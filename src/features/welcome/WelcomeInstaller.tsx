@@ -1,8 +1,7 @@
 // F007 — embeddable sample-corpus installer. Drives the
 // picker -> download/ingest -> suggested-prompt flow without a page header,
 // so it can be embedded in the Corpus pane (the standalone Welcome tab was
-// folded into Corpus). Onboarding's StepWelcome uses welcomeApi directly and
-// is unaffected.
+// folded into Corpus).
 import { useEffect, useRef, useState } from "react";
 import * as welcomeApi from "../../lib/api/welcome";
 import CorporaEmptyState from "./CorporaEmptyState";

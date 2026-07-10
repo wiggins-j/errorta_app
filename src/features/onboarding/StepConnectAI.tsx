@@ -74,7 +74,6 @@ function markSeen(): void {
 interface Props {
   onAdvance: () => void;
   onSkip: () => void;
-  done?: boolean;
 }
 
 // F110 — recommended-model download. Reads errorta.selectedModel; once the
@@ -401,12 +400,7 @@ export default function StepConnectAI({ onAdvance, onSkip }: Props) {
     onAdvance();
   }, [onAdvance]);
 
-  const handleSkipStep = useCallback(() => {
-    markSeen();
-    onAdvance();
-  }, [onAdvance]);
-
-  const handleSkipOnboarding = useCallback(() => {
+  const handleSkip = useCallback(() => {
     markSeen();
     onSkip();
   }, [onSkip]);
@@ -539,18 +533,10 @@ export default function StepConnectAI({ onAdvance, onSkip }: Props) {
         <button
           type="button"
           className="onboarding-cta-secondary"
-          onClick={handleSkipStep}
-          data-testid="connect-ai-skip-step"
+          onClick={handleSkip}
+          data-testid="connect-ai-skip"
         >
           Skip for now
-        </button>
-        <button
-          type="button"
-          className="onboarding-cta-link"
-          onClick={handleSkipOnboarding}
-          data-testid="connect-ai-skip-onboarding"
-        >
-          Skip onboarding
         </button>
       </div>
     </div>

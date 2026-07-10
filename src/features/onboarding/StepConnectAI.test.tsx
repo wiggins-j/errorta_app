@@ -283,23 +283,12 @@ describe("StepConnectAI", () => {
     expect(onSkip).not.toHaveBeenCalled();
   });
 
-  it("Skip for now sets the seen sentinel and calls onAdvance", async () => {
+  it("Skip sets the seen sentinel and calls onSkip", async () => {
     const onAdvance = vi.fn();
     const onSkip = vi.fn();
     render(<StepConnectAI onAdvance={onAdvance} onSkip={onSkip} />);
-    await waitFor(() => screen.getByTestId("connect-ai-skip-step"));
-    fireEvent.click(screen.getByTestId("connect-ai-skip-step"));
-    expect(seen()).toBe(true);
-    expect(onAdvance).toHaveBeenCalledTimes(1);
-    expect(onSkip).not.toHaveBeenCalled();
-  });
-
-  it("Skip onboarding sets the seen sentinel and calls onSkip", async () => {
-    const onAdvance = vi.fn();
-    const onSkip = vi.fn();
-    render(<StepConnectAI onAdvance={onAdvance} onSkip={onSkip} />);
-    await waitFor(() => screen.getByTestId("connect-ai-skip-onboarding"));
-    fireEvent.click(screen.getByTestId("connect-ai-skip-onboarding"));
+    await waitFor(() => screen.getByTestId("connect-ai-skip"));
+    fireEvent.click(screen.getByTestId("connect-ai-skip"));
     expect(seen()).toBe(true);
     expect(onSkip).toHaveBeenCalledTimes(1);
     expect(onAdvance).not.toHaveBeenCalled();
@@ -355,6 +344,18 @@ describe("StepConnectAI — F110 recommended-model download", () => {
     await waitFor(() =>
       expect(_ollama.getModels).toHaveBeenCalledWith("qwen2.5:3b"),
     );
+  });
+
+  it("falls back to Settings when the recommended primary is incompatible", async () => {
+    _hardware.report.mockResolvedValue({
+      recommendation: {
+        primary: { id: "llama3.1:70b", compatible: false },
+      },
+    });
+    render(<StepConnectAI onAdvance={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => screen.getByTestId("connect-ai-model-none"));
+    // Incompatible → we don't offer or probe it.
+    expect(_ollama.getModels).not.toHaveBeenCalled();
   });
 
   it("offers a sized download CTA when the selected model isn't installed", async () => {
