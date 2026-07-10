@@ -1,0 +1,63 @@
+{
+  "name": "errorta",
+  "private": true,
+  "version": "0.1.0-alpha.0",
+  "type": "module",
+  "description": "Errorta — the local AI that admits when it's wrong, built on AIAR.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:a11y": "playwright test --grep @a11y",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.43.1",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "@uiw/react-codemirror": "^4.25.10",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-dropzone": "^14.2.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tauri-apps/cli": "^2.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.9.2",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react-swc": "^4.3.1",
+    "axe-core": "^4.12.1",
+    "happy-dom": "^20.10.2",
+    "typescript": "^5.6.3",
+    "vite": "npm:rolldown-vite@^7.3.1",
+    "vitest": "^4.1.8",
+    "vitest-axe": "^0.1.0"
+  },
+  "overrides": {
+    "vite": "npm:rolldown-vite@^7.3.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

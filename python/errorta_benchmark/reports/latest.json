@@ -1,0 +1,3119 @@
+{
+  "aggregation": {
+    "F024_paraphrase_delta": 0.040000000000000036,
+    "before_after_delta": null,
+    "f024_similar_match_count": 7,
+    "f024_similar_match_mean_similarity": 0.8867606870890723,
+    "f024_similar_match_rate": 0.14,
+    "f024_similar_match_score_delta": 0.5,
+    "matched_prompt_ids": [],
+    "median_score": 0.25,
+    "pass_rate": 0.38,
+    "rating_counts": {
+      "fail": 50,
+      "partial": 12,
+      "pass": 38
+    },
+    "total": 100
+  },
+  "generated_at": "2026-06-10T03:44:31Z",
+  "real_run": true,
+  "run_metadata": {
+    "aiar_pin_source": "editable",
+    "judge_model": "mistral-small3.1:latest",
+    "notes": "real_run=true (live judge)",
+    "ollama_version": "0.24.0",
+    "seed": "welcome_v1.yaml",
+    "seed_prompt_count": 50,
+    "seed_sha256": "2e0f98a8f6bceb4a5cfd1281280527f7814d1468d5fd94a14576397b1298991e"
+  },
+  "seed": "python/errorta_benchmark/seeds/welcome_v1.yaml",
+  "verdicts": [
+    {
+      "answer": "The Errorta judge loop is a process where a separate large language model, acting as a judge, evaluates the output of the answerer model against retrieved context. If the judge gives a poor verdict, the user can review and accept a corrected answer, which is then stored in a grounding store. The next time a similar prompt is received, the grounding loop retrieves the prior correction and reinjects it into the answerer's context, allowing the model to \"remember\" how it was corrected.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-001",
+      "prompt_text": "What is the Errorta judge loop?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Errorta judge loop is a process where a separate large language model, acting as a judge, evaluates the output of the answerer model against retrieved context. If the judge gives a poor verdict, the user can review and accept a corrected answer, which is then stored in a grounding store. The next time a similar prompt is received, the grounding loop retrieves the prior correction and reinjects it into the answerer's context, allowing the model to \"remember\" how it was corrected.",
+        "grounding_match": null,
+        "id": "3022e00299e8498c84d2a5affe6db48c",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the Errorta judge loop?",
+        "prompt_signature": "f72b333a45f7d8629255ea12a123457c731691d499b284b467c96e121ac512a9",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 33576.2,
+          "rating": "partial",
+          "reason": "The response is directionally correct but omits key details about the verdict structure and the handling of uncertain verdicts."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "3022e00299e8498c84d2a5affe6db48c"
+    },
+    {
+      "answer": "Errorta stores accepted corrections in `~/.errorta/grounding.json` as JSON-encoded data. It uses a prompt signature, which is a SHA-256 hash of the normalized prompt, to key the corrections. In version 0.3, it also stores embedding vectors for the prompts in `~/.errorta/grounding_embeddings.jsonl` to enable similarity searches for near-exact rephrasings.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-002",
+      "prompt_text": "How does Errorta store accepted corrections?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Errorta stores accepted corrections in `~/.errorta/grounding.json` as JSON-encoded data. It uses a prompt signature, which is a SHA-256 hash of the normalized prompt, to key the corrections. In version 0.3, it also stores embedding vectors for the prompts in `~/.errorta/grounding_embeddings.jsonl` to enable similarity searches for near-exact rephrasings.",
+        "grounding_match": null,
+        "id": "c30a65daa65645a0a1927ee7eb158e7a",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How does Errorta store accepted corrections?",
+        "prompt_signature": "33b11e98192d745706b896a3e1d884b6130bc78acabd379d1a3c0e5e5724dc5b",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 24575.87,
+          "rating": "pass",
+          "reason": "The response accurately describes how Errorta stores accepted corrections and the changes in version 0.3."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "c30a65daa65645a0a1927ee7eb158e7a"
+    },
+    {
+      "answer": "At query time, the grounding store retrieves prior corrections keyed by a prompt signature and reinjects them into the answerer's context. This allows the model to \"remember\" how it was corrected and apply similar corrections to new, similar prompts.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-003",
+      "prompt_text": "What does the grounding store do at query time?",
+      "rating": "pass",
+      "raw": {
+        "answer": "At query time, the grounding store retrieves prior corrections keyed by a prompt signature and reinjects them into the answerer's context. This allows the model to \"remember\" how it was corrected and apply similar corrections to new, similar prompts.",
+        "grounding_match": null,
+        "id": "77789383fb5f4484b66b1499d18a5bd5",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What does the grounding store do at query time?",
+        "prompt_signature": "6f1e84afae23140bc0bd66c957409a6fef84afd629fccf433c4c0b54af762087",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 29590.13,
+          "rating": "pass",
+          "reason": "The response accurately describes the function of the grounding store at query time, aligning with the provided context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "77789383fb5f4484b66b1499d18a5bd5"
+    },
+    {
+      "answer": "Errorta uses `llama3.1:8b` as the default judge model.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-004",
+      "prompt_text": "Which model does Errorta use as the default judge?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Errorta uses `llama3.1:8b` as the default judge model.",
+        "grounding_match": null,
+        "id": "d712021ba75e4058b4f50c1f19f49b4b",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which model does Errorta use as the default judge?",
+        "prompt_signature": "4811cd04fa8f5e6ba55048560bc9bf80855fe29aefa338adbf40c7f0eca791c7",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26291.28,
+          "rating": "pass",
+          "reason": "The response correctly identifies the default judge model used by Errorta."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "d712021ba75e4058b4f50c1f19f49b4b"
+    },
+    {
+      "answer": "Errorta detects a local Ollama install at startup with an HTTP probe to `http://localhost:11434/api/tags`.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-005",
+      "prompt_text": "How does Errorta detect a local Ollama install?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Errorta detects a local Ollama install at startup with an HTTP probe to `http://localhost:11434/api/tags`.",
+        "grounding_match": null,
+        "id": "46cf2ddc9e30469ab7a59e35567becf5",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How does Errorta detect a local Ollama install?",
+        "prompt_signature": "82c28402577920bbb9256d228b3e8451ff5955069c0b3b5912b579688595213f",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27880.31,
+          "rating": "pass",
+          "reason": "The response accurately describes how Errorta detects a local Ollama install."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "46cf2ddc9e30469ab7a59e35567becf5"
+    },
+    {
+      "answer": "AIAR serves as the substrate for Errorta. It provides the underlying framework for hybrid retrieval, an LLM-as-judge with structured Verdict output, a grounding store for accepted corrections, and a reground pipeline for injecting prior corrections into the answerer's context.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-006",
+      "prompt_text": "What is the role of AIAR in Errorta?",
+      "rating": "pass",
+      "raw": {
+        "answer": "AIAR serves as the substrate for Errorta. It provides the underlying framework for hybrid retrieval, an LLM-as-judge with structured Verdict output, a grounding store for accepted corrections, and a reground pipeline for injecting prior corrections into the answerer's context.",
+        "grounding_match": null,
+        "id": "4b573e57a6c84904b6094e4f2eead9fc",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the role of AIAR in Errorta?",
+        "prompt_signature": "836e8039fef9aaf725b90d38edec154b23e95079b6e46b6b50583007668cb30e",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 30390.44,
+          "rating": "pass",
+          "reason": "The response accurately describes the role of AIAR in Errorta based on the provided context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "4b573e57a6c84904b6094e4f2eead9fc"
+    },
+    {
+      "answer": "When the judge returns an uncertain verdict, it is indicated with a yellow marker and a reason. The user can then choose to accept the answer as-is, provide a correction, or re-run the prompt with a different model. Uncertain verdicts are tracked separately in metrics and are not considered failures unless the user explicitly marks them as such.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-007",
+      "prompt_text": "What happens when the judge returns an uncertain verdict?",
+      "rating": "fail",
+      "raw": {
+        "answer": "When the judge returns an uncertain verdict, it is indicated with a yellow marker and a reason. The user can then choose to accept the answer as-is, provide a correction, or re-run the prompt with a different model. Uncertain verdicts are tracked separately in metrics and are not considered failures unless the user explicitly marks them as such.",
+        "grounding_match": null,
+        "id": "735bca5601ef4366813c9e28eb930245",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What happens when the judge returns an uncertain verdict?",
+        "prompt_signature": "a04f9f4ddca5c724322a95bf404a9ef3ee8fe57e9018835f0e6a6f46915efbdd",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 33459.2,
+          "rating": "fail",
+          "reason": "The response incorrectly states that uncertain verdicts are tracked separately in metrics and are not considered failures unless the user explicitly marks them as such. The context states that uncertain verdicts are counted separately in metrics and are not treated as failures unless the user explicitly marks them."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "735bca5601ef4366813c9e28eb930245"
+    },
+    {
+      "answer": "Errorta protects against pipeline failures by implementing explicit fallbacks at every layer. If Ollama is unreachable, the judge returns an error. If the judge model fails to produce parseable JSON, schema_guard normalizes the response and tags it as `judge_unparseable`. If the AIAR pipeline raises an exception, the sidecar returns the failure as a Verdict with a rating of `fail` and a clear reason, allowing the UI to render it honestly without crashing. The judge subsystem is isolated behind a Pipeline protocol to absorb AIAR API drift in one place.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-008",
+      "prompt_text": "How does Errorta protect against pipeline failures?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Errorta protects against pipeline failures by implementing explicit fallbacks at every layer. If Ollama is unreachable, the judge returns an error. If the judge model fails to produce parseable JSON, schema_guard normalizes the response and tags it as `judge_unparseable`. If the AIAR pipeline raises an exception, the sidecar returns the failure as a Verdict with a rating of `fail` and a clear reason, allowing the UI to render it honestly without crashing. The judge subsystem is isolated behind a Pipeline protocol to absorb AIAR API drift in one place.",
+        "grounding_match": null,
+        "id": "ef0db30ef14b4dadbabc6ed4a2db304e",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How does Errorta protect against pipeline failures?",
+        "prompt_signature": "1821affb153955b5705dc22b8caa32093e22f56632bea74ab9f57bab9f54feaa",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 34754.61,
+          "rating": "pass",
+          "reason": "The response accurately summarizes the information provided in the CONTEXT about how Errorta protects against pipeline failures."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "ef0db30ef14b4dadbabc6ed4a2db304e"
+    },
+    {
+      "answer": "The F024 paraphrase delta is used to measure the effectiveness of the F024 benchmark harness. It compares the pass rate of paraphrased prompts to the pass rate of primary prompts, demonstrating that the system correctly applies corrections to paraphrased prompts. Specifically, it shows that after wedge amplification, the pass rate on paraphrased prompts should be measurably higher, indicating that the system is functioning as intended.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-009",
+      "prompt_text": "What is the F024 paraphrase delta used for?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The F024 paraphrase delta is used to measure the effectiveness of the F024 benchmark harness. It compares the pass rate of paraphrased prompts to the pass rate of primary prompts, demonstrating that the system correctly applies corrections to paraphrased prompts. Specifically, it shows that after wedge amplification, the pass rate on paraphrased prompts should be measurably higher, indicating that the system is functioning as intended.",
+        "grounding_match": null,
+        "id": "2cfa02980cb24a238ef27e5a7405a154",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the F024 paraphrase delta used for?",
+        "prompt_signature": "0c1e778e646b0f126ba5fda45b1a4252d68c6b77ce60fc01c369575f33fff414",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 37107.38,
+          "rating": "fail",
+          "reason": "The response incorrectly states that the F024 paraphrase delta measures the effectiveness of the F024 benchmark harness and that it demonstrates the system correctly applies corrections to paraphrased prompts. The context specifies that the paraphrase delta is a metric that proves F024 is doing what it claims, and it measures the pass-rate difference between paraphrased and primary prompts."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "2cfa02980cb24a238ef27e5a7405a154"
+    },
+    {
+      "answer": "A benchmark report is regenerated from saved verdicts via a deterministic markdown renderer. Given the same metadata (judge model, seed, generated_at), the report bytes are stable.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "welcome-010",
+      "prompt_text": "How is a benchmark report regenerated from saved verdicts?",
+      "rating": "partial",
+      "raw": {
+        "answer": "A benchmark report is regenerated from saved verdicts via a deterministic markdown renderer. Given the same metadata (judge model, seed, generated_at), the report bytes are stable.",
+        "grounding_match": null,
+        "id": "d7a4eab4e62a4eadb4e0fa52eb575f21",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How is a benchmark report regenerated from saved verdicts?",
+        "prompt_signature": "b2f2e6f15ef8688fe0891ae7971a859fd29e76d4adf84bf46d7b578884cef8b2",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 28859.39,
+          "rating": "partial",
+          "reason": "The response is directionally correct but omits key details about the deterministic markdown renderer and the modes (FAKE and REAL) in which it operates."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "d7a4eab4e62a4eadb4e0fa52eb575f21"
+    },
+    {
+      "answer": "The boiling point of water at standard atmospheric pressure is 100 degrees Celsius (212 degrees Fahrenheit). This information is not covered in the provided Knowledge block.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-001",
+      "prompt_text": "What is the boiling point of water at standard atmospheric pressure?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The boiling point of water at standard atmospheric pressure is 100 degrees Celsius (212 degrees Fahrenheit). This information is not covered in the provided Knowledge block.",
+        "grounding_match": null,
+        "id": "299e67784e1b4738af1d3e399911ca9e",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the boiling point of water at standard atmospheric pressure?",
+        "prompt_signature": "dc422fdabbb4246ab2c4a5921eb5c3376c10f680c8bcbb8c26cc50b9ba9311cf",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27963.68,
+          "rating": "pass",
+          "reason": "The response correctly states the boiling point of water at standard atmospheric pressure."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "299e67784e1b4738af1d3e399911ca9e"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about who wrote the play Hamlet. William Shakespeare wrote Hamlet.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-002",
+      "prompt_text": "Who wrote the play Hamlet?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about who wrote the play Hamlet. William Shakespeare wrote Hamlet.",
+        "grounding_match": null,
+        "id": "b6b7fa989764487099630de28c841aa2",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who wrote the play Hamlet?",
+        "prompt_signature": "9325a1c43909de609d8d4a0c9e5b5533a37594daf9a2f99668b5341c4526320d",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 27716.37,
+          "rating": "fail",
+          "reason": "The response contains a factual claim that is not supported by the context and is incorrect."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "b6b7fa989764487099630de28c841aa2"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the speed of light in a vacuum. The speed of light in a vacuum is approximately 299,792,458 meters per second.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-003",
+      "prompt_text": "What is the speed of light in a vacuum?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the speed of light in a vacuum. The speed of light in a vacuum is approximately 299,792,458 meters per second.",
+        "grounding_match": null,
+        "id": "5f8c2e0816864656962b4ea31c5c5a33",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the speed of light in a vacuum?",
+        "prompt_signature": "46952f95a77f5bc2472db1c592c6e86f38315655cbd89b4159fa21bff5a22be7",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 28281.19,
+          "rating": "pass",
+          "reason": "The response correctly states the speed of light in a vacuum."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "5f8c2e0816864656962b4ea31c5c5a33"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the capital city of Australia. The capital city of Australia is Canberra.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-004",
+      "prompt_text": "What is the capital city of Australia?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the capital city of Australia. The capital city of Australia is Canberra.",
+        "grounding_match": null,
+        "id": "9a62531bc5154115bc633121ba162cd0",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the capital city of Australia?",
+        "prompt_signature": "563bead548fbeaa45d9187ad2dab5902dc226b3cb6fac82dc0baa18d8cc59d3d",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27178.8,
+          "rating": "pass",
+          "reason": "The response correctly identifies Canberra as the capital city of Australia."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "9a62531bc5154115bc633121ba162cd0"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about photosynthesis. Plants primarily absorb carbon dioxide (CO2) during photosynthesis.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-005",
+      "prompt_text": "What gas do plants primarily absorb during photosynthesis?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about photosynthesis. Plants primarily absorb carbon dioxide (CO2) during photosynthesis.",
+        "grounding_match": null,
+        "id": "25d9de31982b41aca88a62904ec883c1",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What gas do plants primarily absorb during photosynthesis?",
+        "prompt_signature": "2f4b3c6d993eb49eeb74412c4d9a0bcbf2a5e86c3afff797b43fb40c4346d3c7",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27864.79,
+          "rating": "pass",
+          "reason": "The response correctly identifies carbon dioxide (CO2) as the gas plants primarily absorb during photosynthesis."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "25d9de31982b41aca88a62904ec883c1"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the Apollo 11 mission. The Apollo 11 mission landed on the Moon in 1969.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-006",
+      "prompt_text": "In which year did the Apollo 11 mission land on the Moon?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the Apollo 11 mission. The Apollo 11 mission landed on the Moon in 1969.",
+        "grounding_match": null,
+        "id": "379c32e2157e41ec9507aaa0efe8321f",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "In which year did the Apollo 11 mission land on the Moon?",
+        "prompt_signature": "2d9b61b422a8cc030f4bcf4455f280679998864670864bc4e0621a952ba9e488",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 28568.87,
+          "rating": "fail",
+          "reason": "The response contains a factual claim that is not supported by the context and is plainly wrong."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "379c32e2157e41ec9507aaa0efe8321f"
+    },
+    {
+      "answer": "The chemical symbol for gold is Au.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-007",
+      "prompt_text": "What is the chemical symbol for gold?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The chemical symbol for gold is Au.",
+        "grounding_match": null,
+        "id": "fc1732dcc15d4c49aefe0a117b9726a6",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the chemical symbol for gold?",
+        "prompt_signature": "76cf2dc35a4612005cad189eb9e59632e91018f55f467c5ea83e752909234d39",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 25828.7,
+          "rating": "pass",
+          "reason": "The response correctly identifies the chemical symbol for gold."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "fc1732dcc15d4c49aefe0a117b9726a6"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about who painted the Mona Lisa. Leonardo da Vinci painted the Mona Lisa.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-008",
+      "prompt_text": "Who painted the Mona Lisa?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about who painted the Mona Lisa. Leonardo da Vinci painted the Mona Lisa.",
+        "grounding_match": null,
+        "id": "60a53ae1646b43f2816d4064c1721af2",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who painted the Mona Lisa?",
+        "prompt_signature": "73c21ecfb89ad9300d1324267a5a87617aba7c388f82e52d792d96acd051f09b",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 28054.14,
+          "rating": "partial",
+          "reason": "The response correctly identifies the painter of the Mona Lisa but incorrectly references a non-existent 'Knowledge block'."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "60a53ae1646b43f2816d4064c1721af2"
+    },
+    {
+      "answer": "I do not have information about the largest planet in our solar system.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-009",
+      "prompt_text": "What is the largest planet in our solar system?",
+      "rating": "fail",
+      "raw": {
+        "answer": "I do not have information about the largest planet in our solar system.",
+        "grounding_match": null,
+        "id": "fbf3aaf58e064b67a02026775fbb2937",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the largest planet in our solar system?",
+        "prompt_signature": "cb2f1b0f3c209dbbc1498d87bf1195f128870ef1606d7645ac3377562db8a2da",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 28115.21,
+          "rating": "fail",
+          "reason": "The response is incorrect because it claims to lack information about the largest planet in our solar system, which is a well-known fact."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "fbf3aaf58e064b67a02026775fbb2937"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the language with the most native speakers worldwide.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-010",
+      "prompt_text": "What language has the most native speakers worldwide?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the language with the most native speakers worldwide.",
+        "grounding_match": null,
+        "id": "1900150d2428480eb46931d28b6f7851",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What language has the most native speakers worldwide?",
+        "prompt_signature": "ba994cb1ad17f4ff028386cfea29c723e8e0be6169c034eff74046e8c8337961",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 27370.21,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "1900150d2428480eb46931d28b6f7851"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the powerhouse of the cell. The powerhouse of the cell is the mitochondrion.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-011",
+      "prompt_text": "What is the powerhouse of the cell?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the powerhouse of the cell. The powerhouse of the cell is the mitochondrion.",
+        "grounding_match": null,
+        "id": "b8cb8ad85b49477d97f4eacee65211cc",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the powerhouse of the cell?",
+        "prompt_signature": "cb086dde0b3be303e7a706921956f21788e501f890d4f8bb89af1f1585897d8c",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 28634.48,
+          "rating": "fail",
+          "reason": "The response contains a factual claim that is not supported by the context and is incorrect."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "b8cb8ad85b49477d97f4eacee65211cc"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the development of the theory of general relativity. Albert Einstein developed the theory of general relativity.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-012",
+      "prompt_text": "Who developed the theory of general relativity?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the development of the theory of general relativity. Albert Einstein developed the theory of general relativity.",
+        "grounding_match": null,
+        "id": "742fc8c00ef446d9968ef6db2dba25fe",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who developed the theory of general relativity?",
+        "prompt_signature": "23d8e3f9e34a621476c740144a00114a1e0476011e30f3ad525672fc173b45ab",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27667.03,
+          "rating": "pass",
+          "reason": "The response correctly identifies Albert Einstein as the developer of the theory of general relativity."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "742fc8c00ef446d9968ef6db2dba25fe"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the longest river in the world. The longest river in the world is the Nile.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-013",
+      "prompt_text": "What is the longest river in the world?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the longest river in the world. The longest river in the world is the Nile.",
+        "grounding_match": null,
+        "id": "bc200e893fcb4830bd9f9cf0d5a0a528",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the longest river in the world?",
+        "prompt_signature": "cba0aac73e7cca4f7ad9563971470d0b322b7f9a6a73c0c60904de653b1ac4a3",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 28221.05,
+          "rating": "fail",
+          "reason": "The response contains a factual error \u2014 the longest river in the world is the Amazon, not the Nile."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "bc200e893fcb4830bd9f9cf0d5a0a528"
+    },
+    {
+      "answer": "The freezing point of water in Fahrenheit is 32 degrees.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-014",
+      "prompt_text": "What is the freezing point of water in Fahrenheit?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The freezing point of water in Fahrenheit is 32 degrees.",
+        "grounding_match": null,
+        "id": "005bdc91454a40ef8d7154dd9077cc48",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the freezing point of water in Fahrenheit?",
+        "prompt_signature": "ddd189c9f30638bc737f07efbaeaf9d429455fb32cd13d965b19fe8edde15454",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27343.94,
+          "rating": "pass",
+          "reason": "The response correctly states the freezing point of water in Fahrenheit."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "005bdc91454a40ef8d7154dd9077cc48"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the invention of the telephone. Alexander Graham Bell is credited with inventing and patenting the first practical telephone.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-015",
+      "prompt_text": "Who is credited with inventing the telephone?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the invention of the telephone. Alexander Graham Bell is credited with inventing and patenting the first practical telephone.",
+        "grounding_match": null,
+        "id": "ab70ae71e65f464cb8a009363d40c826",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who is credited with inventing the telephone?",
+        "prompt_signature": "8662d2f63baf6444adabc8cd2dab181d0edbb19c631b3d1138aec9d7ed6e05f7",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 28006.32,
+          "rating": "partial",
+          "reason": "The response is directionally correct but incomplete and hedged."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "ab70ae71e65f464cb8a009363d40c826"
+    },
+    {
+      "answer": "The smallest prime number is 2.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-016",
+      "prompt_text": "What is the smallest prime number?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The smallest prime number is 2.",
+        "grounding_match": null,
+        "id": "59c698d5b4244e529644a0933ee280ad",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the smallest prime number?",
+        "prompt_signature": "6a3fb369ab40417e707c25c7ddc3561e1bcb07e134483e4a284b248b376f5e8e",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 25720.03,
+          "rating": "pass",
+          "reason": "The response correctly identifies the smallest prime number."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "59c698d5b4244e529644a0933ee280ad"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about metals that are liquid at room temperature. Mercury is a metal that is liquid at room temperature.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-017",
+      "prompt_text": "What metal is liquid at room temperature?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about metals that are liquid at room temperature. Mercury is a metal that is liquid at room temperature.",
+        "grounding_match": null,
+        "id": "005a7b7e118d4ae9af1c0c231d2b9242",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What metal is liquid at room temperature?",
+        "prompt_signature": "f1f3c8a36ef0e73447793ba48a409aad69286dc5b5bab323e1b0acde842af7fc",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 34930.12,
+          "rating": "partial",
+          "reason": "The response is correct but incomplete because it does not mention other metals that are liquid at room temperature, such as gallium and cesium."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "005a7b7e118d4ae9af1c0c231d2b9242"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the author of the novel 1984. George Orwell wrote the novel 1984.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-018",
+      "prompt_text": "Who wrote the novel 1984?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the author of the novel 1984. George Orwell wrote the novel 1984.",
+        "grounding_match": null,
+        "id": "6f587940bd804188b4dfbc7e974dd646",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who wrote the novel 1984?",
+        "prompt_signature": "9c4a09d064cd5df383ac79b614551d5932ce94fb26f8cea81a68d7350275e04f",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 28905.91,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the author of 1984 and incorrectly references a non-existent Knowledge block."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "6f587940bd804188b4dfbc7e974dd646"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the tallest mountain on Earth. The tallest mountain on Earth is Mount Everest.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-019",
+      "prompt_text": "What is the tallest mountain on Earth?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the tallest mountain on Earth. The tallest mountain on Earth is Mount Everest.",
+        "grounding_match": null,
+        "id": "7f7fd876e35d4589bf438faa4faf8bf9",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the tallest mountain on Earth?",
+        "prompt_signature": "99d04b84978b861789a6b05ed62e9301a6fb920931bdb75f994839f7256c955c",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 28291.27,
+          "rating": "fail",
+          "reason": "The response contains a factual claim that is not supported by the context and is plainly wrong."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "7f7fd876e35d4589bf438faa4faf8bf9"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the main component of human hair. The main component of human hair is keratin.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "factual-020",
+      "prompt_text": "What protein is the main component of human hair?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the main component of human hair. The main component of human hair is keratin.",
+        "grounding_match": null,
+        "id": "173f83a6c3fd467ca95189297b6ddf31",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What protein is the main component of human hair?",
+        "prompt_signature": "908f7921fc8771c13e199909c85bf5dee367aae186d49c565708717a2efed5b8",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27746.73,
+          "rating": "pass",
+          "reason": "The response correctly identifies keratin as the main component of human hair."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "173f83a6c3fd467ca95189297b6ddf31"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about Albert Einstein or the Nobel Prize in Chemistry. Albert Einstein won the Nobel Prize in Physics in 1921.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-001",
+      "prompt_text": "What year did Albert Einstein win the Nobel Prize in Chemistry?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about Albert Einstein or the Nobel Prize in Chemistry. Albert Einstein won the Nobel Prize in Physics in 1921.",
+        "grounding_match": null,
+        "id": "7b69a744706d4a44b3860b4f88395793",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What year did Albert Einstein win the Nobel Prize in Chemistry?",
+        "prompt_signature": "e0d729b8f66858ca2c60e8ba5c56cdfcbf9a2a7f69175ef2cd5bbd7ca88b6eba",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 27548.24,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the Nobel Prize category."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "7b69a744706d4a44b3860b4f88395793"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the first president of the United States in the 18th century to use email.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-002",
+      "prompt_text": "Who was the first president of the United States in the 18th century to use email?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the first president of the United States in the 18th century to use email.",
+        "grounding_match": null,
+        "id": "0acb7e50fafe4343aa6d065b4d1a125d",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who was the first president of the United States in the 18th century to use email?",
+        "prompt_signature": "b7fd4794b95e2d1cdbc87e5518b7ddaa8fd1bd91918a462fd76ca47185230487",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 28102.82,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about the first president to use email."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "0acb7e50fafe4343aa6d065b4d1a125d"
+    },
+    {
+      "answer": "The Knowledge block does not cover the Treaty of Pixelopolis signed in 1873.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-003",
+      "prompt_text": "Describe the Treaty of Pixelopolis signed in 1873.",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover the Treaty of Pixelopolis signed in 1873.",
+        "grounding_match": null,
+        "id": "cb1608d9946345a386dc80f62f203ea0",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Describe the Treaty of Pixelopolis signed in 1873.",
+        "prompt_signature": "4a28d063695f4973d26ffaafc8bc77c261bd0cf1cdd363b40cf3ea0d8e009329",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 16438.77,
+          "rating": "fail",
+          "reason": "The response is incorrect because it claims the information is not available when it is not true."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "cb1608d9946345a386dc80f62f203ea0"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the planet Vulcan or its moons.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-004",
+      "prompt_text": "How many moons does the planet Vulcan have?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the planet Vulcan or its moons.",
+        "grounding_match": null,
+        "id": "1075f746c1b947a08031f051981ca42c",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How many moons does the planet Vulcan have?",
+        "prompt_signature": "59571b1b99d875b3687c08db3de317bc983d4acf7af4932ab0a155ec4da6f35e",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 8156.31,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "1075f746c1b947a08031f051981ca42c"
+    },
+    {
+      "answer": "I cannot provide information on the lost 14th book of Aristotle's Metaphysics, as the provided Knowledge block does not contain any relevant information.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-005",
+      "prompt_text": "Summarize the contents of the lost 14th book of Aristotle's Metaphysics.",
+      "rating": "fail",
+      "raw": {
+        "answer": "I cannot provide information on the lost 14th book of Aristotle's Metaphysics, as the provided Knowledge block does not contain any relevant information.",
+        "grounding_match": null,
+        "id": "29464cf2581b4eb19a147896f204e90f",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Summarize the contents of the lost 14th book of Aristotle's Metaphysics.",
+        "prompt_signature": "17112cf2dcfd0337037418175c8e590848bc13efbf862aa312010f939dfa67c2",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 28325.68,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the prompt."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "29464cf2581b4eb19a147896f204e90f"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about Marie Curie or penicillin. Marie Curie did not discover penicillin. Penicillin was discovered by Alexander Fleming in 1928.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-006",
+      "prompt_text": "When did Marie Curie discover penicillin?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about Marie Curie or penicillin. Marie Curie did not discover penicillin. Penicillin was discovered by Alexander Fleming in 1928.",
+        "grounding_match": null,
+        "id": "49f8131e790843229dea921b370d363e",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "When did Marie Curie discover penicillin?",
+        "prompt_signature": "9bfa879f461aac6908f465f8de7454afbebb6c3023740ab7e9842689b7f7aef3",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 29012.6,
+          "rating": "fail",
+          "reason": "The response contains a factual error about Marie Curie's discoveries and the discovery of penicillin."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "49f8131e790843229dea921b370d363e"
+    },
+    {
+      "answer": "I cannot provide the lyrics to the unreleased Beatles song \"Octopus Algorithm\" as the Knowledge block does not contain information about it.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-007",
+      "prompt_text": "Provide the lyrics to the unreleased Beatles song \"Octopus Algorithm\".",
+      "rating": "fail",
+      "raw": {
+        "answer": "I cannot provide the lyrics to the unreleased Beatles song \"Octopus Algorithm\" as the Knowledge block does not contain information about it.",
+        "grounding_match": null,
+        "id": "85b73d14692f434eadd21af543018389",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Provide the lyrics to the unreleased Beatles song \"Octopus Algorithm\".",
+        "prompt_signature": "197e89536f49a6f10c302c966029d12a6ee39500cb9f0c74b0ce46e10a1e6e8b",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 16720.47,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the prompt."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "85b73d14692f434eadd21af543018389"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic. The Roman emperor Hero of Alexandria is credited with inventing the first steam engine, known as the aeolipile, but he was not an emperor.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-008",
+      "prompt_text": "Which Roman emperor invented the steam engine?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic. The Roman emperor Hero of Alexandria is credited with inventing the first steam engine, known as the aeolipile, but he was not an emperor.",
+        "grounding_match": null,
+        "id": "d690315acb0d40c5afb820033146ead3",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which Roman emperor invented the steam engine?",
+        "prompt_signature": "33371435be37c083cb69129d10b94bfa5100067e373c79aeebfd20149e980e00",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 29304.76,
+          "rating": "partial",
+          "reason": "The response is directionally correct but incomplete and contains a factual error."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "d690315acb0d40c5afb820033146ead3"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the population of the city of Atlantis.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-009",
+      "prompt_text": "What is the population of the city of Atlantis as of last year?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the population of the city of Atlantis.",
+        "grounding_match": null,
+        "id": "bf8ead16239d4f2a96028e7483912a42",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the population of the city of Atlantis as of last year?",
+        "prompt_signature": "b91cc0ac2af13cde0062afd46cfd8ff4ac186e23f55805dcead9f071b9e33737",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 27779.88,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about the population of Atlantis."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "bf8ead16239d4f2a96028e7483912a42"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about a 2027 Nature paper proving cold fusion at room temperature.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-010",
+      "prompt_text": "Cite the 2027 Nature paper proving cold fusion at room temperature.",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about a 2027 Nature paper proving cold fusion at room temperature.",
+        "grounding_match": null,
+        "id": "73c604c50413477c9ff9819310ecf53b",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Cite the 2027 Nature paper proving cold fusion at room temperature.",
+        "prompt_signature": "64be353fc2dda81c463228296e07532dbd21a2e462c8a47ec16f86a0fd4c2cea",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 16950.83,
+          "rating": "pass",
+          "reason": "The response correctly states that there is no information about a 2027 Nature paper proving cold fusion at room temperature."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "73c604c50413477c9ff9819310ecf53b"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about Shakespeare's tweets, as Twitter did not exist in 1602.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-011",
+      "prompt_text": "What did Shakespeare tweet on the morning of 12 January 1602?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about Shakespeare's tweets, as Twitter did not exist in 1602.",
+        "grounding_match": null,
+        "id": "b21aff63707d419d959f64c8c0e60ca0",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What did Shakespeare tweet on the morning of 12 January 1602?",
+        "prompt_signature": "f4c6585010324a7f5e352cb736ae8cb069a4aacadbe410064f242c8fe67fce39",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 28845.58,
+          "rating": "pass",
+          "reason": "The response correctly notes that Twitter did not exist in 1602, and thus Shakespeare could not have tweeted."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "b21aff63707d419d959f64c8c0e60ca0"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the side effects of the FDA-approved drug Errortazol.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-012",
+      "prompt_text": "List the side effects of the FDA-approved drug Errortazol.",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the side effects of the FDA-approved drug Errortazol.",
+        "grounding_match": null,
+        "id": "75579bc169a142299bb8402bec839f61",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "List the side effects of the FDA-approved drug Errortazol.",
+        "prompt_signature": "8f26d84b1bdeeb67ab0590ff1a6e4053f56be1145a1954a9240780c097645221",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 17574.2,
+          "rating": "fail",
+          "reason": "The response is incorrect because Errortazol is not a drug, and the context does not mention any drug named Errortazol."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "75579bc169a142299bb8402bec839f61"
+    },
+    {
+      "answer": "The Knowledge block does not cover this question.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-013",
+      "prompt_text": "Who composed the Symphony No. 12 by Ludwig van Beethoven?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover this question.",
+        "grounding_match": null,
+        "id": "d7e5a45b3a6d44eabc37823d2f6c6e76",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who composed the Symphony No. 12 by Ludwig van Beethoven?",
+        "prompt_signature": "a1a95df29e3c08bd67309293c8033e3bbeae01e74829e092c78e1c80d58d11b8",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 27360.93,
+          "rating": "fail",
+          "reason": "The response is incorrect because it does not answer the question. The composer of Symphony No. 12 by Ludwig van Beethoven is Beethoven himself."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "d7e5a45b3a6d44eabc37823d2f6c6e76"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the boiling point of water on the dark side of the Moon. The boiling point of water on the dark side of the Moon is approximately 100 degrees Celsius (212 degrees Fahrenheit) under standard lunar surface conditions, but this can vary based on factors like pressure and temperature.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-014",
+      "prompt_text": "What is the boiling point of water on the dark side of the Moon?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the boiling point of water on the dark side of the Moon. The boiling point of water on the dark side of the Moon is approximately 100 degrees Celsius (212 degrees Fahrenheit) under standard lunar surface conditions, but this can vary based on factors like pressure and temperature.",
+        "grounding_match": null,
+        "id": "db4de499b2224e39a3cf96bceccf6495",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the boiling point of water on the dark side of the Moon?",
+        "prompt_signature": "8f18e07fdf81d8bfbed1ca9c6cf51d6b1c2b1e85185a7ae93bd7641c2eb82fdc",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 30304.25,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the boiling point of water on the Moon."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "db4de499b2224e39a3cf96bceccf6495"
+    },
+    {
+      "answer": "The provided Knowledge block does not contain information about the dinosaur species Tyrannosaurus electrus.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-015",
+      "prompt_text": "How tall was the dinosaur species Tyrannosaurus electrus?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The provided Knowledge block does not contain information about the dinosaur species Tyrannosaurus electrus.",
+        "grounding_match": null,
+        "id": "8ecbcc09237843d7805ea016f48d34cb",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How tall was the dinosaur species Tyrannosaurus electrus?",
+        "prompt_signature": "6757d26765d3c766945d88977d1df67becff6da6d1dda95e5651324bdaf191e5",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 26834.57,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about the dinosaur species Tyrannosaurus electrus."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "8ecbcc09237843d7805ea016f48d34cb"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about Ada Lovelace or Photoshop plugins.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-016",
+      "prompt_text": "Which programming language did Ada Lovelace use to write Photoshop plugins?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about Ada Lovelace or Photoshop plugins.",
+        "grounding_match": null,
+        "id": "9ff6dc06ca3d4f7c8b81ed7676562876",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which programming language did Ada Lovelace use to write Photoshop plugins?",
+        "prompt_signature": "51e395f4408c1cecfce09a9d03d427c58baa5e6a2f7179f6a9ca3ca56bddbd00",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 27936.05,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "9ff6dc06ca3d4f7c8b81ed7676562876"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the 17th-century Cookbook of Quantum Pasta.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-017",
+      "prompt_text": "What is the recipe in the 17th-century Cookbook of Quantum Pasta?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the 17th-century Cookbook of Quantum Pasta.",
+        "grounding_match": null,
+        "id": "8a8e76c7e37b4a688bcc532a05e47da2",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the recipe in the 17th-century Cookbook of Quantum Pasta?",
+        "prompt_signature": "6739a9a6a3535a33bd878d8ab1f284fc6766b2f91ec6318950a71c7195fe3f7b",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 15730.11,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the prompt."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "8a8e76c7e37b4a688bcc532a05e47da2"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the Necronomicon.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-018",
+      "prompt_text": "Quote chapter 9 of the Necronomicon's original manuscript.",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the Necronomicon.",
+        "grounding_match": null,
+        "id": "b9fb7074f8cc47ee92bd047155daf59d",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Quote chapter 9 of the Necronomicon's original manuscript.",
+        "prompt_signature": "15b31f1d4fb5580386c3b3d5ee59241ad43f9bf9cde7747b0ee436a24b94f70c",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 16281.78,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the prompt about the Necronomicon."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "b9fb7074f8cc47ee92bd047155daf59d"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the FIFA World Cup in 2031.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-019",
+      "prompt_text": "Which country won the FIFA World Cup in 2031?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the FIFA World Cup in 2031.",
+        "grounding_match": null,
+        "id": "280da3e6cf3d468c8d103f622e9285ae",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which country won the FIFA World Cup in 2031?",
+        "prompt_signature": "8bf6477f3390be61e2060299cd0850c31d34abcd02c3086a1efdc128c5145b63",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 29120.52,
+          "rating": "fail",
+          "reason": "The response is incorrect because the FIFA World Cup in 2031 has not occurred yet, and the assistant should not claim to lack information about a future event."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "280da3e6cf3d468c8d103f622e9285ae"
+    },
+    {
+      "answer": "The Knowledge block does not cover the chemical formula of the element Unobtainium. Unobtainium is not a real chemical element, but a humorous or fictional term used to refer to a substance that is very difficult or impossible to obtain.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": false,
+      "prompt_id": "wedge-020",
+      "prompt_text": "Describe the chemical formula of the element Unobtainium.",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not cover the chemical formula of the element Unobtainium. Unobtainium is not a real chemical element, but a humorous or fictional term used to refer to a substance that is very difficult or impossible to obtain.",
+        "grounding_match": null,
+        "id": "a3edcd953ec74a96ad704f221e3cde0b",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Describe the chemical formula of the element Unobtainium.",
+        "prompt_signature": "ef6764309167b633d505910e813ee95035150126dfa0548605ded1ef1633c998",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 29467.01,
+          "rating": "pass",
+          "reason": "The response correctly identifies that Unobtainium is not a real element and explains its fictional context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "a3edcd953ec74a96ad704f221e3cde0b"
+    },
+    {
+      "answer": "Errorta's judge loop works by evaluating the output of its answerer model using a separate judge model. This judge model produces a verdict, which includes a rating, a reason, optional failure tags, and a confidence score. When the verdict is poor, the user can review and accept a corrected answer. This correction is then stored in a grounding store, keyed by a prompt signature. The next time a similar prompt is received, the grounding loop retrieves the prior correction and reinjects it into the answerer's context, allowing the model to \"remember\" how it was corrected. This process ensures that corrections can generalize to semantically similar prompts, enhancing the accuracy of future responses.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "f72b333a45f7d8629255ea12a123457c731691d499b284b467c96e121ac512a9",
+      "grounding_match_similarity": 0.912939217399975,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-001",
+      "prompt_text": "Can you explain how Errorta's judge loop works?",
+      "rating": "partial",
+      "raw": {
+        "answer": "Errorta's judge loop works by evaluating the output of its answerer model using a separate judge model. This judge model produces a verdict, which includes a rating, a reason, optional failure tags, and a confidence score. When the verdict is poor, the user can review and accept a corrected answer. This correction is then stored in a grounding store, keyed by a prompt signature. The next time a similar prompt is received, the grounding loop retrieves the prior correction and reinjects it into the answerer's context, allowing the model to \"remember\" how it was corrected. This process ensures that corrections can generalize to semantically similar prompts, enhancing the accuracy of future responses.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "f72b333a45f7d8629255ea12a123457c731691d499b284b467c96e121ac512a9",
+          "similarity": 0.912939217399975
+        },
+        "id": "89a0dd03459e404eafc14f1044bb147a",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt welcome-001: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "Can you explain how Errorta's judge loop works?",
+        "prompt_signature": "fcf3c8ba4919c938067f1cece7f5cd3e84c83026cf1db47d3b0f7b1c184327e4",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 25361.43,
+          "rating": "partial",
+          "reason": "The response is mostly correct but omits details about the grounding store's data structure and the ability to configure the judge model."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "89a0dd03459e404eafc14f1044bb147a"
+    },
+    {
+      "answer": "Accepted corrections are stored in `~/.errorta/grounding.json` under a key derived from the prompt. This key is a SHA-256 hash of the normalized prompt. In version 0.3, embeddings of the prompts are also stored in `~/.errorta/grounding_embeddings.jsonl` for similarity searches.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-002",
+      "prompt_text": "Where do accepted corrections end up inside Errorta?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Accepted corrections are stored in `~/.errorta/grounding.json` under a key derived from the prompt. This key is a SHA-256 hash of the normalized prompt. In version 0.3, embeddings of the prompts are also stored in `~/.errorta/grounding_embeddings.jsonl` for similarity searches.",
+        "grounding_match": null,
+        "id": "b7a6ca9b86264e9ea73be6daac0da7a8",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Where do accepted corrections end up inside Errorta?",
+        "prompt_signature": "91488aa90e3b91b3250f8d153f555a78c1e906c4a305913fbc7f7c6fa83d6238",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 31225.89,
+          "rating": "pass",
+          "reason": "The response accurately describes where accepted corrections are stored and how they are accessed."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "b7a6ca9b86264e9ea73be6daac0da7a8"
+    },
+    {
+      "answer": "The grounding store is consulted by retrieving a prior correction for a similar prompt and reinjecting it into the answerer's context. This allows the model to \"remember\" how it was corrected. The UI indicates when a correction is reused from a similar prior prompt with a \"matched from similar prior (92% similarity)\" indicator.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-003",
+      "prompt_text": "At query time, how is the grounding store consulted?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The grounding store is consulted by retrieving a prior correction for a similar prompt and reinjecting it into the answerer's context. This allows the model to \"remember\" how it was corrected. The UI indicates when a correction is reused from a similar prior prompt with a \"matched from similar prior (92% similarity)\" indicator.",
+        "grounding_match": null,
+        "id": "35b7008f9efc47b9901a6d808298f33e",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "At query time, how is the grounding store consulted?",
+        "prompt_signature": "7a62f35320930f7762a8192116305c6dd27beed678ef2856e37e7dde723a7f24",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 31883.88,
+          "rating": "partial",
+          "reason": "The response is directionally correct but omits key details about the grounding store's structure and the process of generating embeddings."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "35b7008f9efc47b9901a6d808298f33e"
+    },
+    {
+      "answer": "The default judge model in Errorta is `llama3.1:8b`.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-004",
+      "prompt_text": "What is the default judge model in Errorta?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The default judge model in Errorta is `llama3.1:8b`.",
+        "grounding_match": null,
+        "id": "421fd134a55542e58eeba4e908606090",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the default judge model in Errorta?",
+        "prompt_signature": "16e34a883e35f403a048b64f03fc85abc9929490e989d84bb90a8f097e0995e3",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26362.38,
+          "rating": "pass",
+          "reason": "The response correctly identifies the default judge model in Errorta."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "421fd134a55542e58eeba4e908606090"
+    },
+    {
+      "answer": "Errorta detects a local Ollama install at startup with an HTTP probe to `http://localhost:11434/api/tags`.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-005",
+      "prompt_text": "How is a local Ollama install detected by Errorta?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Errorta detects a local Ollama install at startup with an HTTP probe to `http://localhost:11434/api/tags`.",
+        "grounding_match": null,
+        "id": "66f6b2bb3f4c4b2faeb682954648cc1d",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How is a local Ollama install detected by Errorta?",
+        "prompt_signature": "1c43ab284e7bee33937dd20606558ca709616c0e4d8c330009d9caa77ebe3e2d",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27623.28,
+          "rating": "pass",
+          "reason": "The response accurately reflects the information provided in the context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "66f6b2bb3f4c4b2faeb682954648cc1d"
+    },
+    {
+      "answer": "AIAR is the substrate for the Errorta product. Errorta is built using the AIAR framework, which provides the underlying technology for hybrid retrieval, LLM-as-judge functionality, and a grounding store. Errorta adds a polished product layer on top of AIAR, including features like hardware detection, drag-and-drop corpus ingestion, and a user-friendly correction-review interface.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-006",
+      "prompt_text": "How does AIAR relate to the Errorta product?",
+      "rating": "partial",
+      "raw": {
+        "answer": "AIAR is the substrate for the Errorta product. Errorta is built using the AIAR framework, which provides the underlying technology for hybrid retrieval, LLM-as-judge functionality, and a grounding store. Errorta adds a polished product layer on top of AIAR, including features like hardware detection, drag-and-drop corpus ingestion, and a user-friendly correction-review interface.",
+        "grounding_match": null,
+        "id": "2daab93ed7b94ba2b91907c6e6c2c451",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How does AIAR relate to the Errorta product?",
+        "prompt_signature": "10475383e5f1591f5fc709dce88765ab113823790666b017aa5ef2bdf09afa92",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete",
+            "hallucinated_fact"
+          ],
+          "latency_ms": 34015.47,
+          "rating": "partial",
+          "reason": "The response is directionally correct but omits key details about the Ollama LLM runtime and the Tauri shell, and it misrepresents the AIAR version used by Errorta."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "2daab93ed7b94ba2b91907c6e6c2c451"
+    },
+    {
+      "answer": "An uncertain verdict is indicated with a yellow marker and a reason. The user can then choose to accept the answer as-is, provide a correction, or re-run the prompt with a different model. Uncertain verdicts are tracked separately in metrics and are only counted as failures if the user explicitly marks them as such.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "a04f9f4ddca5c724322a95bf404a9ef3ee8fe57e9018835f0e6a6f46915efbdd",
+      "grounding_match_similarity": 0.903008400567213,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-007",
+      "prompt_text": "How is an uncertain judge verdict handled?",
+      "rating": "fail",
+      "raw": {
+        "answer": "An uncertain verdict is indicated with a yellow marker and a reason. The user can then choose to accept the answer as-is, provide a correction, or re-run the prompt with a different model. Uncertain verdicts are tracked separately in metrics and are only counted as failures if the user explicitly marks them as such.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "a04f9f4ddca5c724322a95bf404a9ef3ee8fe57e9018835f0e6a6f46915efbdd",
+          "similarity": 0.903008400567213
+        },
+        "id": "7660250346aa439e8fa9ba6263b270b7",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt welcome-007: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "How is an uncertain judge verdict handled?",
+        "prompt_signature": "d7e04f338685d026e123d424ed354f2087c8b81a05855a063a2238d2f4cd9927",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 33150.15,
+          "rating": "fail",
+          "reason": "The response incorrectly states that uncertain verdicts are counted as failures if the user marks them as such, when the context specifies that they are not treated as failures unless explicitly marked."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "7660250346aa439e8fa9ba6263b270b7"
+    },
+    {
+      "answer": "When the AIAR pipeline raises an error, the sidecar returns the failure as a Verdict with a rating of `fail` and a clear reason. This allows the UI to render the error honestly rather than crashing.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-008",
+      "prompt_text": "What is Errorta's behavior when the pipeline errors out?",
+      "rating": "pass",
+      "raw": {
+        "answer": "When the AIAR pipeline raises an error, the sidecar returns the failure as a Verdict with a rating of `fail` and a clear reason. This allows the UI to render the error honestly rather than crashing.",
+        "grounding_match": null,
+        "id": "7929efc899d14f7eb5f362530985c364",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is Errorta's behavior when the pipeline errors out?",
+        "prompt_signature": "f678fda8f1846f72c97dbae916df5aef69a4724003d0b3e2acd702f8e62b1582",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 29218.24,
+          "rating": "pass",
+          "reason": "The response accurately describes Errorta's behavior when the pipeline errors out, matching the provided context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "7929efc899d14f7eb5f362530985c364"
+    },
+    {
+      "answer": "Errorta computes the F024 paraphrase delta to measure the effectiveness of its grounding mechanism in handling paraphrased prompts. Specifically, it calculates the difference in pass rates between the primary prompts and their paraphrased variants to ensure that paraphrased prompts benefit from previously accepted corrections stored in the grounding store. A high paraphrase delta indicates that the system successfully applies corrections to semantically similar prompts, validating that Errorta is \"remembering\" and applying user corrections effectively.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "0c1e778e646b0f126ba5fda45b1a4252d68c6b77ce60fc01c369575f33fff414",
+      "grounding_match_similarity": 0.9112748932300014,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-009",
+      "prompt_text": "Why does Errorta compute the F024 paraphrase delta?",
+      "rating": "partial",
+      "raw": {
+        "answer": "Errorta computes the F024 paraphrase delta to measure the effectiveness of its grounding mechanism in handling paraphrased prompts. Specifically, it calculates the difference in pass rates between the primary prompts and their paraphrased variants to ensure that paraphrased prompts benefit from previously accepted corrections stored in the grounding store. A high paraphrase delta indicates that the system successfully applies corrections to semantically similar prompts, validating that Errorta is \"remembering\" and applying user corrections effectively.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "0c1e778e646b0f126ba5fda45b1a4252d68c6b77ce60fc01c369575f33fff414",
+          "similarity": 0.9112748932300014
+        },
+        "id": "98f22ae919a34149af3f2646469a0bf2",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt welcome-009: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "Why does Errorta compute the F024 paraphrase delta?",
+        "prompt_signature": "53d48ac21b5ff8a1034cb1a3ff348c59bfa094c8cfb472d243dc38d327be6d4f",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 34244.29,
+          "rating": "partial",
+          "reason": "The response is directionally correct but omits key details about the F024 benchmark harness and the specific phases it runs."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "98f22ae919a34149af3f2646469a0bf2"
+    },
+    {
+      "answer": "A benchmark report can be rebuilt from stored verdicts using a deterministic markdown renderer. Given the same metadata (judge model, seed, generated_at), the report bytes are stable.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "welcome-010",
+      "prompt_text": "How can a benchmark report be rebuilt from stored verdicts?",
+      "rating": "pass",
+      "raw": {
+        "answer": "A benchmark report can be rebuilt from stored verdicts using a deterministic markdown renderer. Given the same metadata (judge model, seed, generated_at), the report bytes are stable.",
+        "grounding_match": null,
+        "id": "10ca627a6af4463f8f6d5f25bce751f8",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How can a benchmark report be rebuilt from stored verdicts?",
+        "prompt_signature": "d1e6aceab6da8610f6620466d05c1d8d95d0a776dc258cd8b4bdfc65a36600e6",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27260.09,
+          "rating": "pass",
+          "reason": "The response accurately reflects the information provided in the context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "10ca627a6af4463f8f6d5f25bce751f8"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the boiling point of water. At one atmosphere of pressure, water boils at 100 degrees Celsius or 212 degrees Fahrenheit.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-001",
+      "prompt_text": "At one atmosphere of pressure, at what temperature does water boil?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the boiling point of water. At one atmosphere of pressure, water boils at 100 degrees Celsius or 212 degrees Fahrenheit.",
+        "grounding_match": null,
+        "id": "bfa89704273b49df93758fdb9d775542",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "At one atmosphere of pressure, at what temperature does water boil?",
+        "prompt_signature": "826cdecfdf3a5f8f9e9f57cdcc1b97649122a5704750d619ca555c1627bd822e",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 28181.19,
+          "rating": "pass",
+          "reason": "The response correctly states the boiling point of water at one atmosphere of pressure."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "bfa89704273b49df93758fdb9d775542"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the authorship of Hamlet. Therefore, I cannot answer this question based on the provided information. The authorship of Hamlet is generally attributed to William Shakespeare.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "9325a1c43909de609d8d4a0c9e5b5533a37594daf9a2f99668b5341c4526320d",
+      "grounding_match_similarity": 0.8572784036425304,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-002",
+      "prompt_text": "Which playwright is credited with the authorship of Hamlet?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the authorship of Hamlet. Therefore, I cannot answer this question based on the provided information. The authorship of Hamlet is generally attributed to William Shakespeare.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "9325a1c43909de609d8d4a0c9e5b5533a37594daf9a2f99668b5341c4526320d",
+          "similarity": 0.8572784036425304
+        },
+        "id": "3be88a2ec5334ab09a04d1c9ba2c5fbc",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt factual-002: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "Which playwright is credited with the authorship of Hamlet?",
+        "prompt_signature": "0326047e3fe2be238331ecb815b213a51b084a7f0d9c3c4d09fc47b974f690b1",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 32334.6,
+          "rating": "fail",
+          "reason": "The response is incorrect because it claims it cannot answer the question based on the provided information, but the correct answer is known and provided. The response also incorrectly states that the authorship of Hamlet is generally attributed to William Shakespeare, which is a factual error."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "3be88a2ec5334ab09a04d1c9ba2c5fbc"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the speed of light in a vacuum. The speed of light in a vacuum is approximately 299,792 kilometers per second.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-003",
+      "prompt_text": "How fast does light travel through a vacuum?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the speed of light in a vacuum. The speed of light in a vacuum is approximately 299,792 kilometers per second.",
+        "grounding_match": null,
+        "id": "95c2a17012084bd3b4808ca4b804375d",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How fast does light travel through a vacuum?",
+        "prompt_signature": "a866f1fc4deeba5b030c9004d795e21496bd1c07bbf848c0b894438dd022bf27",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27715.41,
+          "rating": "pass",
+          "reason": "The response correctly states the speed of light in a vacuum."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "95c2a17012084bd3b4808ca4b804375d"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the capital of Australia. The capital of Australia is Canberra.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-004",
+      "prompt_text": "Which city serves as Australia's capital?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the capital of Australia. The capital of Australia is Canberra.",
+        "grounding_match": null,
+        "id": "375c0beb68d440f9b17ca9318e99ab04",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which city serves as Australia's capital?",
+        "prompt_signature": "211c38cf133e3fbab3095db5f32f556f569b12682eba4eb93468f220f704d529",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26752.39,
+          "rating": "pass",
+          "reason": "The response correctly identifies Canberra as the capital of Australia."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "375c0beb68d440f9b17ca9318e99ab04"
+    },
+    {
+      "answer": "The Knowledge block does not cover the topic of photosynthesis. Plants take in carbon dioxide (CO2) from the air during photosynthesis.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-005",
+      "prompt_text": "During photosynthesis, which gas do plants take in from the air?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover the topic of photosynthesis. Plants take in carbon dioxide (CO2) from the air during photosynthesis.",
+        "grounding_match": null,
+        "id": "587d887f5f7e4c23aa620ffc29896803",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "During photosynthesis, which gas do plants take in from the air?",
+        "prompt_signature": "7c09c7dd92af8e4155caabfd59abe505369d0821f7ad934bda33d051d04a340d",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 16700.31,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the content of the Knowledge block and provides incorrect information about photosynthesis."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "587d887f5f7e4c23aa620ffc29896803"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the Apollo 11 mission. Apollo 11 successfully touched down on the lunar surface on July 20, 1969.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-006",
+      "prompt_text": "When did Apollo 11 successfully touch down on the lunar surface?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the Apollo 11 mission. Apollo 11 successfully touched down on the lunar surface on July 20, 1969.",
+        "grounding_match": null,
+        "id": "c5d1d0df4e644b5b9668f7e1dcf2bcef",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "When did Apollo 11 successfully touch down on the lunar surface?",
+        "prompt_signature": "30929488b0d827a4387163d3af3ddf67aaac84819d90685baae4820bcbc13f48",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 10132.98,
+          "rating": "fail",
+          "reason": "The response contains a factual claim that is not supported by the context and is off-topic."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "c5d1d0df4e644b5b9668f7e1dcf2bcef"
+    },
+    {
+      "answer": "The symbol for gold on the periodic table is \"Au\".",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-007",
+      "prompt_text": "On the periodic table, which symbol stands for gold?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The symbol for gold on the periodic table is \"Au\".",
+        "grounding_match": null,
+        "id": "1f68993b19c346ccb52d12f0cae520ac",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "On the periodic table, which symbol stands for gold?",
+        "prompt_signature": "c796499ee697438d83fd460f1b3dfc5bc0a6092202933e591aa0f4047a487ea8",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26996.42,
+          "rating": "pass",
+          "reason": "The response correctly identifies the symbol for gold on the periodic table."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "1f68993b19c346ccb52d12f0cae520ac"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the Mona Lisa or its painter. The artist behind the Mona Lisa is Leonardo da Vinci.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-008",
+      "prompt_text": "Which artist is the painter behind the Mona Lisa?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the Mona Lisa or its painter. The artist behind the Mona Lisa is Leonardo da Vinci.",
+        "grounding_match": null,
+        "id": "f79369d05d44480a899e081afb51e66c",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which artist is the painter behind the Mona Lisa?",
+        "prompt_signature": "d17450e435fdb75904723c3725c56d106bec948c49bcb86befa2de5f00455f78",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 27968.92,
+          "rating": "fail",
+          "reason": "The response contains a factual claim that is not supported by the context and is off-topic."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "f79369d05d44480a899e081afb51e66c"
+    },
+    {
+      "answer": "Jupiter has the greatest mass in the solar system.\n\nThe provided Knowledge block does not contain information about the planets in the solar system.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "cb2f1b0f3c209dbbc1498d87bf1195f128870ef1606d7645ac3377562db8a2da",
+      "grounding_match_similarity": 0.8591590207573524,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-009",
+      "prompt_text": "Which planet in the solar system has the greatest mass?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Jupiter has the greatest mass in the solar system.\n\nThe provided Knowledge block does not contain information about the planets in the solar system.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "cb2f1b0f3c209dbbc1498d87bf1195f128870ef1606d7645ac3377562db8a2da",
+          "similarity": 0.8591590207573524
+        },
+        "id": "f7621fa9d7e143538ad6de0224134449",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt factual-009: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "Which planet in the solar system has the greatest mass?",
+        "prompt_signature": "6d204934fc25f6eaa749872bee6083c394279a060268973be93f2ace16045746",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 28268.0,
+          "rating": "pass",
+          "reason": "The response correctly identifies Jupiter as the planet with the greatest mass in the solar system."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "f7621fa9d7e143538ad6de0224134449"
+    },
+    {
+      "answer": "Mandarin Chinese is spoken natively by the most people globally.\n\nThe Knowledge block does not provide information relevant to the user's prompt.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "ba994cb1ad17f4ff028386cfea29c723e8e0be6169c034eff74046e8c8337961",
+      "grounding_match_similarity": 0.8934675376634518,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-010",
+      "prompt_text": "Globally, which language is spoken natively by the most people?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Mandarin Chinese is spoken natively by the most people globally.\n\nThe Knowledge block does not provide information relevant to the user's prompt.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "ba994cb1ad17f4ff028386cfea29c723e8e0be6169c034eff74046e8c8337961",
+          "similarity": 0.8934675376634518
+        },
+        "id": "27f4ba0d295348d7a0ce225ea0c93ee0",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt factual-010: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "Globally, which language is spoken natively by the most people?",
+        "prompt_signature": "b51e8a40fc33040084649cb4e806a48bfaa93154e05dabf9cb09ec9f273b002d",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 20140.53,
+          "rating": "pass",
+          "reason": "The response correctly identifies Mandarin Chinese as the most natively spoken language globally."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "27f4ba0d295348d7a0ce225ea0c93ee0"
+    },
+    {
+      "answer": "The organelle commonly called the cell's powerhouse is the mitochondrion. The provided Knowledge block does not cover this topic.",
+      "error": null,
+      "grounding_match_kind": "similar",
+      "grounding_match_signature": "cb086dde0b3be303e7a706921956f21788e501f890d4f8bb89af1f1585897d8c",
+      "grounding_match_similarity": 0.8701973363629822,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-011",
+      "prompt_text": "Which organelle is commonly called the cell's powerhouse?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The organelle commonly called the cell's powerhouse is the mitochondrion. The provided Knowledge block does not cover this topic.",
+        "grounding_match": {
+          "kind": "similar",
+          "original_signature": "cb086dde0b3be303e7a706921956f21788e501f890d4f8bb89af1f1585897d8c",
+          "similarity": 0.8701973363629822
+        },
+        "id": "6c310260021b489dbbc9b00a402a617f",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": "[wedge-amplify] synthetic correction for prompt factual-011: the verified answer differs from the judge-flagged response. See seed-canonical guidance.",
+        "prompt": "Which organelle is commonly called the cell's powerhouse?",
+        "prompt_signature": "c1539c90e9b1596914e7381e3acdbd06c52939ee03510889f270b0d5688b4b4c",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 17541.78,
+          "rating": "pass",
+          "reason": "The response correctly identifies the mitochondrion as the cell's powerhouse and acknowledges the lack of relevant information in the provided Knowledge block."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "6c310260021b489dbbc9b00a402a617f"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic. Albert Einstein formulated the general theory of relativity.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-012",
+      "prompt_text": "Which physicist formulated the general theory of relativity?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic. Albert Einstein formulated the general theory of relativity.",
+        "grounding_match": null,
+        "id": "5d294c8f0e4c41c29bccdc5819d351e2",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which physicist formulated the general theory of relativity?",
+        "prompt_signature": "f6170b5f9f79c99ec0e56070e2c143f82700cdeb5dacd20bb0f8ee59b3a43628",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 28518.8,
+          "rating": "pass",
+          "reason": "The response correctly identifies Albert Einstein as the physicist who formulated the general theory of relativity."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "5d294c8f0e4c41c29bccdc5819d351e2"
+    },
+    {
+      "answer": "The Nile River holds the record for the greatest length on Earth.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-013",
+      "prompt_text": "Which river holds the record for the greatest length on Earth?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Nile River holds the record for the greatest length on Earth.",
+        "grounding_match": null,
+        "id": "a62ab43d5e2a4df6ae6ffd9ec8843434",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which river holds the record for the greatest length on Earth?",
+        "prompt_signature": "b95ebbb533bc47631e57ff271ed1cf22e79be87a50c5ca4b6c0493743d2303ef",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 27653.11,
+          "rating": "partial",
+          "reason": "The response is correct but incomplete because it does not provide the length of the Nile River."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "a62ab43d5e2a4df6ae6ffd9ec8843434"
+    },
+    {
+      "answer": "Water freezes at 32 degrees Fahrenheit.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-014",
+      "prompt_text": "At what Fahrenheit temperature does water freeze?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Water freezes at 32 degrees Fahrenheit.",
+        "grounding_match": null,
+        "id": "4f25d91618aa4fc1bde37e429da44bd3",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "At what Fahrenheit temperature does water freeze?",
+        "prompt_signature": "bab6e5bd059d9d4579796d3e5e36fab9f83c8e7fd1ee399b4a43e27113f5b92e",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26343.8,
+          "rating": "pass",
+          "reason": "The response correctly states the freezing point of water in Fahrenheit."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "4f25d91618aa4fc1bde37e429da44bd3"
+    },
+    {
+      "answer": "The inventor most often credited with the invention of the telephone is Alexander Graham Bell.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-015",
+      "prompt_text": "Which inventor is most often credited with the telephone?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The inventor most often credited with the invention of the telephone is Alexander Graham Bell.",
+        "grounding_match": null,
+        "id": "82b07d7d2935491380992156563e9e1b",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which inventor is most often credited with the telephone?",
+        "prompt_signature": "fc71835356fc9783c8b6fbf79e7ea2a4798dcd3bb3c5feb3ac9b5ce02521019a",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26603.21,
+          "rating": "pass",
+          "reason": "The response correctly identifies Alexander Graham Bell as the inventor most often credited with the invention of the telephone."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "82b07d7d2935491380992156563e9e1b"
+    },
+    {
+      "answer": "The smallest prime integer is 2.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-016",
+      "prompt_text": "Which integer is the smallest prime?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The smallest prime integer is 2.",
+        "grounding_match": null,
+        "id": "602f85d11797417db10abd0d5edd06aa",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which integer is the smallest prime?",
+        "prompt_signature": "ecea12f515352cce93a43b9e706f62de3a1fae0c888bc9d1ed7e7ceafdb4da90",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 26047.68,
+          "rating": "pass",
+          "reason": "The response correctly identifies 2 as the smallest prime integer."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "602f85d11797417db10abd0d5edd06aa"
+    },
+    {
+      "answer": "Mercury is the metallic element that remains liquid under normal room conditions.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-017",
+      "prompt_text": "Which metallic element remains liquid under normal room conditions?",
+      "rating": "pass",
+      "raw": {
+        "answer": "Mercury is the metallic element that remains liquid under normal room conditions.",
+        "grounding_match": null,
+        "id": "f7454fd126864d4280a6901adb500fe5",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which metallic element remains liquid under normal room conditions?",
+        "prompt_signature": "260a2a306b56688049d12c8e99965d99776204fea8607050083ff17428b7d2f9",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27035.9,
+          "rating": "pass",
+          "reason": "The response correctly identifies mercury as the metallic element that remains liquid under normal room conditions."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "f7454fd126864d4280a6901adb500fe5"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the author of the novel \"1984\".",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-018",
+      "prompt_text": "Which author published the novel titled 1984?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the author of the novel \"1984\".",
+        "grounding_match": null,
+        "id": "634403879fe24c3588fb7a88dd3f7c3c",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which author published the novel titled 1984?",
+        "prompt_signature": "c3ba965e75372d277a7bdf71563ae0043668467e45ef1ffe4e6d3eb3f65bd81b",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 28244.76,
+          "rating": "fail",
+          "reason": "The response is incorrect because it does not provide the correct author of the novel 1984, and it is off-topic because it mentions irrelevant information."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "634403879fe24c3588fb7a88dd3f7c3c"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic. Mount Everest is the tallest mountain on Earth.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-019",
+      "prompt_text": "Which mountain holds the title of tallest on Earth?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic. Mount Everest is the tallest mountain on Earth.",
+        "grounding_match": null,
+        "id": "1857c6368e74441e806e0bc2654b67ea",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which mountain holds the title of tallest on Earth?",
+        "prompt_signature": "62617a202bc9b0154ad801f08b1223fe8b01846ba8de1a250e698900b23920c3",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 17514.97,
+          "rating": "fail",
+          "reason": "The response contains a factual error. The CONTEXT does not mention Mount Everest, and the response is off-topic."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "1857c6368e74441e806e0bc2654b67ea"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic. The protein that primarily makes up the structure of human hair is keratin.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "factual-020",
+      "prompt_text": "Which protein primarily makes up the structure of human hair?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic. The protein that primarily makes up the structure of human hair is keratin.",
+        "grounding_match": null,
+        "id": "8e89e9725fae4a76aa5c89c316b2fb0f",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which protein primarily makes up the structure of human hair?",
+        "prompt_signature": "f1230f63753534a113caa2457bda717d2f09cb6549006e0843425c19e02cef90",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 27874.31,
+          "rating": "pass",
+          "reason": "The response correctly identifies keratin as the primary protein in human hair and acknowledges the lack of relevant information in the provided context."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "8e89e9725fae4a76aa5c89c316b2fb0f"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about Einstein or the Nobel Prize for Chemistry. Einstein was awarded the Nobel Prize in Physics in 1921.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-001",
+      "prompt_text": "In what year was Einstein awarded the Nobel Prize for Chemistry?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about Einstein or the Nobel Prize for Chemistry. Einstein was awarded the Nobel Prize in Physics in 1921.",
+        "grounding_match": null,
+        "id": "344d905971d54ea5958bd60fea87068e",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "In what year was Einstein awarded the Nobel Prize for Chemistry?",
+        "prompt_signature": "ca385ccf372272f9eea133747cae28838ce81432312f9314ac06974f30c72e1f",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "incomplete"
+          ],
+          "latency_ms": 28903.75,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the Nobel Prize category and fails to answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "344d905971d54ea5958bd60fea87068e"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-002",
+      "prompt_text": "Which 18th-century US president was the first to use email?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic.",
+        "grounding_match": null,
+        "id": "163830470b6e4b47895d4b87ed328125",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which 18th-century US president was the first to use email?",
+        "prompt_signature": "ada01c5bbc5408ebed6c575962e528c898b030cb13b5700aa72300e4dc0b6189",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 14965.45,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "163830470b6e4b47895d4b87ed328125"
+    },
+    {
+      "answer": "The Knowledge block does not cover the terms of the 1873 Treaty of Pixelopolis.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-003",
+      "prompt_text": "What were the terms of the 1873 Treaty of Pixelopolis?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover the terms of the 1873 Treaty of Pixelopolis.",
+        "grounding_match": null,
+        "id": "d7fd3d1cda024e209b15a8101c405a69",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What were the terms of the 1873 Treaty of Pixelopolis?",
+        "prompt_signature": "4ee029c7c02da6341af1b9540dbb4559bbf09ed4785b048cd8e7fa7f2fe1dfb4",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 36203.42,
+          "rating": "fail",
+          "reason": "The response is incorrect because it claims the Knowledge block does not cover the terms of the 1873 Treaty of Pixelopolis, but the prompt did not ask about the Knowledge block."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "d7fd3d1cda024e209b15a8101c405a69"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about the planet Vulcan or its moon count. Vulcan is a fictional planet from the Star Trek universe. In the Star Trek: Enterprise series, Vulcan is depicted as having no moons.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-004",
+      "prompt_text": "What is the moon count for the planet Vulcan?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about the planet Vulcan or its moon count. Vulcan is a fictional planet from the Star Trek universe. In the Star Trek: Enterprise series, Vulcan is depicted as having no moons.",
+        "grounding_match": null,
+        "id": "baa0664151a44184b14d92f398e1497b",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is the moon count for the planet Vulcan?",
+        "prompt_signature": "b853a89debd177b24fba86e855545b6d803de64e4c538d4badf5fad4384574cf",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 30215.55,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the moon count of Vulcan and is off-topic."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "baa0664151a44184b14d92f398e1497b"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the missing 14th book of Aristotle's Metaphysics.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-005",
+      "prompt_text": "What is in the missing 14th book of Aristotle's Metaphysics?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the missing 14th book of Aristotle's Metaphysics.",
+        "grounding_match": null,
+        "id": "f90a9fb3062f41f58db2ad8f11f43ed0",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is in the missing 14th book of Aristotle's Metaphysics?",
+        "prompt_signature": "2270db1d14409efc25cdc86201fe0d232628b709690821a14ffdd1a26e591020",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 27685.19,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about Aristotle's Metaphysics."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "f90a9fb3062f41f58db2ad8f11f43ed0"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about Marie Curie or penicillin. Therefore, I cannot answer this question based on the provided information.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-006",
+      "prompt_text": "In what year did Marie Curie first isolate penicillin?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about Marie Curie or penicillin. Therefore, I cannot answer this question based on the provided information.",
+        "grounding_match": null,
+        "id": "76ac865767d74f929e0b8776ac82b40f",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "In what year did Marie Curie first isolate penicillin?",
+        "prompt_signature": "e3eca2335d5af3c05caf608af33c6b933ad821d3448b1a0ccf1cfad7f0140c5f",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 29805.7,
+          "rating": "fail",
+          "reason": "The response is incorrect because Marie Curie did not isolate penicillin. Penicillin was discovered by Alexander Fleming in 1928."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "76ac865767d74f929e0b8776ac82b40f"
+    },
+    {
+      "answer": "I cannot. The Knowledge block does not contain information about an unreleased Beatles track called Octopus Algorithm.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-007",
+      "prompt_text": "Can you recite the unreleased Beatles track called Octopus Algorithm?",
+      "rating": "pass",
+      "raw": {
+        "answer": "I cannot. The Knowledge block does not contain information about an unreleased Beatles track called Octopus Algorithm.",
+        "grounding_match": null,
+        "id": "ecc1ce1af7c94a69aec9a503ba961dd1",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Can you recite the unreleased Beatles track called Octopus Algorithm?",
+        "prompt_signature": "4f1657642a5fd0258d34b9ec2ea85d1057130cbeedd4b2a17f2e4bd3fa02545d",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 28074.41,
+          "rating": "pass",
+          "reason": "The response correctly states that it cannot provide information about an unreleased Beatles track called Octopus Algorithm, as it is not present in the Knowledge block."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "ecc1ce1af7c94a69aec9a503ba961dd1"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic. The emperor of Rome credited with inventing the steam engine is Hero of Alexandria, although he was not an emperor but a mathematician and engineer.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-008",
+      "prompt_text": "Which emperor of Rome is credited with inventing the steam engine?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic. The emperor of Rome credited with inventing the steam engine is Hero of Alexandria, although he was not an emperor but a mathematician and engineer.",
+        "grounding_match": null,
+        "id": "850b3465bd5940b5bb72f5998be3a4ee",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which emperor of Rome is credited with inventing the steam engine?",
+        "prompt_signature": "7f49dcef5f080406e72ccd6ee9a430ee387f3a032e090279a3761c21bc37da19",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact"
+          ],
+          "latency_ms": 29226.14,
+          "rating": "fail",
+          "reason": "The response contains a factual error about the emperor of Rome credited with inventing the steam engine."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "850b3465bd5940b5bb72f5998be3a4ee"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the population of Atlantis.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-009",
+      "prompt_text": "How many people lived in Atlantis as of last year?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the population of Atlantis.",
+        "grounding_match": null,
+        "id": "1c6edcf417b941859dbdee9d5b131891",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How many people lived in Atlantis as of last year?",
+        "prompt_signature": "31486f9dc264a9f78c76d04050d4c37b71713905575016db5375dd66a87eb920",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 27219.67,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about the population of Atlantis."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "1c6edcf417b941859dbdee9d5b131891"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about a Nature article from 2027 that proved cold fusion.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-010",
+      "prompt_text": "Please cite the Nature article from 2027 that proved cold fusion.",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about a Nature article from 2027 that proved cold fusion.",
+        "grounding_match": null,
+        "id": "4e68aec110a64aada425916d65323717",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Please cite the Nature article from 2027 that proved cold fusion.",
+        "prompt_signature": "be472d8ed6e5149fa6af624bf56f1b351dcb98092c93718ce91b2b944a1bef74",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 30065.32,
+          "rating": "fail",
+          "reason": "The response claims that there is no information about a Nature article from 2027 that proved cold fusion, but it does not acknowledge that the CONTEXT does not contain any information about this topic."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "4e68aec110a64aada425916d65323717"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about Shakespeare or any tweets he posted.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-011",
+      "prompt_text": "Which tweet did Shakespeare post on 12 January 1602?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about Shakespeare or any tweets he posted.",
+        "grounding_match": null,
+        "id": "a0e94eb6ce0f49b09e166e523d4455c8",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which tweet did Shakespeare post on 12 January 1602?",
+        "prompt_signature": "ec2789d3968cb74f99419bfbf1a6ad96791428c45fa8e3553e120b9b8359fce9",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "off_topic"
+          ],
+          "latency_ms": 28121.1,
+          "rating": "fail",
+          "reason": "The response is incorrect because Shakespeare did not post tweets, as Twitter did not exist in 1602."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "a0e94eb6ce0f49b09e166e523d4455c8"
+    },
+    {
+      "answer": "The Knowledge block does not contain information about Errortazol or its side effects.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-012",
+      "prompt_text": "What side effects does the FDA-approved Errortazol carry?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not contain information about Errortazol or its side effects.",
+        "grounding_match": null,
+        "id": "12df0cb773264f00922dd57f738e9ecc",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What side effects does the FDA-approved Errortazol carry?",
+        "prompt_signature": "45b90de50349cad5c9866cd944ea5dec9e904aacd5ae65fcc0b73272038e656a",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "hallucinated_fact",
+            "contradicts_context"
+          ],
+          "latency_ms": 28336.47,
+          "rating": "fail",
+          "reason": "The response is incorrect because Errortazol is not a drug, and the context does not mention any drug called Errortazol."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "12df0cb773264f00922dd57f738e9ecc"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about Beethoven's Symphony No. 12. Beethoven did not write a 12th symphony. His final symphony is the Ninth Symphony.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-013",
+      "prompt_text": "Which composer wrote Beethoven's Symphony No. 12?",
+      "rating": "pass",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about Beethoven's Symphony No. 12. Beethoven did not write a 12th symphony. His final symphony is the Ninth Symphony.",
+        "grounding_match": null,
+        "id": "cf755d8199604abc9e0c68d710dfde22",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Which composer wrote Beethoven's Symphony No. 12?",
+        "prompt_signature": "d205a0caa714e62e47c56db54e12d5df0ba946886c720f7c3e680acaecbd0da7",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [],
+          "latency_ms": 34588.46,
+          "rating": "pass",
+          "reason": "The response correctly identifies that Beethoven did not write a 12th symphony and accurately states that his final symphony is the Ninth Symphony."
+        }
+      },
+      "score": 1.0,
+      "verdict_id": "cf755d8199604abc9e0c68d710dfde22"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the boiling point of water on the Moon's dark side. The boiling point of water depends on the atmospheric pressure, and since the Moon has virtually no atmosphere, water would boil at a much lower temperature than on Earth. On the Moon's dark side, the temperature can drop to around -173\u00b0C (-280\u00b0F), but this does not directly determine the boiling point of water, which would be more influenced by the lack of atmospheric pressure.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-014",
+      "prompt_text": "At what temperature does water boil on the Moon's dark side?",
+      "rating": "partial",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the boiling point of water on the Moon's dark side. The boiling point of water depends on the atmospheric pressure, and since the Moon has virtually no atmosphere, water would boil at a much lower temperature than on Earth. On the Moon's dark side, the temperature can drop to around -173\u00b0C (-280\u00b0F), but this does not directly determine the boiling point of water, which would be more influenced by the lack of atmospheric pressure.",
+        "grounding_match": null,
+        "id": "cde82f50034449a59ebfdd0573b05eba",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "At what temperature does water boil on the Moon's dark side?",
+        "prompt_signature": "a7bf37be80908cdd0ec2e8f057d5f5547b1e334720730038e927abf29d219678",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "incomplete"
+          ],
+          "latency_ms": 34787.89,
+          "rating": "partial",
+          "reason": "The response correctly notes that the boiling point of water depends on atmospheric pressure and that the Moon has virtually no atmosphere, but it fails to provide the specific temperature at which water would boil on the Moon's dark side."
+        }
+      },
+      "score": 0.5,
+      "verdict_id": "cde82f50034449a59ebfdd0573b05eba"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the maximum height of Tyrannosaurus electrus.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-015",
+      "prompt_text": "What was the maximum height of Tyrannosaurus electrus?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the maximum height of Tyrannosaurus electrus.",
+        "grounding_match": null,
+        "id": "d8e1a85266fd493aa0e986ca66a2c386",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What was the maximum height of Tyrannosaurus electrus?",
+        "prompt_signature": "34ef4771e27a9a14766a1f69c370dc7131104f0d293c7bd1f6b042ed0f090303",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 26228.18,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "d8e1a85266fd493aa0e986ca66a2c386"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about Ada Lovelace or Photoshop plugins.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-016",
+      "prompt_text": "In what language did Ada Lovelace author her Photoshop plugins?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about Ada Lovelace or Photoshop plugins.",
+        "grounding_match": null,
+        "id": "b896eaba055c4d349cb4b0580b5d33bd",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "In what language did Ada Lovelace author her Photoshop plugins?",
+        "prompt_signature": "6ff45d5c9a03c37b00159c1293c661532761ce724fd1478f9ca0edb4fd399a2e",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 27015.53,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "b896eaba055c4d349cb4b0580b5d33bd"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about the Cookbook of Quantum Pasta.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-017",
+      "prompt_text": "How does the 17th-century Cookbook of Quantum Pasta prepare its dish?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about the Cookbook of Quantum Pasta.",
+        "grounding_match": null,
+        "id": "0687218d61b6457baa6f8cb2226996db",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "How does the 17th-century Cookbook of Quantum Pasta prepare its dish?",
+        "prompt_signature": "81b4de8d6a5db11f9004006d7791d76debed3353dcef0c32a34cdd774d378e85",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 27187.08,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about the Cookbook of Quantum Pasta."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "0687218d61b6457baa6f8cb2226996db"
+    },
+    {
+      "answer": "The Knowledge block does not cover this question.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-018",
+      "prompt_text": "What does chapter 9 of the original Necronomicon manuscript say?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover this question.",
+        "grounding_match": null,
+        "id": "047b5510ca814907978039f20ad71845",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What does chapter 9 of the original Necronomicon manuscript say?",
+        "prompt_signature": "39ddef59a4591c2112eb5d8a4edb89f488c40ff16cff26d998dc0891df5d080b",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic"
+          ],
+          "latency_ms": 27506.67,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not address the question about the Necronomicon."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "047b5510ca814907978039f20ad71845"
+    },
+    {
+      "answer": "The Knowledge block does not cover this topic.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-019",
+      "prompt_text": "Who took home the FIFA World Cup trophy in 2031?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not cover this topic.",
+        "grounding_match": null,
+        "id": "24c650dc34da454cb3562363ab35af5c",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "Who took home the FIFA World Cup trophy in 2031?",
+        "prompt_signature": "01d5d5672fd961d09a3fc8e50f73b2147b3faa822f01a38abbd740ccaaf8158c",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 27085.42,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "24c650dc34da454cb3562363ab35af5c"
+    },
+    {
+      "answer": "The Knowledge block does not provide information about Unobtainium's chemical formula.",
+      "error": null,
+      "grounding_match_kind": null,
+      "grounding_match_signature": null,
+      "grounding_match_similarity": null,
+      "is_paraphrase_re_run": true,
+      "prompt_id": "wedge-020",
+      "prompt_text": "What is Unobtainium's chemical formula?",
+      "rating": "fail",
+      "raw": {
+        "answer": "The Knowledge block does not provide information about Unobtainium's chemical formula.",
+        "grounding_match": null,
+        "id": "f8eeaddf35b74276b7ac15d654a4f724",
+        "judge_model": "mistral-small3.1:latest",
+        "prior_correction": null,
+        "prompt": "What is Unobtainium's chemical formula?",
+        "prompt_signature": "27303a3284c6b2dc8f3f17aca34bf7940c7230c04c458ac04a18e27d28b334d2",
+        "verdict": {
+          "confidence": null,
+          "failure_tags": [
+            "off_topic",
+            "incomplete"
+          ],
+          "latency_ms": 15540.3,
+          "rating": "fail",
+          "reason": "The response is off-topic and does not answer the question."
+        }
+      },
+      "score": 0.0,
+      "verdict_id": "f8eeaddf35b74276b7ac15d654a4f724"
+    }
+  ]
+}

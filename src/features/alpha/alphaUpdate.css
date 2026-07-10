@@ -1,0 +1,23 @@
+/* F-DIST-01 slice 8 — soft build-EOL "update available" banner. */
+
+.alpha-update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  color: var(--text);
+  background: var(--warn-soft);
+  border-bottom: 1px solid var(--border);
+}
+
+.alpha-update-text {
+  flex: 1 1 auto;
+}
+
+.alpha-update-link {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: underline;
+}

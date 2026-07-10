@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		F-INFRA-02 — minimal hardened-runtime entitlements for the
+		PyInstaller-bundled Errorta sidecar.
+
+		allow-unsigned-executable-memory: required because some wheels
+		(torch, pydantic-core, sentence-transformers) use JIT or
+		mprotect-derived codepaths that the default hardened runtime
+		blocks.
+
+		allow-dyld-environment-variables: required because PyInstaller's
+		bootloader inspects DYLD_* at startup to set up the embedded
+		Python runtime.
+
+		Intentionally NOT enabled (broader; only add if notarization
+		rejects with a library-validation error):
+		com.apple.security.cs.disable-library-validation
+	-->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

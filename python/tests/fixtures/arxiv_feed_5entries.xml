@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <link href="http://arxiv.org/api/query?search_query=cat:cs.AI" rel="self" type="application/atom+xml"/>
+  <title type="html">ArXiv Query</title>
+  <id>http://arxiv.org/api/test_5entries</id>
+  <updated>2024-03-25T00:00:00-04:00</updated>
+  <opensearch:totalResults>5</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <opensearch:itemsPerPage>30</opensearch:itemsPerPage>
+
+  <entry>
+    <id>http://arxiv.org/abs/2403.12345v2</id>
+    <updated>2024-03-20T18:00:00Z</updated>
+    <published>2024-03-15T12:00:00Z</published>
+    <title>
+      Efficient Retrieval-Augmented Generation
+      with Hybrid Indexes
+    </title>
+    <summary>
+      We propose a hybrid retrieval scheme combining BM25 and dense
+      vectors with reciprocal rank fusion. Experiments show consistent
+      gains across QA benchmarks.
+    </summary>
+    <author><name>Alice Researcher</name></author>
+    <author><name>Bob Coauthor</name></author>
+    <arxiv:doi>10.1234/arxiv.2403.12345</arxiv:doi>
+    <link href="http://arxiv.org/abs/2403.12345v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2403.12345v2" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.IR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.IR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.CL" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+
+  <entry>
+    <id>http://arxiv.org/abs/2402.09876v1</id>
+    <updated>2024-02-14T09:30:00Z</updated>
+    <published>2024-02-14T09:30:00Z</published>
+    <title>A Note on Judge-Guided Self-Correction</title>
+    <summary>We study how an LLM judge can guide an answerer to revise its outputs.</summary>
+    <author><name>Carol Author</name></author>
+    <arxiv:journal_ref>JMLR 25(1): 1-12</arxiv:journal_ref>
+    <link href="http://arxiv.org/abs/2402.09876v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2402.09876v1" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v3</id>
+    <updated>2024-01-15T00:00:00Z</updated>
+    <published>2024-01-02T00:00:00Z</published>
+    <title>Grounded Generation in Local Pipelines</title>
+    <summary>Local LLM stacks can ground answers without cloud calls.</summary>
+    <author><name>Dave Engineer</name></author>
+    <author><name>Eve Maintainer</name></author>
+    <author><name>Frank Reviewer</name></author>
+    <link href="http://arxiv.org/abs/2401.00001v3" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2401.00001v3" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.CL" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.CL" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+
+  <entry>
+    <id>http://arxiv.org/abs/2312.55555v1</id>
+    <updated>2023-12-20T00:00:00Z</updated>
+    <published>2023-12-20T00:00:00Z</published>
+    <title>Brief-Driven Corpus Collection</title>
+    <summary>An agentic pipeline that turns a markdown brief into a corpus.</summary>
+    <author><name>Grace Builder</name></author>
+    <link href="http://arxiv.org/abs/2312.55555v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2312.55555v1" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+
+  <entry>
+    <id>http://arxiv.org/abs/2311.42424v2</id>
+    <updated>2023-11-30T00:00:00Z</updated>
+    <published>2023-11-10T00:00:00Z</published>
+    <title>Compliance Gates for RAG Pipelines</title>
+    <summary>We describe strict-by-default metadata gates for ingestion pipelines.</summary>
+    <author><name>Heidi Compliance</name></author>
+    <link href="http://arxiv.org/abs/2311.42424v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2311.42424v2" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>

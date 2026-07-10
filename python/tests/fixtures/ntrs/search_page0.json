@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "id": 20230001111,
+      "title": "Thermal Analysis of Composite Aerospace Structures",
+      "publicationDate": "2023-04-05",
+      "distribution": "PUBLIC",
+      "copyright": {
+        "licenseType": "US-Gov-Work",
+        "determinationType": "GOVERNMENT_WORK"
+      },
+      "authorAffiliations": [
+        {
+          "meta": {
+            "author": {"name": "Alice Researcher"},
+            "organization": {"name": "NASA Langley Research Center"}
+          }
+        }
+      ],
+      "downloads": [
+        {
+          "mimetype": "application/pdf",
+          "links": {"original": "/api/citations/20230001111/downloads/thermal.pdf"}
+        }
+      ]
+    },
+    {
+      "id": 20230002222,
+      "title": "Contractor-Authored Restricted Report",
+      "publicationDate": "2022-11",
+      "distribution": "PUBLIC",
+      "copyright": {
+        "licenseType": "OTHER",
+        "determinationType": "CONTRACTOR"
+      },
+      "authorAffiliations": [
+        {
+          "meta": {
+            "author": {"name": "Carol Contractor"},
+            "organization": {"name": "Acme Aerospace Inc."}
+          }
+        }
+      ],
+      "downloads": []
+    },
+    {
+      "id": 20230003333,
+      "title": "Metadata-Only NASA Memo",
+      "publicationDate": "2021",
+      "distribution": "PUBLIC",
+      "copyright": {
+        "licenseType": "US-Gov-Work",
+        "determinationType": "GOVERNMENT_WORK"
+      },
+      "authorAffiliations": [
+        {
+          "meta": {
+            "author": {"name": "Dave Memo"},
+            "organization": {"name": "NASA Glenn Research Center"}
+          }
+        }
+      ],
+      "downloads": [
+        {
+          "mimetype": "text/html",
+          "links": {"original": "/api/citations/20230003333/downloads/memo.html"}
+        }
+      ]
+    }
+  ],
+  "stats": {"hits": 3}
+}

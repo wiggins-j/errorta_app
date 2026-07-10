@@ -1,0 +1,1 @@
+{"schema_version":"coding_turn.v1","role":"dev","task_id":"t-1","intent":{"kind":"tool_plan","task_type":"implementation","tool_calls":[]}}

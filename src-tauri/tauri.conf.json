@@ -1,0 +1,95 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Errorta",
+  "version": "0.1.0-alpha.0",
+  "identifier": "com.errorta.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build && node scripts/build-sidecar-dispatch.mjs"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Errorta",
+        "width": 980,
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 480,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:*",
+        "img-src": "'self' data: blob: asset: http://asset.localhost",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
+        "script-src": "'self' 'unsafe-eval'",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "frame-ancestors": "'none'"
+      },
+      "devCsp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "nsis"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"]
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "externalBin": ["binaries/errorta-sidecar"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Local AI that admits when it's wrong.",
+    "longDescription": "Errorta is a local AI desktop application built on the AIAR framework. Every answer is scored by an LLM-judge. Accepted corrections feed forward into future answers — local RAG that learns from its own mistakes.",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1"
+        ],
+        "section": "utils",
+        "priority": "optional"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "signingIdentity": null,
+      "hardenedRuntime": true,
+      "entitlements": "macos/entitlements.plist",
+      "minimumSystemVersion": "10.15",
+      "exceptionDomain": null,
+      "providerShortName": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "_comment": "F-INFRA-09 Slice 7 — pubkey generated; endpoint still placeholder pending errorta-downloads repo + first signed release. Flip --features updater-enabled on the v0.6 release build per docs/AUTO_UPDATER.md.",
+      "endpoints": [
+        "https://wiggins-j.github.io/errorta-downloads/updates/{{target}}-{{arch}}.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJCMEUyMzQ2RUZFRTFEOEIKUldTTEhlN3ZSaU1PdTMzU1lidWV4WnNucXRqOGRqQ1NNNTNwa2dIQ2dNWjU0a2EwMUpwWUJLUi8K",
+      "dialog": false
+    }
+  }
+}

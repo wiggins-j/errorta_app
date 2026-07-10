@@ -1,0 +1,172 @@
+/* F141 WS-H — Council rooms Quick Start guide overlay. Mirrors the F134
+   Knowledge quick-start visual using council-scoped classes so the two features
+   stay independent. Theme tokens only (light + dark via shared variables). */
+
+.cqs-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 3rem 1rem;
+  background: rgba(15, 18, 34, 0.55);
+  overflow-y: auto;
+}
+
+.cqs-panel {
+  width: min(760px, 100%);
+  background: var(--surface-raised, var(--bg, #fff));
+  color: var(--text, #223);
+  border: 1px solid var(--border, #ccd);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(15, 18, 34, 0.35);
+  overflow: hidden;
+}
+
+.cqs-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.25rem;
+  border-bottom: 1px solid var(--border, #ccd);
+}
+
+.cqs-eyebrow {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent, #6f7df2);
+  font-weight: 600;
+}
+
+.cqs-head h2 {
+  margin: 0.15rem 0 0.25rem;
+  font-size: 1.25rem;
+}
+
+.cqs-subtitle {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted, #667);
+}
+
+.cqs-close {
+  flex: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border, #ccd);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-inset, var(--bg, #fff));
+  color: var(--text, #223);
+  padding: 0.4rem 0.7rem;
+}
+
+.cqs-close:hover,
+.cqs-close:focus-visible {
+  border-color: var(--accent, #6f7df2);
+}
+
+.cqs-toc {
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border, #ccd);
+  background: var(--surface-inset, transparent);
+}
+
+.cqs-toc ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+}
+
+.cqs-toc-link {
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent, #6f7df2);
+  text-decoration: underline;
+}
+
+.cqs-toc-link:hover,
+.cqs-toc-link:focus-visible {
+  color: var(--text, #223);
+}
+
+.cqs-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 0.5rem 1.25rem 1.25rem;
+}
+
+.cqs-section {
+  padding: 0.9rem 0;
+  border-bottom: 1px dashed var(--border, #ccd);
+}
+
+.cqs-section:last-child {
+  border-bottom: none;
+}
+
+.cqs-section h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.cqs-section p {
+  margin: 0 0 0.5rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.cqs-section ul {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.1rem;
+}
+
+.cqs-section li {
+  font-size: 0.88rem;
+  line-height: 1.5;
+  margin-bottom: 0.3rem;
+}
+
+.cqs-section code {
+  font-size: 0.82em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(111, 125, 242, 0.12));
+}
+
+/* The header entry point + the inline "open the guide" link. */
+.cqs-open-button {
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  border: 1px solid var(--border, #ccd);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-inset, var(--bg, #fff));
+  color: var(--text, #223);
+  padding: 0.3rem 0.6rem;
+}
+
+.cqs-open-button:hover,
+.cqs-open-button:focus-visible {
+  border-color: var(--accent, #6f7df2);
+}
+
+.cqs-inline-link {
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent, #6f7df2);
+  text-decoration: underline;
+}

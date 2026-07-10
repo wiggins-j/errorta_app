@@ -1,0 +1,861 @@
+/* F130 — self-hosted brand faces (OFL, no CDN). See docs/design/typography.md. */
+@font-face {
+  font-family: "Fraunces";
+  src: url("./assets/fonts/Fraunces-Variable.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("./assets/fonts/IBMPlexSans-Variable.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("./assets/fonts/IBMPlexMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0e1116;
+  --bg-card: #151a22;
+  --bg-elevated: #1b212c;
+  --text: #e4e7eb;
+  --text-muted: #8a93a0;
+  --border: #232a36;
+  --border-strong: #2f3847;
+  --accent: #6f7df2;
+  --accent-soft: rgba(111, 125, 242, 0.15);
+  /* Filled brand buttons carry white text, so their background must clear
+   * AA 4.5:1 against white. Brand purple --accent (#6f7df2) is only 3.56:1;
+   * --accent-button is 5.29:1 with white AND still 3.58:1 against the dark
+   * page, so the button keeps its boundary. Same value in light + dark and
+   * identical to the website token so the two surfaces cannot drift. */
+  --accent-button: #4f5fd9;
+  --on-accent: #ffffff;
+  --ok: #4ade80;
+  --ok-soft: rgba(74, 222, 128, 0.15);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.15);
+  --error: #f87171;
+  --error-soft: rgba(248, 113, 113, 0.15);
+
+  /* F130 typography roles */
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-body: "IBM Plex Sans", -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* F130 surface semantics (alias existing bg tokens so migration is 1:1) */
+  --surface-base: var(--bg);
+  --surface-raised: var(--bg-card);
+  --surface-inset: var(--bg-elevated);
+  --surface-overlay: var(--bg-elevated);
+
+  /* F130 radius scale */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* F130 spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* F130 motion */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 0.1s;
+  --dur: 0.16s;
+
+  font-family: var(--font-body);
+  color-scheme: dark;
+  background: var(--bg);
+  color: var(--text);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fbfbfd;
+    --bg-card: #ffffff;
+    --bg-elevated: #f3f4f8;
+    --text: #1c1e22;
+    --text-muted: #5a626d;
+    --border: #e6e8ec;
+    --border-strong: #cfd3dc;
+    --accent: #4f5cd4;
+    --accent-soft: rgba(79, 92, 212, 0.12);
+    --ok: #1f5a2a;
+    --ok-soft: rgba(31, 90, 42, 0.12);
+    --warn: #7a5a10;
+    --warn-soft: rgba(122, 90, 16, 0.15);
+    --error: #b3261e;
+    --error-soft: rgba(179, 38, 30, 0.12);
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ---------- Shell layout ---------- */
+
+.shell-root {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: 100vh;
+  height: 100vh;
+  position: relative;
+}
+
+.shell-root-sidebar-collapsed {
+  grid-template-columns: 64px 1fr;
+}
+
+.shell-root-onboarding {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sidebar {
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 12px 80px;
+  overflow-y: auto;
+}
+
+.sidebar-collapsed {
+  align-items: center;
+  padding: 16px 8px 80px;
+  overflow: hidden;
+}
+
+.sidebar-brand {
+  padding: 12px 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-collapsed .sidebar-brand {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-brand-logo {
+  width: 44px;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+  flex-shrink: 0;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.sidebar-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-brand-name {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: var(--text);
+}
+
+.sidebar-brand-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.sidebar-collapse-toggle {
+  width: 34px;
+  height: 34px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+}
+
+.sidebar-collapse-toggle:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sidebar-collapsed .sidebar-collapse-toggle {
+  margin-left: 0;
+}
+
+.sidebar-collapse-icon {
+  width: 18px;
+  height: 18px;
+  position: relative;
+  display: inline-block;
+  border: 2px solid currentColor;
+  border-radius: 5px;
+}
+
+.sidebar-collapse-icon::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  right: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.sidebar-collapse-icon-collapsed::after {
+  left: 4px;
+  right: auto;
+}
+
+.sidebar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-item {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.sidebar-item:hover {
+  background: var(--bg-elevated);
+}
+
+.sidebar-item-active,
+.sidebar-item-active:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.sidebar-item-label {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sidebar-item-disabled,
+.sidebar-item-disabled:hover {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+/* Grouped (parent) nav */
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-group + .sidebar-group,
+.sidebar-list > li + li.sidebar-group {
+  margin-top: 6px;
+}
+
+.sidebar-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.sidebar-group-header:hover {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.sidebar-group-caret {
+  font-size: 9px;
+  width: 10px;
+  display: inline-block;
+}
+
+.sidebar-group-has-active .sidebar-group-label {
+  color: var(--accent);
+}
+
+.sidebar-sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Nested (child) items sit indented under their group header. */
+.sidebar-item-nested {
+  padding-left: 24px;
+}
+
+/* The standalone Settings leaf is separated from the groups above it. */
+.sidebar-list > li:last-child:not(.sidebar-group) {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- Main pane ---------- */
+
+.main-pane {
+  padding: 48px 56px;
+  overflow-y: auto;
+}
+
+.main-pane-onboarding {
+  min-width: 0;
+  padding: 40px clamp(24px, 5vw, 72px);
+}
+
+.feature-pane {
+  max-width: 800px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.feature-pane-header h1 {
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.feature-pane-spec {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.feature-pane-note {
+  margin: 0;
+  padding: 16px 20px;
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.feature-pane-note code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.feature-pane-loading {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.feature-pane-error {
+  max-width: 720px;
+  padding: 20px 22px;
+  background: var(--bg-card);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+}
+
+.feature-pane-error-details {
+  margin: 0;
+  color: var(--error);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.feature-pane-error button {
+  align-self: flex-start;
+  padding: 7px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.feature-pane-error button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- Sidecar status badge ---------- */
+
+.sidecar-badge {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-muted);
+  z-index: 10;
+}
+
+.sidecar-badge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.sidecar-badge-dot-loading {
+  background: var(--warn);
+}
+
+.sidecar-badge-dot-ok {
+  background: var(--ok);
+}
+
+.sidecar-badge-dot-error {
+  background: var(--error);
+}
+
+.sidecar-badge-label {
+  font-family: var(--font-mono);
+}
+
+.shell-root-sidebar-collapsed .sidecar-badge {
+  left: 15px;
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.shell-root-sidebar-collapsed .sidecar-badge-label {
+  display: none;
+}
+
+/* ---------- Global focus-visible ---------- */
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Corpus: embedded sample-corpus installer (folded in from the old Welcome tab) */
+.corpus-sample-corpus {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+}
+
+.corpus-sample-corpus > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.corpus-sample-blurb {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.corpus-sample-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.corpus-sample-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.welcome-cta-primary {
+  background: var(--accent-button);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.welcome-cta-primary:hover {
+  filter: brightness(1.05);
+}
+
+.welcome-cta-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+  color: var(--text);
+}
+
+/* Info bubbles — "ⓘ" with a hover/focus/click explanation */
+.info-bubble {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.info-bubble-icon {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 50%;
+  cursor: help;
+}
+.info-bubble-icon:hover,
+.info-bubble-icon:focus-visible,
+.info-bubble-pinned {
+  color: var(--on-accent);
+  background: var(--accent-button);
+  border-color: var(--accent-button);
+}
+.info-bubble-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1.45;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: normal;
+  z-index: 300;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+.info-bubble:hover .info-bubble-tip,
+.info-bubble-icon:focus-visible + .info-bubble-tip,
+.info-bubble-tip-pinned {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* F069 — non-blocking backend-boot banner + greyed-out gated controls. */
+.backend-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+/* F103 — static status dot (no circular spinner). */
+.backend-banner-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+.stale-build-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+.stale-build-banner-text {
+  flex: 1;
+}
+.stale-build-banner code {
+  font-size: 0.85em;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  background: var(--border);
+}
+.stale-build-banner-dismiss {
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+/* F103 — full-window cold-launch splash. No circular spinner, no busy cursor:
+   a horizontal progress rail with a soft moving highlight carries the
+   "alive but waiting" signal, disabled under reduced motion. */
+.errorta-startup {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  background: var(--bg);
+  color: var(--text);
+  /* Deliberately keep the cursor normal — no wait/progress styling. */
+  cursor: default;
+  z-index: 1000;
+}
+.errorta-startup-inner {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  text-align: center;
+}
+.errorta-startup-brand {
+  font-family: var(--font-display);
+  font-size: 2.1rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--accent);
+}
+.errorta-startup-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 3.4rem; /* stable height so detail copy changes don't reflow */
+}
+.errorta-startup-message {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.errorta-startup-detail {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.errorta-startup-rail {
+  position: relative;
+  height: 4px;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.errorta-startup-rail-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: errorta-startup-rail-slide 1.6s ease-in-out infinite;
+}
+@keyframes errorta-startup-rail-slide {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+.errorta-startup-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  text-align: left;
+}
+.errorta-startup-step {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  padding-left: 1.2rem;
+  position: relative;
+}
+.errorta-startup-step::before {
+  content: "○";
+  position: absolute;
+  left: 0;
+}
+.errorta-startup-step[data-status="active"] {
+  color: var(--text);
+  font-weight: 600;
+}
+.errorta-startup-step[data-status="active"]::before {
+  content: "◉";
+  color: var(--accent);
+}
+.errorta-startup-step[data-status="done"] {
+  color: var(--text);
+}
+.errorta-startup-step[data-status="done"]::before {
+  content: "●";
+  color: var(--accent);
+}
+.errorta-startup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  justify-content: center;
+}
+.errorta-startup-btn {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  padding: 0.5rem 0.9rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.errorta-startup-btn:hover {
+  background: var(--accent-soft);
+}
+.errorta-startup-btn-primary {
+  background: var(--accent-button);
+  border-color: var(--accent-button);
+  color: var(--on-accent);
+}
+.errorta-startup-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Reduced motion: no moving highlight — a static accent rail plus the
+     changing phase copy carries progress. */
+  .errorta-startup-rail-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+.settings-card-waiting {
+  margin: 0 0 0.5rem;
+  font-style: italic;
+}
+.settings-card-gated {
+  opacity: 0.5;
+  pointer-events: none;
+  filter: grayscale(0.4);
+}
+
+/* Top-level error fallback (RootErrorBoundary) — never a blank window. */
+.root-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem;
+}
+.root-error-card {
+  max-width: 32rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 1.5rem;
+  background: var(--surface, #11151c);
+}
+.root-error-card h1 { margin: 0 0 0.5rem; font-size: 1.2rem; }
+.root-error-detail {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--error-soft, rgba(239, 68, 68, 0.15));
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.85rem;
+  margin: 0.75rem 0;
+}

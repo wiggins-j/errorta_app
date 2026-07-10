@@ -1,0 +1,24 @@
+{
+  "id": 20230001111,
+  "title": "Thermal Analysis of Composite Aerospace Structures",
+  "publicationDate": "2023-04-05",
+  "distribution": "PUBLIC",
+  "copyright": {
+    "licenseType": "US-Gov-Work",
+    "determinationType": "GOVERNMENT_WORK"
+  },
+  "authorAffiliations": [
+    {
+      "meta": {
+        "author": {"name": "Alice Researcher"},
+        "organization": {"name": "NASA Langley Research Center"}
+      }
+    }
+  ],
+  "downloads": [
+    {
+      "mimetype": "application/pdf",
+      "links": {"original": "/api/citations/20230001111/downloads/thermal.pdf"}
+    }
+  ]
+}

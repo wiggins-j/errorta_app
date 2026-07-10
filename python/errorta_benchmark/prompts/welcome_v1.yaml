@@ -1,0 +1,48 @@
+# F-DEMO-01 welcome-corpus benchmark seed (v1, scaffold-only).
+#
+# This file is intentionally small (10 entries) — the full 50-entry seed
+# lands once the live-run harness is wired up. Each entry has:
+#   id              short, hyphenated, stable
+#   text            primary prompt
+#   paraphrase      surface-form variant for the F024 paraphrase delta
+#   expected_topics optional list of topical keywords
+- id: welcome-001
+  text: What is the Errorta judge loop?
+  paraphrase: Can you explain how Errorta's judge loop works?
+  expected_topics: [judge, loop, verdict]
+- id: welcome-002
+  text: How does Errorta store accepted corrections?
+  paraphrase: Where do accepted corrections end up inside Errorta?
+  expected_topics: [grounding, correction]
+- id: welcome-003
+  text: What does the grounding store do at query time?
+  paraphrase: At query time, how is the grounding store consulted?
+  expected_topics: [grounding, retrieval]
+- id: welcome-004
+  text: Which model does Errorta use as the default judge?
+  paraphrase: What is the default judge model in Errorta?
+  expected_topics: [judge, model]
+- id: welcome-005
+  text: How does Errorta detect a local Ollama install?
+  paraphrase: How is a local Ollama install detected by Errorta?
+  expected_topics: [ollama, detect]
+- id: welcome-006
+  text: What is the role of AIAR in Errorta?
+  paraphrase: How does AIAR relate to the Errorta product?
+  expected_topics: [aiar, framework]
+- id: welcome-007
+  text: What happens when the judge returns an uncertain verdict?
+  paraphrase: How is an uncertain judge verdict handled?
+  expected_topics: [verdict, uncertain]
+- id: welcome-008
+  text: How does Errorta protect against pipeline failures?
+  paraphrase: What is Errorta's behavior when the pipeline errors out?
+  expected_topics: [pipeline, error]
+- id: welcome-009
+  text: What is the F024 paraphrase delta used for?
+  paraphrase: Why does Errorta compute the F024 paraphrase delta?
+  expected_topics: [f024, paraphrase, delta]
+- id: welcome-010
+  text: How is a benchmark report regenerated from saved verdicts?
+  paraphrase: How can a benchmark report be rebuilt from stored verdicts?
+  expected_topics: [report, regenerate]

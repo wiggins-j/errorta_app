@@ -1,0 +1,55 @@
+# F066 — XcodeGen spec for the installable iOS app.
+#
+# Regenerate the .xcodeproj with:  xcodegen generate   (run in this dir)
+# Then open ErrortaCompanion.xcodeproj, pick your Apple team, and Run.
+#
+# The app target compiles the SwiftUI App sources and links the local
+# ErrortaCompanionCore SwiftPM library (pairing, pinning, projections). The
+# SwiftPM `ErrortaCompanionApp` executable target stays for macOS `swift run`
+# dev; this is the iOS-installable wrapper.
+name: ErrortaCompanion
+options:
+  bundleIdPrefix: app.errorta
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  ErrortaCompanionCore:
+    path: .
+targets:
+  ErrortaCompanion:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/ErrortaCompanionApp
+    dependencies:
+      - package: ErrortaCompanionCore
+        product: ErrortaCompanionCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.errorta.companion
+        PRODUCT_NAME: Errorta
+        # Automatic signing — leave DEVELOPMENT_TEAM empty so no team id is
+        # committed; pick yours in Xcode (Signing & Capabilities).
+        CODE_SIGN_STYLE: Automatic
+        # Maintainer's Apple team (same id as the Developer ID cert). Set here so
+        # `xcodegen generate` doesn't wipe signing every time — open in Xcode and
+        # Run works without re-picking the team. Change to your own team id if you
+        # fork this.
+        DEVELOPMENT_TEAM: ""
+        # App icon — the same pixel-art "E" cloud the desktop app uses
+        # (Assets.xcassets/AppIcon, sourced from src/assets/errorta-logo-square.png).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Errorta
+        # iOS REQUIRES this to permit connections to a device on the local
+        # network (the desktop). Without it, LAN requests silently fail.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Errorta connects to your Errorta desktop on the local network to show runs and approvals."
+        # F068: camera is used only to scan the desktop's pairing QR code.
+        INFOPLIST_KEY_NSCameraUsageDescription: "Scan the pairing QR code shown by Errorta on your computer."
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        SWIFT_VERSION: "6.0"

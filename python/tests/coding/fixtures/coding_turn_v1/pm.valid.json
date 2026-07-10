@@ -1,0 +1,1 @@
+{"schema_version":"coding_turn.v1","role":"pm","intent":{"kind":"plan","done":false,"tasks":[{"title":"Implement CLI flag","role":"dev","detail":"Add --json output mode and tests","depends_on":[]}],"decisions":[{"title":"Output format","choice":"JSON lines","rationale":"Matches existing streaming UI"}]},"confidence":"medium","notes":"start with the flag"}

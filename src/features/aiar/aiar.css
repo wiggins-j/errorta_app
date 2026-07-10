@@ -1,0 +1,122 @@
+.aiar-connection-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.aiar-connection-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.aiar-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.8125rem;
+}
+
+.aiar-status-badge.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+
+.aiar-status-badge.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+.aiar-connection-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 0.875rem;
+}
+
+.aiar-connection-message {
+  margin: 0;
+  color: var(--ok);
+  font-size: 0.875rem;
+}
+
+.aiar-connection-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.5rem 0.75rem;
+  margin: 0;
+}
+
+.aiar-connection-facts div {
+  min-width: 0;
+}
+
+.aiar-connection-facts dt {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.aiar-connection-facts dd {
+  margin: 0.125rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.aiar-capability-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.aiar-connection-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.aiar-connection-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.aiar-connection-form input,
+.aiar-connection-form select {
+  min-height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.375rem 0.5rem;
+}
+
+.aiar-connection-form button {
+  min-height: 2.25rem;
+}
+
+.aiar-connection-check {
+  flex-direction: row !important;
+  align-items: center;
+  color: var(--text);
+}
+
+.aiar-capability-strip span {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.75rem;
+}
+
+.aiar-capability-strip .ok {
+  color: var(--ok);
+}
+
+.aiar-capability-strip .warn {
+  color: var(--text-muted);
+}

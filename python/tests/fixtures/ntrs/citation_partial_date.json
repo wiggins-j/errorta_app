@@ -1,0 +1,24 @@
+{
+  "id": 20230005555,
+  "title": "Year-Only Publication Date",
+  "publicationDate": "2019",
+  "distribution": "PUBLIC",
+  "copyright": {
+    "licenseType": "CC-BY",
+    "determinationType": "GOVERNMENT_WORK"
+  },
+  "authorAffiliations": [
+    {
+      "meta": {
+        "author": {"name": "Fran Falcon"},
+        "organization": {"name": "NASA Marshall Space Flight Center"}
+      }
+    }
+  ],
+  "downloads": [
+    {
+      "mimetype": "application/pdf",
+      "links": {"original": "/api/citations/20230005555/downloads/year.pdf"}
+    }
+  ]
+}

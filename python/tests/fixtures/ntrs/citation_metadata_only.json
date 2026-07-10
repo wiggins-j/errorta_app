@@ -1,0 +1,24 @@
+{
+  "id": 20230003333,
+  "title": "Metadata-Only NASA Memo",
+  "publicationDate": "2021",
+  "distribution": "PUBLIC",
+  "copyright": {
+    "licenseType": "US-Gov-Work",
+    "determinationType": "GOVERNMENT_WORK"
+  },
+  "authorAffiliations": [
+    {
+      "meta": {
+        "author": {"name": "Dave Memo"},
+        "organization": {"name": "NASA Glenn Research Center"}
+      }
+    }
+  ],
+  "downloads": [
+    {
+      "mimetype": "text/html",
+      "links": {"original": "/api/citations/20230003333/downloads/memo.html"}
+    }
+  ]
+}

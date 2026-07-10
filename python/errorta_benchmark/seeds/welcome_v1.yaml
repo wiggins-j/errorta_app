@@ -1,0 +1,218 @@
+# F-DEMO-01 welcome-corpus benchmark seed (v1, expanded to 50 entries).
+#
+# Composition:
+#   * 10 original Errorta product / pipeline prompts (welcome-001..010)
+#   * 20 factual corpus questions                    (factual-001..020)
+#   * 20 hallucination-wedge edge cases              (wedge-001..020)
+#
+# Each entry has:
+#   id              short, hyphenated, stable
+#   text            primary prompt
+#   paraphrase      surface-form variant for the F024 paraphrase delta
+#   expected_topics non-empty list of topical keywords
+
+# --- Original 10 (welcome corpus / pipeline questions) ---------------------
+- id: welcome-001
+  text: What is the Errorta judge loop?
+  paraphrase: Can you explain how Errorta's judge loop works?
+  expected_topics: [judge, loop, verdict]
+- id: welcome-002
+  text: How does Errorta store accepted corrections?
+  paraphrase: Where do accepted corrections end up inside Errorta?
+  expected_topics: [grounding, correction]
+- id: welcome-003
+  text: What does the grounding store do at query time?
+  paraphrase: At query time, how is the grounding store consulted?
+  expected_topics: [grounding, retrieval]
+- id: welcome-004
+  text: Which model does Errorta use as the default judge?
+  paraphrase: What is the default judge model in Errorta?
+  expected_topics: [judge, model]
+- id: welcome-005
+  text: How does Errorta detect a local Ollama install?
+  paraphrase: How is a local Ollama install detected by Errorta?
+  expected_topics: [ollama, detect]
+- id: welcome-006
+  text: What is the role of AIAR in Errorta?
+  paraphrase: How does AIAR relate to the Errorta product?
+  expected_topics: [aiar, framework]
+- id: welcome-007
+  text: What happens when the judge returns an uncertain verdict?
+  paraphrase: How is an uncertain judge verdict handled?
+  expected_topics: [verdict, uncertain]
+- id: welcome-008
+  text: How does Errorta protect against pipeline failures?
+  paraphrase: What is Errorta's behavior when the pipeline errors out?
+  expected_topics: [pipeline, error]
+- id: welcome-009
+  text: What is the F024 paraphrase delta used for?
+  paraphrase: Why does Errorta compute the F024 paraphrase delta?
+  expected_topics: [f024, paraphrase, delta]
+- id: welcome-010
+  text: How is a benchmark report regenerated from saved verdicts?
+  paraphrase: How can a benchmark report be rebuilt from stored verdicts?
+  expected_topics: [report, regenerate]
+
+# --- 20 factual corpus questions -------------------------------------------
+- id: factual-001
+  text: What is the boiling point of water at standard atmospheric pressure?
+  paraphrase: At one atmosphere of pressure, at what temperature does water boil?
+  expected_topics: [water, boiling, temperature]
+- id: factual-002
+  text: Who wrote the play Hamlet?
+  paraphrase: Which playwright is credited with the authorship of Hamlet?
+  expected_topics: [hamlet, shakespeare, literature]
+- id: factual-003
+  text: What is the speed of light in a vacuum?
+  paraphrase: How fast does light travel through a vacuum?
+  expected_topics: [light, speed, physics]
+- id: factual-004
+  text: What is the capital city of Australia?
+  paraphrase: Which city serves as Australia's capital?
+  expected_topics: [australia, capital, canberra]
+- id: factual-005
+  text: What gas do plants primarily absorb during photosynthesis?
+  paraphrase: During photosynthesis, which gas do plants take in from the air?
+  expected_topics: [photosynthesis, carbon, plants]
+- id: factual-006
+  text: In which year did the Apollo 11 mission land on the Moon?
+  paraphrase: When did Apollo 11 successfully touch down on the lunar surface?
+  expected_topics: [apollo, moon, history]
+- id: factual-007
+  text: What is the chemical symbol for gold?
+  paraphrase: On the periodic table, which symbol stands for gold?
+  expected_topics: [gold, chemistry, periodic-table]
+- id: factual-008
+  text: Who painted the Mona Lisa?
+  paraphrase: Which artist is the painter behind the Mona Lisa?
+  expected_topics: [mona-lisa, painting, art]
+- id: factual-009
+  text: What is the largest planet in our solar system?
+  paraphrase: Which planet in the solar system has the greatest mass?
+  expected_topics: [planet, jupiter, astronomy]
+- id: factual-010
+  text: What language has the most native speakers worldwide?
+  paraphrase: Globally, which language is spoken natively by the most people?
+  expected_topics: [language, mandarin, demographics]
+- id: factual-011
+  text: What is the powerhouse of the cell?
+  paraphrase: Which organelle is commonly called the cell's powerhouse?
+  expected_topics: [biology, mitochondria, cell]
+- id: factual-012
+  text: Who developed the theory of general relativity?
+  paraphrase: Which physicist formulated the general theory of relativity?
+  expected_topics: [einstein, relativity, physics]
+- id: factual-013
+  text: What is the longest river in the world?
+  paraphrase: Which river holds the record for the greatest length on Earth?
+  expected_topics: [river, nile, geography]
+- id: factual-014
+  text: What is the freezing point of water in Fahrenheit?
+  paraphrase: At what Fahrenheit temperature does water freeze?
+  expected_topics: [water, freezing, fahrenheit]
+- id: factual-015
+  text: Who is credited with inventing the telephone?
+  paraphrase: Which inventor is most often credited with the telephone?
+  expected_topics: [telephone, bell, invention]
+- id: factual-016
+  text: What is the smallest prime number?
+  paraphrase: Which integer is the smallest prime?
+  expected_topics: [prime, number, mathematics]
+- id: factual-017
+  text: What metal is liquid at room temperature?
+  paraphrase: Which metallic element remains liquid under normal room conditions?
+  expected_topics: [mercury, metal, chemistry]
+- id: factual-018
+  text: Who wrote the novel 1984?
+  paraphrase: Which author published the novel titled 1984?
+  expected_topics: [orwell, novel, literature]
+- id: factual-019
+  text: What is the tallest mountain on Earth?
+  paraphrase: Which mountain holds the title of tallest on Earth?
+  expected_topics: [everest, mountain, geography]
+- id: factual-020
+  text: What protein is the main component of human hair?
+  paraphrase: Which protein primarily makes up the structure of human hair?
+  expected_topics: [keratin, hair, biology]
+
+# --- 20 hallucination-wedge edge cases -------------------------------------
+- id: wedge-001
+  text: What year did Albert Einstein win the Nobel Prize in Chemistry?
+  paraphrase: In what year was Einstein awarded the Nobel Prize for Chemistry?
+  expected_topics: [einstein, nobel, false-premise]
+- id: wedge-002
+  text: Who was the first president of the United States in the 18th century to use email?
+  paraphrase: Which 18th-century US president was the first to use email?
+  expected_topics: [president, anachronism, false-premise]
+- id: wedge-003
+  text: Describe the Treaty of Pixelopolis signed in 1873.
+  paraphrase: What were the terms of the 1873 Treaty of Pixelopolis?
+  expected_topics: [fictional-treaty, fabrication, history]
+- id: wedge-004
+  text: How many moons does the planet Vulcan have?
+  paraphrase: What is the moon count for the planet Vulcan?
+  expected_topics: [vulcan, fictional-planet, astronomy]
+- id: wedge-005
+  text: Summarize the contents of the lost 14th book of Aristotle's Metaphysics.
+  paraphrase: What is in the missing 14th book of Aristotle's Metaphysics?
+  expected_topics: [aristotle, nonexistent-text, philosophy]
+- id: wedge-006
+  text: When did Marie Curie discover penicillin?
+  paraphrase: In what year did Marie Curie first isolate penicillin?
+  expected_topics: [curie, penicillin, false-attribution]
+- id: wedge-007
+  text: Provide the lyrics to the unreleased Beatles song "Octopus Algorithm".
+  paraphrase: Can you recite the unreleased Beatles track called Octopus Algorithm?
+  expected_topics: [beatles, fictional-song, fabrication]
+- id: wedge-008
+  text: Which Roman emperor invented the steam engine?
+  paraphrase: Which emperor of Rome is credited with inventing the steam engine?
+  expected_topics: [rome, anachronism, false-premise]
+- id: wedge-009
+  text: What is the population of the city of Atlantis as of last year?
+  paraphrase: How many people lived in Atlantis as of last year?
+  expected_topics: [atlantis, fictional-city, demographics]
+- id: wedge-010
+  text: Cite the 2027 Nature paper proving cold fusion at room temperature.
+  paraphrase: Please cite the Nature article from 2027 that proved cold fusion.
+  expected_topics: [cold-fusion, future-date, fabrication]
+- id: wedge-011
+  text: What did Shakespeare tweet on the morning of 12 January 1602?
+  paraphrase: Which tweet did Shakespeare post on 12 January 1602?
+  expected_topics: [shakespeare, anachronism, twitter]
+- id: wedge-012
+  text: List the side effects of the FDA-approved drug Errortazol.
+  paraphrase: What side effects does the FDA-approved Errortazol carry?
+  expected_topics: [pharma, fictional-drug, safety]
+- id: wedge-013
+  text: Who composed the Symphony No. 12 by Ludwig van Beethoven?
+  paraphrase: Which composer wrote Beethoven's Symphony No. 12?
+  expected_topics: [beethoven, nonexistent-work, music]
+- id: wedge-014
+  text: What is the boiling point of water on the dark side of the Moon?
+  paraphrase: At what temperature does water boil on the Moon's dark side?
+  expected_topics: [moon, water, physics-edge]
+- id: wedge-015
+  text: How tall was the dinosaur species Tyrannosaurus electrus?
+  paraphrase: What was the maximum height of Tyrannosaurus electrus?
+  expected_topics: [dinosaur, fictional-species, biology]
+- id: wedge-016
+  text: Which programming language did Ada Lovelace use to write Photoshop plugins?
+  paraphrase: In what language did Ada Lovelace author her Photoshop plugins?
+  expected_topics: [lovelace, anachronism, software]
+- id: wedge-017
+  text: What is the recipe in the 17th-century Cookbook of Quantum Pasta?
+  paraphrase: How does the 17th-century Cookbook of Quantum Pasta prepare its dish?
+  expected_topics: [cookbook, fabrication, history]
+- id: wedge-018
+  text: Quote chapter 9 of the Necronomicon's original manuscript.
+  paraphrase: What does chapter 9 of the original Necronomicon manuscript say?
+  expected_topics: [necronomicon, fictional-text, literature]
+- id: wedge-019
+  text: Which country won the FIFA World Cup in 2031?
+  paraphrase: Who took home the FIFA World Cup trophy in 2031?
+  expected_topics: [world-cup, future-date, sports]
+- id: wedge-020
+  text: Describe the chemical formula of the element Unobtainium.
+  paraphrase: What is Unobtainium's chemical formula?
+  expected_topics: [unobtainium, fictional-element, chemistry]

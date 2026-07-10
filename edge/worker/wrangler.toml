@@ -1,0 +1,38 @@
+# F-DIST-01 check-in service. Deploy manually with `wrangler deploy` (no GitHub
+# Actions — locked off). See ../README.md for the full runbook.
+#
+# Before first deploy:
+#   wrangler d1 create errorta-alpha           # -> paste database_id below
+#   wrangler d1 execute errorta-alpha --file schema.sql
+#   wrangler r2 bucket create errorta-alpha-feedback   # PRIVATE bucket (no public access)
+#   node ../tools/gen-keypair.mjs               # -> embed the public key in the app,
+#   wrangler secret put LICENSE_SIGNING_KEY     #    paste the private (PKCS8 base64) here
+
+name = "errorta-alpha"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+# Ed25519 WebCrypto needs the Node-compat-free modern runtime; no flags required
+# on current compat dates.
+
+[vars]
+GRACE_DAYS = "14"
+MAX_BUNDLE_BYTES = "5242880"
+FEEDBACK_EMAIL = "help@errorta.app"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "errorta-alpha"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# R2 stores the redacted feedback bundles. Left commented so the Worker can
+# deploy before R2 is enabled on the account — feedback tickets still work, the
+# bundle just isn't stored (the handler skips R2 when the binding is absent).
+# To enable: turn on R2 in the dashboard, `wrangler r2 bucket create
+# errorta-alpha-feedback`, uncomment, and redeploy.
+# [[r2_buckets]]
+# binding = "BUNDLES"
+# bucket_name = "errorta-alpha-feedback"
+
+# Custom domain api.errorta.app is attached via the Cloudflare dashboard route
+# (Workers Routes) or `wrangler deploy --route`. Rate-limiting on /v1/activate and
+# /v1/feedback is configured as Cloudflare edge rules (per-IP), not in code.

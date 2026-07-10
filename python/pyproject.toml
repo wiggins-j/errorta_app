@@ -1,0 +1,110 @@
+[project]
+name = "errorta-app"
+version = "0.1.0-alpha.0"
+description = "Errorta Python sidecar: thin web layer over AIAR."
+requires-python = ">=3.10"
+authors = [{ name = "The Errorta Authors" }]
+license = { text = "Proprietary" }
+
+dependencies = [
+    # AIAR is the framework. During development this is installed as an
+    # editable local checkout via `pip install -e ../../aiar`. Release builds
+    # will pin to a PyPI version once AIAR is published there.
+    # "aiar>=0.2.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    # F002 hardware scan
+    "psutil>=6.0",
+    "nvidia-ml-py>=12.560",
+    "pyamdgpuinfo>=2.1; sys_platform=='linux'",
+    # F003 Ollama lifecycle / general HTTP
+    "httpx>=0.27",
+    # F005 folder watch
+    "watchdog>=4.0",
+    "xxhash>=3.5",
+    # F004 corpus / file parsing
+    "python-dotenv>=1.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
+    "beautifulsoup4>=4.12",
+    "chardet>=5.2",
+    "PyMuPDF>=1.24",
+    "aiofiles>=24.1",
+    "python-multipart>=0.0.12",
+    # F008 brief-driven collection: YAML front-matter parsing
+    "PyYAML>=6.0",
+    # F065 mobile LAN listener: self-signed TLS cert generation for the
+    # phone↔desktop channel (off by default; only used when the LAN connector
+    # is explicitly enabled).
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+    "pyinstaller>=6.10",
+    "ruff>=0.7",
+]
+# Release build profile. NOTE: `pip install '.[release]'` will currently FAIL
+# because AIAR has not yet been published to PyPI. This entry is intentionally
+# committed in v0.1.5 as a probe — it documents the eventual pin and lets the
+# release-build pipeline (post AIAR 0.1.0 PyPI publish) install Errorta without
+# touching pyproject.toml again. Dev installs continue to use the editable
+# checkout (`pip install -e ../../aiar`) and do not need `[release]`.
+release = [
+    # AIAR 0.2.5 (PyPI) ships the F096 integration contracts + F098 active-model
+    # reliability, validated live against example-host. Floor the minimum at 0.2.5;
+    # stay on the 0.2 train (0.3.0 is a deliberate upgrade, not an auto-resolve).
+    "aiar-rag[rag]>=0.2.5,<0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "internal_contract: tests that lock internal-only shape contracts (NOT a public schema commitment)",
+    # Test-automation plan markers (docs/TEST_AUTOMATION_PLAN.md). Acceptance
+    # journeys chain a full user flow and are traceable to a TC-NN.M case.
+    "acceptance: end-to-end user-journey acceptance test (maps to a TEST_CASES.md TC)",
+    "smoke: minimal liveness set; fast, runs on every push",
+    "regression: full functional coverage",
+    "security: auth / isolation / redaction / fail-closed — BLOCKING",
+    "blocking: a failure here holds the release regardless of other results",
+    "a11y: accessibility checks, usually browser or component driven",
+    "e2e: browser-driven end-to-end flow",
+    "live: needs real models/network; non-gating (nightly/manual opt-in)",
+    "manual: not fully automatable; tracked for human release sign-off",
+    "flaky: quarantined until root-caused; never part of the merge gate",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["errorta_app*", "errorta_*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+errorta_hwdetect = ["recommendations.json"]
+errorta_ollama = ["known_hashes.json"]
+errorta_welcome = ["pinned_hash.json"]
+# Quoted so this is a literal package-data key, not nested TOML tables —
+# modern setuptools rejects a dotted bare key (it parses as a sub-table,
+# failing with "package-data.errorta_council must be array").
+"errorta_council.context.dialect" = ["*.json"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]

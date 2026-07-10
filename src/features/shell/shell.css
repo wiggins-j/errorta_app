@@ -1,0 +1,815 @@
+/* F006 / F-INFRA-12 Phase B Slice 9 — baseline shell + settings styles.
+ *
+ * Closes the long-standing gap where AppShellSettings.tsx and its sibling
+ * cards reference classes (.shell-settings-grid, .shell-settings-card,
+ * .shell-actions, .shell-muted, .shell-error, .shell-ollama-*, .shell-proc-*)
+ * that were never defined anywhere in the repo. Tokens come from index.css so
+ * dark + light modes work without per-block media queries.
+ */
+
+/* ---------- Settings grid ---------- */
+
+.shell-settings-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+/* F134 — Settings is organized into labeled groups so a long config page stays
+   scannable (Ollama + Shell were folded in from their own tabs). */
+.settings-group {
+  margin-bottom: 28px;
+}
+
+.settings-group-heading {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.shell-settings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.shell-settings-card h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  color: var(--text);
+}
+
+.shell-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.shell-muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.settings-tools-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-tools-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.settings-tools-card input {
+  min-width: 0;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+}
+
+.shell-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-model-family-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.25rem 0.75rem 0.25rem 0;
+}
+
+.settings-model-catalog {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.settings-model-catalog-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) auto auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.settings-model-catalog-row label {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.shell-error {
+  color: var(--error);
+  font-size: 13px;
+}
+
+/* ---------- Ollama host field ---------- */
+
+.shell-ollama-host {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.shell-ollama-host label {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.shell-ollama-host input {
+  flex: 1 1 200px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+.shell-ollama-error {
+  color: var(--error);
+  font-size: 12px;
+}
+
+.shell-ollama-saved {
+  color: var(--ok);
+  font-size: 12px;
+}
+
+/* ---------- File picker + picked-list ---------- */
+
+.shell-file-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shell-picked-list {
+  margin: 0;
+  padding-left: 18px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ---------- Process health indicator ---------- */
+
+.shell-proc-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.shell-proc-list-loading,
+.shell-proc-list-error {
+  color: var(--text-muted);
+}
+
+.shell-proc-list-error {
+  color: var(--error);
+}
+
+.shell-proc-name {
+  font-weight: 600;
+}
+
+.shell-proc-role,
+.shell-proc-pid,
+.shell-proc-rss,
+.shell-proc-status {
+  color: var(--text-muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.shell-proc-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ---------- Tray prefs placeholder ---------- */
+
+.shell-tray-prefs-note {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ---------- Buttons ---------- */
+
+.shell-actions button {
+  padding: 6px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.shell-actions button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.shell-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- F067 - Mobile connector pairing ---------- */
+
+.mobile-connector-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mobile-connector-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.mobile-connector-row label,
+.mobile-capability-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mobile-connector-row input,
+.mobile-connector-row select {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.mobile-connector-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mobile-connector-status span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mobile-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mobile-device-list h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.mobile-device-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(220px, 2fr) auto;
+  gap: 12px;
+  align-items: start;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.mobile-device-row strong {
+  font-size: 13px;
+}
+
+.mobile-device-row p {
+  margin: 4px 0 0;
+}
+
+.mobile-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 8px;
+}
+
+.mobile-capability-grid label {
+  flex-direction: row;
+  align-items: center;
+  color: var(--text);
+}
+
+.mobile-pairing-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgb(0 0 0 / 0.42);
+}
+
+.mobile-pairing-modal {
+  width: min(680px, 100%);
+  max-height: min(760px, calc(100vh - 40px));
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  box-shadow: 0 20px 50px rgb(0 0 0 / 0.28);
+}
+
+.mobile-pairing-header,
+.mobile-pairing-content {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.mobile-pairing-header {
+  align-items: flex-start;
+}
+
+.mobile-pairing-header h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.mobile-pairing-header p {
+  margin: 0;
+}
+
+.mobile-pairing-content {
+  align-items: stretch;
+}
+
+.mobile-qr-frame {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 264px;
+  min-height: 264px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.mobile-qr-frame canvas {
+  width: 240px;
+  height: 240px;
+}
+
+.mobile-pairing-details {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mobile-pairing-pin {
+  display: block;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 34px;
+  letter-spacing: 0;
+}
+
+.mobile-pairing-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0;
+  padding-left: 22px;
+}
+
+.mobile-pairing-steps li {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.mobile-pairing-steps li[data-active="true"] {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .mobile-device-row,
+  .mobile-pairing-content {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .mobile-qr-frame {
+    width: 100%;
+  }
+}
+
+/* ---------- F032 — Debug logging + live log ---------- */
+
+.diagnostics-settings,
+.diagnostics-live-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diagnostics-debug-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.diagnostics-debug-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.diagnostics-live-log summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.diagnostics-log-actions {
+  margin-top: 10px;
+}
+
+.diagnostics-log-pre {
+  min-height: 180px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- F-INFRA-12 Phase B — Data residency card ---------- */
+
+.data-residency-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.data-residency-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.data-residency-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0;
+}
+
+.data-residency-legend {
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.data-residency-mode-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.data-residency-mode-option input[type="radio"] {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.data-residency-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.data-residency-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.data-residency-fields input {
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+.data-residency-toast {
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+
+.data-residency-toast p {
+  margin: 0 0 4px;
+}
+
+.data-residency-toast p:last-child {
+  margin-bottom: 0;
+}
+
+.data-residency-toast-ok {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+  color: var(--text);
+}
+
+.data-residency-toast-err {
+  background: var(--error-soft);
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.data-residency-apply-row {
+  margin-top: 4px;
+}
+
+.data-residency-warning {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* F-INFRA-09 — UpdatesCard */
+.updates-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.updates-card__crash-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--error-soft);
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.updates-card__crash-banner button {
+  flex-shrink: 0;
+}
+
+.updates-card__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.updates-card__notes {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.updates-card__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.updates-card__channel label,
+.updates-card__behavior label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.updates-card__channel select,
+.updates-card__behavior select {
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.updates-card__rollback-list h3 {
+  margin: 8px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.updates-card__rollback-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.updates-card__rollback-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+/* F034 — Provider keys settings */
+.provider-keys-settings { display: flex; flex-direction: column; gap: 12px; }
+.provider-keys-settings h3 { margin: 0 0 4px; }
+.provider-keys-settings h4 { margin: 8px 0 4px; font-size: 14px; }
+.provider-keys-help { font-size: 12px; color: var(--text-muted); margin: 0; }
+.provider-keys-empty { font-size: 13px; color: var(--text-muted); font-style: italic; margin: 0; }
+.provider-keys-divider { height: 1px; background: var(--border); margin: 8px 0; }
+
+.provider-key-row {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg);
+}
+.provider-key-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.provider-key-status.configured { color: var(--text-muted); font-size: 12px; }
+.provider-key-status.missing { color: var(--text-muted); font-size: 12px; font-style: italic; }
+.provider-key-actions { display: flex; gap: 6px; }
+.provider-key-meta { font-size: 12px; color: var(--text-muted); }
+.provider-key-editor { display: flex; gap: 6px; align-items: center; }
+.provider-key-editor input { flex: 1; padding: 4px 8px; }
+.provider-key-error { color: var(--error); font-size: 12px; }
+
+.provider-key-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px dashed var(--border); border-radius: 4px; }
+.provider-key-form label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.provider-key-form input, .provider-key-form select { padding: 4px 8px; }
+
+.provider-key-add { padding: 6px 12px; font-size: 13px; }
+
+/* F040-01 — subscription CLI setup */
+.provider-key-status.cli-connected { color: var(--ok, #10b981); font-style: normal; }
+.provider-cli-command {
+  margin: 0; padding: 6px 10px; font-size: 12px;
+  background: var(--bg-alt, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--border); border-radius: 4px;
+  white-space: pre-wrap; word-break: break-all;
+  font-family: var(--mono, ui-monospace, monospace);
+  user-select: all;
+}
+
+/* F034 — Test connection badges */
+.provider-test-badge {
+  font-size: 12px; padding: 2px 8px; border-radius: 3px; margin-left: 4px;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.provider-test-badge.testing {
+  background: var(--accent-soft, #e0e0e0); color: var(--text-muted);
+}
+.provider-test-badge.ok {
+  background: #1f5e2c; color: #b6f0c0;
+}
+.provider-test-badge.fail {
+  background: #5e1f1f; color: #f0c0c0;
+}
+/* F120 — a logged-out CLI is a distinct, actionable state, not a hard error. */
+.provider-test-badge.logged-out {
+  background: #5e4a1f; color: #f0e0b0;
+}
+/* F132 — a throttled CLI is connected-but-busy (amber), not a red failure. */
+.provider-test-badge.rate-limited {
+  background: #5e4a1f; color: #f0e0b0;
+}
+.provider-key-warn { color: var(--warn, #b08a2c); font-size: 12px; }
+
+/* F048 — sidecar lifecycle status */
+.sidecar-lifecycle {
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+.sidecar-lifecycle-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.sidecar-lifecycle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--text-muted, #6b7280);
+}
+.sidecar-lifecycle-dot.is-up { background: var(--ok, #10b981); }
+.sidecar-lifecycle-dot.is-stale { background: var(--warn, #fbbf24); }
+.sidecar-lifecycle-dot.is-down { background: var(--error, #ef4444); }
+.sidecar-lifecycle-warn {
+  margin: 0.3rem 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn, #fbbf24);
+  background: var(--warn-soft, rgba(251, 191, 36, 0.15));
+  border-radius: 0 4px 4px 0;
+  color: var(--text);
+}
+.sidecar-lifecycle-sig {
+  display: inline-block;
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--text-muted, #6b7280);
+}
+
+/* F070 — paired-device row actions: revoke + (post-revoke) delete. */
+.mobile-device-actions { display: flex; gap: 0.4rem; }
+.mobile-device-delete {
+  border-color: var(--error, #ef4444);
+  color: var(--error, #ef4444);
+}
+.mobile-device-delete:hover:not(:disabled) {
+  background: var(--error-soft, rgba(239, 68, 68, 0.15));
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sample seed page</title>
+  <style>body { font-family: sans-serif; }</style>
+</head>
+<body>
+  <main>
+    <h1>Errorta generic HTML connector fixture</h1>
+    <p>
+      This fixture stands in for a real third-party HTML page that an Errorta
+      brief author has declared as a seed URL. The body is intentionally long
+      enough that the JS-only detector treats it as a real document with more
+      than two hundred characters of visible text after script and style tags
+      have been stripped from the extracted output.
+    </p>
+    <p>
+      Anchors below exercise the same-host filter, fragment stripping, and the
+      hop-1 discovery cap.
+    </p>
+    <ul>
+      <li><a href="/article/one">First in-host article</a></li>
+      <li><a href="/article/two#section-2">Second article with fragment</a></li>
+      <li><a href="https://other.example.com/page">Off-host link (should be filtered)</a></li>
+      <li><a href="/article/one?utm=duplicate">Same canonical id as first</a></li>
+    </ul>
+  </main>
+  <script>console.log("ignored by extractor");</script>
+</body>
+</html>

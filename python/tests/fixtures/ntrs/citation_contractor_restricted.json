@@ -1,0 +1,19 @@
+{
+  "id": 20230002222,
+  "title": "Contractor-Authored Restricted Report",
+  "publicationDate": "2022-11",
+  "distribution": "PUBLIC",
+  "copyright": {
+    "licenseType": "OTHER",
+    "determinationType": "CONTRACTOR"
+  },
+  "authorAffiliations": [
+    {
+      "meta": {
+        "author": {"name": "Carol Contractor"},
+        "organization": {"name": "Acme Aerospace Inc."}
+      }
+    }
+  ],
+  "downloads": []
+}

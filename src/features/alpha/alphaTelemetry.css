@@ -1,0 +1,97 @@
+/* F-DIST-01 slice 6 — Settings → Alpha telemetry consent card. */
+
+.alpha-telemetry .alpha-tel-copy {
+  margin: 0 0 14px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.alpha-tel-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  line-height: 1.45;
+}
+
+.alpha-tel-toggle input {
+  margin-top: 3px;
+  flex: 0 0 auto;
+}
+
+.alpha-tel-floor-note {
+  margin: 12px 0 4px;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.alpha-tel-error {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  font-size: 0.88rem;
+  color: var(--error);
+  background: var(--error-soft);
+  border-radius: 6px;
+}
+
+.alpha-tel-inspect-btn {
+  margin-top: 12px;
+  padding: 6px 12px;
+  font-size: 0.9rem;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.alpha-tel-inspect-btn:hover {
+  background: var(--bg-elevated);
+}
+
+.alpha-tel-inspect {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.alpha-tel-inspect-sub {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.alpha-tel-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.9rem;
+}
+
+.alpha-tel-list li {
+  margin: 3px 0;
+}
+
+.alpha-tel-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+
+.alpha-tel-empty {
+  list-style: none;
+  margin-left: -18px;
+  color: var(--text-muted);
+}
+
+.alpha-tel-feedback {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.alpha-tel-feedback h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}

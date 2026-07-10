@@ -1,0 +1,33 @@
+diff --git a/added.py b/added.py
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/added.py
+@@ -0,0 +1,1 @@
++added = True
+diff --git a/mod.py b/mod.py
+index 1111111..2222222 100644
+--- a/mod.py
++++ b/mod.py
+@@ -1,2 +1,2 @@
+-x = 1
++x = 2
+ y = 3
+diff --git a/gone.py b/gone.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/gone.py
++++ /dev/null
+@@ -1,1 +0,0 @@
+-gone = True
+diff --git a/old.py b/new.py
+similarity index 90%
+rename from old.py
+rename to new.py
+index 4444444..5555555 100644
+--- a/old.py
++++ b/new.py
+@@ -1,2 +1,2 @@
+-v = 1
++v = 2
+ keep = 0

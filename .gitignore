@@ -1,0 +1,103 @@
+# --- Python (for AIAR sidecar) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# --- Node / Tauri frontend ---
+node_modules/
+yarn.lock
+pnpm-lock.yaml
+.npm/
+.pnpm-store/
+
+# Vite + tsc build artifacts
+dist/
+*.tsbuildinfo
+
+# --- Tauri build artifacts ---
+src-tauri/target/
+src-tauri/gen/
+# PyInstaller-staged sidecar binaries (produced by scripts/build-sidecar.sh)
+src-tauri/binaries/
+
+# --- Swift / iOS companion ---
+.build/
+ios/ErrortaCompanion/.swiftpm/
+
+# --- Errorta runtime state ---
+# Local runtime / vector stores / user data — never committed
+.errorta/
+~/.errorta/
+*.errorta-corpus/
+.benchmark-home-current
+.benchmark-sidecar.pid
+# F031-DEMO-BOOT-VERIFY: log dir used by scripts/demo-up.sh.
+.errorta-demo-logs/
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Editor / IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# --- OS / temp ---
+Thumbs.db
+*.log
+*.tmp
+
+# --- Test / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+test-results/
+playwright-report/
+.playwright/
+.wrangler/
+
+# --- Local-only scratch and private experiments ---
+local/
+scratch/
+*.local.md
+*.local.json
+*.local.py
+
+# --- Signing / secrets ---
+# NEVER commit signing material
+*.p12
+*.cer
+*.mobileprovision
+.env
+.env.*
+!.env.example
+secrets/
+# F-INFRA-09 updater signing key (path documented in
+# docs/release-engineering/updater-key-backup.md). Even though the key
+# lives outside the repo by default, this guards against an accidental
+# `git add .` if the maintainer ever symlinks it in for convenience.
+.errorta-updater-key.pem
+.errorta-updater-key.pem.pub
+*.errorta-updater-key.pem
+# F-INFRA-02 — Apple signing/notarization env file. Canonical path is
+# ~/.config/errorta-release.env (outside the repo). This guard prevents
+# an accidental drop into the worktree.
+errorta-release.env
+
+# Xcode per-user state (machine-specific)
+*.xcuserstate
+xcuserdata/
+
+# Build provenance stamp (written by scripts/build-sidecar.sh)
+python/errorta_app/_build_info.json

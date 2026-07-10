@@ -1,0 +1,109 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "Default Errorta window capabilities.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "fs:default",
+    "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "ssh-probe",
+          "cmd": "ssh",
+          "args": [
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            { "validator": "^(?:[a-zA-Z0-9_-]+@)?[a-zA-Z0-9_.-]+$" },
+            { "validator": "^.{1,2000}$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "ssh-probe-port",
+          "cmd": "ssh",
+          "args": [
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            "-p", { "validator": "^\\d+$" },
+            { "validator": "^(?:[a-zA-Z0-9_-]+@)?[a-zA-Z0-9_.-]+$" },
+            { "validator": "^.{1,2000}$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "ssh-probe-key",
+          "cmd": "ssh",
+          "args": [
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            "-i", { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^(?:[a-zA-Z0-9_-]+@)?[a-zA-Z0-9_.-]+$" },
+            { "validator": "^.{1,2000}$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "ssh-probe-port-key",
+          "cmd": "ssh",
+          "args": [
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            "-p", { "validator": "^\\d+$" },
+            "-i", { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^(?:[a-zA-Z0-9_-]+@)?[a-zA-Z0-9_.-]+$" },
+            { "validator": "^.{1,2000}$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "scp-port-key",
+          "cmd": "scp",
+          "args": [
+            "-P", { "validator": "^\\d+$" },
+            "-i", { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^[A-Za-z0-9._/~@:-]+$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "scp-port",
+          "cmd": "scp",
+          "args": [
+            "-P", { "validator": "^\\d+$" },
+            { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^[A-Za-z0-9._/~@:-]+$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "scp-key",
+          "cmd": "scp",
+          "args": [
+            "-i", { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^[A-Za-z0-9._/~@:-]+$" }
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "scp-plain",
+          "cmd": "scp",
+          "args": [
+            { "validator": "^[A-Za-z0-9._/~-]+$" },
+            { "validator": "^[A-Za-z0-9._/~@:-]+$" }
+          ],
+          "sidecar": false
+        }
+      ]
+    }
+  ]
+}

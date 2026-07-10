@@ -1,0 +1,34 @@
+# gitleaks configuration for Errorta.
+#
+# Errorta itself implements and tests secret scanning (see
+# python/errorta_tools/runner/{repo_reader,secret_scan}.py). As a result the
+# codebase deliberately contains (a) the detection PATTERNS a scanner looks for
+# and (b) obviously-fake fixture "secrets" used to test redaction/egress guards.
+# None of these are real credentials. This allowlist keeps `gitleaks detect`
+# clean on the working tree while still catching a genuine leak elsewhere.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Errorta scanner patterns + fake test fixtures (verified: no real secrets)"
+
+# Files that ARE the secret-scanner (they contain PEM headers / key-shaped
+# regexes as detection patterns, not real keys).
+paths = [
+  '''python/errorta_tools/runner/repo_reader\.py''',
+  '''python/errorta_tools/runner/secret_scan\.py''',
+  '''python/errorta_project_grounding/paths\.py''',
+]
+
+# Fake, self-evidently non-real fixture tokens used across the test suite to
+# exercise redaction / egress / orientation-scan code paths.
+regexes = [
+  '''ghp_0123456789abcdefghij0123456789abcd''',   # sequential fake GitHub PAT
+  '''AKIA1234567890''',                            # fake AWS access key id
+  '''AKIAABCDEFGHIJKLMNOP''',                      # fake AWS access key id
+  '''MIIsecretvalue''',                            # fake PEM body in a redaction test
+  '''grace_until=now''',                           # a Python kwarg, not a secret
+  '''Ed25519PrivateKey''',                         # a cryptography class name, not a key
+  '''sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX''',     # fake Anthropic key in a live-validate stub
+]

@@ -1,0 +1,1874 @@
+/* F031 Phase 2 Council UI — uses shared theme tokens only (no hardcoded hexes). */
+
+.council-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr minmax(240px, 320px);
+  gap: 0.75rem;
+  height: 100%;
+  min-height: 0;
+  padding: 0.75rem;
+  color: var(--text);
+}
+
+/* Audit pane hidden — Transcript spans the freed column. */
+.council-shell--audit-collapsed {
+  grid-template-columns: minmax(220px, 280px) 1fr;
+}
+
+.council-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.council-audit-toggle {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #6b7280);
+  cursor: pointer;
+}
+
+.council-audit-toggle:hover {
+  border-color: var(--accent, #6F7DF2);
+  color: var(--accent, #6F7DF2);
+}
+
+.council-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.75rem;
+  gap: 0.5rem;
+}
+
+.council-pane h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.council-room-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.council-room-list-ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.council-room-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+}
+
+.council-room-list-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.council-room-list-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.council-new-room-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.council-new-room-btn:hover:not(:disabled) {
+  background: var(--accent-button);
+  color: var(--on-accent);
+}
+
+.council-new-room-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.council-room-row {
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 0.5rem;
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.council-room-row[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.council-room-row .room-name {
+  display: block;
+  font-weight: 600;
+}
+
+.council-room-row .room-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.council-transcript {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow-y: auto;
+}
+
+.council-event {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  background: var(--surface-2, var(--surface));
+}
+
+.council-event .ev-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+}
+
+.council-event .ev-type {
+  font-weight: 600;
+}
+
+.council-event .ev-payload {
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
+.council-event.unknown {
+  border-color: var(--warn-soft, var(--border));
+}
+
+.council-event .fake-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  padding: 0 0.35rem;
+  margin-left: 0.35rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+.council-composer {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.council-composer textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 3rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.4rem 0.5rem;
+}
+
+.council-composer button {
+  align-self: stretch;
+  padding: 0 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text, white);
+  cursor: pointer;
+}
+
+.council-composer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.council-audit {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem 0.75rem;
+}
+
+.council-status-banner {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+
+.council-status-banner.unknown {
+  background: var(--warn-soft, var(--surface));
+  border-color: var(--warn, var(--border));
+}
+
+.council-status-banner.error {
+  background: var(--error-soft, var(--surface));
+  border-color: var(--error, var(--border));
+}
+
+.council-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 0.5rem;
+}
+
+/* F133 — narrow widths: stack the three panes into one vertically-scrolling
+   column instead of crushing them into a single fixed-height grid.
+   .main-pane (src/index.css) is already the scroll owner (overflow-y: auto,
+   bounded to the viewport by the 100vh .shell-root grid); the only reason it
+   never scrolled here is .council-shell pinning itself to height:100%. Un-pin
+   it and the stacked content flows into the page scroll. */
+@media (max-width: 1100px) {
+  .council-shell,
+  .council-shell--audit-collapsed {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100%;
+  }
+
+  /* Release the inner scroll traps: in the wide layout these scroll within a
+     fixed-height column; stacked, they must flow so the page scrolls and no
+     pane is clipped to an unreachable inner scroller. */
+  .council-transcript {
+    overflow-y: visible;
+  }
+
+  /* Keep the room list a compact scanner at the top of the stack instead of a
+     long list shoving the Transcript below the fold — bound to a fraction of
+     the viewport, not the (now unbounded) pane. */
+  .council-room-list {
+    max-height: 40vh;
+  }
+}
+
+/* F031 Phase 5 — ContextInspectionDrawer (F031-08). */
+
+.cid-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 50;
+}
+
+.cid-drawer {
+  width: min(560px, 92vw);
+  height: 100vh;
+  background: var(--surface);
+  color: var(--text);
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 14px rgba(0, 0, 0, 0.16);
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.cid-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+.cid-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.cid-subtitle {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.cid-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.cid-manifest {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cid-manifest.blocked {
+  border-color: var(--error);
+}
+
+.cid-manifest-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.cid-blocked-banner {
+  background: var(--error-soft, rgba(220, 38, 38, 0.12));
+  color: var(--error);
+  padding: 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--error);
+}
+
+.cid-section h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.cid-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 0.75rem;
+  row-gap: 0.15rem;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.cid-kv dt {
+  color: var(--text-muted);
+}
+
+.cid-narrowed {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.cid-counts,
+.cid-omitted {
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.85rem;
+}
+
+.cid-refs {
+  width: 100%;
+  font-size: 0.8rem;
+  border-collapse: collapse;
+}
+
+.cid-refs th,
+.cid-refs td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.2rem 0.4rem;
+  text-align: left;
+}
+
+.cid-loading,
+.cid-empty {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.cid-error {
+  color: var(--error);
+  background: var(--error-soft, rgba(220, 38, 38, 0.1));
+  border: 1px solid var(--error);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+}
+
+/* Stale-route notice: a saved member/steward route the provider no longer
+   offers, with a one-click heal to the account default. */
+.cre-route-stale {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--warn, #b45309);
+}
+
+.cre-route-stale-fix {
+  margin-left: 2px;
+  padding: 1px 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft, transparent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.cre-route-stale-fix:hover {
+  background: var(--accent);
+  color: var(--bg, #fff);
+}
+
+/* F135 — Multi model mode: CLI picker + redesigned "Allowed models" pool. */
+.cre-cli-picker {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cre-cli-picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.cre-cli-picker-row select { width: auto; min-width: 12rem; padding: 4px 6px; }
+.cre-cli-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.cre-cli-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 8px;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-soft, rgba(111, 125, 242, 0.12));
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+}
+.cre-cli-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--accent);
+  background: none;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.cre-cli-chip button:hover { background: var(--accent); color: var(--bg, #fff); }
+
+.cre-model-pool {
+  grid-column: 1 / -1;
+  display: block;
+  max-height: 20rem;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.cre-model-pool > legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+.cre-pool-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cre-pool-clear {
+  padding: 1px 8px;
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cre-pool-clear:hover { background: var(--accent); color: var(--bg, #fff); }
+.cre-pool-group { margin-bottom: 6px; }
+.cre-pool-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.cre-pool-group-name {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.cre-pool-group-actions { display: inline-flex; gap: 6px; }
+.cre-pool-group-actions button {
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.cre-pool-group-actions button:hover { text-decoration: underline; }
+
+/* Specificity fix: `.cre-member-primary label` (0,0,1,1) previously overrode
+   `.cre-model-pool-option` (0,0,1,0) and forced each row to stack vertically
+   into a tall grey block. Scope under `.cre-member-primary` to win, and lay
+   out each option as one compact line. */
+.cre-member-primary .cre-model-pool-option {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  font-size: 12px;
+  color: var(--text);
+  border-radius: 4px;
+}
+.cre-member-primary .cre-model-pool-option:hover { background: var(--accent-soft, rgba(111, 125, 242, 0.08)); }
+.cre-member-primary .cre-model-pool-option[data-available="no"] { color: var(--text-muted); }
+.cre-model-pool-option input { margin: 0; }
+.cre-pool-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cre-pool-reason { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.cre-pool-unavailable > summary {
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.cre-pool-empty {
+  margin: 6px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cid-member {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Transcript event clickable affordance (Phase 5 Task 3). */
+.council-event .inspect-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text);
+  cursor: pointer;
+  margin-left: 0.5rem;
+}
+
+.council-event .inspect-btn:hover {
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+}
+
+.citation-chip {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.25rem;
+  margin: 0 0.1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.digest-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.digest-position {
+  font-weight: 600;
+}
+
+.digest-claims {
+  margin: 0;
+  padding-left: 1rem;
+}
+
+.confidence {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.25rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.digest-card pre {
+  white-space: pre-wrap;
+  font-size: 0.75rem;
+  margin: 0.25rem 0 0;
+}
+
+/* Run controls (Phase 5 Task 4). */
+.council-run-controls {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.4rem 0;
+}
+
+.council-run-controls button {
+  font-size: 0.85rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.council-run-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.council-room-list .seed-demo-btn {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px dashed var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+/* F031-PROVENANCE-VIZ (Task 5) — multi-member compare strip. */
+
+.cid-compare-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.cid-compare-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.cid-compare-section-title {
+  margin: 0;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.cid-compare-row {
+  display: flex;
+  flex-direction: row;
+  gap: 1rem;
+  overflow-x: auto;
+}
+
+.cid-compare-col {
+  flex: 1 1 0;
+  min-width: 260px;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.cid-compare-col-focused {
+  box-shadow: 0 0 0 2px var(--accent);
+  border-radius: 4px;
+}
+
+/* Sticky top policy row. */
+.cid-compare-policy-row {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem;
+}
+
+.cid-compare-policy-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.cid-compare-policy-table th,
+.cid-compare-policy-table td {
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.cid-compare-policy-table thead th {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cid-compare-cell-differs {
+  background: var(--accent-soft);
+}
+
+.cid-compare-field-label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  margin-right: 0.25rem;
+}
+
+.cid-compare-no-diff,
+.cid-compare-all-blocked {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.cid-compare-blocked-row {
+  /* Reuses .cid-compare-row layout but no overflow scroll quirks needed
+     because each column is just a banner. */
+}
+
+/* Narrow-viewport fallback — vertical stacking under 720px. */
+@media (max-width: 719px) {
+  .cid-compare-row {
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .cid-compare-policy-row {
+    position: static;
+  }
+  .cid-compare-col {
+    min-width: 0;
+  }
+}
+
+/* F033 — Council room editor */
+.council-room-action-btn {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 13px;
+  line-height: 1.2;
+}
+.council-modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  /* Above the fixed AIAR-pin badge (z-index 50) and sidecar badge (10) so the
+     editor's Save/Cancel footer isn't covered by them. */
+  z-index: 200; padding: 24px;
+}
+.council-room-editor {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 14px; max-width: 960px; width: 100%; max-height: 90vh; overflow-y: auto;
+}
+.cre-head {
+  position: sticky;
+  top: -14px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: -14px -14px 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.cre-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 9rem;
+}
+.cre-title-block h3 { margin: 0; font-size: 1rem; }
+.cre-room-name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.25rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.cre-room-name-field input {
+  width: min(22rem, 60vw);
+  min-height: 2rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.cre-room-name-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.cre-title-block p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.cre-status-strip {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-left: auto;
+}
+.cre-status-pill,
+.cre-group-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.35rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.04));
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.cre-status-pill.is-dirty,
+.cre-group-badge.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.cre-status-pill.is-error {
+  border-color: var(--error);
+  color: var(--error);
+  background: transparent;
+}
+.cre-status-pill.is-clean,
+.cre-validation-ready {
+  background: var(--ok-soft, var(--accent-soft));
+}
+.cre-summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+.cre-summary-item {
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.04));
+}
+.cre-summary-item span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+.cre-summary-item strong {
+  display: block;
+  margin-top: 0.1rem;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.cre-validation { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 13px; }
+.cre-validation-blocked_by_policy, .cre-validation-draft { background: var(--warn-soft, var(--accent-soft)); }
+.cre-validation ul { margin: 4px 0 0; padding-left: 20px; }
+.cre-callout-preserved {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.5rem;
+}
+
+.cre-members { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.cre-member-row {
+  border: 1px solid var(--border); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+}
+.cre-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--border);
+}
+.cre-member-index {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.cre-member-route-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  min-width: 10rem;
+  max-width: 22rem;
+}
+.cre-member-route-summary strong,
+.cre-member-route-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cre-member-route-summary strong {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+.cre-member-route-summary span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.cre-member-primary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+.cre-member-primary label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cre-id-input { width: 100%; padding: 4px; }
+.cre-name-input { flex: 1; min-width: 120px; padding: 4px; }
+/* F040-01 — deep-link to provider-keys setup for an installed-but-not-connected CLI. */
+.cre-cli-setup-link {
+  align-self: flex-start; padding: 2px 8px; font-size: 12px;
+  background: none; border: 1px solid var(--accent, #6f7df2);
+  color: var(--accent, #6f7df2); border-radius: 4px; cursor: pointer;
+}
+.cre-cli-setup-link:hover { background: var(--accent-soft, rgba(111, 125, 242, 0.12)); }
+.cre-order-buttons { display: flex; gap: 4px; margin-left: auto; }
+.cre-row-bottom { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.cre-row-bottom label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-muted); }
+.cre-field-label { display: inline-flex; align-items: center; gap: 2px; }
+.cre-member-primary select,
+.cre-member-primary input,
+.cre-row-bottom select,
+.cre-row-bottom input,
+.cre-member-advanced select,
+.cre-member-advanced input {
+  min-width: 0;
+  width: 100%;
+  padding: 4px 6px;
+}
+.cre-checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px !important;
+}
+.cre-primary-toggle {
+  margin: 8px 0 10px;
+  font-size: 13px;
+}
+
+.cre-member-advanced {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cre-member-advanced summary {
+  cursor: pointer;
+  list-style: none;
+}
+.cre-member-advanced summary::-webkit-details-marker {
+  display: none;
+}
+.cre-member-advanced summary::before {
+  content: "▸";
+  margin-right: 5px;
+  color: var(--text-muted);
+}
+.cre-member-advanced[open] summary::before {
+  content: "▾";
+}
+.cre-member-advanced .cre-row-bottom {
+  margin-top: 8px;
+}
+
+.cre-system-prompt {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cre-system-prompt-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.cre-system-prompt-label::-webkit-details-marker {
+  display: none;
+}
+.cre-system-prompt-label::before {
+  content: "▸";
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.cre-system-prompt[open] > .cre-system-prompt-label::before {
+  content: "▾";
+}
+.cre-prompt-state {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.cre-system-prompt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.cre-system-prompt textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 48px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.cre-prompt-example-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cre-prompt-example-btn:hover {
+  background: var(--accent-button);
+  color: var(--on-accent);
+}
+
+/* F084 steelman role control */
+.cre-steelman {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.cre-steelman-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.cre-steelman-topic {
+  flex: 1 1 220px;
+  min-width: 160px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.cre-steelman-topic:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cre-section-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.cre-actions { display: flex; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.cre-error { color: var(--error); margin-top: 8px; }
+
+.agent-context-inspector {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.aci-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.aci-head h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.aci-head select {
+  max-width: 160px;
+}
+
+.aci-status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.aci-body,
+.aci-buckets {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.aci-task p {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.aci-buckets h4 {
+  margin: 0 0 0.2rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.aci-buckets ul {
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.82rem;
+}
+
+.agent-context-error {
+  color: var(--error);
+  font-size: 0.82rem;
+}
+
+/* QA 2026-06-12: Simple/Verbose transcript views */
+/* The wrapper must fill the pane and clamp its own height (min-height:0 on a
+   flex child) so the inner view scrolls instead of pushing the pane open. */
+.council-transcript-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.council-transcript-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.council-mode-btn {
+  background: transparent;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 0.25rem;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--text-muted, #6b7280);
+}
+
+.council-mode-btn.active {
+  background: var(--accent-soft, #eef2ff);
+  color: var(--accent, #6F7DF2);
+  border-color: var(--accent, #6F7DF2);
+}
+
+.council-mode-btn:focus-visible {
+  outline: 2px solid var(--accent, #6F7DF2);
+  outline-offset: 2px;
+}
+
+.council-transcript-simple {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+}
+
+.simple-user-prompt {
+  padding: 0.5rem 0.75rem;
+  background: var(--accent-soft, #eef2ff);
+  border-left: 3px solid var(--accent, #6F7DF2);
+  border-radius: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.simple-user-prompt .simple-label {
+  font-weight: 600;
+  margin-right: 0.4rem;
+}
+
+.simple-turn { padding: 0.35rem 0; }
+
+.simple-turn .simple-label { font-weight: 600; color: var(--text, #111827); }
+
+.simple-thinking { font-style: italic; color: var(--text-muted, #6b7280); }
+
+.simple-note { font-size: 0.8rem; color: var(--text-muted, #6b7280); }
+
+.simple-no-consensus {
+  margin: 0.3rem 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn, #fbbf24);
+  background: var(--warn-soft, rgba(251, 191, 36, 0.15));
+  border-radius: 0 4px 4px 0;
+  color: var(--text);
+  font-style: normal;
+}
+
+/* Synthesized consensus answer — visually distinct from a verbatim
+   last-speaker final answer. */
+.simple-turn-consensus {
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--accent, #6f7df2);
+  border-radius: 8px;
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+}
+
+.simple-turn-consensus .simple-label {
+  color: var(--accent, #6f7df2);
+}
+
+.simple-consensus-note {
+  margin: 0.3rem 0;
+  font-style: normal;
+}
+
+.simple-content {
+  margin-top: 0.2rem;
+  padding-left: 0.5rem;
+  white-space: pre-wrap;
+  font-size: 0.9rem;
+}
+
+.simple-turn-burn .simple-note,
+.simple-turn-skipped .simple-note,
+.simple-turn-failed .simple-note {
+  font-style: italic;
+}
+
+/* QA 2026-06-12: topology / budget / finalization section hints */
+.cre-section-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted, #6b7280);
+  margin: 0 0 0.5rem;
+  line-height: 1.4;
+}
+
+/* Small visible notes for settings whose concrete controls live elsewhere. */
+.cre-field-note {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted, #6b7280);
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.cre-wide-note {
+  align-self: center;
+  margin: 0;
+}
+
+.cre-section-hint code {
+  font-size: 0.72rem;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--accent-soft, rgba(111, 125, 242, 0.12));
+}
+
+.cre-doc-pointer {
+  margin-bottom: 0.75rem;
+  padding: 6px 8px;
+  border-left: 3px solid var(--accent, #6f7df2);
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+  border-radius: 0 4px 4px 0;
+}
+
+.cre-members-heading {
+  margin: 0.5rem 0 0.25rem;
+}
+
+/* Quick-setup preset bar */
+.cre-presets {
+  margin: 0.75rem 0 1rem;
+  padding: 0.6rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.04));
+}
+
+.cre-presets-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cre-presets-title {
+  font-weight: 600;
+  font-size: 0.86rem;
+  color: var(--text, #111827);
+}
+
+.cre-presets-sub {
+  font-size: 0.82rem;
+  color: var(--text-muted, #6b7280);
+}
+
+.cre-presets-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.cre-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.9rem;
+  padding: 0.28rem 0.65rem;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  /* --surface is not a defined theme token; the old `var(--surface, #fff)`
+     fell back to white in BOTH themes, so in dark mode the light --text label
+     was white-on-white. Use the real dark-aware elevated-surface token. */
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+}
+
+.cre-preset-btn:hover {
+  border-color: var(--accent, #6f7df2);
+}
+
+.cre-preset-btn:focus-visible {
+  outline: 2px solid var(--accent, #6f7df2);
+  outline-offset: 2px;
+}
+
+.cre-preset-btn.is-active {
+  border-color: var(--accent, #6f7df2);
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+  box-shadow: 0 0 0 1px var(--accent, #6f7df2);
+}
+
+.cre-preset-label {
+  font-weight: 600;
+  font-size: 0.78rem;
+  color: var(--text, #111827);
+  white-space: nowrap;
+}
+
+.cre-preset-description {
+  min-height: 1.05rem;
+  margin: 0.45rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted, #6b7280);
+  line-height: 1.3;
+}
+
+.cre-preset-applied {
+  margin: 0.35rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted, #6b7280);
+}
+
+.cre-topology, .cre-finalization {
+  margin-top: 1rem;
+}
+
+.cre-topology h4, .cre-finalization h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text, #111827);
+}
+
+/* "Advanced — expand only what you need" divider */
+.cre-advanced-divider {
+  margin: 1.4rem 0 0.5rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Collapsible advanced sections (budget / context efficiency / steward) */
+.cre-group {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  padding: 0 12px;
+}
+.cre-group[open] {
+  padding: 0 12px 12px;
+}
+.cre-group-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 0;
+}
+.cre-group-summary::-webkit-details-marker { display: none; }
+.cre-group-summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.cre-group[open] > .cre-group-summary::before { content: "▾"; }
+.cre-group-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.cre-group-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.cre-group .cre-section-hint { margin-top: 0; }
+
+.cre-topology select:disabled,
+.cre-finalization select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .council-modal-overlay {
+    align-items: stretch;
+    padding: 10px;
+  }
+  .council-room-editor {
+    max-height: calc(100vh - 20px);
+  }
+  .cre-head {
+    align-items: flex-start;
+  }
+  .cre-status-strip {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+  .cre-head-actions {
+    margin-left: auto;
+  }
+  .cre-member-primary {
+    grid-template-columns: 1fr;
+  }
+  .cre-member-route-summary {
+    min-width: 0;
+    flex: 1;
+  }
+  .cre-order-buttons {
+    width: 100%;
+    margin-left: 0;
+  }
+  .cre-order-buttons button {
+    flex: 1;
+  }
+}
+
+@media (max-width: 420px) {
+  .cre-summary-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cre-head-actions {
+    width: 100%;
+  }
+  .cre-head-actions button {
+    flex: 1;
+  }
+  .cre-preset-btn {
+    flex: 1 1 calc(50% - 0.35rem);
+  }
+}
+
+/* F037 expert callouts */
+.council-callout-panel {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+.council-callout-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.council-callout-ask {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.council-callout-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+}
+.council-callout-field input,
+.council-callout-field select {
+  min-width: 12rem;
+}
+.council-callout-approvals {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.council-callout-approval {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.council-callout-approval-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+.council-callout-error {
+  color: var(--error);
+  font-size: 0.8rem;
+  margin: 0.4rem 0 0;
+}
+.simple-callout-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.7rem;
+  border-radius: 6px;
+  background: var(--accent-button);
+  color: var(--on-accent);
+}
+.simple-turn-callout {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.5rem;
+}
+
+/* F047 — profile import/export */
+.cre-head-actions { display: flex; gap: 0.5rem; align-items: center; }
+.cre-export-profile {
+  font-size: 0.85rem;
+}
+.profile-import {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  max-width: 640px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.profile-import-head { display: flex; justify-content: space-between; align-items: center; }
+.profile-import-examples { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; margin: 0.5rem 0; font-size: 0.85rem; }
+.profile-import-field { display: flex; flex-direction: column; gap: 0.25rem; }
+.profile-import-field textarea { width: 100%; font-family: var(--mono, monospace); font-size: 0.8rem; }
+.profile-import-actions { margin: 0.5rem 0; }
+.profile-import-preview {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--accent, #6f7df2);
+  border-radius: 8px;
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+}
+.profile-import-warnings { margin: 0.4rem 0; color: var(--text); }
+.profile-import-warnings li { font-size: 0.82rem; }
+.profile-import-note { font-size: 0.78rem; color: var(--text-muted, #6b7280); }
+.profile-import-error { color: var(--error, #ef4444); }
+
+/* F046 — Council work rail */
+.council-work-rail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.council-work-rail [role="tablist"] {
+  display: flex;
+  gap: 0.2rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.3rem;
+  flex-wrap: wrap;
+}
+.work-rail-tab {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #6b7280);
+  cursor: pointer;
+}
+.work-rail-tab.is-active {
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+  border-color: var(--accent, #6f7df2);
+  color: var(--accent, #6f7df2);
+  font-weight: 600;
+}
+.work-rail-panel { padding: 0.6rem; overflow-y: auto; }
+.work-rail-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.work-rail-item { border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.55rem; }
+.work-rail-item-head { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.work-rail-meta { font-size: 0.78rem; color: var(--text-muted, #6b7280); word-break: break-word; }
+.work-rail-chip, .work-rail-status {
+  font-size: 0.7rem; padding: 0 0.35rem; border-radius: 4px;
+  border: 1px solid var(--border); color: var(--text-muted, #6b7280);
+}
+.work-rail-status.status-failed, .work-rail-status.status-open, .work-rail-status.status-blocked {
+  color: var(--error, #ef4444); border-color: var(--error, #ef4444);
+}
+.work-rail-status.status-completed, .work-rail-status.status-closed { color: var(--ok, #10b981); border-color: var(--ok, #10b981); }
+.work-rail-status.status-running, .work-rail-status.status-half_open { color: var(--warn, #fbbf24); border-color: var(--warn, #fbbf24); }
+.work-rail-actions { display: flex; gap: 0.4rem; margin-top: 0.35rem; }
+.work-rail-untrusted { font-size: 0.72rem; color: var(--text-muted, #6b7280); margin: 0.2rem 0 0; font-style: italic; }
+.work-rail-empty, .work-rail-note { color: var(--text-muted, #6b7280); font-size: 0.82rem; }
+.work-rail-error { color: var(--error, #ef4444); font-size: 0.82rem; }
+.work-rail-cancel { margin-bottom: 0.5rem; font-size: 0.8rem; }
+.work-rail-health h4 { margin: 0.3rem 0 0.2rem; font-size: 0.8rem; }
+
+/* F039 auto-apply merge-back panel */
+.apply-workspace-panel { border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem; margin: 0.6rem 0; }
+.apply-workspace-panel h4 { margin: 0 0 0.3rem; font-size: 0.9rem; }
+.apply-workspace-panel .aw-source { font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: 0 0 0.5rem; word-break: break-word; }
+.aw-changes { list-style: none; margin: 0 0 0.5rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.82rem; }
+.aw-status { font-size: 0.7rem; padding: 0 0.3rem; border-radius: 4px; border: 1px solid var(--border); }
+.aw-status-A { color: var(--ok, #10b981); border-color: var(--ok, #10b981); }
+.aw-status-D { color: var(--error, #ef4444); border-color: var(--error, #ef4444); }
+.aw-conflict { color: var(--error, #ef4444); font-size: 0.76rem; }
+.aw-diff pre { max-height: 320px; overflow: auto; font-size: 0.75rem; background: var(--accent-soft, #f3f4f6); padding: 0.5rem; border-radius: 6px; }
+.aw-applied { color: var(--ok, #10b981); font-size: 0.82rem; }
+.aw-error { color: var(--error, #ef4444); font-size: 0.82rem; }
+.aw-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+.aw-force { color: var(--error, #ef4444); border-color: var(--error, #ef4444); }
+
+/* F049 user interjection — "You" bubble in the simple transcript view */
+.simple-turn-user { border-left: 3px solid var(--accent, #6F7DF2); background: var(--accent-soft, #eef0ff); padding: 0.4rem 0.6rem; border-radius: 6px; }
+.simple-turn-user .simple-label { color: var(--accent, #6F7DF2); font-weight: 600; }
+
+/* F080 neutral leader-judge — a distinct, understated verdict line. */
+.simple-turn-judge { border-left: 3px solid var(--border-strong, #9ca3af); background: var(--bg-elevated, #f3f4f6); padding: 0.35rem 0.6rem; border-radius: 6px; }
+.simple-turn-judge .simple-label { color: var(--text-muted, #6b7280); font-weight: 600; }
+
+/* Room list — per-row delete button */
+.council-room-li { display: flex; align-items: stretch; gap: 0.25rem; }
+.council-room-li .council-room-row { flex: 1; }
+.council-room-delete {
+  flex: 0 0 auto; align-self: center; border: 1px solid var(--border);
+  background: transparent; color: var(--text-muted, #6b7280);
+  border-radius: 6px; padding: 0.2rem 0.45rem; cursor: pointer; font-size: 0.85rem;
+}
+.council-room-delete:hover:not(:disabled) { color: var(--error, #ef4444); border-color: var(--error, #ef4444); }
+
+/* F031 — consensus "agreement reached" banner in the simple view */
+.simple-consensus-banner {
+  margin: 0 0 0.25rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ok, #10b981);
+}
+
+/* F064 — "held position" badge on an agreeing member's final turn */
+.simple-agreed-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  padding: 0 0.35rem;
+  margin-left: 0.4rem;
+  border: 1px solid var(--ok, #10b981);
+  border-radius: 4px;
+  color: var(--ok, #10b981);
+}
+
+/* F084 steelman badge + report section. */
+.simple-steelman-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  padding: 0 0.35rem;
+  margin-left: 0.4rem;
+  border: 1px solid var(--warn, #d97706);
+  border-radius: 4px;
+  color: var(--warn, #d97706);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.credibility-steelman {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--warn, #d97706);
+  border-radius: 6px;
+  background: var(--warn-soft, rgba(217, 119, 6, 0.08));
+}
+.credibility-steelman-head {
+  margin: 0 0 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--warn, #d97706);
+}
+.credibility-steelman ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+}
+
+/* F078 Credibility report card in the simple transcript view. */
+.credibility-report {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #d0d0d8);
+  border-radius: 8px;
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+  font-size: 0.9em;
+}
+.credibility-summary {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.credibility-sources {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.credibility-sources li {
+  margin: 2px 0;
+  word-break: break-word;
+}
+.credibility-source-type {
+  color: var(--text-muted, #666);
+  font-variant: small-caps;
+}
+.credibility-source-url {
+  color: var(--accent, #6f7df2);
+}
+/* F085 provenance tier tag */
+.credibility-tier {
+  font-size: 0.72rem;
+  font-variant: small-caps;
+  letter-spacing: 0.02em;
+}
+.credibility-tier-primary { color: var(--ok, #10b981); }
+.credibility-tier-reporting { color: var(--text-muted, #666); }
+.credibility-tier-opinion { color: var(--warn, #d97706); }
+.credibility-tier-unknown { color: var(--warn, #d97706); }
+.credibility-tier-legend {
+  margin: 2px 0 6px;
+  font-size: 0.74rem;
+  color: var(--warn, #d97706);
+}
+.credibility-caveats {
+  margin: 6px 0;
+  padding-left: 20px;
+  color: var(--warn, #9a6700);
+}
+
+/* IA refactor 2026-06-22 — Rooms tab (room management relocated from Council) */
+.rooms-shell {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  max-width: 720px;
+}
+.rooms-intro {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 4px;
+}
+.rooms-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* Selection-only "Manage rooms →" affordance shown in the Council room list. */
+.council-manage-rooms-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.council-manage-rooms-btn:hover {
+  border-color: var(--accent);
+}

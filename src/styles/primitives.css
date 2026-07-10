@@ -1,0 +1,168 @@
+/* F130 shared primitives.
+ * Reusable, token-driven building blocks so feature CSS stops re-inventing
+ * panels, pills, and empty states. See docs/specs/F130-design-specificity-redesign.md
+ * (Phase B) and docs/design/typography.md. */
+
+/* ---------------------------------------------------------------- Surfaces
+ * A bordered box is used only when it communicates one of these semantics.
+ * base = page; raised = a panel that sits above the page; inset = a well. */
+.surface {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.surface--inset {
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.surface--flush {
+  background: transparent;
+  border: none;
+}
+
+/* -------------------------------------------------------------- Status pill
+ * RESERVED FOR ACTUAL STATE (running, merged, changes requested). Static
+ * metadata (provider names, versions, routes, counts) must NOT use this —
+ * use .meta-list or plain text. */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15em 0.6em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: transparent;
+  white-space: nowrap;
+}
+.status-pill--ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--ok-soft);
+}
+.status-pill--active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
+.status-pill--warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-soft);
+}
+.status-pill--error {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  background: var(--error-soft);
+}
+.status-pill--dot::before {
+  content: "";
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ------------------------------------------------------ Metadata (not state)
+ * A definition list for static facts: label + value, quiet, machine values in
+ * mono. This is what counts and config values become instead of status rows. */
+.meta-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  align-items: baseline;
+}
+.meta-list dt {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.meta-list dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+.meta-value--num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.meta-value--machine {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--text);
+}
+
+/* ------------------------------------------------------- Technical details
+ * Diagnostics live behind a disclosure. The user-facing message + recovery
+ * action come first, in normal prose; raw runtime/endpoint/env goes in here. */
+.tech-details {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+.tech-details > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  list-style: none;
+}
+.tech-details > summary::-webkit-details-marker {
+  display: none;
+}
+.tech-details > summary::before {
+  content: "▸ ";
+  color: var(--text-muted);
+}
+.tech-details[open] > summary::before {
+  content: "▾ ";
+}
+.tech-details pre,
+.tech-details code {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------- Empty state
+ * A screen with no data yet reads as "ready to start", never a wall of zeros
+ * or a bare "broken" panel. */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 1.5rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+.empty-state__title {
+  color: var(--text);
+  font-weight: 600;
+}
+.empty-state__hint {
+  font-size: 0.9rem;
+}
+
+/* --------------------------------------------------------------- Section rail
+ * The run-ledger signature: a left accent rail marks the primary, active
+ * region of a screen (what needs the user now), distinct from quiet metadata. */
+.rail {
+  border-left: 3px solid var(--accent);
+  background: var(--surface-raised);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  padding: 1rem 1.25rem;
+}
+
+/* Machine facts inline anywhere (commits, models, paths). */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}

@@ -1,0 +1,24 @@
+{
+  "_comment": "F003 — pinned SHA-256 hashes of Ollama installer artifacts. Update by running scripts/refresh-ollama-hashes (post-v0.1). For v0.1 we ship placeholder zeros; the installer surfaces a 'hash unknown — refusing to run' error until real hashes are pinned for the release the user is on.",
+  "schema_version": 1,
+  "artifacts": {
+    "darwin": {
+      "url": "https://ollama.com/download/Ollama-darwin.zip",
+      "filename": "Ollama-darwin.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ollama_version": "unknown"
+    },
+    "linux": {
+      "url": "https://ollama.com/install.sh",
+      "filename": "install.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ollama_version": "unknown"
+    },
+    "windows": {
+      "url": "https://ollama.com/download/OllamaSetup.exe",
+      "filename": "OllamaSetup.exe",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ollama_version": "unknown"
+    }
+  }
+}

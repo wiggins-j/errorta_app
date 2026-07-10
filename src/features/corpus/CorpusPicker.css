@@ -1,0 +1,131 @@
+/* F141 WS-E — the corpus picker had no styles; the room editor's multi-select
+   rendered as a bare native <select multiple> that looked broken. These rules
+   theme both the single-select dropdown and the multi-select checkbox list with
+   the existing tokens (light + dark via the shared variables). */
+
+.corpus-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+
+.corpus-picker-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text, #223);
+}
+
+.corpus-picker-label select {
+  font: inherit;
+  font-weight: 400;
+  width: 100%;
+  border: 1px solid var(--border, #ccd);
+  border-radius: var(--radius-sm, 6px);
+  padding: 0.45rem 0.55rem;
+  background: var(--surface-inset, var(--bg, #fff));
+  color: var(--text, #223);
+}
+
+.corpus-picker-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+
+.corpus-picker-label-text {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text, #223);
+}
+
+/* The multi-select checkbox list — a bordered, scrollable box that reads as one
+   control instead of a stack of loose checkboxes. */
+.corpus-picker-choices {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 12rem;
+  overflow-y: auto;
+  border: 1px solid var(--border, #ccd);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-inset, var(--bg, #fff));
+}
+
+.corpus-picker-choice > label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--text, #223);
+}
+
+.corpus-picker-choice > label:hover {
+  background: var(--accent-soft, rgba(111, 125, 242, 0.08));
+}
+
+.corpus-picker-choice input {
+  flex: none;
+}
+
+.corpus-picker-choice-name {
+  font-weight: 500;
+}
+
+.corpus-picker-choice-count {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--text-muted, #667);
+}
+
+.corpus-picker-note {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted, #667);
+}
+
+/* Selected corpora summary (chips). */
+.corpus-picker-selection {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.corpus-picker-selection li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border, #ccd);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-raised, var(--bg, #fff));
+}
+
+.corpus-picker-source-badge {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: var(--accent-soft, rgba(111, 125, 242, 0.12));
+  color: var(--accent, #6f7df2);
+}
+
+.corpus-picker-status {
+  color: var(--text-muted, #667);
+}

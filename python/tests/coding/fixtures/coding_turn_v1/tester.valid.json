@@ -1,0 +1,1 @@
+{"schema_version":"coding_turn.v1","role":"tester","task_id":"t-3","intent":{"kind":"test_plan","command_ids":["unit","lint"],"scope":"changed_files","rationale":"Changed TS component and API client"}}

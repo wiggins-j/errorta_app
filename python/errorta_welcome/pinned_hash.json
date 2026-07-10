@@ -1,0 +1,8 @@
+{
+  "tarball": "welcome-corpus.tar.gz",
+  "source_url": "https://github.com/wiggins-j/errorta-downloads/releases/latest/download/welcome-corpus.tar.gz",
+  "version": "0.1.0",
+  "sha256": "468257f01e169379f468acffc478d209d9ef8f855320b3d952108322275ffed5",
+  "max_bytes": 5242880,
+  "notes": "SHA-256 of welcome-corpus.tar.gz v0.1.0 (6 markdown files, repacked with neutral ownership metadata). Hosted at https://github.com/wiggins-j/errorta-downloads/releases/tag/welcome-corpus-v0.1.0."
+}

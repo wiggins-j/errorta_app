@@ -1,0 +1,94 @@
+{
+  "version": "0.1.0-snapshot",
+  "note": "Static snapshot for v0.1. Tiers selected per VRAM bucket. Token/sec ranges are rough estimates for planning, not benchmarks.",
+  "models": [
+    {
+      "id": "qwen2.5:3b",
+      "label": "Qwen 2.5 3B (Q4)",
+      "params_b": 3,
+      "quant": "Q4_K_M",
+      "vram_gb": 3,
+      "install_gb": 2,
+      "tok_s_low": 60,
+      "tok_s_high": 120,
+      "vendors": ["nvidia", "apple", "amd", "intel", "none"]
+    },
+    {
+      "id": "llama3.2:3b",
+      "label": "Llama 3.2 3B (Q4)",
+      "params_b": 3,
+      "quant": "Q4_K_M",
+      "vram_gb": 3,
+      "install_gb": 2,
+      "tok_s_low": 60,
+      "tok_s_high": 120,
+      "vendors": ["nvidia", "apple", "amd", "intel", "none"]
+    },
+    {
+      "id": "qwen2.5:7b",
+      "label": "Qwen 2.5 7B (Q4)",
+      "params_b": 7,
+      "quant": "Q4_K_M",
+      "vram_gb": 6,
+      "install_gb": 5,
+      "tok_s_low": 35,
+      "tok_s_high": 70,
+      "vendors": ["nvidia", "apple", "amd"]
+    },
+    {
+      "id": "llama3.1:8b",
+      "label": "Llama 3.1 8B (Q4)",
+      "params_b": 8,
+      "quant": "Q4_K_M",
+      "vram_gb": 7,
+      "install_gb": 5,
+      "tok_s_low": 30,
+      "tok_s_high": 65,
+      "vendors": ["nvidia", "apple", "amd"]
+    },
+    {
+      "id": "mistral-small:22b",
+      "label": "Mistral Small 22B (Q4)",
+      "params_b": 22,
+      "quant": "Q4_K_M",
+      "vram_gb": 14,
+      "install_gb": 13,
+      "tok_s_low": 20,
+      "tok_s_high": 40,
+      "vendors": ["nvidia", "apple", "amd"]
+    },
+    {
+      "id": "mistral-small3.1",
+      "label": "Mistral Small 3.1 (24B Q4)",
+      "params_b": 24,
+      "quant": "Q4_K_M",
+      "vram_gb": 15,
+      "install_gb": 14,
+      "tok_s_low": 18,
+      "tok_s_high": 35,
+      "vendors": ["nvidia", "apple", "amd"]
+    },
+    {
+      "id": "qwen2.5:32b",
+      "label": "Qwen 2.5 32B (Q4)",
+      "params_b": 32,
+      "quant": "Q4_K_M",
+      "vram_gb": 20,
+      "install_gb": 19,
+      "tok_s_low": 12,
+      "tok_s_high": 25,
+      "vendors": ["nvidia", "apple"]
+    },
+    {
+      "id": "llama3.1:70b",
+      "label": "Llama 3.1 70B (Q4)",
+      "params_b": 70,
+      "quant": "Q4_K_M",
+      "vram_gb": 40,
+      "install_gb": 40,
+      "tok_s_low": 6,
+      "tok_s_high": 15,
+      "vendors": ["nvidia", "apple"]
+    }
+  ]
+}

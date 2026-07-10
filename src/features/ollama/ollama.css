@@ -1,0 +1,104 @@
+/* F134 — Ollama surface. Used standalone and embedded inside Settings. */
+
+.ollama-embed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+}
+
+/* Detection status — a real card with a status dot + key/value grid, not a
+   raw browser <dl> with default indentation. */
+.ollama-status-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface-inset, var(--bg));
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+}
+
+.ollama-status-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ollama-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-muted);
+}
+
+.ollama-status-dot.ollama-status-ok {
+  background: var(--ok);
+}
+.ollama-status-dot.ollama-status-warn {
+  background: var(--warn);
+}
+.ollama-status-dot.ollama-status-error {
+  background: var(--error);
+}
+
+.ollama-recheck {
+  margin-left: auto;
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.ollama-recheck:not(:disabled):hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ollama-recheck:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ollama-kv {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.ollama-kv-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.ollama-kv-row dt {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.ollama-kv-row dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.ollama-kv-row dd code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8rem;
+}
+
+.ollama-kv-err {
+  color: var(--error);
+}
+
+@media (max-width: 520px) {
+  .ollama-kv-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

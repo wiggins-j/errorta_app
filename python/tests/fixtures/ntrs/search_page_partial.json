@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "id": 20230004444,
+      "title": "Partial Page Single Result",
+      "publicationDate": "2020-07-15",
+      "distribution": "PUBLIC",
+      "copyright": {
+        "licenseType": "Public Domain",
+        "determinationType": "GOVERNMENT_WORK"
+      },
+      "authorAffiliations": [
+        {
+          "meta": {
+            "author": {"name": "Erin Engineer"},
+            "organization": {"name": "NASA Ames Research Center"}
+          }
+        }
+      ],
+      "downloads": [
+        {
+          "mimetype": "application/pdf",
+          "links": {"original": "/api/citations/20230004444/downloads/partial.pdf"}
+        }
+      ]
+    }
+  ],
+  "stats": {"hits": 1001}
+}

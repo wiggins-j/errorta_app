@@ -1,0 +1,194 @@
+/* Badge styles for the aiar_pin status indicator.
+ *
+ * SidecarStatusBadge (.sidecar-badge in index.css) is pinned to the bottom-left
+ * corner at left:16px / bottom:16px, so we stack the aiar-pin badge directly
+ * above it to keep both visible without overlap. All colors reference brand
+ * tokens defined in index.css, with two intentional rgba() literals for the
+ * green-tinted "pinned" surface (the only non-tokenized accent in the palette).
+ */
+
+.aiar-pin-status {
+  position: fixed;
+  bottom: 60px;
+  left: 12px;
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  /* Keep the badge inside the 240px sidebar (it's fixed-positioned at left:12px,
+     so without a cap long content spilled into the main pane). */
+  max-width: calc(240px - 24px);
+  box-sizing: border-box;
+}
+
+.aiar-version {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* AIAR brand mark — inline next to any AIAR mention.
+ * Logo is portrait pixel-art (832×1248). Scaled to the badge cap height
+ * and rendered pixelated so chunky pixel art survives the scale-down. */
+.aiar-logo-mark {
+  height: 18px;
+  width: auto;
+  display: inline-block;
+  vertical-align: middle;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  /* Negate the badge's letter-spacing so the mark sits flush with the text. */
+  margin-right: 2px;
+}
+
+/* The judge-preflight pill is smaller — drop the mark to match. */
+.judge-preflight .aiar-logo-mark {
+  height: 14px;
+  margin-right: 3px;
+}
+
+.shell-root-sidebar-collapsed .aiar-pin-status {
+  left: 15px;
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.shell-root-sidebar-collapsed .aiar-pin-status .aiar-logo-mark {
+  margin-right: 0;
+}
+
+.shell-root-sidebar-collapsed .aiar-pin-status .aiar-version,
+.shell-root-sidebar-collapsed .aiar-pin-status .pin-badge {
+  display: none;
+}
+
+.pin-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  line-height: 1;
+}
+
+.pin-editable {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pin-pinned {
+  background: rgba(74, 222, 128, 0.18);
+  color: #1f5a2a;
+}
+
+.pin-absent {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+/* In dark mode the green surface is bright enough that the deep #1f5a2a text
+ * reads cleanly. In light mode we need a darker, more saturated green to stay
+ * accessible against the pale surface. */
+@media (prefers-color-scheme: light) {
+  .pin-pinned {
+    color: #166534;
+  }
+}
+
+/* ---------- TunnelStatusBadge (F-INFRA-12 Phase B) ----------
+ *
+ * Inline chip — does NOT pin itself to a corner. The DataResidencyCard renders
+ * it next to the section header; later slices may also stack a floating copy
+ * above the aiar-pin badge, in which case the floating wrapper supplies the
+ * fixed positioning. All colors reference brand tokens from index.css so dark
+ * + light modes work without extra rules.
+ */
+
+.tunnel-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.tunnel-badge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.tunnel-badge-dot-down {
+  background: var(--text-muted);
+  opacity: 0.7;
+}
+
+.tunnel-badge-dot-connecting {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent-soft);
+  animation: tunnel-badge-pulse 1.4s ease-in-out infinite;
+}
+
+.tunnel-badge-dot-up {
+  background: var(--ok);
+}
+
+.tunnel-badge-dot-error {
+  background: var(--error);
+}
+
+.tunnel-badge-label {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.tunnel-badge-detail {
+  color: var(--error);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes tunnel-badge-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-soft);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(111, 125, 242, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(111, 125, 242, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tunnel-badge-dot-connecting {
+    animation: none;
+  }
+}
