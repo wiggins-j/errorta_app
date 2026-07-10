@@ -1,7 +1,7 @@
 # F004 — Drag-and-drop corpus management
 
 **Target version:** v0.1
-**Status:** drafted
+**Status:** implemented
 **Owner:** wiggins-j
 
 ---

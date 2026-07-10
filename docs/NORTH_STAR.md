@@ -97,13 +97,25 @@ claiming remote routing:
 The things we're explicitly NOT building. Saying no to these is part of the product.
 
 - **Hidden cloud.** No remote model calls, sync, accounts, telemetry, or
-  background uploads without explicit user opt-in. Local-only remains the
-  default mode and an absolute kill switch.
+  background uploads without explicit user opt-in. Local-only remains a
+  fully-supported mode and an absolute kill switch.
+  *Reality check (alpha):* a normal build never phones home. Only a build
+  produced with `ERRORTA_ALPHA_GATE=1` talks to the alpha check-in service
+  (`api.errorta.app`) for activation/heartbeat, and that carries a **disclosed
+  telemetry floor** (event counts, no content) plus opt-out extras. See
+  [`SECURITY.md`](../SECURITY.md).
 - **Multi-tenant / multi-user.** One install, one user. Teams are a future v2+ concern.
 - **Beating LM Studio at smooth onboarding.** They polish for breadth; we go deep on the judge loop. We don't compete on first-run UX for non-technical users.
-- **Being everything to everyone.** The three wedges define what we are. Features that don't serve them get punted to "maybe v2."
-- **Mobile (iOS / Android).** Desktop only. Mobile is a separate product if it ever happens.
-- **A chat-only product.** The judge + correction loop is the central UX, not the chat surface. Chat ships in v0.2 as a *delivery vehicle* for the loop, not as the headline.
+- **Being everything to everyone.** The three wedges define the *core*. Newer
+  workspaces (Council, Coding Team) are built on the same judge/trust
+  architecture and ship as experimental surfaces — they don't dilute the core
+  pitch, which stays the judge + correction loop.
+- **A standalone mobile product (iOS / Android).** Errorta is a desktop app. The
+  iOS companion (F065/F066) is a **remote-control surface for your own desktop**
+  over your LAN — off by default, owner-approved pairing — not a mobile rewrite
+  of the product. A phone can view and steer runs; the product still lives on the
+  desktop.
+- **A chat-only product.** The judge + correction loop is the central UX, not the chat surface. Chat ships as a *delivery vehicle* for the loop, not as the headline.
 
 ---
 
@@ -119,8 +131,11 @@ Every page of Errorta's website will advertise this. Not because we have to, but
 
 ## Distribution and economic model
 
-- **Free download** from a GitHub Pages site (custom domain TBD)
-- **Source code:** private until the v1.0 launch. After launch, license TBD (Apache-2.0 to match AIAR is the path of least friction; MIT also on the table).
+- **Free download** from a GitHub Pages site at [`errorta.app`](https://errorta.app).
+- **License: Apache-2.0** — matching AIAR. The root [`LICENSE`](../LICENSE) file
+  and every package's declared license are Apache-2.0. (The historical "private
+  until v1.0 / license TBD" stance is resolved; the source is now open under
+  Apache-2.0.)
 - **Revenue model:** none for v1.0. Money is not the goal. If someone wants to acquire it later, that conversation can happen then.
 
 ---

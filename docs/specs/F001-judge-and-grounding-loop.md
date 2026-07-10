@@ -1,7 +1,7 @@
 # F001 — Judge + grounding loop (lead UX)
 
 **Target version:** v0.1
-**Status:** drafted
+**Status:** implemented
 **Owner:** wiggins-j
 
 ---
