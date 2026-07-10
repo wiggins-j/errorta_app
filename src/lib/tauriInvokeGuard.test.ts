@@ -18,7 +18,6 @@ const GUARDED = [
   "src/lib/sidecarPort.ts",
   "src/lib/api/providerKeys.ts",
   "src/lib/api/updater.ts",
-  "src/features/onboarding/StepResidency.tsx",
   "src/features/shell/DataResidencyCard.tsx",
   "src/features/shell/AppShellSettings.tsx",
   "src/features/shell/DiagnosticsExport.tsx",

@@ -74,6 +74,14 @@ describe("Settings tab", () => {
     expect(screen.getByTestId("hardware-feature")).toBeInTheDocument();
   });
 
+  it("shows a 'What is AIAR?' help affordance with a guide link", () => {
+    renderSettings(true);
+    expect(screen.getByTestId("settings-aiar-help")).toBeInTheDocument();
+    expect(screen.getByText("What is AIAR?")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /Read the AIAR guide/i });
+    expect(link.getAttribute("href")).toContain("docs/AIAR_SETUP.md");
+  });
+
   it("hosts the Mobile connector card (moved out of Shell)", () => {
     renderSettings(true);
     expect(screen.getByRole("heading", { name: "Mobile connector" })).toBeInTheDocument();

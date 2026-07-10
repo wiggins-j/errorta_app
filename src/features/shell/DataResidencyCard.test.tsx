@@ -6,7 +6,7 @@
 //   2. The dynamic `new Function("s","return import(...)")` trick the
 //      component uses to load @tauri-apps/api/core (so we can inject a
 //      controllable `invoke` mock without a real Tauri runtime). Same pattern
-//      used by AppShellSettings and StepResidency.
+//      used by AppShellSettings.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

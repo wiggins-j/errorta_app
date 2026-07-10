@@ -156,6 +156,7 @@ Two foundational feature designs are included as reference:
 ## Read these first
 
 - [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) — product identity, who it's for, what makes it different, what we're explicitly NOT building.
+- [`docs/AIAR_SETUP.md`](docs/AIAR_SETUP.md) — what AIAR is, local vs. remote, and how to connect it. First run just connects your models; AIAR/knowledge is set up in Settings.
 - [`DEVELOPING.md`](DEVELOPING.md) — how to actually run the thing locally.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
 - [`docs/SIDECAR_LIFECYCLE.md`](docs/SIDECAR_LIFECYCLE.md) and [`docs/SYSTEM_TRAY.md`](docs/SYSTEM_TRAY.md) — architecture notes.

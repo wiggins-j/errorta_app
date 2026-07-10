@@ -28,8 +28,8 @@ import {
   SubscriptionCliRow,
 } from "../shell/providerRows";
 import * as ollamaApi from "../../lib/api/ollama";
+import * as hardwareApi from "../../lib/api/hardware";
 import type { OllamaHealth } from "../ollama/types";
-import AiarConnectionCard from "../aiar/AiarConnectionCard";
 
 const SEEN_KEY = "errorta.onboarding.connect-ai.seen";
 const SELECTED_MODEL_KEY = "errorta.selectedModel";
@@ -74,7 +74,6 @@ function markSeen(): void {
 interface Props {
   onAdvance: () => void;
   onSkip: () => void;
-  done?: boolean;
 }
 
 // F110 — recommended-model download. Reads errorta.selectedModel; once the
@@ -82,7 +81,13 @@ interface Props {
 // an explicit, sized download with progress. Already-installed → "ready", no
 // pull. Never auto-downloads (consented action).
 function ModelDownloadSection({ runtimeReachable }: { runtimeReachable: boolean }) {
-  const [model] = useState<string | null>(() => readSelectedModel());
+  const [model, setModel] = useState<string | null>(() => readSelectedModel());
+  // Whether we've settled on a model to offer: true immediately if the user
+  // already picked one (Settings › Hardware), else after the best-effort
+  // recommendation probe below resolves.
+  const [recResolved, setRecResolved] = useState<boolean>(
+    () => readSelectedModel() != null,
+  );
   const [installed, setInstalled] = useState<boolean | null>(null);
   const [checking, setChecking] = useState(false);
   const [pulling, setPulling] = useState(false);
@@ -97,6 +102,29 @@ function ModelDownloadSection({ runtimeReachable }: { runtimeReachable: boolean 
       stopRef.current?.();
     };
   }, []);
+
+  // Best-effort recommendation. Onboarding no longer has a Hardware step, so if
+  // no model was picked yet, ask the hardware recommender for a compatible
+  // default. Any failure is fine — we fall back to a Settings pointer.
+  useEffect(() => {
+    if (model || recResolved) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await hardwareApi.report();
+        if (!cancelled && r.recommendation?.primary?.compatible) {
+          setModel(r.recommendation.primary.id);
+        }
+      } catch {
+        // best-effort; no recommendation available
+      } finally {
+        if (!cancelled) setRecResolved(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [model, recResolved]);
 
   const checkInstalled = useCallback(async () => {
     if (!model) return;
@@ -139,10 +167,17 @@ function ModelDownloadSection({ runtimeReachable }: { runtimeReachable: boolean 
   }, [model]);
 
   if (!model) {
+    if (!recResolved) {
+      return (
+        <p className="provider-keys-help" data-testid="connect-ai-model-checking">
+          Checking your hardware for a recommended model…
+        </p>
+      );
+    }
     return (
       <p className="provider-keys-help" data-testid="connect-ai-model-none">
-        No model selected yet — pick one on the <strong>Hardware</strong> tab and
-        it&rsquo;ll be offered for download here.
+        No model picked yet — choose one in{" "}
+        <strong>Settings &rsaquo; Local models</strong>.
       </p>
     );
   }
@@ -365,12 +400,7 @@ export default function StepConnectAI({ onAdvance, onSkip }: Props) {
     onAdvance();
   }, [onAdvance]);
 
-  const handleSkipStep = useCallback(() => {
-    markSeen();
-    onAdvance();
-  }, [onAdvance]);
-
-  const handleSkipOnboarding = useCallback(() => {
+  const handleSkip = useCallback(() => {
     markSeen();
     onSkip();
   }, [onSkip]);
@@ -397,13 +427,6 @@ export default function StepConnectAI({ onAdvance, onSkip }: Props) {
           Failed to load provider status: {loadError}
         </p>
       ) : null}
-
-      <details className="connect-ai-section" open data-testid="connect-ai-aiar">
-        <summary>
-          <span className="connect-ai-section-title">AIAR runtime</span>
-        </summary>
-        <AiarConnectionCard />
-      </details>
 
       <details className="connect-ai-section" open data-testid="connect-ai-keys">
         <summary>
@@ -490,6 +513,14 @@ export default function StepConnectAI({ onAdvance, onSkip }: Props) {
         <LocalAiSection />
       </details>
 
+      <p
+        className="provider-keys-help connect-ai-settings-note"
+        data-testid="connect-ai-settings-note"
+      >
+        Knowledge, AIAR retrieval, and data residency are set up in{" "}
+        <strong>Settings</strong> — see the AIAR guide to learn what AIAR does.
+      </p>
+
       <div className="onboarding-actions">
         <button
           type="button"
@@ -502,18 +533,10 @@ export default function StepConnectAI({ onAdvance, onSkip }: Props) {
         <button
           type="button"
           className="onboarding-cta-secondary"
-          onClick={handleSkipStep}
-          data-testid="connect-ai-skip-step"
+          onClick={handleSkip}
+          data-testid="connect-ai-skip"
         >
           Skip for now
-        </button>
-        <button
-          type="button"
-          className="onboarding-cta-link"
-          onClick={handleSkipOnboarding}
-          data-testid="connect-ai-skip-onboarding"
-        >
-          Skip onboarding
         </button>
       </div>
     </div>
