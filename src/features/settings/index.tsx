@@ -183,6 +183,23 @@ export default function Settings() {
         <h2 className="settings-group-heading">Knowledge &amp; connections</h2>
         <div className="shell-settings-grid">
           <SettingsCard title="AIAR connection" ready={ready}>
+            <details className="settings-aiar-help" data-testid="settings-aiar-help">
+              <summary>What is AIAR?</summary>
+              <p className="shell-muted">
+                AIAR is the retrieval framework Errorta is built on — it powers
+                grounded answers, judge verdicts, and the memory that feeds your
+                corrections forward. By default Errorta runs it locally with no
+                setup; to use a deployed AIAR server instead, fill in the
+                connection below.{" "}
+                <a
+                  href="https://github.com/wiggins-j/errorta_app/blob/main/docs/AIAR_SETUP.md"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Read the AIAR guide &rarr;
+                </a>
+              </p>
+            </details>
             <AiarConnectionCard />
           </SettingsCard>
 

@@ -38,8 +38,9 @@ vi.mock("../../lib/api/ollama", () => ({
   getModels: vi.fn(),
   streamPull: vi.fn(),
 }));
-vi.mock("../aiar/AiarConnectionCard", () => ({
-  default: () => <div data-testid="aiar-connection-card" />,
+vi.mock("../../lib/api/hardware", () => ({
+  report: vi.fn(),
+  scan: vi.fn(),
 }));
 
 // Tauri shell-open + file picker — mock so nothing touches the OS.
@@ -53,7 +54,13 @@ vi.mock("../shell/FilePickerDialog", async () => {
 
 import * as providerKeysApi from "../../lib/api/providerKeys";
 import * as ollamaApi from "../../lib/api/ollama";
+import * as hardwareApi from "../../lib/api/hardware";
 import StepConnectAI from "./StepConnectAI";
+
+const _hardware = hardwareApi as unknown as {
+  report: ReturnType<typeof vi.fn>;
+  scan: ReturnType<typeof vi.fn>;
+};
 
 const _pk = providerKeysApi as unknown as {
   getProviderKeys: ReturnType<typeof vi.fn>;
@@ -129,6 +136,9 @@ beforeEach(() => {
     installed: false,
   });
   _ollama.streamPull.mockReturnValue(() => {});
+  _hardware.report.mockReset();
+  // Default: no recommendation available (probe fails) → Settings-pointer fallback.
+  _hardware.report.mockRejectedValue(new Error("no hardware report"));
 
   _pk.getProviderKeys.mockResolvedValue(EMPTY_KEYS);
   _pk.listGatewayProviders.mockResolvedValue(CLI_PROVIDERS);
@@ -168,18 +178,25 @@ afterEach(() => {
 });
 
 describe("StepConnectAI", () => {
-  it("renders all connection sections", async () => {
+  it("renders the model-connection sections", async () => {
     render(<StepConnectAI onAdvance={vi.fn()} onSkip={vi.fn()} />);
     await waitFor(() => screen.getByTestId("connect-ai-keys"));
-    expect(screen.getByTestId("connect-ai-aiar")).toBeInTheDocument();
-    expect(screen.getByTestId("aiar-connection-card")).toBeInTheDocument();
     expect(screen.getByTestId("connect-ai-keys")).toBeInTheDocument();
     expect(screen.getByTestId("connect-ai-clis")).toBeInTheDocument();
     expect(screen.getByTestId("connect-ai-local")).toBeInTheDocument();
-    expect(screen.getByText("AIAR runtime")).toBeInTheDocument();
     expect(screen.getByText("Provider API keys")).toBeInTheDocument();
     expect(screen.getByText("Subscription CLIs")).toBeInTheDocument();
     expect(screen.getByText("Local AI (Ollama)")).toBeInTheDocument();
+  });
+
+  it("does NOT render the AIAR runtime card in onboarding (moved to Settings)", async () => {
+    render(<StepConnectAI onAdvance={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => screen.getByTestId("connect-ai-keys"));
+    expect(screen.queryByTestId("connect-ai-aiar")).toBeNull();
+    expect(screen.queryByTestId("aiar-connection-card")).toBeNull();
+    expect(screen.queryByText("AIAR runtime")).toBeNull();
+    // …but points the user to Settings for AIAR/knowledge/residency.
+    expect(screen.getByTestId("connect-ai-settings-note")).toBeInTheDocument();
   });
 
   it("Scan for CLIs re-loads provider status", async () => {
@@ -312,10 +329,32 @@ describe("StepConnectAI", () => {
 });
 
 describe("StepConnectAI — F110 recommended-model download", () => {
-  it("shows 'no model selected' when errorta.selectedModel is unset", async () => {
+  it("falls back to a Settings pointer when no model + no recommendation", async () => {
+    // hardware.report rejects (beforeEach default) → no recommendation.
     render(<StepConnectAI onAdvance={vi.fn()} onSkip={vi.fn()} />);
     await waitFor(() => screen.getByTestId("connect-ai-model-none"));
+    expect(_hardware.report).toHaveBeenCalled();
     expect(_ollama.getModels).not.toHaveBeenCalled();
+  });
+
+  it("recommends a compatible model via the hardware probe when none is picked", async () => {
+    _hardware.report.mockResolvedValue({
+      recommendation: {
+        primary: { id: "qwen2.5:3b", compatible: true },
+      },
+    });
+    _ollama.getModels.mockResolvedValue({
+      models: [],
+      queried: "qwen2.5:3b",
+      installed: false,
+    });
+    render(<StepConnectAI onAdvance={vi.fn()} onSkip={vi.fn()} />);
+    // The recommended model is offered for download without a Hardware step.
+    const btn = await screen.findByTestId("connect-ai-model-pull");
+    expect(btn).toHaveTextContent("Download qwen2.5:3b");
+    await waitFor(() =>
+      expect(_ollama.getModels).toHaveBeenCalledWith("qwen2.5:3b"),
+    );
   });
 
   it("offers a sized download CTA when the selected model isn't installed", async () => {
