@@ -169,6 +169,63 @@ def test_refuses_version_skewed_app_sidecar(monkeypatch, tmp_path: Path) -> None
         sidecar.resolve(tmp_path, our_commit="new")
 
 
+def test_refuses_unknown_commit_foreign_sidecar(monkeypatch, tmp_path: Path) -> None:
+    """LOW-3 safe fallback: a FOREIGN (app-started) sidecar whose build commit is
+    UNKNOWN can't be positively confirmed as coordinated, so it is NOT adopted —
+    it refuses (mirrors the Rust app's empty-commit → never-adopt). Previously the
+    ``not mismatch`` rule adopted an unknown-commit foreign sidecar (unsafe)."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": None, "started_by": "app"}
+    )
+    # Live /healthz but no build.commit → commit is unknown on the advert side.
+    monkeypatch.setattr(
+        sidecar, "probe_healthz", lambda port, **k: {"service": "errorta-sidecar"}
+    )
+    monkeypatch.setattr(
+        sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn"))
+    )
+    with pytest.raises(ForeignSidecar):
+        sidecar.resolve(tmp_path, our_commit="abc")
+
+
+def test_refuses_foreign_sidecar_when_our_commit_unknown(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """LOW-3: unknown commit on OUR side also can't confirm a match against a
+    foreign app sidecar → refuse (not adopt)."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": "abc", "started_by": "app"}
+    )
+    monkeypatch.setattr(
+        sidecar, "probe_healthz", lambda port, **k: {"build": {"commit": "abc"}}
+    )
+    monkeypatch.setattr(
+        sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn"))
+    )
+    with pytest.raises(ForeignSidecar):
+        sidecar.resolve(tmp_path, our_commit=None)
+
+
+def test_adopts_own_cli_sidecar_with_unknown_commit(monkeypatch, tmp_path: Path) -> None:
+    """LOW-3: our OWN cli-started sidecar stays adoptable even when the build
+    commit is unknown — a sidecar this CLI started is coordinated by construction
+    (sole owner), so the stricter foreign rule must NOT apply to it."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": None, "started_by": "cli"}
+    )
+    # Live but reports no build.commit (unknown on both sides).
+    monkeypatch.setattr(
+        sidecar, "probe_healthz", lambda port, **k: {"service": "errorta-sidecar"}
+    )
+    monkeypatch.setattr(
+        sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn"))
+    )
+    handle = sidecar.resolve(tmp_path, our_commit=None)
+    assert handle.adopted is True
+    assert handle.started_by == "cli"
+    assert handle.port == 5555
+
+
 def test_adopt_registers_client_pidfile(monkeypatch, tmp_path: Path) -> None:
     """Adopting a shared sidecar registers this CLI as a watchdog client so the
     sidecar refcounts us and doesn't exit under an in-flight run."""
@@ -421,11 +478,14 @@ def test_require_sole_owner_allows_driving_advertised_shared_sidecar(
     sidecar.write_record(
         tmp_path, {"port": 5555, "pid": 77, "commit": "abc", "started_by": "app"}
     )
-    # A live /healthz on our (advertised) port, and an Errorta.app process running.
+    # A live /healthz on our (advertised) port reporting the SAME pid we drive
+    # (LOW-4: identity, not just port), and an Errorta.app process running.
     monkeypatch.setattr(
         sidecar,
         "probe_healthz",
-        lambda port, **k: {"service": "errorta-sidecar"} if port == 5555 else None,
+        lambda port, **k: {"service": "errorta-sidecar", "pid": 77}
+        if port == 5555
+        else None,
     )
     monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
 
@@ -439,6 +499,40 @@ def test_require_sole_owner_allows_driving_advertised_shared_sidecar(
     )
     # Must NOT raise — we're driving the coordinated shared sidecar.
     sidecar.require_sole_owner(tmp_path, handle)
+
+
+def test_require_sole_owner_refuses_when_port_swapped_to_different_pid(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """LOW-4: the advert names our port, but the sidecar now answering there is a
+    DIFFERENT process (a swap that reused the port). Port equality alone used to
+    pass the no-op; the pid cross-check now catches it → not driving → the foreign
+    scan refuses."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": "abc", "started_by": "app"}
+    )
+    # A live /healthz on 5555, but it reports a DIFFERENT pid than the one we
+    # adopted/drive (77) — i.e. the process was swapped under us.
+    monkeypatch.setattr(
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"service": "errorta-sidecar", "pid": 999}
+        if port == 5555
+        else None,
+    )
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
+
+    handle = sidecar.SidecarHandle(
+        base_url="http://127.0.0.1:5555",
+        port=5555,
+        pid=77,
+        commit="abc",
+        started_by="app",
+        adopted=True,
+    )
+    assert sidecar._driving_advertised_sidecar(tmp_path, handle) is False
+    with pytest.raises(ForeignSidecar):
+        sidecar.require_sole_owner(tmp_path, handle)
 
 
 def test_require_sole_owner_refuses_when_a_different_sidecar_is_advertised(

@@ -344,6 +344,27 @@ fn try_adopt_existing_sidecar() -> Option<u16> {
     if their_commit == want {
         Some(port)
     } else {
+        // F147 S9 follow-up (review LOW-2): a version-skewed peer is running on
+        // this store. We do NOT adopt it (co-driving a different build could
+        // corrupt in-flight runs), and — unlike the CLI, which *refuses to
+        // launch* in this case — the app MUST keep going and spawn its own
+        // sidecar, because it is the GUI: there is no useful "refuse to open the
+        // window" state, and a working sidecar is a hard requirement for the app
+        // to function at all. The CLI can safely refuse (`--home` / non-zero
+        // exit) because it is a one-shot command with an obvious retry. This
+        // asymmetry is intentional. The transient two-sidecar window it opens is
+        // covered end-to-end: the fresh sidecar's owner-aware boot recovery
+        // stands down for the peer's live run, and S9a's per-run cross-process
+        // lock + owner_pid guard protect every runtime mutation. Warn loudly so
+        // the operator knows to run only one front-end at a time.
+        eprintln!(
+            "[errorta] WARNING: detected a running sidecar built from a different \
+             version at 127.0.0.1:{port} (its commit {their} != ours {want}); \
+             starting a separate one. Run only one front-end at a time against \
+             this data, or update both so they match.",
+            their = their_commit,
+            want = want,
+        );
         None // version-skewed peer — don't co-drive it, spawn our own instead
     }
 }

@@ -32,6 +32,72 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=ERRORTA_BUILD_COMMIT={commit}");
     println!("cargo:rerun-if-env-changed=ERRORTA_BUILD_COMMIT");
+    // F147 S9 follow-up (review NIT-6): also re-run this script when git HEAD
+    // moves, so the stamp refreshes across commits.
+    emit_git_rerun_hints();
 
     tauri_build::build()
+}
+
+/// F147 S9 follow-up (review NIT-6) — refresh the `ERRORTA_BUILD_COMMIT` stamp
+/// when git HEAD moves.
+///
+/// Without a `cargo:rerun-if-changed`, cargo caches `build.rs`'s output whenever
+/// nothing under `src-tauri/` changes, so a plain `git commit` left the stamped
+/// commit STALE — a dev build then never matched a freshly built sidecar's
+/// `_build_info.json`, so single-instance ADOPTION never engaged. Declaring
+/// `rerun-if-changed` for the files git rewrites on a commit/checkout makes cargo
+/// re-run this script (and re-stamp `git rev-parse HEAD`) the moment HEAD moves.
+///
+/// Fully defensive: no `.git` directory, a detached HEAD, or any unreadable file
+/// simply means fewer/zero rerun hints — cargo keeps the cached stamp, which is
+/// the safe, pre-existing fallback (a stale stamp only makes adoption safe-fall
+/// back to "spawn our own", never corrupts anything). Never fails the build.
+fn emit_git_rerun_hints() {
+    let Some(git_dir) = find_git_dir() else {
+        return;
+    };
+    // `.git/HEAD` is rewritten on every branch switch / detached checkout.
+    let head = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head.display());
+    // `.git/packed-refs` — a fallback for a ref stored packed rather than loose
+    // (e.g. right after a `git gc` or a fresh clone).
+    let packed = git_dir.join("packed-refs");
+    if packed.is_file() {
+        println!("cargo:rerun-if-changed={}", packed.display());
+    }
+    // The current branch's loose ref file (e.g. `.git/refs/heads/<branch>`) is
+    // what git rewrites when you commit on that branch. Resolve it from HEAD's
+    // `ref: refs/...` target. A detached HEAD (raw sha, no `ref:` prefix) has no
+    // branch ref — HEAD itself already changes on any move, so it's covered.
+    if let Ok(contents) = std::fs::read_to_string(&head) {
+        if let Some(target) = contents.strip_prefix("ref:").map(str::trim) {
+            if !target.is_empty() {
+                let ref_path = git_dir.join(target);
+                if ref_path.is_file() {
+                    println!("cargo:rerun-if-changed={}", ref_path.display());
+                }
+            }
+        }
+    }
+}
+
+/// Walk up from `CARGO_MANIFEST_DIR` looking for a `.git` DIRECTORY (the common
+/// case for this repo). Returns the git dir, or `None` if not found or if `.git`
+/// is not a plain directory. A linked-worktree / submodule `.git` FILE
+/// (`gitdir: ...`) is intentionally not chased — skipping is safe (the stamp just
+/// falls back to cargo's cached value), which keeps this helper simple and
+/// failure-proof.
+fn find_git_dir() -> Option<std::path::PathBuf> {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let mut dir = std::path::PathBuf::from(manifest);
+    loop {
+        let candidate = dir.join(".git");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
