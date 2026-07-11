@@ -7,6 +7,7 @@ probed foreign one.
 """
 from __future__ import annotations
 
+from errorta_cli import poller as poller_module
 from errorta_cli.poller import DEFAULT_SOURCES, Event, Poller, Source, events_for_view
 from errorta_cli.verbosity import Level, Verbosity
 
@@ -52,6 +53,25 @@ def test_append_source_emits_only_new_entries_with_stable_ids():
     third = poller.poll_source(src)
     assert [e.item["decision_id"] for e in third] == ["d3"]
     assert poller.cursors["decisions"].order == ["d1", "d2", "d3"]
+
+
+def test_full_append_source_does_not_reemit_after_seen_cap_eviction(monkeypatch):
+    monkeypatch.setattr(poller_module, "_SEEN_CAP", 2)
+    client = GrowingClient()
+    src = Source("decisions", "/coding/projects/{project_id}/decisions", "decisions",
+                 "append", key="decisions", id_field="decision_id")
+    poller = Poller(client, PID, sources=[src])
+
+    client.state["/decisions"] = _decisions("d1", "d2", "d3")
+    assert [e.item["decision_id"] for e in poller.poll_source(src)] == ["d1", "d2", "d3"]
+    assert poller.cursors["decisions"].order == ["d2", "d3"]
+
+    # Full chronological routes still include d1 after it falls out of the
+    # bounded dedupe window. The high-water mark prevents re-emitting it.
+    assert poller.poll_source(src) == []
+
+    client.state["/decisions"] = _decisions("d1", "d2", "d3", "d4")
+    assert [e.item["decision_id"] for e in poller.poll_source(src)] == ["d4"]
 
 
 def test_append_falls_back_to_content_hash_without_id_field():

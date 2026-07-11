@@ -76,10 +76,10 @@ class Event:
     item: Any
 
 
-# Cap on remembered append-ledger ids per source. Ids are uuid-based and never
-# reused, so a long-lived ``--watch`` would otherwise grow ``seen``/``order``
-# without bound. We keep the most-recent window; rolled-off ids can't re-appear
-# (the ledgers only append at the tail), so dedup stays correct.
+# Cap on remembered append-ledger ids per source. ``last_id`` is the high-water
+# mark for full chronological ledgers; this bounded set is the fallback dedupe
+# window for bounded-tail routes where the previous high-water id has fallen out
+# of the returned payload.
 _SEEN_CAP = 4096
 
 
@@ -87,11 +87,13 @@ _SEEN_CAP = 4096
 class _Cursor:
     seen: set[str] = field(default_factory=set)
     order: list[str] = field(default_factory=list)
+    last_id: str | None = None
     snapshot_hash: str | None = None
     next_due: float = 0.0
 
-    def remember(self, iid: str, cap: int = _SEEN_CAP) -> None:
+    def remember(self, iid: str, cap: int | None = None) -> None:
         """Record a freshly-seen id, evicting the oldest once past ``cap``."""
+        cap = _SEEN_CAP if cap is None else cap
         self.seen.add(iid)
         self.order.append(iid)
         overflow = len(self.order) - cap
@@ -170,12 +172,26 @@ class Poller:
         events: list[Event] = []
         if source.mode == "append":
             items = (payload or {}).get(source.key) or []
-            for item in items:
-                iid = self._id_of(source, item)
+            indexed = [(self._id_of(source, item), item) for item in items]
+            ids = [iid for iid, _item in indexed]
+            if cur.last_id is None:
+                candidates = indexed
+            else:
+                try:
+                    last_index = ids.index(cur.last_id)
+                    candidates = indexed[last_index + 1:]
+                except ValueError:
+                    # Bounded-tail route where our previous high-water id fell
+                    # off the returned window. Fall back to the recent dedupe
+                    # set and emit only entries not seen in that retained window.
+                    candidates = [(iid, item) for iid, item in indexed if iid not in cur.seen]
+            for iid, item in candidates:
                 if iid in cur.seen:
                     continue
                 cur.remember(iid)
                 events.append(self._emit(source, "append", item))
+            if ids:
+                cur.last_id = ids[-1]
         else:  # snapshot
             digest = _stable_hash(payload)
             if cur.snapshot_hash is None:
