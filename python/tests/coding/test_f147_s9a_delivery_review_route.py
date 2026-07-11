@@ -50,6 +50,23 @@ def test_not_done_is_graceful_409(tmp_errorta_home: Path) -> None:
     assert r.json()["detail"]["code"] == "not_done"
 
 
+def test_done_but_run_live_is_409(tmp_errorta_home: Path, monkeypatch) -> None:
+    """A delivered project with a run live (this or another sidecar) is refused —
+    the reviewer/tests/launch probe would contend with the worker's worktree."""
+    from errorta_app.routes import coding as coding_routes
+    from errorta_council.coding.ledger import LedgerStore
+
+    c = _client()
+    _create(c, "plive")
+    LedgerStore("plive").set_project_status("done")
+    # Simulate a live run (here or in another process) via the same predicate the
+    # route consults; avoids standing up a real worker thread.
+    monkeypatch.setattr(coding_routes, "_run_live", lambda project_id, state: True)
+    r = c.post("/coding/projects/plive/delivery-review")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "a run is already in progress"
+
+
 def test_done_no_team_is_graceful(tmp_errorta_home: Path) -> None:
     from errorta_council.coding.ledger import LedgerStore
 
