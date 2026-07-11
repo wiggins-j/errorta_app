@@ -21,7 +21,7 @@ which refers to the *shared engine store*: a pre-confirm draft is not engine sta
 
 Member shape produced (the minimal set the run-setup body validates):
 
-    {"id": "<coding_role>", "role": "member", "enabled": true,
+    {"id": "<coding_role>", "role": "answerer", "enabled": true,
      "model_mode": "single", "gateway_route_id": "<route>",
      "metadata": {"coding_role": "<role>"}}
 
@@ -116,7 +116,9 @@ def _find(members: list[dict[str, Any]], role: str) -> dict[str, Any] | None:
 def _new_member(role: str) -> dict[str, Any]:
     return {
         "id": role,
-        "role": "member",
+        # Engine canon for the CouncilMember.role field is "answerer"
+        # (recipes.resolve_team / orientation_scan); coding-role lives in metadata.
+        "role": "answerer",
         "enabled": True,
         "model_mode": "single",
         "metadata": {"coding_role": role},

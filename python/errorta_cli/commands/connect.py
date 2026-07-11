@@ -84,8 +84,14 @@ def _read_key(args: dict[str, Any], *, label: str) -> str:
     if key_file:
         try:
             text = Path(str(key_file)).read_text(encoding="utf-8")
-        except OSError as exc:
-            raise CliError(f"could not read --key-file: {exc}", code="key_file_error")
+        except OSError:
+            # Never echo the path/value: a user who mistypes their key into
+            # --key-file would otherwise see it in the error text (§14).
+            raise CliError(
+                "could not read the file given to --key-file "
+                "(check the path; the value is not shown for safety)",
+                code="key_file_error",
+            )
         key = text.strip().splitlines()[0].strip() if text.strip() else ""
         if not key:
             raise CliError("--key-file is empty", code="key_file_empty")

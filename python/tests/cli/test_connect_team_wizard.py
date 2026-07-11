@@ -278,7 +278,7 @@ def test_team_set_builds_single_member(make_ctx) -> None:
     m = draft["members"][0]
     # Exactly the fields _resolve_members/_validate_member_ids/_ensure_coding_roles need.
     assert m["id"] == "dev"
-    assert m["role"] == "member"
+    assert m["role"] == "answerer"  # engine canon (recipes.resolve_team)
     assert m["enabled"] is True
     assert m["model_mode"] == "single"
     assert m["gateway_route_id"] == "anthropic.sonnet"
