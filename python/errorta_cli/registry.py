@@ -208,6 +208,7 @@ _COMMAND_MODULES = (
     "status", "log", "decisions", "tasks", "prs", "tokens", "turns",
     "attention", "runtime", "team", "models", "governance", "pm",
     "runctl",  # S3 — setup / run / cancel / resume / continue (mutations)
+    "connect", "wizard",  # S4 — provider onboarding + conversational setup
 )
 
 for _name in _COMMAND_MODULES:
