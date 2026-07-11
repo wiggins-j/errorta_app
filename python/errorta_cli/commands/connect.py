@@ -23,7 +23,9 @@ Write flow per §7.1:
   (``GET /gateway/providers/{p}/cli-status``); optionally set the path
   (``PUT /provider-keys/{p}/cli-binary``); ``--login`` shows
   ``GET /provider-keys/{p}/login-command``; then ``POST /provider-keys/{p}/test``
-  (the ONLY way to populate the fail-closed ``connected`` cache — gateway.py:495).
+  (the explicit way to populate the ``connected`` cache — gateway.py:495; a run's
+  member-health preflight ALSO auto-warms it via the shared observed-connectivity
+  cache, so an actively-used provider shows ``connected`` without a manual Test).
 * ``connect ollama`` — show local availability (``GET /gateway/model-availability``
   / ``GET /gateway/routes?provider=local``) + the ``ERRORTA_OLLAMA_HOST`` guidance
   (the sidecar reads that env at call time; the CLI can't mutate the sidecar's env).

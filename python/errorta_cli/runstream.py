@@ -77,7 +77,7 @@ SUCCESS_STOP_REASONS = frozenset({
 # One-line human gloss per terminal reason (rendered at the end of a stream).
 STOP_REASON_GLOSS: dict[str, str] = {
     "definition_of_done": "the team met the definition of done",
-    "checkpoint": "stopped at a checkpoint — resume to continue",
+    "checkpoint": "stopped at a checkpoint — continue it with: errorta continue",
     "cancelled": "cancelled by request",
     "no_actionable_work": "no actionable work remained",
     "budget_exhausted": "budget (iterations / model-calls) exhausted",

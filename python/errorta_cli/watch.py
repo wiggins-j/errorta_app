@@ -82,12 +82,24 @@ def run_watch(
             return
 
 
+# Clear sequence for a redraw. The cursor is HOMED (`\x1b[H`) BEFORE the erase
+# (`\x1b[2J`): erasing first while the cursor sits at the bottom of a full screen
+# makes some terminals (macOS Terminal.app among them) scroll the old frame up
+# into the scrollback instead of clearing it in place — which is exactly the
+# "the watched view accumulates every tick" bug. `tput clear` emits ESC[H ESC[2J
+# for this same ordering reason. The trailing `\x1b[3J` drops the scrollback so a
+# stale frame can't even be scrolled back to.
+_CLEAR_SCREEN = "\x1b[H\x1b[2J\x1b[3J"
+
+
 def _draw(stream: TextIO, text: str, clear: bool) -> None:
     try:
         is_tty = stream.isatty()
     except (ValueError, AttributeError):
         is_tty = False
     if clear and is_tty:
-        stream.write("\x1b[2J\x1b[H")
+        # Escape codes ONLY on a real TTY — a piped `errorta log --watch | tee`
+        # must stay plain text (no ANSI leaks into the captured stream).
+        stream.write(_CLEAR_SCREEN)
     stream.write(text + "\n")
     stream.flush()
