@@ -535,6 +535,36 @@ def test_require_sole_owner_refuses_when_port_swapped_to_different_pid(
         sidecar.require_sole_owner(tmp_path, handle)
 
 
+def test_require_sole_owner_refuses_when_advert_pid_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """LOW-4: a port+healthz match is still not enough if the on-disk advert
+    does not name the pid. Missing identity data is uncertainty → refuse."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "commit": "abc", "started_by": "app"}
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"service": "errorta-sidecar", "pid": 77}
+        if port == 5555
+        else None,
+    )
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
+
+    handle = sidecar.SidecarHandle(
+        base_url="http://127.0.0.1:5555",
+        port=5555,
+        pid=77,
+        commit="abc",
+        started_by="app",
+        adopted=True,
+    )
+    assert sidecar._driving_advertised_sidecar(tmp_path, handle) is False
+    with pytest.raises(ForeignSidecar):
+        sidecar.require_sole_owner(tmp_path, handle)
+
+
 def test_require_sole_owner_refuses_when_a_different_sidecar_is_advertised(
     monkeypatch, tmp_path: Path
 ) -> None:

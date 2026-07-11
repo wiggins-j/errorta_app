@@ -49,7 +49,7 @@ fn main() {
 /// `rerun-if-changed` for the files git rewrites on a commit/checkout makes cargo
 /// re-run this script (and re-stamp `git rev-parse HEAD`) the moment HEAD moves.
 ///
-/// Fully defensive: no `.git` directory, a detached HEAD, or any unreadable file
+/// Fully defensive: no `.git` metadata, a detached HEAD, or any unreadable file
 /// simply means fewer/zero rerun hints — cargo keeps the cached stamp, which is
 /// the safe, pre-existing fallback (a stale stamp only makes adoption safe-fall
 /// back to "spawn our own", never corrupts anything). Never fails the build.
@@ -57,15 +57,15 @@ fn emit_git_rerun_hints() {
     let Some(git_dir) = find_git_dir() else {
         return;
     };
+    let common_dir = find_common_git_dir(&git_dir);
+    let mut emitted = std::collections::BTreeSet::new();
     // `.git/HEAD` is rewritten on every branch switch / detached checkout.
     let head = git_dir.join("HEAD");
-    println!("cargo:rerun-if-changed={}", head.display());
+    emit_rerun_hint(&head, &mut emitted);
     // `.git/packed-refs` — a fallback for a ref stored packed rather than loose
     // (e.g. right after a `git gc` or a fresh clone).
-    let packed = git_dir.join("packed-refs");
-    if packed.is_file() {
-        println!("cargo:rerun-if-changed={}", packed.display());
-    }
+    emit_rerun_hint_if_file(git_dir.join("packed-refs"), &mut emitted);
+    emit_rerun_hint_if_file(common_dir.join("packed-refs"), &mut emitted);
     // The current branch's loose ref file (e.g. `.git/refs/heads/<branch>`) is
     // what git rewrites when you commit on that branch. Resolve it from HEAD's
     // `ref: refs/...` target. A detached HEAD (raw sha, no `ref:` prefix) has no
@@ -73,21 +73,33 @@ fn emit_git_rerun_hints() {
     if let Ok(contents) = std::fs::read_to_string(&head) {
         if let Some(target) = contents.strip_prefix("ref:").map(str::trim) {
             if !target.is_empty() {
-                let ref_path = git_dir.join(target);
-                if ref_path.is_file() {
-                    println!("cargo:rerun-if-changed={}", ref_path.display());
-                }
+                emit_rerun_hint_if_file(git_dir.join(target), &mut emitted);
+                emit_rerun_hint_if_file(common_dir.join(target), &mut emitted);
             }
         }
     }
 }
 
-/// Walk up from `CARGO_MANIFEST_DIR` looking for a `.git` DIRECTORY (the common
-/// case for this repo). Returns the git dir, or `None` if not found or if `.git`
-/// is not a plain directory. A linked-worktree / submodule `.git` FILE
-/// (`gitdir: ...`) is intentionally not chased — skipping is safe (the stamp just
-/// falls back to cargo's cached value), which keeps this helper simple and
-/// failure-proof.
+fn emit_rerun_hint(path: &std::path::Path, emitted: &mut std::collections::BTreeSet<String>) {
+    let key = path.display().to_string();
+    if emitted.insert(key.clone()) {
+        println!("cargo:rerun-if-changed={key}");
+    }
+}
+
+fn emit_rerun_hint_if_file(
+    path: std::path::PathBuf,
+    emitted: &mut std::collections::BTreeSet<String>,
+) {
+    if path.is_file() {
+        emit_rerun_hint(&path, emitted);
+    }
+}
+
+/// Walk up from `CARGO_MANIFEST_DIR` looking for git metadata. Supports both the
+/// normal `.git` directory and the `.git` file used by linked worktrees
+/// (`gitdir: ...`). Returns the worktree-specific git dir, or `None` if not
+/// found/unreadable.
 fn find_git_dir() -> Option<std::path::PathBuf> {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
     let mut dir = std::path::PathBuf::from(manifest);
@@ -96,8 +108,50 @@ fn find_git_dir() -> Option<std::path::PathBuf> {
         if candidate.is_dir() {
             return Some(candidate);
         }
+        if candidate.is_file() {
+            if let Some(path) = read_gitdir_file(&candidate) {
+                return Some(path);
+            }
+        }
         if !dir.pop() {
             return None;
         }
     }
+}
+
+fn read_gitdir_file(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let raw = contents.strip_prefix("gitdir:")?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let gitdir = std::path::PathBuf::from(raw);
+    let resolved = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        path.parent()?.join(gitdir)
+    };
+    if !resolved.is_dir() {
+        return None;
+    }
+    Some(resolved.canonicalize().unwrap_or(resolved))
+}
+
+fn find_common_git_dir(git_dir: &std::path::Path) -> std::path::PathBuf {
+    let commondir = git_dir.join("commondir");
+    if let Ok(contents) = std::fs::read_to_string(&commondir) {
+        let raw = contents.trim();
+        if !raw.is_empty() {
+            let common = std::path::PathBuf::from(raw);
+            let resolved = if common.is_absolute() {
+                common
+            } else {
+                git_dir.join(common)
+            };
+            if resolved.is_dir() {
+                return resolved.canonicalize().unwrap_or(resolved);
+            }
+        }
+    }
+    git_dir.to_path_buf()
 }

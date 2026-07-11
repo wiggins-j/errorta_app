@@ -574,10 +574,10 @@ def _driving_advertised_sidecar(home: Path, handle: SidecarHandle) -> bool:
     serving_pid = body.get("pid")
     if not isinstance(serving_pid, int):
         return False
-    if handle.pid is not None and serving_pid != handle.pid:
+    if not isinstance(handle.pid, int) or serving_pid != handle.pid:
         return False
     advert_pid = record.get("pid")
-    if isinstance(advert_pid, int) and advert_pid != serving_pid:
+    if not isinstance(advert_pid, int) or advert_pid != serving_pid:
         return False
     return True
 
