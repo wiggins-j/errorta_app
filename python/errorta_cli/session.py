@@ -23,6 +23,7 @@ class Context:
     verbosity: Verbosity
     project_id: str | None = None
     handle: SidecarHandle | None = None
+    poll_interval: float | None = None
 
     @classmethod
     def build(
@@ -32,6 +33,7 @@ class Context:
         verbosity: Verbosity | None = None,
         project_override: str | None = None,
         cwd: Path | None = None,
+        poll_interval: float | None = None,
     ) -> Context:
         """Resolve ``ERRORTA_HOME`` and the cwd-bound project into a Context."""
         home = config.resolve_home(home_override)
@@ -40,6 +42,7 @@ class Context:
             home=home,
             verbosity=verbosity or Verbosity(),
             project_id=pid,
+            poll_interval=poll_interval,
         )
 
     def switch_project(self, project_id: str | None) -> None:

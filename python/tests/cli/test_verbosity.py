@@ -89,3 +89,47 @@ def test_resolve_level_prefers_override_then_env(monkeypatch) -> None:
     assert resolve_level("1") is Level.DEFAULT  # override wins
     monkeypatch.delenv("ERRORTA_CLI_VERBOSITY", raising=False)
     assert resolve_level(None) is Level.DEFAULT
+
+
+# --- S2: the overrides compose deterministically (plan §4 invariant 7) --------
+
+def test_focus_wins_over_mute_and_watch() -> None:
+    v = Verbosity(level=Level.DEFAULT)
+    v.watch("turns")
+    v.mute("prs")
+    v.set_focus("prs")  # focus solos prs — even though prs is muted
+    assert v.should_emit("prs")
+    assert not v.should_emit("turns")  # watched, but not the focus → off
+    assert not v.should_emit("team-log")  # on by level, but not the focus → off
+
+
+def test_focus_on_a_watched_channel_solos_it() -> None:
+    v = Verbosity(level=Level.QUIET)
+    v.watch("turns")
+    v.set_focus("turns")
+    assert v.should_emit("turns")
+    assert not v.should_emit("team-log")
+
+
+def test_unknown_channel_only_streams_at_firehose_or_when_watched() -> None:
+    # An unknown channel is FIREHOSE-only by default (a typo never spams L1).
+    assert not should_emit("bogus", Level.DEFAULT)
+    assert should_emit("bogus", Level.FIREHOSE)
+    v = Verbosity(level=Level.DEFAULT)
+    assert not v.should_emit("bogus")
+    v.watch("bogus")  # explicit opt-in still works
+    assert v.should_emit("bogus")
+
+
+def test_every_level_boundary_matches_the_channel_table() -> None:
+    # Level N shows exactly the channels whose min-level ≤ N — asserted end-to-end.
+    expected = {
+        0: set(),
+        1: {"team-log", "attention", "prs"},
+        2: {"team-log", "attention", "prs", "decisions", "runtime"},
+        3: {"team-log", "attention", "prs", "decisions", "runtime", "turns", "tokens"},
+        4: {"team-log", "attention", "prs", "decisions", "runtime", "turns", "tokens", "tools"},
+        5: set(CHANNELS),
+    }
+    for level, shown in expected.items():
+        assert {c for c in CHANNELS if should_emit(c, level)} == shown, level

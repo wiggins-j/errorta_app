@@ -75,3 +75,50 @@ def test_json_flag_stripped_and_bypasses_render(make_ctx) -> None:
     # --json emits the raw payload as JSON, not the human summary.
     assert text.strip().startswith("{")
     assert '"health"' in text
+
+
+# --- S2: parity across every read command (argv ≡ slash) ----------------------
+
+# Representative args per command so a required positional is satisfied. Both
+# surfaces receive the identical token list, so identical routes are the property
+# under test.
+_S2_ARGS = {
+    "pr": ["pr-1"],
+    "turn": ["t1", "tn-1"],
+    "pm": ["chat"],
+}
+
+
+def _args_for(name: str) -> list[str]:
+    return list(_S2_ARGS.get(name, []))
+
+
+def test_all_commands_parity_with_bound_project(make_ctx) -> None:
+    """Every registered command hits the identical route sequence via argv and
+    slash when a project is bound — and actually reaches a route (not a no-op)."""
+    from .conftest import RouteClient
+
+    for cmd in registry.all_commands():
+        args = _args_for(cmd.name)
+        argv_client = RouteClient()
+        slash_client = RouteClient()
+
+        registry.dispatch(cmd.name, argv_client, make_ctx(project_id="p"), args)
+
+        name_s, base = registry.split_slash("/" + cmd.name + " " + " ".join(args))
+        registry.dispatch(name_s, slash_client, make_ctx(project_id="p"), base)
+
+        assert argv_client.calls == slash_client.calls, cmd.name
+        assert argv_client.calls, f"{cmd.name} made no route call with a project bound"
+
+
+def test_json_bypasses_render_for_every_command(make_ctx) -> None:
+    from .conftest import RouteClient
+
+    for cmd in registry.all_commands():
+        client = RouteClient(default={"entries": [], "run": {}, "health": {}})
+        _payload, text = registry.dispatch(
+            cmd.name, client, make_ctx(project_id="p"), _args_for(cmd.name), json_mode=True
+        )
+        stripped = text.strip()
+        assert stripped.startswith("{") or stripped.startswith("["), cmd.name
