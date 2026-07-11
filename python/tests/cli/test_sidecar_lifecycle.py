@@ -374,6 +374,23 @@ def test_stop_without_record_is_noop(tmp_path: Path) -> None:
     assert result["stopped"] is False
 
 
+def test_restart_refuses_to_spawn_when_foreign_app_detected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sidecar, "probe_healthz", lambda *a, **k: None)
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
+    monkeypatch.setattr(
+        sidecar,
+        "_launch",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+
+    with pytest.raises(ForeignSidecar):
+        sidecar.restart(tmp_path, our_commit="abc")
+
+    assert sidecar.read_record(tmp_path) is None
+
+
 # --------------------------------------------------------------------------- #
 # Real-boot smoke (skips without the engine stack) — mirrors boot-smoke.
 # --------------------------------------------------------------------------- #

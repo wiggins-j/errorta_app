@@ -497,4 +497,4 @@ def stop(home: Path) -> dict[str, Any]:
 def restart(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
     """Stop the current CLI sidecar and spawn a fresh one."""
     stop(home)
-    return spawn(home, our_commit=our_commit)
+    return resolve(home, allow_spawn=True, our_commit=our_commit)

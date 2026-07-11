@@ -144,8 +144,10 @@ def _register_argv_commands() -> None:
 
 
 def _add_argv_command(command: registry.Command) -> None:
-    def _handler(ctx: typer.Context, _name: str = command.name) -> None:
-        _run_registry_command(_name, list(ctx.args))
+    command_name = command.name
+
+    def _handler(ctx: typer.Context) -> None:
+        _run_registry_command(command_name, list(ctx.args))
 
     app.command(
         name=command.name,
