@@ -293,6 +293,12 @@ def owner_is_live_peer_sidecar(
     ``advert`` is passed as data (the parsed ``sidecar.json`` dict, or ``None``)
     and ``healthz_fn``/``alive_fn`` are injected, so this stays a pure predicate
     with no import of ``errorta_app`` (the caller supplies the app-side seams).
+
+    Scope: ``sidecar.json`` names exactly ONE peer, which is sound under the
+    single-instance adoption contract (§13.1 guarantees at most one *other*
+    sidecar — front-ends adopt rather than proliferate). A contrived 3+-sidecar
+    zoo is out of contract and not defended here; the fail-open direction keeps it
+    safe (uncertainty → recover) rather than correct.
     """
     if not isinstance(state, dict):
         return False
