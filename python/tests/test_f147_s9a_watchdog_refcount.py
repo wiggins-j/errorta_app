@@ -47,6 +47,48 @@ def test_registered_ignores_malformed_entries(tmp_errorta_home: Path) -> None:
     assert pw.registered_client_pids() == {77}
 
 
+# --- LOW-5: stale client pidfile reaping ------------------------------------
+
+def test_reap_removes_dead_client_and_keeps_live(tmp_errorta_home: Path) -> None:
+    """A dead client's stale pidfile is reaped (and excluded from the refcount);
+    a live client's pidfile is kept — so a crashed client can't keep a shared
+    sidecar alive forever."""
+    d = pw.clients_dir()
+    (d / "111").write_text("111", encoding="utf-8")  # dead client
+    (d / "222").write_text("222", encoding="utf-8")  # live client
+    alive = {222}
+
+    result = pw.registered_client_pids(reap=True, alive_fn=lambda p: p in alive)
+
+    assert result == {222}
+    assert not (d / "111").exists(), "dead client's pidfile should be reaped"
+    assert (d / "222").exists(), "live client's pidfile must be kept"
+
+
+def test_default_read_never_reaps(tmp_errorta_home: Path) -> None:
+    """The default (reap=False) call is a pure reader — it never unlinks, even a
+    pidfile whose pid is dead. Preserves every existing caller/test."""
+    d = pw.clients_dir()
+    (d / "111").write_text("111", encoding="utf-8")
+    result = pw.registered_client_pids(alive_fn=lambda p: False)
+    assert result == {111}
+    assert (d / "111").exists()
+
+
+def test_reap_keeps_pid_it_cannot_prove_dead(tmp_errorta_home: Path) -> None:
+    """A liveness probe that raises must NOT reap the pidfile — only a
+    positively-dead pid is reaped (never reap a client we can't prove dead)."""
+    d = pw.clients_dir()
+    (d / "333").write_text("333", encoding="utf-8")
+
+    def boom(_pid: int) -> bool:
+        raise OSError("probe failed")
+
+    result = pw.registered_client_pids(reap=True, alive_fn=boom)
+    assert result == {333}
+    assert (d / "333").exists()
+
+
 # --- loop --------------------------------------------------------------------
 
 def test_loop_no_thread_when_nothing_to_watch(monkeypatch) -> None:

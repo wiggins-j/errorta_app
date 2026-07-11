@@ -380,19 +380,30 @@ def resolve(
                 mismatch = bool(
                     our_commit and commit and str(commit) != str(our_commit)
                 )
-                # F147 S9b co-drive policy. Adopt when we can confirm a
-                # COORDINATED, single shared sidecar:
-                #   * our own previously-spawned CLI sidecar (mismatch is a
-                #     harmless upgrade warning — the CLI is still sole owner), OR
-                #   * ANY live sidecar (app- or cli-started) whose build commit
-                #     MATCHES ours — co-driving one same-build sidecar is safe
-                #     (S9a's cross-process lock + owner_pid + owner-aware boot
-                #     recovery coordinate the two front-ends).
-                # A live but VERSION-SKEWED non-CLI sidecar (e.g. an app built
-                # from a different commit) is NOT adopted and NOT spawned-next-to:
-                # we can't confirm a coordinated build, so we refuse (safe
-                # fallback — concurrency simply doesn't engage).
-                coordinated = (started == "cli") or (not mismatch)
+                # F147 S9b co-drive policy + S9 follow-up (review LOW-3). Adopt
+                # when we can confirm a COORDINATED, single shared sidecar:
+                #   * our own previously-spawned CLI sidecar (started == "cli"): a
+                #     sidecar this CLI started is coordinated BY CONSTRUCTION (we
+                #     are its sole owner) regardless of whether a build commit is
+                #     known — a mismatched commit there is just a harmless upgrade
+                #     warning, NOT a reason to refuse; OR
+                #   * a FOREIGN (app-/unknown-started) live sidecar whose build
+                #     commit is KNOWN on both sides AND MATCHES ours — co-driving
+                #     one same-build sidecar is safe (S9a's cross-process lock +
+                #     owner_pid + owner-aware boot recovery coordinate the two
+                #     front-ends).
+                # LOW-3 safe fallback: for a FOREIGN sidecar an unknown/blank
+                # commit on EITHER side means we CANNOT positively confirm a
+                # coordinated build, so we fail toward NOT adopting it (refuse) —
+                # mirroring the Rust app's "empty commit → never adopt". Only a
+                # positively-confirmed match adopts a foreign sidecar; a
+                # version-skewed OR unconfirmable foreign sidecar is neither
+                # adopted nor spawned-next-to (safe fallback — concurrency simply
+                # doesn't engage).
+                commits_confirmed_match = bool(
+                    our_commit and commit and str(commit) == str(our_commit)
+                )
+                coordinated = (started == "cli") or commits_confirmed_match
                 if coordinated:
                     pid = record.get("pid")
                     port = int(record["port"])
@@ -408,10 +419,12 @@ def resolve(
                     _register_client(home)
                     return handle
                 raise ForeignSidecar(
-                    "refusing to co-drive a version-skewed sidecar (it was built "
-                    f"from {str(commit)!r}, this CLI from {str(our_commit)!r}). "
-                    "Update so both match, or use a separate --home — co-driving "
-                    "a different build on one store can corrupt in-flight work.",
+                    "refusing to co-drive a sidecar whose build could not be "
+                    f"confirmed to match (it advertises commit {str(commit)!r}, "
+                    f"this CLI is {str(our_commit)!r}). Update so both are known "
+                    "and match, or use a separate --home — co-driving an "
+                    "unconfirmed or mismatched build on one store can corrupt "
+                    "in-flight work.",
                     code="foreign_sidecar",
                 )
             # The record didn't yield a live /healthz. Only discard it if the
@@ -531,18 +544,42 @@ def _scan_errorta_processes(*, exclude_pid: int | None) -> list[str]:
 def _driving_advertised_sidecar(home: Path, handle: SidecarHandle) -> bool:
     """Are we driving the ONE sidecar currently advertised in ``sidecar.json``?
 
-    True when the on-disk record names the exact port we hold and a live
-    ``/healthz`` confirms it. That is the co-drive-safe case: a single, shared,
+    True when the on-disk record names the exact port we hold, a live ``/healthz``
+    confirms it, AND the process actually serving there is the SAME one we're
+    driving (pid match). That is the co-drive-safe case: a single, shared,
     coordinated sidecar (whether the app adopted ours or we adopted the app's)
     can't corrupt itself. If a DIFFERENT sidecar now owns the advertisement (e.g.
     an app that couldn't adopt spawned its own second one), our port won't match
-    and this returns False → the foreign scan below decides."""
+    and this returns False → the foreign scan below decides.
+
+    F147 S9 follow-up (review LOW-4): port equality alone is a narrow TOCTOU — a
+    sidecar swap that reused the same port between adopt and this call would pass
+    a port-only check. So we also confirm the live ``/healthz`` pid matches the
+    pid we adopted/spawned (``handle.pid``), and that the advert names that same
+    pid. SAFE FALLBACK: any uncertainty (no live healthz, healthz without a pid,
+    a pid that differs, or an advert pid that differs) returns False → treated as
+    NOT driving the shared sidecar → the conservative foreign scan decides."""
     record = read_record(home)
     if not record:
         return False
     if record.get("port") != handle.port:
         return False
-    return probe_healthz(handle.port) is not None
+    body = probe_healthz(handle.port)
+    if body is None:
+        return False
+    # Confirm identity, not just the port. The sidecar answering on our port must
+    # be the process we're driving. Our own sidecar's /healthz always reports its
+    # pid (server.py); if it's missing or differs, we can't prove it's ours → not
+    # driving (conservative).
+    serving_pid = body.get("pid")
+    if not isinstance(serving_pid, int):
+        return False
+    if not isinstance(handle.pid, int) or serving_pid != handle.pid:
+        return False
+    advert_pid = record.get("pid")
+    if not isinstance(advert_pid, int) or advert_pid != serving_pid:
+        return False
+    return True
 
 
 def require_sole_owner(home: Path, handle: SidecarHandle | None) -> None:

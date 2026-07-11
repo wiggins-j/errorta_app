@@ -28,6 +28,7 @@ under a real front-end.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -93,9 +94,22 @@ def unregister_client(pid: Optional[int] = None) -> None:
         _LOG.warning("could not unregister client pid %d: %s", want, exc)
 
 
-def registered_client_pids() -> set[int]:
+def registered_client_pids(
+    *,
+    reap: bool = False,
+    alive_fn: Callable[[int], bool] = parent_alive,
+) -> set[int]:
     """The pids registered under the clients dir. Ignores malformed entries.
-    Best-effort — returns an empty set on any error."""
+    Best-effort — returns an empty set on any error.
+
+    F147 S9 follow-up (review LOW-5): when ``reap=True`` (the watchdog's live
+    poll), a pidfile whose pid is NOT alive is unlinked and excluded from the
+    result, so a crashed client that never ran ``unregister_client`` — especially
+    combined with later pid reuse — can't keep a shared sidecar alive forever. A
+    LIVE client's pidfile is never reaped, and a pid we can't prove dead
+    (``alive_fn`` raises) is kept, so the refcount only ever loses genuinely-dead
+    clients. Default ``reap=False`` keeps this a pure reader for its other
+    callers/tests."""
     out: set[int] = set()
     try:
         d = clients_dir()
@@ -104,9 +118,22 @@ def registered_client_pids() -> set[int]:
     try:
         for entry in d.iterdir():
             try:
-                out.add(int(entry.name))
+                pid = int(entry.name)
             except (ValueError, OSError):
                 continue
+            if reap:
+                try:
+                    dead = not alive_fn(pid)
+                except Exception:  # noqa: BLE001 — can't prove dead → keep it
+                    dead = False
+                if dead:
+                    # Reap the stale pidfile of a dead client. Best-effort: a
+                    # concurrent unlink (another poll / a clean disconnect) is
+                    # fine — the pid is excluded from the refcount either way.
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        entry.unlink()
+                    continue
+            out.add(pid)
     except Exception:  # noqa: BLE001
         return out
     return out
@@ -125,8 +152,13 @@ def should_exit(
     return not any(alive_fn(pid) for pid in client_pids)
 
 
-def _live_client_set(parent_pid: Optional[int]) -> set[int]:
-    pids: set[int] = set(registered_client_pids())
+def _live_client_set(
+    parent_pid: Optional[int],
+    *,
+    reap: bool = False,
+    alive_fn: Callable[[int], bool] = parent_alive,
+) -> set[int]:
+    pids: set[int] = set(registered_client_pids(reap=reap, alive_fn=alive_fn))
     if parent_pid is not None:
         pids.add(int(parent_pid))
     return pids
@@ -169,7 +201,10 @@ def start_parent_death_watchdog(
     def _clients() -> set[int]:
         if clients_fn is not None:
             return set(clients_fn())
-        return _live_client_set(ppid)
+        # F147 S9 follow-up (review LOW-5): reap dead client pidfiles on the live
+        # poll using the same liveness probe the exit policy uses, so a crashed
+        # client can't linger until an unrelated process reuses its pid.
+        return _live_client_set(ppid, reap=True, alive_fn=alive_fn)
 
     # Nothing to watch: no parent and no registered client. Preserve the pre-S9a
     # standalone-dev no-op.
