@@ -210,9 +210,13 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     if not _base.has_project(ctx):
         return _base.no_project()
     action = str(args.get("action") or "").strip().lower()
-    if action in _MUTATING_ACTIONS and args.get("watch"):
+    # `run` is watchable as a PREVIEW, but `run --go` performs a real launch
+    # (installs deps + starts the program) — a mutation that must not re-fire.
+    is_mutation = action in _MUTATING_ACTIONS or (action == "run" and bool(args.get("go")))
+    if is_mutation and args.get("watch"):
+        label = "run --go" if action == "run" else action
         raise CliError(
-            f"--watch is for read views; `runtime {action}` spawns/records and "
+            f"--watch is for read views; `runtime {label}` spawns/records and "
             "can't be watched (it would re-fire every tick). Run it once, then "
             "watch progress with: runtime logs <sid> --watch",
             code="watch_on_mutation",

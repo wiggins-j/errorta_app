@@ -134,6 +134,37 @@ def test_pr_json_mode_requires_yes(make_ctx) -> None:
     assert client.calls == []
 
 
+def test_pr_interactive_decline_opens_nothing(make_ctx, monkeypatch) -> None:
+    """Interactive `publish pr`: declining the y/N opens no PR (outward-action gate)."""
+    monkeypatch.setattr("errorta_cli.commands._mutate.is_interactive", lambda: True)
+    monkeypatch.setattr("errorta_cli.commands._mutate.prompt_yes_no",
+                        lambda *a, **k: False)
+    client = RouteClient()
+    registry.dispatch("publish", client, make_ctx(project_id=PID),
+                      ["pr", "--branch", "b", "--title", "t"])
+    assert client.calls == []  # declined → never opened a PR
+
+
+def test_new_repo_interactive_confirm_defaults_private(make_ctx, monkeypatch) -> None:
+    """Interactive accept → posts; `new-repo` defaults private=True (no --public)."""
+    monkeypatch.setattr("errorta_cli.commands._mutate.is_interactive", lambda: True)
+    monkeypatch.setattr("errorta_cli.commands._mutate.prompt_yes_no",
+                        lambda *a, **k: True)
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content) if request.content else None
+        return httpx.Response(200, json={"repo_url": "https://github.com/o/newrepo"})
+
+    with _mock_client(handler) as client:
+        registry.dispatch("publish", client, make_ctx(project_id=PID),
+                          ["new-repo", "newrepo"])
+    assert seen["path"] == f"{BASE}/new-github-repo"
+    assert seen["body"]["repo_name"] == "newrepo"
+    assert seen["body"]["private"] is True  # private by default
+
+
 # --------------------------------------------------------------------------- #
 # publish new-repo — private by default; requires --yes.
 # --------------------------------------------------------------------------- #

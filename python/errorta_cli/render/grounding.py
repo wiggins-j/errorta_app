@@ -88,9 +88,14 @@ def render_bootstrap(payload: Any) -> str:
              Text(status or "unknown", style="cli.ok" if ok else "cli.warn")]
     if job.get("corpus_id"):
         lines.append(_kv("corpus", job.get("corpus_id")))
-    for key in ("ingested", "indexed", "included"):
-        if job.get(key) not in (None, ""):
-            lines.append(_kv(key, job.get(key)))
+    # Show whatever scalar progress/count fields the job carries (schema varies:
+    # documents/chunks/ingested/indexed/…), skipping the meta fields already shown.
+    _meta = {"job_id", "status", "corpus_id", "errors", "error", "source_root"}
+    for key, value in job.items():
+        if key in _meta or value in (None, ""):
+            continue
+        if isinstance(value, (int, float, str, bool)):
+            lines.append(_kv(key, value))
     errors = job.get("errors") or []
     if errors:
         lines.append(Text("errors: " + truncate("; ".join(str(e) for e in errors), 120),

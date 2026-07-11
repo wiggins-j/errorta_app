@@ -241,6 +241,16 @@ def test_watch_on_mutation_refused(make_ctx) -> None:
     assert client.calls == []
 
 
+def test_run_go_watch_refused(make_ctx) -> None:
+    """`run --go` is a real launch — --watch must be refused (would re-fire)."""
+    client = RouteClient()
+    with pytest.raises(CliError) as ei:
+        registry.dispatch("runtime", client, make_ctx(project_id=PID),
+                          ["run", "--go", "--watch", "--yes"])
+    assert ei.value.code == "watch_on_mutation"
+    assert client.calls == []  # never launched
+
+
 # --------------------------------------------------------------------------- #
 # evidence surfaces runtime_evidence + delivery outcome.
 # --------------------------------------------------------------------------- #
