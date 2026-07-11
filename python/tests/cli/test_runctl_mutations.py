@@ -23,6 +23,7 @@ from errorta_cli.errors import (
     PreflightFailed,
     ResidencyRefused,
     SetupRequired,
+    SidecarUnreachable,
 )
 
 from .conftest import RouteClient
@@ -411,3 +412,170 @@ def test_ctrl_c_detaches_without_cancel(make_ctx, monkeypatch) -> None:
     assert posted == [f"/coding/projects/{PID}/run"]
     assert not any(p.endswith("/run/cancel") for p in posted)
     assert "detached" in text.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 8. classify_exit fails CLOSED on an unknown/未-triaged terminal reason (#1).
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    "stop_reason",
+    ["some_future_reason_the_cli_has_not_triaged", None, ""],
+)
+def test_classify_exit_unknown_reason_fails_closed(stop_reason) -> None:
+    # A terminal `stopped` run whose reason isn't in the SUCCESS allowlist must
+    # classify as failure (non-zero) — never a silent CI "success".
+    payload = {"running": False,
+               "state": {"status": "stopped", "stop_reason": stop_reason}}
+    assert runstream.classify_exit(payload) == runstream.EXIT_RUN_FAILED
+
+
+def _engine_stop_reasons() -> set[str]:
+    """Parse the CURRENT engine stop_reason constants straight from the source.
+
+    Reads ``autonomy.py`` as text (no heavy engine import) between the
+    ``# --- stop reasons`` header and the next section header, extracting each
+    ``NAME = "value"`` literal. A NEW engine reason added to that block that the
+    CLI hasn't triaged will surface here and fail the guard below — loudly.
+    """
+    import re
+    from pathlib import Path
+
+    autonomy = (Path(__file__).resolve().parents[2]
+                / "errorta_council" / "coding" / "autonomy.py")
+    assert autonomy.exists(), f"engine autonomy.py not found at {autonomy}"
+    text = autonomy.read_text()
+    start = text.index("# --- stop reasons")
+    block = text[start:]
+    block = block[: block.index("\n# ---", 1)]  # up to the next section header
+    return set(re.findall(r'^[A-Z][A-Z0-9_]*\s*=\s*"([a-z_]+)"', block, re.MULTILINE))
+
+
+def test_every_engine_stop_reason_is_triaged() -> None:
+    """Drift guard: the two CLI sets must EXACTLY partition the engine reasons.
+
+    So a future engine reason the CLI forgot to classify fails CI here instead of
+    silently mis-exiting as success (finding #1).
+    """
+    engine = _engine_stop_reasons()
+    assert len(engine) >= 11, f"parsed too few stop_reasons: {engine}"
+
+    success = runstream.SUCCESS_STOP_REASONS
+    failure = runstream.FAILURE_STOP_REASONS
+    assert not (success & failure), f"stop_reason in BOTH CLI sets: {success & failure}"
+
+    untriaged = engine - (success | failure)
+    assert not untriaged, f"engine stop_reasons the CLI hasn't triaged: {untriaged}"
+    phantom = (success | failure) - engine
+    assert not phantom, f"CLI references unknown stop_reasons: {phantom}"
+
+    # Every engine reason classifies to its intended code.
+    for reason in engine:
+        payload = {"running": False,
+                   "state": {"status": "stopped", "stop_reason": reason}}
+        expected = runstream.EXIT_OK if reason in success else runstream.EXIT_RUN_FAILED
+        assert runstream.classify_exit(payload) == expected, reason
+
+
+# --------------------------------------------------------------------------- #
+# 9. Poll-error tolerance: a transient blip mid-stream is survived (#2).
+# --------------------------------------------------------------------------- #
+
+class _BlippyRunClient:
+    """``GET /run`` raises on the given (1-based) poll indices, else advances.
+
+    Non-``/run`` gets (ledger polls) return ``{}``. After ``running_before_terminal``
+    successful ``/run`` polls it returns a clean terminal.
+    """
+
+    def __init__(self, *, fail_at, running_before_terminal: int) -> None:
+        self.base_url = "http://127.0.0.1:59999"
+        self.fail_at = set(fail_at)
+        self.running_before_terminal = running_before_terminal
+        self.run_gets = 0
+        self.ok_run_gets = 0
+        self.paths: list[str] = []
+
+    def get_json(self, path: str, *, params=None):
+        self.paths.append(path)
+        if not path.endswith("/run"):
+            return {}
+        self.run_gets += 1
+        if self.run_gets in self.fail_at:
+            raise SidecarUnreachable("transient blip")
+        self.ok_run_gets += 1
+        if self.ok_run_gets <= self.running_before_terminal:
+            return {"running": True, "state": {"status": "running"}}
+        return {"running": False,
+                "state": {"status": "stopped", "stop_reason": "definition_of_done"}}
+
+    def post_json(self, path: str, *, json=None, params=None):
+        self.paths.append(path)
+        return {"started": True}
+
+
+def test_block_until_terminal_survives_transient_blip() -> None:
+    client = _BlippyRunClient(fail_at={2}, running_before_terminal=1)
+    slept: list[float] = []
+    final = runstream.block_until_terminal(
+        client, PID, sleep=slept.append, interval=0.1, max_ticks=50
+    )
+    assert runstream.is_terminal(final)
+    assert final["state"]["stop_reason"] == "definition_of_done"
+    # get#1 running, get#2 blip (tolerated, backoff), get#3 terminal.
+    assert client.run_gets == 3
+    assert runstream.POLL_ERROR_BACKOFF in slept  # backed off on the blip
+
+
+def test_stream_run_survives_transient_blip(make_ctx) -> None:
+    client = _BlippyRunClient(fail_at={2}, running_before_terminal=1)
+    emitted: list[str] = []
+    final = runstream.stream_run(
+        client, make_ctx(project_id=PID),
+        sleep=lambda _s: None, emit=emitted.append, max_ticks=50,
+    )
+    assert runstream.is_terminal(final)
+    assert final["state"]["stop_reason"] == "definition_of_done"
+    # The tolerated blip surfaced a retry note rather than aborting the stream.
+    assert any("retry" in line.lower() for line in emitted)
+
+
+def test_block_until_terminal_gives_up_after_tolerance() -> None:
+    class _Down:
+        base_url = "http://127.0.0.1:59999"
+
+        def get_json(self, path, *, params=None):
+            raise SidecarUnreachable("sidecar down")
+
+    with pytest.raises(runstream.RunStreamDetached):
+        runstream.block_until_terminal(
+            _Down(), PID, sleep=lambda _s: None, max_ticks=50
+        )
+
+
+def test_run_detaches_when_poll_repeatedly_fails(make_ctx, monkeypatch) -> None:
+    # A persistent poll failure DETACHES (exit 0), it does NOT surface as the
+    # exit-9 sidecar-unreachable failure that would kill a still-live run.
+    monkeypatch.setattr(runstream, "POLL_ERROR_BACKOFF", 0.0)
+
+    class _Down:
+        base_url = "http://127.0.0.1:59999"
+
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+
+        def get_json(self, path, *, params=None):
+            raise SidecarUnreachable("sidecar down")
+
+        def post_json(self, path, *, json=None, params=None):
+            self.posts.append(path)
+            return {"started": True}
+
+    client = _Down()
+    payload, _text = registry.dispatch(
+        "run", client, make_ctx(project_id=PID),
+        ["--room", "t", "--yes"], json_mode=True,
+    )
+    assert payload.get("_detached")
+    assert registry.exit_code_for(payload) == 0  # graceful detach, NOT exit 9
+    assert client.posts == [f"/coding/projects/{PID}/run"]

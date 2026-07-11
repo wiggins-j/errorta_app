@@ -210,6 +210,9 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
                 _watch.run_watch(name, client, ctx, raw_args)
             except KeyboardInterrupt:
                 pass
+            except CliError as exc:
+                # e.g. `run --watch` — a mutating command rejects the watch loop.
+                _fail(exc)
         return
 
     with SidecarClient(handle.base_url) as client:

@@ -33,7 +33,21 @@ def run_watch(
     out: TextIO | None = None,
     clear: bool = True,
 ) -> None:
-    """Loop-render ``name`` until Ctrl-C (or ``iterations`` frames elapse)."""
+    """Loop-render ``name`` until Ctrl-C (or ``iterations`` frames elapse).
+
+    Rejects ``--watch`` on a MUTATING command (``run`` / ``cancel`` / ``resume`` /
+    ``continue``) BEFORE any dispatch: a watched mutation would re-fire the write
+    every tick and spend real model budget (F147 S3 review #3). Reads are fine.
+    """
+    command = registry.get(name)
+    if command is not None and command.mutating:
+        raise CliError(
+            f"--watch is for read commands; `{name}` mutates run state and can't "
+            "be watched (a watched mutation would re-fire every tick and spend "
+            f"budget). Run `{name}` once, then watch progress with: "
+            "errorta status --watch  /  errorta log --watch",
+            code="watch_on_mutation",
+        )
     stream = out or sys.stdout
     tick = interval if interval is not None else (ctx.poll_interval or DEFAULT_INTERVAL)
     count = 0

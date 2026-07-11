@@ -13,20 +13,50 @@ sidecar):
   ``status`` is a terminal one (``stopped`` / ``failed`` / ``interrupted``). The
   start route sets ``status="running"`` synchronously before returning, so the
   first poll after ``POST /run`` is never a false terminal.
-* ``classify_exit`` — a FAILURE-class ``stop_reason`` (or a ``failed`` /
-  ``interrupted`` state) → ``EXIT_RUN_FAILED`` (7); a success class
+* ``classify_exit`` — classification is an **allowlist that fails closed** so the
+  exit-code contract can't silently drift: only the success allowlist
   (``definition_of_done`` / ``checkpoint`` / ``cancelled`` / ``no_actionable_work``)
-  or an unknown reason → ``EXIT_OK`` (0). The stop-reason sets are grounded in
-  ``autonomy.py:36`` + ``topology.Complete`` (survey §2).
+  → ``EXIT_OK`` (0). A FAILURE-class ``stop_reason``, a ``failed`` /
+  ``interrupted`` state, **or an unknown/未-triaged terminal reason** →
+  ``EXIT_RUN_FAILED`` (7). A future engine ``stop_reason`` the CLI hasn't
+  classified therefore reads as CI failure (non-zero), never a false success.
+  The stop-reason sets are grounded in ``autonomy.py:36`` (survey §2) and locked
+  against drift by ``test_every_engine_stop_reason_is_triaged``.
+
+Live polling is **blip-tolerant**: a transient ``GET /run`` failure mid-stream
+must not abort a still-live run with exit 9, so both loops tolerate up to
+``POLL_ERROR_TOLERANCE`` *consecutive* poll errors (small backoff between them; a
+successful poll resets the counter) before giving up with
+:class:`RunStreamDetached` — which the ``run`` command surfaces as a graceful
+"detached, run continues" (exit 0), not a hard sidecar-unreachable failure.
 """
 from __future__ import annotations
 
 import time
 from typing import Any, Callable
 
-from .errors import EXIT_OK, EXIT_RUN_FAILED
+from .errors import EXIT_OK, EXIT_RUN_FAILED, CliError
 from .poller import Poller, events_for_view
 from .render.runctl import render_stream_event
+
+# Consecutive ``GET /run`` poll failures tolerated during a live stream before we
+# give up on the view (a single transient blip must not kill a live run). A
+# successful poll resets the counter; exceeding it raises :class:`RunStreamDetached`.
+POLL_ERROR_TOLERANCE = 3
+POLL_ERROR_BACKOFF = 1.0  # seconds between tolerated retries
+
+
+class RunStreamDetached(Exception):
+    """The stream gave up polling (too many consecutive errors) — NOT a failure.
+
+    The run itself is still running in the background; the client just lost its
+    view of it. Carries the last-seen ``GET /run`` payload (may be empty). The
+    ``run`` command maps this to a graceful detach (exit 0), never exit 9.
+    """
+
+    def __init__(self, last: Any = None) -> None:
+        super().__init__("run stream detached after repeated poll failures")
+        self.last = last or {}
 
 # Run-state ``status`` values that mean "the loop is no longer live" (survey §2:
 # stopped=loop returned a LoopResult, failed=worker exception, interrupted=orphan
@@ -88,14 +118,22 @@ def terminal_stop_reason(run_payload: Any) -> str | None:
 
 
 def classify_exit(run_payload: Any) -> int:
-    """Map a terminal run to ``EXIT_OK`` (success/benign) or ``EXIT_RUN_FAILED``."""
+    """Map a terminal run to ``EXIT_OK`` (success/benign) or ``EXIT_RUN_FAILED``.
+
+    Allowlist + fail-closed: a ``failed`` / ``interrupted`` status is always a
+    failure; otherwise ONLY a ``stop_reason`` in :data:`SUCCESS_STOP_REASONS` is
+    ``EXIT_OK``. A failure-class reason, an unknown/未-triaged reason, or a
+    missing reason all classify as :data:`EXIT_RUN_FAILED` — for a headless CI
+    tool, an unrecognized terminal reason defaulting to "success" is the wrong
+    direction, so we fail closed.
+    """
     state = _state(run_payload)
     status = str(state.get("status") or "")
     if status in ("failed", "interrupted"):
         return EXIT_RUN_FAILED
-    if state.get("stop_reason") in FAILURE_STOP_REASONS:
-        return EXIT_RUN_FAILED
-    return EXIT_OK
+    if state.get("stop_reason") in SUCCESS_STOP_REASONS:
+        return EXIT_OK
+    return EXIT_RUN_FAILED
 
 
 def gloss(reason: str | None) -> str:
@@ -107,6 +145,10 @@ def gloss(reason: str | None) -> str:
 
 def _run_path(project_id: str) -> str:
     return f"/coding/projects/{project_id}/run"
+
+
+def _poll_retry_note(errors: int) -> str:
+    return f"(poll failed — retrying {errors}/{POLL_ERROR_TOLERANCE})"
 
 
 def _visible_channels(verbosity: Any) -> set[str]:
@@ -129,12 +171,23 @@ def block_until_terminal(
     """Poll ONLY ``GET /run`` until terminal — the ``--json`` block-to-done path.
 
     No live view (a machine consumer wants the terminal JSON, not a stream). Only
-    ever touches the CLI's own sidecar (invariant #6).
+    ever touches the CLI's own sidecar (invariant #6). Tolerates transient poll
+    errors (see :data:`POLL_ERROR_TOLERANCE`); raises :class:`RunStreamDetached`
+    only after too many *consecutive* failures.
     """
     ticks = 0
+    errors = 0
     last: dict[str, Any] = {}
     while True:
-        last = client.get_json(_run_path(project_id)) or {}
+        try:
+            last = client.get_json(_run_path(project_id)) or {}
+        except CliError as exc:
+            errors += 1
+            if errors > POLL_ERROR_TOLERANCE:
+                raise RunStreamDetached(last) from exc
+            sleep(POLL_ERROR_BACKOFF)
+            continue
+        errors = 0
         if is_terminal(last):
             return last
         ticks += 1
@@ -167,13 +220,26 @@ def stream_run(
     )
     channels = _visible_channels(ctx.verbosity)
     ticks = 0
+    errors = 0
     last: dict[str, Any] = {}
     while True:
-        for event in events_for_view(poller.poll_once(channels=channels), ctx.verbosity):
-            line = render_stream_event(event)
-            if line:
-                emit(line)
-        last = client.get_json(_run_path(project_id)) or {}
+        # The whole tick (ledger event synthesis + the terminal poll) is
+        # blip-tolerant: a transient sidecar error retries the tick with backoff
+        # rather than aborting a live run. A clean tick resets the error budget.
+        try:
+            for event in events_for_view(poller.poll_once(channels=channels), ctx.verbosity):
+                line = render_stream_event(event)
+                if line:
+                    emit(line)
+            last = client.get_json(_run_path(project_id)) or {}
+        except CliError as exc:
+            errors += 1
+            if errors > POLL_ERROR_TOLERANCE:
+                raise RunStreamDetached(last) from exc
+            emit(_poll_retry_note(errors))
+            sleep(POLL_ERROR_BACKOFF)
+            continue
+        errors = 0
         if is_terminal(last):
             return last
         ticks += 1

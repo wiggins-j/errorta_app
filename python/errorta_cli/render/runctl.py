@@ -192,8 +192,10 @@ def render_run_terminal(run_payload: Any, *, reason: str | None, gloss_text: str
         table = Table(show_edge=False, pad_edge=False, box=None, show_header=False)
         table.add_column("k", style="cli.muted", no_wrap=True)
         table.add_column("v", justify="right", no_wrap=True)
-        for key in ("iterations", "model_calls", "tasks_done", "turns_repaired",
-                    "model_escalations", "task_reassignments", "pm_assists"):
+        # Only the counters the worker actually persists (coding.py:2393-2399);
+        # model_calls / tasks_done were never written, so they're dropped.
+        for key in ("iterations", "turns_repaired", "model_escalations",
+                    "task_reassignments", "pm_assists"):
             if counters.get(key) is not None:
                 table.add_row(f"  {key}", str(counters.get(key)))
         lines.append(table)

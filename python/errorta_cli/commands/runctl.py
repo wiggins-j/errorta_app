@@ -181,6 +181,10 @@ def _run_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict
     except KeyboardInterrupt:
         # Ctrl-C DETACHES the view; it does NOT cancel the run (§8.2).
         return {"_detached": True, "project_id": ctx.project_id}
+    except runstream.RunStreamDetached:
+        # Lost the sidecar mid-stream after repeated retries — the run keeps
+        # going in the background. Detach gracefully (exit 0), never exit 9.
+        return {"_detached": True, "project_id": ctx.project_id}
     payload: dict[str, Any] = {"_terminal": True, "run": final}
     if runstream.classify_exit(final) == EXIT_RUN_FAILED:
         payload["_exit_code"] = EXIT_RUN_FAILED
@@ -340,6 +344,7 @@ register(Command(
         Param("detach", "Fire the run and return immediately (no live stream).",
               is_flag=True),
     ),
+    mutating=True,
 ))
 
 register(Command(
@@ -348,6 +353,7 @@ register(Command(
     call=_cancel_call,
     render=_cancel_render,
     params=(_YES_PARAM,),
+    mutating=True,
 ))
 
 register(Command(
@@ -356,6 +362,7 @@ register(Command(
     call=_resume_call,
     render=_make_resume_render("resume"),
     params=(*_TEAM_PARAMS, _YES_PARAM),
+    mutating=True,
 ))
 
 register(Command(
@@ -364,4 +371,5 @@ register(Command(
     call=_continue_call,
     render=_make_resume_render("continue"),
     params=(*_TEAM_PARAMS, _YES_PARAM),
+    mutating=True,
 ))

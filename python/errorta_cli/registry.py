@@ -47,6 +47,10 @@ class Command:
     call: CallFn
     render: RenderFn
     params: tuple[Param, ...] = ()
+    # A command that WRITES run state (starts/cancels/resumes a run, confirms
+    # setup). ``--watch`` is rejected on these: a watched mutation would re-fire
+    # the write every poll tick and spend real model budget (F147 S3 review #3).
+    mutating: bool = False
 
 
 # --------------------------------------------------------------------------- #
