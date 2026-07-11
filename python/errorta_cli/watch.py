@@ -20,6 +20,13 @@ from .session import Context
 
 DEFAULT_INTERVAL = 2.5
 
+# Mutations that STREAM their own live view to completion (`run`). For these,
+# `--watch` is redundant, not a re-firing hazard, so it's treated as a single
+# run rather than rejected. app.py / repl route these to the normal dispatch
+# path (for exit-code handling + a note); this set is the shared source of truth
+# and run_watch also honors it as a safety net for direct callers.
+SELF_STREAMING = frozenset({"run"})
+
 
 def run_watch(
     name: str,
@@ -41,6 +48,11 @@ def run_watch(
     Reads are fine.
     """
     command = registry.get(name)
+    if name in SELF_STREAMING:
+        # `run` already streams its live view to completion — run it ONCE (no
+        # poll loop, no re-fire) instead of rejecting --watch.
+        registry.dispatch(name, client, ctx, raw_args, json_mode=False)
+        return
     if command is not None and command.mutating:
         raise CliError(
             f"--watch is for read commands; `{name}` mutates run state and can't "

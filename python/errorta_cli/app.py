@@ -214,15 +214,25 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     if "--watch" in raw_args and not json_mode:
         from . import watch as _watch
 
-        with SidecarClient(handle.base_url) as client:
-            try:
-                _watch.run_watch(name, client, ctx, raw_args)
-            except KeyboardInterrupt:
-                pass
-            except CliError as exc:
-                # e.g. `run --watch` — a mutating command rejects the watch loop.
-                _fail(exc)
-        return
+        if name in _watch.SELF_STREAMING:
+            # `run` already streams live to completion — --watch is redundant.
+            # Drop it and fall through to the normal dispatch (which streams AND
+            # sets the terminal exit code), with a gentle note.
+            typer.echo(
+                f"note: `{name}` already streams live; --watch has no extra effect.",
+                err=True,
+            )
+            raw_args = [a for a in raw_args if a != "--watch"]
+        else:
+            with SidecarClient(handle.base_url) as client:
+                try:
+                    _watch.run_watch(name, client, ctx, raw_args)
+                except KeyboardInterrupt:
+                    pass
+                except CliError as exc:
+                    # e.g. `cancel --watch` — a mutating command rejects the loop.
+                    _fail(exc)
+            return
 
     with SidecarClient(handle.base_url) as client:
         try:
