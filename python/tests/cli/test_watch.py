@@ -47,10 +47,12 @@ def test_run_watch_reports_unknown_command(make_ctx, capsys):
     assert "unknown command" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("name", ["setup", "run", "cancel", "resume", "continue"])
+# `run` is EXCLUDED — it streams its own live view to completion, so --watch is
+# handled as a single run (see test_run_watch_run_streams_once), not rejected.
+@pytest.mark.parametrize("name", ["setup", "cancel", "resume", "continue"])
 def test_run_watch_rejects_mutating_commands(make_ctx, name):
-    # `run --watch` (etc.) would re-fire the mutation every tick and burn budget.
-    # It must be rejected BEFORE any dispatch — no request fired at all (#3).
+    # `cancel --watch` (etc.) would re-fire the mutation every tick and burn
+    # budget. It must be rejected BEFORE any dispatch — no request fired (#3).
     client = RouteClient()
     with pytest.raises(CliError) as ei:
         watch.run_watch(name, client, make_ctx(project_id="p"), ["--yes"],
@@ -58,6 +60,20 @@ def test_run_watch_rejects_mutating_commands(make_ctx, name):
                         out=io.StringIO(), clear=False)
     assert ei.value.code == "watch_on_mutation"
     assert client.calls == []  # never dispatched → nothing mutated / no budget spent
+
+
+def test_run_watch_run_streams_once(make_ctx, monkeypatch):
+    # `run --watch` is NOT rejected: `run` already streams live, so run_watch
+    # dispatches it exactly ONCE (no poll loop, no re-fire), not an error.
+    calls: list[str] = []
+    monkeypatch.setattr(
+        watch.registry, "dispatch",
+        lambda name, *a, **k: (calls.append(name), ("payload", "text"))[1],
+    )
+    watch.run_watch("run", RouteClient(), make_ctx(project_id="p"),
+                    ["--yes"], iterations=5, sleep=lambda _s: None,
+                    out=io.StringIO(), clear=False)
+    assert calls == ["run"]  # dispatched once despite iterations=5 (no loop)
 
 
 def test_run_watch_allows_read_command(make_ctx):

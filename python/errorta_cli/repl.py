@@ -124,14 +124,20 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
         if "--watch" in raw_args and registry.get(name) is not None:
             from . import watch as _watch
 
-            try:
-                _watch.run_watch(name, client, ctx, raw_args)
-            except KeyboardInterrupt:
-                pass
-            except CliError as exc:
-                # e.g. `/run --watch` — a mutating command rejects the watch loop.
-                print(f"error: {exc.message}")
-            continue
+            if name in _watch.SELF_STREAMING:
+                # `/run --watch` — run already streams; note it and fall through
+                # to the normal one-shot dispatch below (`run` ignores the stray
+                # --watch, which lands in _extra).
+                print(f"note: `{name}` already streams live; --watch has no extra effect.")
+            else:
+                try:
+                    _watch.run_watch(name, client, ctx, raw_args)
+                except KeyboardInterrupt:
+                    pass
+                except CliError as exc:
+                    # e.g. `/cancel --watch` — a mutating command rejects the loop.
+                    print(f"error: {exc.message}")
+                continue
         text = handle_line(line, ctx, client)
         if text:
             print(text)
