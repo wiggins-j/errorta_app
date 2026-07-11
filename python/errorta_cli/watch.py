@@ -35,9 +35,10 @@ def run_watch(
 ) -> None:
     """Loop-render ``name`` until Ctrl-C (or ``iterations`` frames elapse).
 
-    Rejects ``--watch`` on a MUTATING command (``run`` / ``cancel`` / ``resume`` /
-    ``continue``) BEFORE any dispatch: a watched mutation would re-fire the write
-    every tick and spend real model budget (F147 S3 review #3). Reads are fine.
+    Rejects ``--watch`` on a MUTATING command (``setup`` / ``run`` / ``cancel`` /
+    ``resume`` / ``continue``) BEFORE any dispatch: a watched mutation would
+    re-fire the write every tick and spend real model budget (F147 S3 review #3).
+    Reads are fine.
     """
     command = registry.get(name)
     if command is not None and command.mutating:

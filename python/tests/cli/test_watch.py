@@ -47,7 +47,7 @@ def test_run_watch_reports_unknown_command(make_ctx, capsys):
     assert "unknown command" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("name", ["run", "cancel", "resume", "continue"])
+@pytest.mark.parametrize("name", ["setup", "run", "cancel", "resume", "continue"])
 def test_run_watch_rejects_mutating_commands(make_ctx, name):
     # `run --watch` (etc.) would re-fire the mutation every tick and burn budget.
     # It must be rejected BEFORE any dispatch — no request fired at all (#3).

@@ -331,6 +331,7 @@ register(Command(
         Param("preflight-enabled", "Member-health preflight on/off (true/false).",
               is_flag=False),
     ),
+    mutating=True,
 ))
 
 register(Command(
