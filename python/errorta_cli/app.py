@@ -210,11 +210,14 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
                 _watch.run_watch(name, client, ctx, raw_args)
             except KeyboardInterrupt:
                 pass
+            except CliError as exc:
+                # e.g. `run --watch` — a mutating command rejects the watch loop.
+                _fail(exc)
         return
 
     with SidecarClient(handle.base_url) as client:
         try:
-            _payload, text = registry.dispatch(
+            payload, text = registry.dispatch(
                 name, client, ctx, raw_args, json_mode=json_mode
             )
         except KeyError:
@@ -224,6 +227,11 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
             _fail(exc)
             return
     typer.echo(text)
+    # A command may PRINT its result and still want a non-zero exit (the run
+    # command stamps `_exit_code` when a run ends in a failure-class stop_reason).
+    code = registry.exit_code_for(payload)
+    if code:
+        raise typer.Exit(code=code)
 
 
 def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[str]]:

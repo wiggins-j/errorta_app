@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from errorta_cli import watch
+from errorta_cli.errors import CliError
 
 from .conftest import RouteClient
 
@@ -42,3 +45,24 @@ def test_run_watch_reports_unknown_command(make_ctx, capsys):
     watch.run_watch("nope", RouteClient(), ctx, [], iterations=1,
                     sleep=lambda _s: None, out=io.StringIO(), clear=False)
     assert "unknown command" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["setup", "run", "cancel", "resume", "continue"])
+def test_run_watch_rejects_mutating_commands(make_ctx, name):
+    # `run --watch` (etc.) would re-fire the mutation every tick and burn budget.
+    # It must be rejected BEFORE any dispatch — no request fired at all (#3).
+    client = RouteClient()
+    with pytest.raises(CliError) as ei:
+        watch.run_watch(name, client, make_ctx(project_id="p"), ["--yes"],
+                        iterations=1, sleep=lambda _s: None,
+                        out=io.StringIO(), clear=False)
+    assert ei.value.code == "watch_on_mutation"
+    assert client.calls == []  # never dispatched → nothing mutated / no budget spent
+
+
+def test_run_watch_allows_read_command(make_ctx):
+    # Regression guard: the mutation gate must NOT block a read from watching.
+    client = RouteClient(default={"tasks": []})
+    watch.run_watch("tasks", client, make_ctx(project_id="p"), [], iterations=1,
+                    sleep=lambda _s: None, out=io.StringIO(), clear=False)
+    assert any(method == "GET" for method, _ in client.calls)

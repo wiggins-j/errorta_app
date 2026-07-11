@@ -24,6 +24,10 @@ class Context:
     project_id: str | None = None
     handle: SidecarHandle | None = None
     poll_interval: float | None = None
+    # Set by ``registry.dispatch`` to the effective ``--json`` mode so a command's
+    # ``call`` (not just its ``render``) can branch on it — e.g. the run command's
+    # "--json requires --yes" gate and its block-to-done vs live-stream choice.
+    json_mode: bool = False
 
     @classmethod
     def build(

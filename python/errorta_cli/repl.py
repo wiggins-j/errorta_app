@@ -122,6 +122,9 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
                 _watch.run_watch(name, client, ctx, raw_args)
             except KeyboardInterrupt:
                 pass
+            except CliError as exc:
+                # e.g. `/run --watch` — a mutating command rejects the watch loop.
+                print(f"error: {exc.message}")
             continue
         text = handle_line(line, ctx, client)
         if text:

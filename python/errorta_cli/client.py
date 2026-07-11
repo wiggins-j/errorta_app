@@ -22,7 +22,9 @@ from .errors import (
     LockBusy,
     NotFound,
     OriginDenied,
+    PreflightFailed,
     ResidencyRefused,
+    SetupRequired,
     SidecarUnreachable,
 )
 
@@ -167,7 +169,21 @@ def _raise_for_status(resp: httpx.Response) -> None:
     if status == 409:
         if code in ("residency_unsupported_path",):
             raise ResidencyRefused(message or "action unavailable in remote mode", code=code)
-        # The run-lock 409 ("a run is already in progress") and any other 409.
+        if code == "member_health_preflight_failed":
+            # coding.py:2291 — carry the unhealthy provider list for rendering.
+            unhealthy = detail.get("unhealthy") if isinstance(detail, dict) else None
+            raise PreflightFailed(
+                message or "a provider isn't ready", code=code, unhealthy=unhealthy
+            )
+        if code == "run_setup_required":
+            # coding.py:2237 — the readiness gate hasn't been confirmed.
+            raise SetupRequired(
+                message or "run setup hasn't been confirmed", code=code
+            )
+        # The run-lock 409 ("a run is already in progress") + the resume/continue
+        # run-state 409s ("run is not recoverable" / "run is not continuable" /
+        # "workspace_integrity_failed") — all run-state conflicts. The real detail
+        # string (message) is preserved so the rendered error is specific.
         raise LockBusy(message or "a run is already in progress", code=code)
     if status in (501, 503):
         # active_remote_base() raises these for cloud / ssh-remote-without-tunnel.
