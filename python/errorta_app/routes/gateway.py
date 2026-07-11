@@ -69,9 +69,11 @@ _PROBE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _require_tauri_origin(request: Request) -> None:
-    origin = request.headers.get("x-errorta-origin", "").lower()
-    if origin != "tauri-ui":
-        raise HTTPException(status_code=403, detail="origin_not_authorized")
+    # F147 S9a: accept ``cli`` alongside ``tauri-ui`` (both loopback-trusted) so a
+    # CLI-initiated gateway mutation is distinguishable in logs/audit.
+    from errorta_app.origin import require_ui_or_cli_origin
+
+    require_ui_or_cli_origin(request)
 
 
 def _cli_handler(provider: str):

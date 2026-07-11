@@ -296,6 +296,25 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("parent watchdog not started: %s", exc)
         app.state.parent_watchdog = None
 
+    # F147 S9a: advertise this sidecar on disk (${ERRORTA_HOME}/sidecar.json) so
+    # an out-of-process front-end (the headless CLI, app-doctor) can DISCOVER a
+    # live sidecar's port+pid and adopt it instead of spawning a competitor.
+    # Best-effort; removed on graceful shutdown iff we still own it.
+    app.state.sidecar_advert = False
+    try:
+        from . import sidecar_advert as _advert
+
+        port = _resolve_port()
+        app.state.sidecar_port = port
+        wrote = _advert.write_advertisement(
+            port=port,
+            pid=os.getpid(),
+            commit=(_build_info() or {}).get("commit"),
+        )
+        app.state.sidecar_advert = bool(wrote)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning("sidecar advertisement not written: %s", exc)
+
     # F-DIST-01 — start the alpha check-in loop ONLY when this build ships the
     # gate on. Production keyless builds never start it, so they never phone
     # home. Lazy import so gate-off builds don't even load the module.
@@ -350,6 +369,15 @@ async def lifespan(app: FastAPI):
             from errorta_council.coding import runtime_process as _runtime
 
             _runtime.teardown_all()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        # F147 S9a: retract our sidecar advertisement (only if it still points at
+        # us — a successor that already overwrote it is left alone). A crash skips
+        # this; a reader validates the stale file against a live /healthz.
+        try:
+            from . import sidecar_advert as _advert
+
+            _advert.remove_advertisement(only_if_pid=os.getpid())
         except Exception:  # pragma: no cover - defensive
             pass
         # Stop the watchdog so it can't os._exit() mid-teardown during a
@@ -559,6 +587,13 @@ def healthz() -> dict:
         "service": "errorta-sidecar",
         "version": __version__,
         "now": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        # F147 S9a: identity + discovery — a front-end reads these to confirm the
+        # sidecar it discovered (via ${ERRORTA_HOME}/sidecar.json) is the one it
+        # reached, and who spawned it. Additive; existing fields are unchanged.
+        "pid": os.getpid(),
+        "port": _resolve_port(),
+        "started_by": (os.environ.get("ERRORTA_STARTED_BY") or "unknown").strip()
+        or "unknown",
         "aiar_available": _AIAR_AVAILABLE,
         "aiar_version": _AIAR_VERSION,
         "aiar_pin": check_aiar_pin(),

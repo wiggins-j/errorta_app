@@ -7,9 +7,11 @@ the F086-E fail-closed-under-remote-residency guard.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import uuid
+from contextlib import contextmanager
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -22,6 +24,11 @@ from errorta_council.coding.autonomy import (
     policy_to_dict,
     save_policy,
 )
+from errorta_council.coding.governance import (
+    GovernanceMode,
+    GovernancePhase,
+    HumanCodeApproval,
+)
 from errorta_council.coding.ledger import (
     FocusNotFound,
     FocusTransitionError,
@@ -31,11 +38,6 @@ from errorta_council.coding.ledger import (
     _atomic_write_json,
     _now,
     list_projects,
-)
-from errorta_council.coding.governance import (
-    GovernanceMode,
-    GovernancePhase,
-    HumanCodeApproval,
 )
 from errorta_council.coding.orientation import build_orientation_packet
 from errorta_council.coding.project_status import derive_project_list_status
@@ -59,9 +61,16 @@ def _alpha_enforce_not_locked() -> None:
 
 def _require_tauri_origin(request: Request) -> None:
     """F087-07-D: coding mutations (esp. merge-back to the real repo) must come
-    from the Tauri webview, mirroring the Council/settings guard."""
-    if request.headers.get("x-errorta-origin", "").lower() != "tauri-ui":
-        raise HTTPException(status_code=403, detail="origin_not_authorized")
+    from a first-party loopback front-end, mirroring the Council/settings guard.
+
+    F147 S9a: accepts ``x-errorta-origin: cli`` in addition to ``tauri-ui`` so a
+    CLI-initiated mutation is distinguishable in audit/logs. Both are equally
+    trusted and loopback-only; this is not a privilege change (see
+    ``errorta_app.origin``). The CLI still sends ``tauri-ui`` today, which stays
+    valid — ``cli`` is the future-flip alternative."""
+    from errorta_app.origin import require_ui_or_cli_origin
+
+    require_ui_or_cli_origin(request)
 
 
 def _validate_repo_path(repo_path: Optional[str]) -> None:
@@ -2115,14 +2124,77 @@ def _thread_alive(project_id: str) -> bool:
     return bool(rec and rec["thread"] is not None and rec["thread"].is_alive())
 
 
+# F147 S9a: reconcile (a possible running->interrupted recovery) is a
+# CROSS-process-sensitive write. A bounded wait for the run lock beats an
+# unbounded hang; if another process holds it we simply skip recovery this pass.
+_RECONCILE_LOCK_TIMEOUT_SECONDS = 2.0
+# The start-run critical section can afford a longer wait (a genuine concurrent
+# start is rare and brief); a foreign holder past this window surfaces as a 409.
+_RUN_LOCK_TIMEOUT_SECONDS = 10.0
+
+
 def _reconcile_run_state(project_id: str, store: LedgerStore) -> dict[str, Any]:
-    from errorta_council.coding.run_recovery import recover_orphaned_run
-    recover_orphaned_run(
-        store,
-        live=_thread_alive(project_id),
-        reason="run_status",
+    from errorta_app.parent_watchdog import parent_alive
+    from errorta_council.coding.locks import (
+        RunLockBusy,
+        cross_process_lock,
+        run_owned_by_live_process,
     )
+    from errorta_council.coding.run_recovery import recover_orphaned_run
+
+    # F147 S9a: hold the cross-process run lock around the recovery transition so
+    # it can't interleave with another sidecar's start/reconcile mid-write.
+    # cross_process_lock is acquired OUTSIDE store.lock (recover_orphaned_run takes
+    # store.lock internally) per the locks-module ordering contract; it is
+    # reentrant so a caller already inside it (e.g. _start_run) does not re-flock.
+    try:
+        with cross_process_lock(
+            store.dir, timeout=_RECONCILE_LOCK_TIMEOUT_SECONDS
+        ):
+            state = store.get_run_state()
+            # A run whose owner_pid is a DIFFERENT live process is live-elsewhere:
+            # never reconcile it to `interrupted`. Single-process operation
+            # (owner_pid == our pid, or unset) falls through to the thread-local
+            # liveness check — byte-identical to pre-S9a behavior.
+            live = _thread_alive(project_id) or run_owned_by_live_process(
+                state, my_pid=os.getpid(), alive_fn=parent_alive
+            )
+            recover_orphaned_run(store, live=live, reason="run_status")
+    except RunLockBusy:
+        # Another process holds the run lock -> a run is active there; inhibit
+        # recovery this pass and report the current state unchanged.
+        return store.get_run_state()
     return store.get_run_state()
+
+
+def _run_live(project_id: str, state: dict[str, Any]) -> bool:
+    """Is a run for this project live — in THIS process (a live worker thread) OR
+    in another sidecar (owner_pid alive and not us)? F147 S9a cross-process guard;
+    reduces to the thread-local check under single-process operation."""
+    from errorta_app.parent_watchdog import parent_alive
+    from errorta_council.coding.locks import run_owned_by_live_process
+
+    return _thread_alive(project_id) or run_owned_by_live_process(
+        state, my_pid=os.getpid(), alive_fn=parent_alive
+    )
+
+
+@contextmanager
+def _run_critical_section(store: "LedgerStore"):
+    """F147 S9a: run the start/recovery critical section under BOTH the
+    cross-process run lock (outermost) and the in-process per-project lock. A
+    cross-process holder past the bounded window surfaces as a 409 (a run is
+    active in another sidecar). Lock order matches the locks-module contract:
+    cross_process_lock OUTSIDE store.lock, both reentrant."""
+    from errorta_council.coding.locks import RunLockBusy, cross_process_lock
+
+    try:
+        with cross_process_lock(
+            store.dir, timeout=_RUN_LOCK_TIMEOUT_SECONDS
+        ), store.lock:
+            yield
+    except RunLockBusy:
+        raise HTTPException(status_code=409, detail="a run is already in progress")
 
 
 def _run_result_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -2281,9 +2353,9 @@ def _start_run(
     # alive-check is repeated in the critical section below after preflight, which
     # keeps the concurrent-start race closed.
     if not (resume or continue_) and settings.member_health_preflight_enabled():
-        with store.lock:
-            _reconcile_run_state(project_id, store)
-            if _thread_alive(project_id):
+        with _run_critical_section(store):
+            state = _reconcile_run_state(project_id, store)
+            if _run_live(project_id, state):
                 raise HTTPException(status_code=409, detail="a run is already in progress")
         from errorta_council.coding.member_health import preflight_members
         unhealthy = preflight_members(members)
@@ -2302,9 +2374,12 @@ def _start_run(
     # one critical section under the per-project lock, so two concurrent POST /run
     # for the same project can never both pass the alive-check and spawn two
     # workers over the same worktree. The loser raises 409.
-    with store.lock:
+    # F147 S9a: the critical section is now ALSO under the cross-process run lock,
+    # and the liveness check is cross-process-aware (a run live in another sidecar
+    # blocks this start too).
+    with _run_critical_section(store):
         state = _reconcile_run_state(project_id, store)
-        if _thread_alive(project_id):
+        if _run_live(project_id, state):
             raise HTTPException(status_code=409, detail="a run is already in progress")
         if resume and state.get("status") != "interrupted":
             raise HTTPException(status_code=409, detail="run is not recoverable")
@@ -2369,7 +2444,11 @@ def _start_run(
                             stop_reason=None, last_error=None, cancel_requested=False,
                             counters=None, recoverable=False, can_resume=False,
                             resumed_from_status=previous.get("status"),
-                            resumed_at=_now() if resume else None)
+                            resumed_at=_now() if resume else None,
+                            # F147 S9a: stamp the OWNING process so another
+                            # sidecar's reconcile/start recognises this run as
+                            # live-elsewhere and stands down (never reconciles it).
+                            owner_pid=os.getpid())
         record: dict[str, Any] = {"thread": None}
 
         def _should_cancel() -> bool:
@@ -2469,6 +2548,105 @@ def continue_run(project_id: str, body: dict[str, Any], request: Request) -> dic
     _require_tauri_origin(request)
     refuse_local_dataplane_if_remote(f"/coding/projects/{project_id}/run/continue")
     return _start_run(project_id, body, continue_=True)
+
+
+def _run_delivery_review_ondemand(project_id: str) -> dict[str, Any]:
+    """F147 §13.3: re-run the F146 delivery review (reviewer + registered tests +
+    launch probe) on an already-``done`` project, bound to the CURRENT head,
+    OUTSIDE the run loop. Reuses the F146 ``delivery_review`` closure verbatim —
+    never reimplements the verification. Fail-closed: an inability to verify never
+    reports a pass."""
+    store = LedgerStore(project_id)
+    try:
+        project = store.get_project()
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    status = str(getattr(project, "status", "") or "")
+    if status != "done":
+        # Graceful: only a delivered (`done`) project has an integrated head to
+        # verify as a unit. Nothing to review otherwise.
+        raise HTTPException(status_code=409, detail={
+            "code": "not_done",
+            "message": ("Delivery review runs on a delivered (done) project. "
+                        f"This project is '{status or 'unknown'}'."),
+        })
+
+    # Refuse while a run is live (this or another sidecar) — the reviewer/tests/
+    # launch probe would contend with the worker over the same worktree.
+    state = _reconcile_run_state(project_id, store)
+    if _run_live(project_id, state):
+        raise HTTPException(status_code=409, detail="a run is already in progress")
+
+    # Recover the delivered team from run_config; the reviewer role is required
+    # for a real review.
+    cfg = store.get_run_config()
+    members = _ensure_coding_roles(
+        [m for m in (cfg.get("members") or []) if isinstance(m, dict)])
+    if not members:
+        # Graceful + honest: no saved team means no reviewer to run — report that
+        # rather than fabricate a pass.
+        return {"ran": False, "passed": None, "reason": "no_team",
+                "message": "No saved team to run a delivery reviewer with."}
+
+    from errorta_council.coding.runner import (
+        CodingRunner,
+        build_run_turn,
+        gateway_member_caller,
+        members_by_coding_role,
+    )
+    from errorta_council.coding.skills import load_guardrail
+    from errorta_council.gateway_local import LocalGateway
+
+    try:
+        runner = CodingRunner(
+            project_id, members, gateway_member_caller(LocalGateway()),
+            guardrail_enabled=load_guardrail(store).enabled)
+    except Exception as exc:  # noqa: BLE001 - fail-closed on an unopenable workspace
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_unavailable",
+            "message": f"Could not open the delivered workspace: {exc}",
+        })
+
+    run_turn = build_run_turn(
+        runner.store, runner.workspace, members_by_coding_role(members),
+        runner.caller, guardrail_enabled=runner.guardrail_enabled)
+    review = getattr(run_turn, "delivery_review", None)
+    if review is None:  # pragma: no cover - build_run_turn always attaches it
+        raise HTTPException(status_code=500, detail="delivery_review_unavailable")
+
+    # F146 caches one review per unchanged head; an ON-DEMAND re-run should
+    # genuinely re-execute against the current head, so clear the cache key first.
+    try:
+        rs = store.get_run_state()
+        if rs.get("delivery_reviewed_head"):
+            store.set_run_state(delivery_reviewed_head=None,
+                                delivery_review_passed=None)
+    except Exception:  # noqa: BLE001 - cache clear is best-effort
+        pass
+
+    result = review(runner.store)
+    return {
+        "ran": True,
+        "passed": bool(result.passed),
+        "filed_findings": bool(result.filed_findings),
+        "reason": result.reason,
+    }
+
+
+@router.post("/projects/{project_id}/delivery-review")
+def delivery_review_ondemand(project_id: str, request: Request) -> dict[str, Any]:
+    """F147 §13.3 — on-demand delivery review of a delivered project.
+
+    Re-runs the F146 delivery review + launch probe on an already-``done``
+    project bound to its current head, so ``deliver review`` works outside the run
+    loop (the known F146 gap). Origin-guarded (tauri-ui / cli), residency-aware,
+    and alpha-gated. Handles ``not done`` / no-team gracefully."""
+    _require_tauri_origin(request)
+    refuse_local_dataplane_if_remote(
+        f"/coding/projects/{project_id}/delivery-review")
+    _alpha_enforce_not_locked()
+    return _run_delivery_review_ondemand(project_id)
 
 
 @router.get("/projects/{project_id}/run")
