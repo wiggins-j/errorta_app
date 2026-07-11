@@ -1,0 +1,40 @@
+# Formula template for the errorta CLI (F148 S1).
+#
+# NOT hand-edited. scripts/release-cli.sh renders this into
+# <tap>/Formula/errorta.rb, substituting the @@TOKENS@@ below with the release
+# version and each platform's asset URL + sha256. On a per-platform run the
+# script preserves the other platforms' already-published sha256 values (it
+# looks them up in the current formula by the version-stamped asset name), so
+# building one arch never wipes the others. A platform that has not been built
+# for this version keeps its @@..._SHA@@ placeholder until its own run lands.
+#
+# Assets are hosted as GitHub Releases on wiggins-j/errorta_app (tag cli-vX.Y.Z).
+class Errorta < Formula
+  desc "Headless Errorta Coding Council CLI"
+  homepage "https://github.com/wiggins-j/errorta_app"
+  version "@@VERSION@@"
+
+  on_macos do
+    on_arm do
+      url "@@DARWIN_ARM64_URL@@"
+      sha256 "@@DARWIN_ARM64_SHA@@"
+    end
+    on_intel do
+      url "@@DARWIN_X86_64_URL@@"
+      sha256 "@@DARWIN_X86_64_SHA@@"
+    end
+  end
+
+  on_linux do
+    url "@@LINUX_X86_64_URL@@"
+    sha256 "@@LINUX_X86_64_SHA@@"
+  end
+
+  def install
+    bin.install "errorta"
+  end
+
+  test do
+    assert_match "Coding Council", shell_output("#{bin}/errorta --help")
+  end
+end
