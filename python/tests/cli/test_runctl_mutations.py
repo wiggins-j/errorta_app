@@ -72,6 +72,59 @@ def test_run_posts_members_array(make_ctx) -> None:
     assert seen["body"] == {"members": [{"id": "m1"}]}
 
 
+def test_run_falls_back_to_team_draft_when_no_members(make_ctx) -> None:
+    """`run` with no --members/--room uses the team assembled via `team set`/
+    `team apply` (the engine's fresh-run path requires members in the body)."""
+    from errorta_cli import teamdraft
+
+    ctx = make_ctx(project_id=PID)
+    teamdraft.save(ctx.home, PID, teamdraft.set_route(
+        {"members": [], "room_id": None}, "dev", "claude_cli.sonnet"))
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content) if request.content else None
+        return httpx.Response(200, json={"started": True})
+
+    with _mock_client(handler) as client:
+        registry.dispatch("run", client, ctx, ["--yes", "--detach"])
+    members = seen["body"]["members"]  # type: ignore[index]
+    assert [m["id"] for m in members] == ["dev"]
+    assert members[0]["gateway_route_id"] == "claude_cli.sonnet"
+
+
+def test_run_no_team_remessages_engine_400(make_ctx) -> None:
+    """The engine's raw 'no members' 400 is re-messaged with CLI guidance."""
+    from errorta_cli.errors import CliError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"detail": "no members (pass members or room_id)"})
+
+    with _mock_client(handler) as client:
+        with pytest.raises(CliError) as ei:
+            registry.dispatch("run", client, make_ctx(project_id=PID), ["--yes"])
+    assert ei.value.code == "no_team"
+    assert "team set" in str(ei.value.message)
+
+
+def test_run_setup_required_points_at_cli_command(make_ctx) -> None:
+    """The engine's GUI-oriented run_setup_required message is re-messaged with
+    the actual CLI command (`team apply` / `setup --confirm`)."""
+    from errorta_cli.errors import SetupRequired
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": {
+            "code": "run_setup_required",
+            "message": "Run setup hasn't been confirmed. Open Run setup...",
+        }})
+
+    with _mock_client(handler) as client:
+        with pytest.raises(SetupRequired) as ei:
+            registry.dispatch("run", client, make_ctx(project_id=PID),
+                              ["--members", '[{"id": "m1"}]', "--yes"])
+    assert "team apply" in str(ei.value.message)
+
+
 @pytest.mark.parametrize(
     ("name", "args", "route"),
     [

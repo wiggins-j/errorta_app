@@ -22,9 +22,9 @@ from __future__ import annotations
 import json as _json
 from typing import Any
 
-from .. import runstream
+from .. import runstream, teamdraft
 from ..client import SidecarClient
-from ..errors import EXIT_RUN_FAILED, CliError, PreflightFailed
+from ..errors import EXIT_RUN_FAILED, CliError, PreflightFailed, SetupRequired
 from ..registry import Command, Param, register, render_json
 from ..render import is_no_project, muted, no_project, render
 from ..render import runctl as _rr
@@ -168,9 +168,45 @@ def _run_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict
     if not _mutate.confirm(ctx, args, "start a run"):
         return {"_aborted": True}
     body = _team_body(args)
+    # A fresh /run REQUIRES a team in the request — the engine only recovers the
+    # saved team from run_config on resume/continue, not a fresh start
+    # (coding.py:2333). So when the user didn't pass --members/--room, fall back
+    # to the team they assembled with `team set` / `team apply` (the CLI-local
+    # draft), which is exactly the shape /run wants.
+    if not body.get("members") and not body.get("room_id"):
+        draft = teamdraft.load(ctx.home, ctx.project_id)
+        if draft.get("members"):
+            body["members"] = draft["members"]
+        elif draft.get("room_id"):
+            body["room_id"] = str(draft["room_id"])
     # POST /coding/projects/{id}/run (coding.py:2445). Typed 409s (preflight /
     # setup-required / run-in-progress) are raised by the client before we stream.
-    _post_start(client, f"/coding/projects/{ctx.project_id}/run", body)
+    try:
+        _post_start(client, f"/coding/projects/{ctx.project_id}/run", body)
+    except SetupRequired as exc:
+        # The engine's message is GUI-oriented ("Open Run setup"); point a CLI
+        # user at the actual command that confirms setup.
+        raise SetupRequired(
+            "run setup isn't confirmed yet. Confirm it first:\n"
+            "  errorta team apply --yes        (applies your team + confirms setup)\n"
+            "  errorta setup --confirm --yes   (confirm with current settings)\n"
+            "then `errorta run`.",
+            code=exc.code,
+        ) from exc
+    except CliError as exc:
+        # Re-message the engine's raw "no members" 400 with CLI guidance (the
+        # draft fallback above handles the normal `team set`/`team apply` flow;
+        # this only fires when the project truly has no team).
+        if "no members" in str(getattr(exc, "message", "") or exc):
+            raise CliError(
+                "no team set for this project. Assemble one first:\n"
+                "  errorta team set pm <route>\n"
+                "  errorta team set dev <route>\n"
+                "(routes come from `errorta connect status`), then `errorta run`. "
+                "Or pass --members / --room, or run `errorta wizard`.",
+                code="no_team",
+            ) from exc
+        raise
     if args.get("detach"):
         return {"_detach": True, "project_id": ctx.project_id}
     try:
