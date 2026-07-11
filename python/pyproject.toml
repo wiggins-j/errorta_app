@@ -39,7 +39,19 @@ dependencies = [
     # phone↔desktop channel (off by default; only used when the LAN connector
     # is explicitly enabled).
     "cryptography>=42",
+    # F147 headless Coding Council CLI (errorta_cli): a pure sidecar client.
+    # Typer drives the argv front-end, prompt_toolkit the slash REPL, Rich the
+    # terminal rendering. httpx (above) is the transport. `textual` (optional
+    # TUI board) is intentionally left out until it's needed.
+    "typer>=0.12",
+    "rich>=13.7",
+    "prompt_toolkit>=3.0",
 ]
+
+[project.scripts]
+# F147: the headless Coding Council CLI. `errorta` (CLI) and the hidden
+# `errorta __serve__` (embedded sidecar) are one multicall entry point.
+errorta = "errorta_cli.app:main"
 
 [project.optional-dependencies]
 dev = [

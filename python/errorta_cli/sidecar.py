@@ -1,0 +1,500 @@
+"""CLI-owned single-instance sidecar lifecycle (F147 spec §4.2).
+
+The CLI owns **exactly one** sidecar per ``ERRORTA_HOME``. Successive ``errorta``
+invocations and multiple terminals share that one sidecar by discovering it
+through ``${ERRORTA_HOME}/sidecar.json``:
+
+    resolve():
+      under a cross-process file lock on sidecar.lock:
+        read sidecar.json
+        if it points at a live, healthz-confirmed, started_by=="cli" sidecar:
+            adopt it
+        else:
+            spawn a new one (self-re-exec `__serve__`), poll /healthz, persist
+
+Foreign-app detection (``detect_foreign_sidecar``): the desktop app spawns its
+sidecar on a random in-memory port that an external CLI cannot discover, and *any*
+second sidecar on the same ``ERRORTA_HOME`` corrupts a run live in the app's
+process — its boot recovery (``scan_and_recover``) and every ``GET /run`` sweep
+flip the app's ``running`` run to ``interrupted``, requeue its ``doing`` tasks,
+and prune its worktrees. So the sole-owner guarantee is enforced at the **spawn
+decision**: ``resolve()`` refuses to start a second sidecar (for *every* command,
+reads included) when a foreign ``Errorta.app`` / ``errorta-sidecar`` process — or
+a live sidecar on the app's default port (8770) — is detected. Adopting the CLI's
+own already-running sidecar is always safe and never triggers a refusal.
+``require_sole_owner`` stays as defense-in-depth on explicit run/mutation paths.
+
+The HTTP probe and the process launch are module-level seams
+(``probe_healthz`` / ``_launch``) so tests exercise the adopt-vs-spawn logic and
+the foreign-app refusal without a real sidecar or a real subprocess.
+"""
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterator
+
+import httpx
+
+from . import config
+from .errors import ForeignSidecar, SidecarUnreachable
+
+# The desktop app's default sidecar port (server.py:_resolve_port). Used only to
+# *detect* a foreign app — the CLI never drives a foreign sidecar.
+APP_DEFAULT_PORT = 8770
+
+_HEALTHZ_PROBE_TIMEOUT = 1.0
+_SPAWN_READY_BUDGET = 15.0
+_SPAWN_POLL_INTERVAL = 0.1
+
+try:  # POSIX cross-process file lock; absent on Windows (handled gracefully).
+    import fcntl
+
+    _HAVE_FCNTL = True
+except ImportError:  # pragma: no cover — Windows only
+    _HAVE_FCNTL = False
+
+
+@dataclass
+class SidecarHandle:
+    """A resolved, reachable CLI sidecar."""
+
+    base_url: str
+    port: int
+    pid: int | None
+    commit: str | None
+    started_by: str
+    adopted: bool
+    commit_mismatch: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# Seams — monkeypatched in tests.
+# --------------------------------------------------------------------------- #
+
+def probe_healthz(port: int, *, timeout: float = _HEALTHZ_PROBE_TIMEOUT) -> dict | None:
+    """GET ``/healthz`` on loopback ``port``; return the JSON body or ``None``.
+
+    Never raises — an unreachable port simply means "no live sidecar here".
+    """
+    url = f"http://127.0.0.1:{port}/healthz"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(url)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _launch(argv: list[str], env: dict[str, str]) -> subprocess.Popen:
+    """Spawn the sidecar process (its own session so it outlives this call)."""
+    return subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        argv,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# sidecar.json + the discover-or-spawn lock.
+# --------------------------------------------------------------------------- #
+
+def read_record(home: Path) -> dict | None:
+    """Read ``${ERRORTA_HOME}/sidecar.json``; ``None`` if absent/unreadable."""
+    path = config.sidecar_record_path(home)
+    try:
+        raw = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def write_record(home: Path, record: dict) -> None:
+    """Atomically write the sidecar discovery record."""
+    path = config.sidecar_record_path(home)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record), "utf-8")
+    os.replace(tmp, path)
+
+
+def clear_record(home: Path) -> None:
+    with contextlib.suppress(OSError):
+        config.sidecar_record_path(home).unlink()
+
+
+@contextlib.contextmanager
+def _home_lock(home: Path) -> Iterator[None]:
+    """Cross-process exclusive lock around the discover-or-spawn decision.
+
+    Uses ``fcntl.flock`` on ``sidecar.lock`` so two concurrent ``errorta``
+    launches can't double-spawn. On a platform without ``fcntl`` (Windows) this
+    degrades to a no-op — acceptable for v1 (the Windows port is later work).
+    """
+    if not _HAVE_FCNTL:
+        yield
+        return
+    lock_path = config.sidecar_lock_path(home)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+# --------------------------------------------------------------------------- #
+# Resolve: adopt an existing CLI sidecar, else spawn one.
+# --------------------------------------------------------------------------- #
+
+_ADOPT_PROBE_ATTEMPTS = 3
+_ADOPT_PROBE_BACKOFF = 0.15
+
+
+def _record_is_adoptable(record: dict) -> dict | None:
+    """Return the live healthz body if ``record`` names an adoptable sidecar.
+
+    Adoptable = ``started_by == "cli"`` and a live ``/healthz`` on its port.
+    Commit match is a *warning*, not an adoption gate (spec §4.2 step 4).
+
+    Probes a few times before giving up: a single 1 s ``/healthz`` timeout on a
+    momentarily-busy but *live* sidecar must not be read as "gone" (that would
+    orphan it and double-spawn — see ``resolve``).
+    """
+    if record.get("started_by") != "cli":
+        return None
+    port = record.get("port")
+    if not isinstance(port, int):
+        return None
+    for attempt in range(_ADOPT_PROBE_ATTEMPTS):
+        body = probe_healthz(port)
+        if body is not None:
+            return body
+        if attempt + 1 < _ADOPT_PROBE_ATTEMPTS:
+            time.sleep(_ADOPT_PROBE_BACKOFF)
+    return None
+
+
+def _pid_alive(pid: object) -> bool:
+    """Return True if ``pid`` names a live process (best-effort, signal 0)."""
+    if not isinstance(pid, int):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists but owned by another user — still alive
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _healthz_commit(body: dict | None) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    build = body.get("build")
+    if isinstance(build, dict):
+        commit = build.get("commit")
+        return str(commit) if commit else None
+    return None
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _serve_argv() -> list[str]:
+    """Argv to re-exec *this* executable into the embedded sidecar.
+
+    Frozen binary → ``[<self>, "__serve__"]`` (re-exec the multicall binary).
+    Dev → ``[python, "-m", "errorta_cli", "__serve__"]`` (same self-re-exec via
+    the package ``__main__``).
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "__serve__"]
+    return [sys.executable, "-m", "errorta_cli", "__serve__"]
+
+
+def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
+    """Spawn a fresh CLI-owned sidecar, wait for readiness, persist the record."""
+    port = _free_port()
+    env = {**os.environ, "ERRORTA_SIDECAR_PORT": str(port), "ERRORTA_HOME": str(home)}
+    env.setdefault("ERRORTA_CLI_SIDECAR", "1")
+    proc = _launch(_serve_argv(), env)
+
+    try:
+        body = _wait_ready(port, proc)
+    except BaseException:
+        # A failed spawn must not leave a detached child running: the next
+        # invocation would find no record and spawn *another*, accumulating
+        # orphan sidecars. Kill the child we launched before re-raising.
+        _kill_child(proc)
+        raise
+    commit = _healthz_commit(body) or our_commit
+    record = {
+        "port": port,
+        "pid": proc.pid,
+        "commit": commit,
+        "started_by": "cli",
+    }
+    write_record(home, record)
+    return SidecarHandle(
+        base_url=f"http://127.0.0.1:{port}",
+        port=port,
+        pid=proc.pid,
+        commit=commit,
+        started_by="cli",
+        adopted=False,
+    )
+
+
+def _kill_child(proc: subprocess.Popen | None) -> None:
+    """Best-effort kill+reap of a spawned child (no-op if already dead)."""
+    if proc is None:
+        return
+    with contextlib.suppress(Exception):
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def _wait_ready(port: int, proc: subprocess.Popen | None) -> dict | None:
+    """Poll ``/healthz`` until the spawned sidecar answers (bounded)."""
+    deadline = time.monotonic() + _SPAWN_READY_BUDGET
+    while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise SidecarUnreachable(
+                f"the sidecar exited during startup (code {proc.returncode})"
+            )
+        body = probe_healthz(port)
+        if body is not None:
+            return body
+        time.sleep(_SPAWN_POLL_INTERVAL)
+    raise SidecarUnreachable(
+        f"the sidecar did not become ready on port {port} within "
+        f"{_SPAWN_READY_BUDGET:.0f}s"
+    )
+
+
+def resolve(
+    home: Path,
+    *,
+    allow_spawn: bool = True,
+    our_commit: str | None = None,
+) -> SidecarHandle:
+    """Resolve the CLI's sidecar: adopt the running CLI one, else spawn.
+
+    The whole decision runs under the cross-process home lock so two launches
+    never double-spawn. ``allow_spawn=False`` (``--no-spawn``, for CI) turns a
+    missing sidecar into :class:`SidecarUnreachable` instead of spawning.
+    """
+    if our_commit is None:
+        our_commit = config.build_commit()
+    with _home_lock(home):
+        record = read_record(home)
+        if record is not None:
+            body = _record_is_adoptable(record)
+            if body is not None:
+                commit = _healthz_commit(body) or record.get("commit")
+                mismatch = bool(
+                    our_commit and commit and str(commit) != str(our_commit)
+                )
+                pid = record.get("pid")
+                port = int(record["port"])
+                return SidecarHandle(
+                    base_url=f"http://127.0.0.1:{port}",
+                    port=port,
+                    pid=int(pid) if isinstance(pid, int) else None,
+                    commit=str(commit) if commit else None,
+                    started_by="cli",
+                    adopted=True,
+                    commit_mismatch=mismatch,
+                )
+            # The record didn't yield a live /healthz. Only discard it if the
+            # recorded process is genuinely GONE. A slow-but-live sidecar (probe
+            # timed out under load) must not be nuked + duplicated — that orphans
+            # the running one and double-spawns. Refuse instead of racing it.
+            if _pid_alive(record.get("pid")):
+                raise SidecarUnreachable(
+                    f"the recorded CLI sidecar (pid {record.get('pid')}, port "
+                    f"{record.get('port')}) is not answering /healthz but its "
+                    "process is still alive; refusing to spawn a duplicate. Run "
+                    "`errorta sidecar restart` if it is wedged."
+                )
+            # Stale record (dead sidecar) — drop it before deciding to spawn.
+            clear_record(home)
+        if not allow_spawn:
+            raise SidecarUnreachable(
+                "no CLI sidecar is running and --no-spawn was given"
+            )
+        # About to spawn a *new* sidecar on this ERRORTA_HOME. A second sidecar
+        # next to a foreign desktop app / sidecar is the core B1 hazard: its boot
+        # recovery — and any GET /run — flips the app's live run to
+        # `interrupted`, requeues its `doing` tasks, and prunes its worktrees.
+        # So refuse to spawn when a foreign owner is detected — for ALL commands,
+        # reads included. (Adopting our own live CLI sidecar above is always safe
+        # and never reaches here.)
+        reasons = detect_foreign_sidecar(home)
+        if reasons:
+            joined = "; ".join(reasons)
+            raise ForeignSidecar(
+                "refusing to start a second sidecar: "
+                f"{joined}. Close the desktop app (or use a separate --home) and "
+                "retry — a second sidecar on one store can corrupt in-flight "
+                "work.",
+                code="foreign_sidecar",
+            )
+        return spawn(home, our_commit=our_commit)
+
+
+# --------------------------------------------------------------------------- #
+# Foreign-app detection + the sole-owner guard.
+# --------------------------------------------------------------------------- #
+
+def detect_foreign_sidecar(
+    home: Path,
+    *,
+    our_port: int | None = None,
+    our_pid: int | None = None,
+) -> list[str]:
+    """Return human-readable reasons a foreign app owns this ``ERRORTA_HOME``.
+
+    An empty list means "sole owner, safe to spawn". Detection signals, in order
+    of reliability:
+
+    * **Primary** — a running ``Errorta.app`` / ``errorta-sidecar`` process
+      (``psutil`` scan). This is the real signal for the *bundled* desktop app:
+      its Tauri sidecar binds a random ephemeral port (``ERRORTA_SIDECAR_PORT``),
+      so the fixed-8770 probe below structurally misses it. ``psutil`` is a
+      declared dependency (``python/pyproject.toml``) and is collected into the
+      frozen binary (``sidecar.spec`` hiddenimports + it is pulled in by
+      ``errorta_hwdetect``); if it is somehow unimportable the scan degrades
+      gracefully to "no signal" rather than crashing.
+    * **Secondary** — a live sidecar on the app's default port (8770) that isn't
+      our own. Only fires for a *dev* app launched on the fallback port.
+    """
+    reasons: list[str] = []
+
+    for name in _scan_errorta_processes(exclude_pid=our_pid):
+        reasons.append(f"the process {name!r} is running against this data")
+
+    if our_port != APP_DEFAULT_PORT:
+        if probe_healthz(APP_DEFAULT_PORT) is not None:
+            reasons.append(
+                "a sidecar is live on 127.0.0.1:8770 — the desktop app's "
+                "default port"
+            )
+
+    return reasons
+
+
+def _scan_errorta_processes(*, exclude_pid: int | None) -> list[str]:
+    """Best-effort scan for a desktop-app / sidecar process.
+
+    ``psutil`` is a declared dependency (``python/pyproject.toml``) and is
+    bundled in the frozen binary, so this normally runs. It degrades gracefully
+    to an empty list only in a stripped environment where ``psutil`` can't be
+    imported (the guard is then silent — a known v1 limitation, spec §18 B1).
+    """
+    try:
+        import psutil
+    except ImportError:
+        return []
+    hits: list[str] = []
+    needles = ("errorta.app", "errorta-sidecar")
+    self_pid = os.getpid()
+    for proc in psutil.process_iter(["pid", "name", "exe"]):
+        try:
+            pid = proc.info.get("pid")
+            if pid in (self_pid, exclude_pid):
+                continue
+            haystack = " ".join(
+                str(proc.info.get(k) or "") for k in ("name", "exe")
+            ).lower()
+        except (psutil.Error, KeyError):  # pragma: no cover — race on exit
+            continue
+        for needle in needles:
+            if needle in haystack:
+                hits.append(str(proc.info.get("name") or needle))
+                break
+    return hits
+
+
+def require_sole_owner(home: Path, handle: SidecarHandle | None) -> None:
+    """Raise :class:`ForeignSidecar` if a foreign app owns this store.
+
+    **Defense-in-depth.** The primary sole-owner guarantee is enforced earlier,
+    at the spawn decision in :func:`resolve` (the CLI never starts a second
+    sidecar next to a foreign app). This is an extra guard called before every
+    run/mutation command (spec §4.2) — belt-and-suspenders for the case where the
+    CLI already adopted its own sidecar and the app was launched afterwards.
+    """
+    reasons = detect_foreign_sidecar(
+        home,
+        our_port=handle.port if handle else None,
+        our_pid=handle.pid if handle else None,
+    )
+    if reasons:
+        joined = "; ".join(reasons)
+        raise ForeignSidecar(
+            "refusing to co-drive: "
+            f"{joined}. Close the desktop app (or use a separate --home) and "
+            "retry — concurrent GUI+CLI use on one store can corrupt in-flight "
+            "work.",
+            code="foreign_sidecar",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Explicit lifecycle controls: `errorta sidecar {status,stop,restart}`.
+# --------------------------------------------------------------------------- #
+
+def status(home: Path) -> dict[str, Any]:
+    """Describe the CLI-owned sidecar without spawning one."""
+    record = read_record(home)
+    if record is None:
+        return {"running": False, "record": None, "healthz": None}
+    port = record.get("port")
+    body = probe_healthz(port) if isinstance(port, int) else None
+    return {"running": body is not None, "record": record, "healthz": body}
+
+
+def stop(home: Path) -> dict[str, Any]:
+    """Stop the CLI-owned sidecar (SIGTERM) and drop its record."""
+    record = read_record(home)
+    if record is None:
+        return {"stopped": False, "reason": "no CLI sidecar record"}
+    pid = record.get("pid")
+    stopped = False
+    if isinstance(pid, int):
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.kill(pid, 15)
+            stopped = True
+    clear_record(home)
+    return {"stopped": stopped, "pid": pid}
+
+
+def restart(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
+    """Stop the current CLI sidecar and spawn a fresh one."""
+    stop(home)
+    return resolve(home, allow_spawn=True, our_commit=our_commit)
