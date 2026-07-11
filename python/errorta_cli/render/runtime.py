@@ -49,9 +49,17 @@ def render_runtime(payload: Any, verbosity: Any) -> str:
         stable = Table(show_edge=False, pad_edge=False, box=None, show_header=False)
         stable.add_column("k", style="cli.key", no_wrap=True)
         stable.add_column("v")
-        for key in ("session_id", "profile_id", "status", "pid", "port", "url",
-                    "started_at", "ended_at", "exit_code"):
-            if key in session and session.get(key) not in (None, ""):
-                stable.add_row(key, str(session.get(key)))
+        # Real ``RuntimeSession.to_dict`` fields (runtime.py): state/pgid/
+        # allocated_ports (NOT status/pid/port/url). Join the port list.
+        for key in ("session_id", "profile_id", "state", "pgid", "allocated_ports",
+                    "sandbox_backend", "started_at", "ended_at", "exit_code", "error"):
+            if key not in session:
+                continue
+            value = session.get(key)
+            if value in (None, "", []):
+                continue
+            if key == "allocated_ports" and isinstance(value, list):
+                value = ", ".join(str(p) for p in value)
+            stable.add_row(key, str(value))
         parts.append(stable)
     return render(*parts)

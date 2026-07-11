@@ -38,10 +38,11 @@ def render_models(payload: Any, verbosity: Any) -> str:
         for r in routes[:20]:
             if not isinstance(r, dict):
                 continue
+            attempts, rate = _route_stats(r)
             table.add_row(
                 truncate(r.get("route_id") or r.get("route"), 40),
-                str(r.get("attempts", "")),
-                _rate(r),
+                str(attempts) if attempts else "",
+                _fmt_rate(rate),
             )
         parts.append(table)
     else:
@@ -58,13 +59,39 @@ def render_models(payload: Any, verbosity: Any) -> str:
     return render(*parts)
 
 
-def _rate(route: dict) -> str:
-    rate = route.get("accepted_rate")
-    if rate is None:
-        accepted = route.get("accepted")
-        attempts = route.get("attempts")
-        if isinstance(accepted, (int, float)) and attempts:
-            rate = accepted / attempts
+def _route_stats(route: dict) -> tuple[int, float | None]:
+    """Aggregate a route's ``buckets[]`` into (total attempts, attempt-weighted
+    mean accepted-rate).
+
+    ``learning_digest()`` nests ``attempts``/``accepted``/``accepted_rate`` inside
+    ``route["buckets"][]`` (per (task_type, difficulty_tier) bucket), NOT on the
+    route row — so a route's headline signal must be summed/weighted over buckets.
+    """
+    buckets = route.get("buckets")
+    if not isinstance(buckets, list) or not buckets:
+        return 0, None
+    total_attempts = 0
+    weighted_accepted = 0.0
+    for b in buckets:
+        if not isinstance(b, dict):
+            continue
+        attempts = b.get("attempts")
+        if not isinstance(attempts, (int, float)) or attempts <= 0:
+            continue
+        total_attempts += int(attempts)
+        rate = b.get("accepted_rate")
+        if isinstance(rate, (int, float)):
+            weighted_accepted += float(rate) * attempts
+        else:
+            accepted = b.get("accepted")
+            if isinstance(accepted, (int, float)):
+                weighted_accepted += float(accepted)
+    if total_attempts <= 0:
+        return 0, None
+    return total_attempts, weighted_accepted / total_attempts
+
+
+def _fmt_rate(rate: float | None) -> str:
     if isinstance(rate, (int, float)):
         return f"{float(rate) * 100:.0f}%"
     return ""

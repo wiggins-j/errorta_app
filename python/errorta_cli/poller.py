@@ -76,12 +76,29 @@ class Event:
     item: Any
 
 
+# Cap on remembered append-ledger ids per source. Ids are uuid-based and never
+# reused, so a long-lived ``--watch`` would otherwise grow ``seen``/``order``
+# without bound. We keep the most-recent window; rolled-off ids can't re-appear
+# (the ledgers only append at the tail), so dedup stays correct.
+_SEEN_CAP = 4096
+
+
 @dataclass
 class _Cursor:
     seen: set[str] = field(default_factory=set)
     order: list[str] = field(default_factory=list)
     snapshot_hash: str | None = None
     next_due: float = 0.0
+
+    def remember(self, iid: str, cap: int = _SEEN_CAP) -> None:
+        """Record a freshly-seen id, evicting the oldest once past ``cap``."""
+        self.seen.add(iid)
+        self.order.append(iid)
+        overflow = len(self.order) - cap
+        if overflow > 0:
+            for old in self.order[:overflow]:
+                self.seen.discard(old)
+            del self.order[:overflow]
 
 
 def _stable_hash(value: Any) -> str:
@@ -157,8 +174,7 @@ class Poller:
                 iid = self._id_of(source, item)
                 if iid in cur.seen:
                     continue
-                cur.seen.add(iid)
-                cur.order.append(iid)
+                cur.remember(iid)
                 events.append(self._emit(source, "append", item))
         else:  # snapshot
             digest = _stable_hash(payload)

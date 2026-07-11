@@ -62,7 +62,11 @@ def _kitchen_sink() -> dict:
         "profiles": [{"profile_id": "p", "kind": "cli", "runtime_mode": "managed_local",
                       "start": ["x"], "sandbox": "none", "env_required": [SECRET],
                       "_secret": SECRET}],
-        "session": {"session_id": "s", "status": "running", "_secret": SECRET},
+        # runtime session — real RuntimeSession.to_dict shape (runtime.py):
+        # state/pgid/allocated_ports (NOT status/pid/port/url).
+        "session": {"session_id": "s", "state": "running", "pgid": 4242,
+                    "allocated_ports": [8080], "sandbox_backend": "none",
+                    "_secret": SECRET},
         # tokens + team (usage)
         "usage": {
             "total": {"input": 1, "output": 1, "turns": 1, "coverage": {"measured_pct": 100}},
@@ -71,13 +75,18 @@ def _kitchen_sink() -> dict:
             "multi_members": [{"member_id": "m-2", "role": "dev", "pool": ["r"],
                                "_secret": SECRET}],
             "single_members": [{"member_id": "m-1", "route_id": "r"}]},
-        # models
+        # models — learning_digest shape (performance_corpus.py): attempts/
+        # accepted_rate live inside route["buckets"][], not on the route.
         "learning": {"summary": {"total_attempts": 1, "distinct_routes": 1, "window_days": 90},
-                     "routes": [{"route_id": "r", "attempts": 1, "accepted_rate": 1.0,
+                     "routes": [{"route_id": "r", "capability_tier": "mid", "cost_tier": 0,
+                                 "buckets": [{"task_type": "code", "difficulty_tier": "mid",
+                                              "attempts": 1, "accepted": 1, "accepted_rate": 1.0,
+                                              "_secret": SECRET}],
                                  "_secret": SECRET}]},
-        # governance
-        "governance": {"mode": "careful", "phase": "idle", "_secret": SECRET},
-        "status": {"stage": "s", "status": "i"},
+        # governance — summary() shape (governance.py): settings under state[].
+        "governance": {"state": {"mode": "careful", "phase": "idle", "_secret": SECRET},
+                       "artifacts": [], "reviews": [], "approvals": [], "_secret": SECRET},
+        "status": {"stage": "s", "status": "i", "headline": ""},
         # pm chat + pm changes (summary is shown → keep clean; secret in hidden detail)
         "thread": [{"role": "user", "message": "hi", "at": "2026-01-01T00:00:00",
                     "_secret": SECRET}],

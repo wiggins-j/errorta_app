@@ -94,7 +94,11 @@ def render_pr_detail(payload: Any, verbosity: Any) -> str:
 
         delta_out = pager.format_diff(diff)
         diff_block = delta_out if delta_out is not None else render_diff(diff)
-        out = f"{out}\n{render(heading('diff'))}\n{diff_block}"
+        # There is no per-PR diff route — ``/worktree`` returns the whole
+        # cumulative delivered-tree diff. Label it so the user isn't misled into
+        # reading it as only this PR's change.
+        label = render(heading("diff (cumulative delivered-tree — no per-PR diff)"))
+        out = f"{out}\n{label}\n{diff_block}"
     return out
 
 
