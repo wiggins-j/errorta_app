@@ -22,6 +22,11 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     health = client.get_json("/healthz")
     run: Any = None
     if ctx.project_id:
+        # GET /coding/projects/{id}/run is side-effecting (it runs recovery /
+        # reconcile). This is safe ONLY because sidecar.resolve() guarantees sole
+        # ownership: the CLI adopts its own live sidecar or refuses to spawn a
+        # second one next to a foreign app — so this call never hits a foreign
+        # sidecar and never corrupts another process's live run.
         run = client.get_json(f"/coding/projects/{ctx.project_id}/run")
     return {"project_id": ctx.project_id, "health": health, "run": run}
 

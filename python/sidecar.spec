@@ -141,6 +141,12 @@ a = Analysis(
         "chromadb",
         "sentence_transformers",
         "fastapi",
+        # F147 CLI foreign-app detection (errorta_cli.sidecar._scan_errorta_processes)
+        # imports psutil in a function body to spot a running Errorta.app /
+        # errorta-sidecar before spawning a second sidecar. psutil is already
+        # pulled in transitively by errorta_hwdetect, but declare it explicitly so
+        # the sole-owner guard can never silently degrade in the frozen binary.
+        "psutil",
     ],
     hookspath=[],
     hooksconfig={},

@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -63,12 +64,20 @@ def test_spawn_when_no_record(monkeypatch, tmp_path: Path) -> None:
     def fake_launch(argv, env):
         launched["argv"] = argv
         launched["env"] = env
+        launched["port"] = int(env["ERRORTA_SIDECAR_PORT"])
         return _FakeProc(pid=4321)
 
     monkeypatch.setattr(sidecar, "_launch", fake_launch)
+    # Answer /healthz only on the freshly-spawned port so the pre-spawn
+    # foreign-app probe of 8770 stays negative.
     monkeypatch.setattr(
-        sidecar, "probe_healthz", lambda port, **k: {"build": {"commit": "abc"}}
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"build": {"commit": "abc"}}
+        if port == launched.get("port")
+        else None,
     )
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: [])
 
     handle = sidecar.resolve(tmp_path, our_commit="abc")
 
@@ -132,6 +141,9 @@ def test_stale_record_respawns(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(sidecar, "_launch", fake_launch)
     monkeypatch.setattr(sidecar, "probe_healthz", probe)
+    # The recorded pid (77) is genuinely dead → clear + respawn.
+    monkeypatch.setattr(sidecar, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: [])
 
     handle = sidecar.resolve(tmp_path, our_commit="abc")
     assert handle.adopted is False
@@ -158,8 +170,133 @@ def test_spawn_raises_when_child_exits(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(sidecar, "_launch", lambda *a, **k: _DeadProc())
     monkeypatch.setattr(sidecar, "probe_healthz", lambda *a, **k: None)
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: [])
     with pytest.raises(SidecarUnreachable):
         sidecar.resolve(tmp_path, our_commit="abc")
+
+
+def test_transient_probe_failure_keeps_live_record_and_does_not_duplicate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A live-but-slow sidecar (probe times out, pid alive) is never nuked/duplicated."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 4242, "commit": "abc", "started_by": "cli"}
+    )
+    # /healthz never answers (transient), but the recorded process IS alive.
+    monkeypatch.setattr(sidecar, "probe_healthz", lambda *a, **k: None)
+    monkeypatch.setattr(sidecar, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn"))
+    )
+    # Keep the retry loop fast.
+    monkeypatch.setattr(sidecar, "_ADOPT_PROBE_BACKOFF", 0.0)
+
+    with pytest.raises(SidecarUnreachable):
+        sidecar.resolve(tmp_path, our_commit="abc")
+
+    # Record preserved (not clobbered) for the still-running sidecar.
+    assert sidecar.read_record(tmp_path) is not None
+
+
+def test_resolve_refuses_to_spawn_when_foreign_app_detected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """No CLI record + a foreign Errorta process → refuse to spawn (all commands)."""
+    monkeypatch.setattr(sidecar, "probe_healthz", lambda *a, **k: None)
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
+    monkeypatch.setattr(
+        sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn"))
+    )
+    with pytest.raises(ForeignSidecar):
+        sidecar.resolve(tmp_path, our_commit="abc")
+    # No second sidecar record was written.
+    assert sidecar.read_record(tmp_path) is None
+
+
+class _KillTrackingProc:
+    def __init__(self, pid: int = 7777) -> None:
+        self.pid = pid
+        self.returncode = None
+        self.killed = False
+        self.waited = False
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        self.waited = True
+        return self.returncode
+
+
+def test_spawn_kills_child_on_readiness_timeout(monkeypatch, tmp_path: Path) -> None:
+    """A spawn that never becomes ready must kill its detached child (no orphan)."""
+    proc = _KillTrackingProc()
+    monkeypatch.setattr(sidecar, "_launch", lambda *a, **k: proc)
+    monkeypatch.setattr(sidecar, "probe_healthz", lambda *a, **k: None)
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: [])
+    # Shrink the readiness budget so the timeout path fires fast.
+    monkeypatch.setattr(sidecar, "_SPAWN_READY_BUDGET", 0.05)
+    monkeypatch.setattr(sidecar, "_SPAWN_POLL_INTERVAL", 0.01)
+
+    with pytest.raises(SidecarUnreachable):
+        sidecar.resolve(tmp_path, our_commit="abc")
+
+    assert proc.killed is True
+    assert proc.waited is True
+    # No stale record for the child that never came up.
+    assert sidecar.read_record(tmp_path) is None
+
+
+def test_concurrent_resolve_spawns_exactly_once(monkeypatch, tmp_path: Path) -> None:
+    """The flock guarantee: two concurrent resolve() calls spawn one sidecar.
+
+    Fires two threads at resolve() with a slow `_launch` held under the home
+    lock. The lock must serialize them so the second adopts the record the first
+    wrote — `_launch` runs exactly once.
+    """
+    launch_calls: list[int] = []
+    calls_lock = threading.Lock()
+    spawned: dict[str, int] = {}
+
+    def fake_launch(argv, env):
+        with calls_lock:
+            launch_calls.append(1)
+        spawned["port"] = int(env["ERRORTA_SIDECAR_PORT"])
+        time.sleep(0.25)  # simulate a slow boot while holding the home lock
+        return _FakeProc(pid=1234)
+
+    def probe(port, **k):
+        return {"build": {"commit": "abc"}} if port == spawned.get("port") else None
+
+    monkeypatch.setattr(sidecar, "_launch", fake_launch)
+    monkeypatch.setattr(sidecar, "probe_healthz", probe)
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: [])
+
+    results: dict[int, sidecar.SidecarHandle] = {}
+    errors: dict[int, BaseException] = {}
+
+    def worker(i: int) -> None:
+        try:
+            results[i] = sidecar.resolve(tmp_path, our_commit="abc")
+        except BaseException as exc:  # pragma: no cover — surfaced via assert below
+            errors[i] = exc
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert not errors, errors
+    assert len(launch_calls) == 1, "the flock must prevent a double-spawn"
+    assert results[0].port == results[1].port
+    # Exactly one spawned, one adopted the shared record.
+    assert {results[0].adopted, results[1].adopted} == {True, False}
 
 
 # --------------------------------------------------------------------------- #

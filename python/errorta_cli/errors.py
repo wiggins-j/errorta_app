@@ -94,9 +94,10 @@ class SidecarUnreachable(CliError):
 class ForeignSidecar(CliError):
     """A desktop app (or other foreign sidecar) is driving this ERRORTA_HOME.
 
-    v1 is sole-owner: the CLI refuses run/mutation commands rather than race the
-    app and corrupt in-flight work (F147 spec §4.2). Read-only inspection may
-    still proceed.
+    v1 is sole-owner: rather than race the app and corrupt in-flight work, the
+    CLI refuses to spawn a second sidecar next to a foreign owner — for ALL
+    commands, reads included (F147 spec §4.2). Reads proceed only by adopting an
+    existing CLI-owned sidecar; the CLI never stands up a competing one.
     """
 
     exit_code = EXIT_FOREIGN_SIDECAR
