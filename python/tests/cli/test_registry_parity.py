@@ -147,6 +147,31 @@ def test_s3_mutations_hit_expected_routes_via_both_surfaces(make_ctx) -> None:
         assert (method, path) in argv_client.calls, (name, argv_client.calls)
 
 
+# --- S4: connect / wizard registered + parity-clean (argv ≡ slash) -----------
+
+def test_s4_commands_are_registered() -> None:
+    for name in ("connect", "wizard"):
+        assert registry.get(name) is not None, name
+
+
+def test_s4_reads_hit_identical_routes_via_both_surfaces(make_ctx) -> None:
+    """Bare ``connect`` (→ status) and ``wizard`` (→ models list) make the same
+    route calls whether invoked as argv or slash, and actually reach a route."""
+    from .conftest import RouteClient
+
+    for name, expected in (
+        ("connect", ("GET", "/gateway/providers")),
+        ("wizard", ("GET", "/coding/wizard/models")),
+    ):
+        argv_client = RouteClient(default={"providers": [], "routes": [], "custom": []})
+        slash_client = RouteClient(default={"providers": [], "routes": [], "custom": []})
+        registry.dispatch(name, argv_client, make_ctx(project_id="p"), [])
+        n_s, base = registry.split_slash("/" + name)
+        registry.dispatch(n_s, slash_client, make_ctx(project_id="p"), base)
+        assert argv_client.calls == slash_client.calls, name
+        assert expected in argv_client.calls, (name, argv_client.calls)
+
+
 def test_json_bypasses_render_for_every_command(make_ctx) -> None:
     from .conftest import RouteClient
 

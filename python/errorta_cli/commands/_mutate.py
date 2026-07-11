@@ -56,25 +56,46 @@ def prompt_yes_no(question: str) -> bool:
     return answer in ("y", "yes")
 
 
-def confirm(ctx: Context, args: dict[str, Any], action: str) -> bool:
+# The default cost note — a run spends real model budget. Other mutations (a
+# provider-key write, a team apply) pass their own note so the refusal message is
+# honest about the actual side effect.
+_RUN_NOTE = "a run spends real model budget"
+
+
+def confirm(
+    ctx: Context,
+    args: dict[str, Any],
+    action: str,
+    *,
+    note: str = _RUN_NOTE,
+    interactive_prompt: bool = True,
+) -> bool:
     """Resolve whether ``action`` (e.g. "start a run") is authorized to proceed.
 
     Returns ``True`` to proceed, ``False`` if the user declined interactively.
     Raises :class:`CliError` (exit 1) when confirmation is required but ``--yes``
     was not given (``--json`` or non-interactive). Golden invariant #7.
+
+    ``note`` customizes the parenthetical in the refusal message so a non-run
+    mutation (e.g. writing a provider key) explains its own side effect instead of
+    the run-budget default. ``interactive_prompt=False`` skips the ``y/N`` prompt
+    interactively — used when the action is ALREADY an explicit deliberate step
+    (e.g. the no-echo key prompt), so the gate only enforces ``--yes`` in the
+    non-interactive / ``--json`` path.
     """
     if args.get("yes"):
         return True
     if ctx.json_mode:
         raise CliError(
-            f"refusing to {action} in --json mode without --yes "
-            "(a run spends real model budget; pass --yes to confirm)",
+            f"refusing to {action} in --json mode without --yes ({note}; "
+            "pass --yes to confirm)",
             code="confirmation_required",
         )
     if not is_interactive():
         raise CliError(
-            f"refusing to {action} without --yes "
-            "(non-interactive; a run spends real model budget)",
+            f"refusing to {action} without --yes (non-interactive; {note})",
             code="confirmation_required",
         )
-    return prompt_yes_no(f"{action}? this spends real model budget")
+    if not interactive_prompt:
+        return True
+    return prompt_yes_no(f"{action}? {note}")
