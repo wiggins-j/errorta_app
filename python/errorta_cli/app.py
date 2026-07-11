@@ -1,0 +1,275 @@
+"""The ``errorta`` root app — Typer argv front-end + ``main()`` entry.
+
+Registers one argv command per registry entry (parity with the slash REPL by
+construction), the global options ``--home / --verbosity / --no-spawn / --json``,
+the ``errorta sidecar {status,stop,restart}`` lifecycle group, the hidden
+``__serve__`` subcommand, and — for a bare ``errorta`` with no subcommand — the
+interactive REPL.
+"""
+from __future__ import annotations
+
+import json as _json
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+import typer
+
+from . import config, registry, serve, sidecar
+from .client import SidecarClient
+from .errors import CliError
+from .session import Context
+from .verbosity import Verbosity, resolve_level
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    help="Errorta — headless Coding Council CLI (a sidecar client).",
+)
+
+
+@dataclass
+class _Globals:
+    """Global options captured on the root callback."""
+
+    home: Optional[str] = None
+    verbosity: Optional[str] = None
+    no_spawn: bool = False
+    json: bool = False
+    extra: dict[str, object] = field(default_factory=dict)
+
+
+_G = _Globals()
+
+
+# --------------------------------------------------------------------------- #
+# Root callback: capture globals; launch the REPL when no subcommand is given.
+# --------------------------------------------------------------------------- #
+
+@app.callback(invoke_without_command=True)
+def _root(
+    ctx: typer.Context,
+    home: Optional[str] = typer.Option(
+        None, "--home", help="Override ERRORTA_HOME (isolated store)."
+    ),
+    verbosity: Optional[str] = typer.Option(
+        None, "--verbosity", "-V", help="Global verbosity 0..5 or a name."
+    ),
+    no_spawn: bool = typer.Option(
+        False, "--no-spawn", help="Never spawn a sidecar; error if none is running."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the raw route payload as JSON to stdout."
+    ),
+) -> None:
+    _G.home = home
+    _G.verbosity = verbosity
+    _G.no_spawn = no_spawn
+    _G.json = json_out
+    if ctx.invoked_subcommand is None:
+        _launch_repl()
+        raise typer.Exit()
+
+
+# --------------------------------------------------------------------------- #
+# Hidden `__serve__` — run the embedded sidecar in-process.
+# --------------------------------------------------------------------------- #
+
+@app.command("__serve__", hidden=True)
+def _serve() -> None:
+    """Run the embedded uvicorn sidecar (self-re-exec target)."""
+    serve.run()
+
+
+# --------------------------------------------------------------------------- #
+# Sidecar lifecycle group.
+# --------------------------------------------------------------------------- #
+
+sidecar_app = typer.Typer(help="Manage the CLI-owned sidecar.")
+app.add_typer(sidecar_app, name="sidecar")
+
+
+@sidecar_app.command("status")
+def _sidecar_status() -> None:
+    home = config.resolve_home(_G.home)
+    info = sidecar.status(home)
+    if _G.json:
+        typer.echo(_json.dumps(info, indent=2, default=str))
+        return
+    if not info["running"]:
+        typer.echo("sidecar: not running (no live CLI sidecar for this ERRORTA_HOME)")
+        return
+    rec = info["record"] or {}
+    typer.echo(
+        f"sidecar: running on 127.0.0.1:{rec.get('port')} "
+        f"(pid {rec.get('pid')}, started_by {rec.get('started_by')})"
+    )
+
+
+@sidecar_app.command("stop")
+def _sidecar_stop() -> None:
+    home = config.resolve_home(_G.home)
+    result = sidecar.stop(home)
+    typer.echo(_json.dumps(result, default=str) if _G.json else _stop_line(result))
+
+
+@sidecar_app.command("restart")
+def _sidecar_restart() -> None:
+    home = config.resolve_home(_G.home)
+    try:
+        handle = sidecar.restart(home, our_commit=config.build_commit())
+    except CliError as exc:
+        _fail(exc)
+        return
+    if _G.json:
+        typer.echo(_json.dumps({"port": handle.port, "pid": handle.pid}, default=str))
+    else:
+        typer.echo(f"sidecar: restarted on 127.0.0.1:{handle.port} (pid {handle.pid})")
+
+
+def _stop_line(result: dict) -> str:
+    if result.get("stopped"):
+        return f"sidecar: stopped (pid {result.get('pid')})"
+    return f"sidecar: nothing to stop ({result.get('reason', 'not running')})"
+
+
+# --------------------------------------------------------------------------- #
+# Registry commands → argv commands.
+# --------------------------------------------------------------------------- #
+
+def _register_argv_commands() -> None:
+    for command in registry.all_commands():
+        _add_argv_command(command)
+
+
+def _add_argv_command(command: registry.Command) -> None:
+    def _handler(ctx: typer.Context, _name: str = command.name) -> None:
+        _run_registry_command(_name, list(ctx.args))
+
+    app.command(
+        name=command.name,
+        help=command.help,
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": True,
+        },
+    )(_handler)
+
+
+def _run_registry_command(name: str, raw_args: list[str]) -> None:
+    """Resolve the sidecar, dispatch through the shared registry, print, exit."""
+    # Global options work in either position: before the subcommand (parsed by
+    # the callback into `_G`) or after it (in `raw_args`). Reconcile both here so
+    # `errorta status --no-spawn` behaves like `errorta --no-spawn status`.
+    post, raw_args = _extract_post_globals(raw_args)
+    home_override = post.get("home", _G.home)
+    verbosity_raw = post.get("verbosity", _G.verbosity)
+    no_spawn = _G.no_spawn or post.get("no_spawn", False)
+    json_mode = _G.json or post.get("json", False)
+
+    home = config.resolve_home(home_override)
+    verbosity = Verbosity(level=resolve_level(verbosity_raw))
+    ctx = Context.build(home_override=home_override, verbosity=verbosity)
+
+    try:
+        handle = sidecar.resolve(
+            home, allow_spawn=not no_spawn, our_commit=config.build_commit()
+        )
+    except CliError as exc:
+        _fail(exc)
+        return
+    ctx.handle = handle
+    if handle.commit_mismatch:
+        typer.echo(
+            "warning: this CLI and the running sidecar were built from "
+            "different commits; behavior may differ.",
+            err=True,
+        )
+
+    with SidecarClient(handle.base_url) as client:
+        try:
+            _payload, text = registry.dispatch(
+                name, client, ctx, raw_args, json_mode=json_mode
+            )
+        except KeyError:
+            typer.echo(f"unknown command: {name}", err=True)
+            raise typer.Exit(code=1) from None
+        except CliError as exc:
+            _fail(exc)
+            return
+    typer.echo(text)
+
+
+def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[str]]:
+    """Pull global options that appear *after* the subcommand out of ``raw_args``.
+
+    Returns ``(overrides, remaining_args)``. Recognizes ``--json``, ``--no-spawn``
+    (flags), and ``--home VALUE`` / ``--verbosity|-V VALUE`` (value options), so a
+    global flag is honored whether it precedes or follows the subcommand.
+    """
+    overrides: dict[str, object] = {}
+    rest: list[str] = []
+    i = 0
+    while i < len(raw_args):
+        token = raw_args[i]
+        if token == "--json":
+            overrides["json"] = True
+        elif token == "--no-spawn":
+            overrides["no_spawn"] = True
+        elif token in ("--home", "--verbosity", "-V"):
+            key = "verbosity" if token in ("--verbosity", "-V") else "home"
+            if i + 1 < len(raw_args):
+                overrides[key] = raw_args[i + 1]
+                i += 1
+        else:
+            rest.append(token)
+        i += 1
+    return overrides, rest
+
+
+def _fail(exc: CliError) -> None:
+    typer.echo(f"error: {exc.message}", err=True)
+    raise typer.Exit(code=exc.exit_code)
+
+
+# --------------------------------------------------------------------------- #
+# REPL launch.
+# --------------------------------------------------------------------------- #
+
+def _launch_repl() -> None:
+    from . import repl  # deferred: prompt_toolkit imported only when needed
+
+    home = config.resolve_home(_G.home)
+    verbosity = Verbosity(level=resolve_level(_G.verbosity))
+    ctx = Context.build(home_override=_G.home, verbosity=verbosity)
+    try:
+        handle = sidecar.resolve(
+            home, allow_spawn=not _G.no_spawn, our_commit=config.build_commit()
+        )
+    except CliError as exc:
+        typer.echo(f"error: {exc.message}", err=True)
+        raise typer.Exit(code=exc.exit_code)
+    ctx.handle = handle
+    with SidecarClient(handle.base_url) as client:
+        repl.run_repl(ctx, client, cwd=Path.cwd())
+
+
+# Register argv commands at import time so `errorta --help` lists them.
+_register_argv_commands()
+
+
+def main() -> None:
+    """``console_scripts`` entry point.
+
+    Special-cases the frozen self-re-exec: a frozen ``errorta __serve__`` must
+    run the embedded sidecar without going through Typer's option parsing.
+    """
+    if len(sys.argv) >= 2 and sys.argv[1] == "__serve__":
+        serve.run()
+        return
+    app()
+
+
+if __name__ == "__main__":
+    main()
