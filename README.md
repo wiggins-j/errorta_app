@@ -130,6 +130,37 @@ subscription**, and drives them to shipped code.
 
 ---
 
+## Headless CLI (`errorta`)
+
+Drive the whole Coding Team from your terminal — no window needed. `errorta` is a
+terminal front-end over the **same local engine** the desktop app uses: it shares
+the same on-disk store, so a project is interchangeable between the CLI and the
+GUI. Connect a provider, scope a project, start a run, and watch it live, with a
+layered verbosity dial and a `--json` surface for scripting and CI.
+
+```bash
+# Point errorta at your store (defaults to ~/.errorta); connect a model provider.
+# The API key is read from a hidden prompt, never from argv.
+errorta connect anthropic api
+
+# Create a project rooted in the current directory.
+errorta new my-project --here --north-star "A CLI that renders Markdown tables"
+
+# Choose the team, commit it to the run config, and start the run.
+errorta team set dev anthropic.claude-sonnet-4-6
+errorta team apply --yes
+errorta run --yes
+
+# Follow the team log live from another terminal.
+errorta log --watch
+```
+
+**Full CLI documentation: [docs/CLI.md](docs/CLI.md)** — the complete command
+reference, the verbosity model, scripting with `--json` and exit codes, and the
+sole-owner sidecar model.
+
+---
+
 ## What else Errorta can do
 
 ### Council — many models deliberate, one answer comes out
@@ -242,6 +273,7 @@ Two foundational feature designs are included as reference:
 
 - [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) — product identity, who it's for, what makes it different, what we're explicitly NOT building.
 - [`docs/AIAR_SETUP.md`](docs/AIAR_SETUP.md) — what AIAR is, local vs. remote, and how to connect it. First run just connects your models; AIAR/knowledge is set up in Settings.
+- [`docs/CLI.md`](docs/CLI.md) — the headless `errorta` CLI: full command reference and guides.
 - [`DEVELOPING.md`](DEVELOPING.md) — how to actually run the thing locally.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
 - [`docs/SIDECAR_LIFECYCLE.md`](docs/SIDECAR_LIFECYCLE.md) and [`docs/SYSTEM_TRAY.md`](docs/SYSTEM_TRAY.md) — architecture notes.
