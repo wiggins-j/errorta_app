@@ -112,6 +112,17 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
         if is_quit(line):
             print("bye")
             return
+        name, raw_args = registry.split_slash(line)
+        # `/log --watch` (etc.) tails on the poll loop until Ctrl-C, then returns
+        # to the prompt. Only registry commands watch; builtins render once.
+        if "--watch" in raw_args and registry.get(name) is not None:
+            from . import watch as _watch
+
+            try:
+                _watch.run_watch(name, client, ctx, raw_args)
+            except KeyboardInterrupt:
+                pass
+            continue
         text = handle_line(line, ctx, client)
         if text:
             print(text)

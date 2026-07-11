@@ -37,6 +37,7 @@ class _Globals:
     verbosity: Optional[str] = None
     no_spawn: bool = False
     json: bool = False
+    poll_interval: Optional[float] = None
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -62,11 +63,15 @@ def _root(
     json_out: bool = typer.Option(
         False, "--json", help="Emit the raw route payload as JSON to stdout."
     ),
+    poll_interval: Optional[float] = typer.Option(
+        None, "--poll-interval", help="Seconds between --watch re-renders / poll ticks."
+    ),
 ) -> None:
     _G.home = home
     _G.verbosity = verbosity
     _G.no_spawn = no_spawn
     _G.json = json_out
+    _G.poll_interval = poll_interval
     if ctx.invoked_subcommand is None:
         _launch_repl()
         raise typer.Exit()
@@ -164,15 +169,22 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     # Global options work in either position: before the subcommand (parsed by
     # the callback into `_G`) or after it (in `raw_args`). Reconcile both here so
     # `errorta status --no-spawn` behaves like `errorta --no-spawn status`.
-    post, raw_args = _extract_post_globals(raw_args)
+    try:
+        post, raw_args = _extract_post_globals(raw_args)
+    except CliError as exc:
+        _fail(exc)
+        return
     home_override = post.get("home", _G.home)
     verbosity_raw = post.get("verbosity", _G.verbosity)
     no_spawn = _G.no_spawn or post.get("no_spawn", False)
     json_mode = _G.json or post.get("json", False)
+    poll_interval = post.get("poll_interval", _G.poll_interval)
 
     home = config.resolve_home(home_override)
     verbosity = Verbosity(level=resolve_level(verbosity_raw))
-    ctx = Context.build(home_override=home_override, verbosity=verbosity)
+    ctx = Context.build(
+        home_override=home_override, verbosity=verbosity, poll_interval=poll_interval
+    )
 
     try:
         handle = sidecar.resolve(
@@ -188,6 +200,17 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
             "different commits; behavior may differ.",
             err=True,
         )
+
+    # `--watch` on a read command re-renders on the poll loop (never in --json/CI).
+    if "--watch" in raw_args and not json_mode:
+        from . import watch as _watch
+
+        with SidecarClient(handle.base_url) as client:
+            try:
+                _watch.run_watch(name, client, ctx, raw_args)
+            except KeyboardInterrupt:
+                pass
+        return
 
     with SidecarClient(handle.base_url) as client:
         try:
@@ -207,8 +230,9 @@ def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[
     """Pull global options that appear *after* the subcommand out of ``raw_args``.
 
     Returns ``(overrides, remaining_args)``. Recognizes ``--json``, ``--no-spawn``
-    (flags), and ``--home VALUE`` / ``--verbosity|-V VALUE`` (value options), so a
-    global flag is honored whether it precedes or follows the subcommand.
+    (flags), and ``--home VALUE`` / ``--verbosity|-V VALUE`` /
+    ``--poll-interval VALUE`` (value options), so a global flag is honored
+    whether it precedes or follows the subcommand.
     """
     overrides: dict[str, object] = {}
     rest: list[str] = []
@@ -219,10 +243,21 @@ def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[
             overrides["json"] = True
         elif token == "--no-spawn":
             overrides["no_spawn"] = True
-        elif token in ("--home", "--verbosity", "-V"):
-            key = "verbosity" if token in ("--verbosity", "-V") else "home"
+        elif token in ("--home", "--verbosity", "-V", "--poll-interval"):
+            if token == "--poll-interval":
+                key = "poll_interval"
+            elif token in ("--verbosity", "-V"):
+                key = "verbosity"
+            else:
+                key = "home"
             if i + 1 < len(raw_args):
-                overrides[key] = raw_args[i + 1]
+                if key == "poll_interval":
+                    try:
+                        overrides[key] = float(raw_args[i + 1])
+                    except ValueError:
+                        raise CliError("--poll-interval must be a number") from None
+                else:
+                    overrides[key] = raw_args[i + 1]
                 i += 1
         else:
             rest.append(token)
@@ -244,7 +279,9 @@ def _launch_repl() -> None:
 
     home = config.resolve_home(_G.home)
     verbosity = Verbosity(level=resolve_level(_G.verbosity))
-    ctx = Context.build(home_override=_G.home, verbosity=verbosity)
+    ctx = Context.build(
+        home_override=_G.home, verbosity=verbosity, poll_interval=_G.poll_interval
+    )
     try:
         handle = sidecar.resolve(
             home, allow_spawn=not _G.no_spawn, our_commit=config.build_commit()

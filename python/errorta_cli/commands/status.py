@@ -1,21 +1,19 @@
-"""``status`` — the one real read command proving the S1 spine.
+"""``status`` — sidecar health + the bound project's run state (spec §9).
 
 Calls ``GET /healthz`` and, when a project is bound to the cwd, ``GET
-/coding/projects/{id}/run``, then renders a terminal summary (spec §9 "Run
-status"). Works identically as ``errorta status [--json]`` and ``/status`` in the
-REPL because both front-ends dispatch through the shared registry.
-
-Rich rendering polish and the other read views are S2; S1 keeps ``status``
-deliberately simple.
+/coding/projects/{id}/run`` (state + last ``stop_reason`` + counters). Works
+identically as ``errorta status [--json]`` and ``/status`` in the REPL because
+both front-ends dispatch through the shared registry.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from ..client import SidecarClient
-from ..registry import Command, register, render_json
+from ..registry import Command, register
+from ..render.status import render_status
 from ..session import Context
-from ..verbosity import Verbosity
+from ._base import make_render
 
 
 def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
@@ -31,48 +29,7 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     return {"project_id": ctx.project_id, "health": health, "run": run}
 
 
-def _render(payload: Any, verbosity: Verbosity, json_mode: bool) -> str:
-    if json_mode:
-        return render_json(payload)
-
-    health = payload.get("health") or {}
-    lines: list[str] = []
-    lines.append(
-        "sidecar: {service} v{version} (python {py})".format(
-            service=health.get("service", "?"),
-            version=health.get("version", "?"),
-            py=health.get("python", "?"),
-        )
-    )
-
-    build = health.get("build") or {}
-    commit = build.get("commit")
-    if commit:
-        dirty = " (dirty)" if build.get("dirty") else ""
-        lines.append(f"build:   {commit}{dirty}")
-
-    residency = health.get("residency") or {}
-    mode = residency.get("mode") or residency.get("residency")
-    if mode:
-        lines.append(f"residency: {mode}")
-
-    pid = payload.get("project_id")
-    if not pid:
-        lines.append("project: (none bound to this directory)")
-        return "\n".join(lines)
-
-    lines.append(f"project: {pid}")
-    run = payload.get("run") or {}
-    state = run.get("state") or {}
-    running = run.get("running")
-    run_status = state.get("status") or run.get("result") or "unknown"
-    lines.append(f"run:     {'running' if running else run_status}")
-    stop_reason = state.get("stop_reason")
-    if stop_reason:
-        lines.append(f"stop:    {stop_reason}")
-    if run.get("can_resume"):
-        lines.append("         (resumable)")
-    return "\n".join(lines)
+_render = make_render(render_status)
 
 
 register(

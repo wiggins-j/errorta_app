@@ -176,5 +176,14 @@ def render_json(payload: Any) -> str:
 
 
 # Import the command modules for their registration side effects. Done at the
-# bottom so the Command/registry symbols above are fully defined first.
-from .commands import status as _status  # noqa: E402,F401
+# bottom (so the Command/registry symbols above are fully defined first) via
+# importlib so the imports can't be seen as "unused" and stripped by a linter.
+import importlib as _importlib  # noqa: E402
+
+_COMMAND_MODULES = (
+    "status", "log", "decisions", "tasks", "prs", "tokens", "turns",
+    "attention", "runtime", "team", "models", "governance", "pm",
+)
+
+for _name in _COMMAND_MODULES:
+    _importlib.import_module(f".commands.{_name}", __package__)

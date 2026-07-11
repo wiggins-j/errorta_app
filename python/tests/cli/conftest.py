@@ -45,6 +45,46 @@ class RecordingClient:
         return self._record("DELETE", path)
 
 
+class RouteClient:
+    """A recording client that maps request paths to canned payloads.
+
+    Exact path match wins; otherwise a substring match against the registered
+    keys; otherwise ``default``. Records ``(method, path)`` so a test can assert
+    which routes a command hit. Carries a ``base_url`` so the poller's
+    own-sidecar invariant is checkable.
+    """
+
+    def __init__(self, responses: dict[str, Any] | None = None, *, default: Any = None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.responses = responses or {}
+        self.default = {} if default is None else default
+        self.base_url = "http://127.0.0.1:59999"
+
+    def _resp(self, method: str, path: str) -> Any:
+        self.calls.append((method, path))
+        if path in self.responses:
+            return self.responses[path]
+        for key, val in self.responses.items():
+            if key in path:
+                return val
+        return self.default
+
+    def get_json(self, path: str, *, params: dict | None = None) -> Any:
+        return self._resp("GET", path)
+
+    def post_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
+        return self._resp("POST", path)
+
+    def put_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
+        return self._resp("PUT", path)
+
+    def delete_json(self, path: str, *, params: dict | None = None) -> Any:
+        return self._resp("DELETE", path)
+
+    def paths(self) -> list[str]:
+        return [p for _, p in self.calls]
+
+
 @pytest.fixture
 def make_ctx(tmp_path: Path):
     """Factory for a :class:`Context` rooted at an isolated tmp home."""
