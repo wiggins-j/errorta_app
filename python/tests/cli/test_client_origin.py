@@ -1,7 +1,8 @@
 """The origin header is on every request; status → typed-exception mapping.
 
-Golden invariant #2 (F147 plan §4): every request carries
-``x-errorta-origin: tauri-ui`` — the sole guard on coding/gateway mutations.
+Golden invariant #2 (F147 plan §4): every request carries the trusted origin
+header ``x-errorta-origin`` — the sole guard on coding/gateway mutations. S9b
+sends ``cli`` (audit-distinguishable from the GUI's ``tauri-ui``; both trusted).
 """
 from __future__ import annotations
 

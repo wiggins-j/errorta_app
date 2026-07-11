@@ -8,9 +8,9 @@ there is nothing else to install or run.
 
 - Everything is **local**. The CLI talks to a loopback sidecar; your code and
   keys never leave the machine (unless you configure a remote provider yourself).
-- It shares the **same on-disk store** as the desktop app, so a project is
-  interchangeable between the terminal and the GUI — one at a time (see
-  [Sole owner](#sole-owner)).
+- It shares the **same on-disk store** *and the same running sidecar* as the
+  desktop app, so a project is interchangeable between the terminal and the GUI —
+  and you can drive both at once (see [Sharing one sidecar](#sharing-one-sidecar-gui--cli)).
 
 ---
 
@@ -185,15 +185,21 @@ to gate a pipeline on.
 
 ---
 
-## Sole owner
+## Sharing one sidecar (GUI + CLI)
 
-For v1, **one owner per data store at a time.** Don't run the CLI and the desktop
-app against the same store simultaneously — a second sidecar next to the first
-can corrupt an in-flight run (its recovery sweep re-queues live work). The CLI
-detects a running desktop app and refuses to start a second sidecar rather than
-risk it.
+The CLI and the desktop app can now run against the **same store at the same
+time** — they *share a single sidecar*. Whichever starts first spawns it and
+advertises it in `${ERRORTA_HOME}/sidecar.json`; the other **adopts** that same
+running sidecar instead of starting a second one. A single shared sidecar
+coordinates all writes internally (a cross-process run lock, per-run owner
+tracking, and owner-aware crash recovery), so concurrent GUI + CLI use is safe.
 
-If you need them side by side, give one of them a separate store:
+This relies on the **single-instance contract**: there must only ever be *one*
+sidecar per store. The CLI upholds it by refusing to start a second sidecar when
+it can't confirm a coordinated one to adopt — specifically when it detects a
+desktop app (or a foreign sidecar) it cannot adopt, e.g. one built from a
+**different version**. In that case update so both sides match, or give one of
+them a separate store:
 
 ```bash
 errorta --home ~/.errorta-cli status

@@ -218,6 +218,136 @@ impl SidecarHandle {
     }
 }
 
+// --------------------------------------------------------------------------- //
+// F147 S9b — single-instance ADOPTION.
+//
+// Before spawning, the app checks whether a healthy sidecar built from the SAME
+// commit is already advertised in `${ERRORTA_HOME}/sidecar.json` (e.g. a
+// CLI-started one). If so it ADOPTS that port instead of spawning a competing
+// second sidecar (two sidecars on one store corrupt in-flight runs — §4.2). The
+// governing rule is SAFE FALLBACK: adoption engages ONLY on a positive match
+// (a build stamp we can read, a live /healthz, and an equal build commit); any
+// uncertainty falls through to spawning our own sidecar — today's behavior.
+// --------------------------------------------------------------------------- //
+
+/// Our own build commit, stamped at compile time by `build.rs` (git HEAD, or
+/// empty when git was unavailable). Empty ⇒ we cannot confirm a commit match, so
+/// adoption is disabled and we always spawn (safe fallback).
+fn own_build_commit() -> Option<String> {
+    let c = env!("ERRORTA_BUILD_COMMIT").trim();
+    if c.is_empty() {
+        None
+    } else {
+        Some(c.to_string())
+    }
+}
+
+/// `${ERRORTA_HOME}/sidecar.json` — the sidecar discovery file. Mirrors
+/// `errorta_app.sidecar_advert.sidecar_json_path()` /
+/// `errorta_cli.config.sidecar_record_path`.
+fn sidecar_json_path() -> std::path::PathBuf {
+    crate::paths::errorta_home().join("sidecar.json")
+}
+
+/// Directory holding one pidfile per live watchdog client. Mirrors
+/// `errorta_app.parent_watchdog.clients_dir()`.
+fn clients_dir() -> std::path::PathBuf {
+    crate::paths::errorta_home().join("sidecar-clients")
+}
+
+/// Register THIS app process as a live watchdog client of the shared sidecar
+/// (write a pidfile named/holding our pid, matching the S9a registry format), so
+/// an adopted sidecar refcounts us and does not exit while we're using it.
+/// Best-effort; a failure is non-fatal.
+fn register_client_pidfile() {
+    let dir = clients_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let pid = std::process::id();
+    let _ = std::fs::write(dir.join(pid.to_string()), pid.to_string());
+}
+
+/// Remove this app's watchdog-client pidfile (a clean disconnect on app exit).
+/// Best-effort; a missing file is fine.
+pub fn unregister_client_pidfile() {
+    let pid = std::process::id();
+    let _ = std::fs::remove_file(clients_dir().join(pid.to_string()));
+}
+
+/// Read + parse `${ERRORTA_HOME}/sidecar.json`, or `None` if absent/unreadable/
+/// corrupt (all of which mean "no discoverable sidecar" → spawn our own).
+fn read_sidecar_advert() -> Option<serde_json::Value> {
+    let bytes = std::fs::read(sidecar_json_path()).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+}
+
+/// GET `/healthz` on loopback `port` and parse the JSON body. Bounded read; never
+/// blocks app boot. `None` on any unreachable/slow/non-2xx/unparseable response
+/// (→ we don't adopt, we spawn — safe fallback).
+fn probe_healthz_json(port: u16) -> Option<serde_json::Value> {
+    use std::io::{Read, Write};
+
+    let host_port = format!("127.0.0.1:{port}");
+    let addr = host_port.parse().ok()?;
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1000)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    let req = format!(
+        "GET /healthz HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+
+    let mut raw: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if raw.len() > 64 * 1024 {
+                    break; // cap — a pathological body can't bloat the probe
+                }
+            }
+            Err(_) => break, // timeout / reset — parse whatever we have below
+        }
+    }
+
+    let text = String::from_utf8_lossy(&raw);
+    if !(text.starts_with("HTTP/1.1 2") || text.starts_with("HTTP/1.0 2")) {
+        return None;
+    }
+    // Header/body split (headers are ASCII, so the byte index is stable).
+    let idx = text.find("\r\n\r\n")?;
+    let body = text[idx + 4..].trim();
+    serde_json::from_str::<serde_json::Value>(body).ok()
+}
+
+/// Try to adopt an already-running, healthy, SAME-BUILD sidecar advertised on
+/// disk. Returns `Some(port)` only on a positive confirmation; `None` (spawn our
+/// own) on any uncertainty.
+fn try_adopt_existing_sidecar() -> Option<u16> {
+    // No build stamp ⇒ can't confirm a match ⇒ never adopt (safe fallback).
+    let want = own_build_commit()?;
+    let advert = read_sidecar_advert()?;
+    let port = u16::try_from(advert.get("port")?.as_u64()?).ok()?;
+    if port == 0 {
+        return None;
+    }
+    let body = probe_healthz_json(port)?; // must be live + 2xx
+    let their_commit = body.get("build")?.get("commit")?.as_str()?;
+    if their_commit == want {
+        Some(port)
+    } else {
+        None // version-skewed peer — don't co-drive it, spawn our own instead
+    }
+}
+
 /// Allocate a free TCP port by binding to :0 and immediately releasing.
 /// There is a small race window between drop and re-bind, but it's the same
 /// trick most local dev tooling uses and is good enough here.
@@ -326,6 +456,25 @@ fn spawn_sidecar_locked(app: &AppHandle, handle: &SidecarHandle) -> Result<u16, 
 fn spawn_sidecar_inner(app: &AppHandle, handle: &SidecarHandle) -> Result<u16, String> {
     handle.terminate();
 
+    // F147 S9b — single-instance ADOPTION. If a healthy sidecar built from the
+    // SAME commit is already advertised in ${ERRORTA_HOME}/sidecar.json (e.g. a
+    // CLI-started one), adopt its port instead of spawning a competing second
+    // sidecar. Register as a watchdog client either way (so an adopted sidecar
+    // refcounts us). Any uncertainty (no build stamp, no/stale/mismatched
+    // advert, unreachable /healthz) falls through to spawning our own — the
+    // safe fallback (worst case: concurrency doesn't engage, never two sidecars).
+    if let Some(port) = try_adopt_existing_sidecar() {
+        // We hold no child in the adopt case: `terminate()` on exit is a no-op,
+        // and `ensure_sidecar` re-probes /healthz and spawns our own if the
+        // adopted sidecar later dies.
+        handle.set_port(port);
+        register_client_pidfile();
+        eprintln!(
+            "[errorta] adopted existing sidecar on 127.0.0.1:{port} (single-instance)"
+        );
+        return Ok(port);
+    }
+
     let port = allocate_free_port()?;
     let port_str = port.to_string();
 
@@ -337,6 +486,10 @@ fn spawn_sidecar_inner(app: &AppHandle, handle: &SidecarHandle) -> Result<u16, S
         // F063 A3: tell the sidecar our PID so it can self-exit if this shell
         // dies without cleanup (SIGKILL / crash / replaced on disk).
         .env("ERRORTA_PARENT_PID", std::process::id().to_string())
+        // F147 S9b: stamp who spawned this sidecar so its /healthz + sidecar.json
+        // advertisement report `started_by=app` (the CLI reads this to know it's
+        // adopting the desktop app's shared sidecar).
+        .env("ERRORTA_STARTED_BY", "app")
         .env(
             "ERRORTA_LOG_LEVEL",
             std::env::var("ERRORTA_LOG_LEVEL").unwrap_or_else(|_| "info".into()),
@@ -384,6 +537,11 @@ fn spawn_sidecar_inner(app: &AppHandle, handle: &SidecarHandle) -> Result<u16, S
         // If healthz failed, kill the child so we don't leak.
         handle.terminate();
     })?;
+
+    // F147 S9b: register as a watchdog client of the sidecar we just spawned
+    // (belt-and-suspenders alongside ERRORTA_PARENT_PID; symmetric with the
+    // adopt path so a co-driving CLI + this app refcount the shared sidecar).
+    register_client_pidfile();
 
     Ok(port)
 }

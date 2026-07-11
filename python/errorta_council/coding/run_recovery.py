@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable, Optional
 
 from .ledger import LedgerStore, _now, list_projects
 
@@ -164,7 +164,20 @@ def scan_and_recover(
     root: Path | None = None,
     live_project_ids: Iterable[str] = (),
     reason: str = "sidecar_startup",
+    owner_peer_fn: Optional[Callable[[dict], bool]] = None,
 ) -> CodingRunRecoverySummary:
+    """Boot-time recovery scan.
+
+    F147 S9b — ``owner_peer_fn`` makes the boot scan **owner-aware**, closing the
+    S9a gap where a *second* sidecar's boot could reconcile a run that is live in
+    ANOTHER sidecar to ``interrupted`` (§4.2 corruption). For each ``running``
+    project not owned by a live worker in THIS process, ``owner_peer_fn(state)``
+    is consulted; when it confirms the run is owned by a live, advertised peer
+    sidecar (see ``locks.owner_is_live_peer_sidecar``) the project is treated as
+    ``live`` and NOT recovered. ``owner_peer_fn=None`` (tests, and any caller that
+    doesn't supply the app-side seams) preserves the exact pre-S9b, owner-blind
+    behavior. The seam is fail-OPEN toward recovery: any error consulting it
+    leaves the project recoverable, so a genuine orphan is never wedged."""
     live = set(live_project_ids)
     recovered: list[CodingRunRecoveryResult] = []
     projects = list_projects(root)
@@ -172,11 +185,17 @@ def scan_and_recover(
         project_id = str(project.get("id", ""))
         if not project_id:
             continue
-        result = recover_orphaned_run(
-            LedgerStore(project_id, root=root),
-            live=project_id in live,
-            reason=reason,
-        )
+        store = LedgerStore(project_id, root=root)
+        is_live = project_id in live
+        if not is_live and owner_peer_fn is not None:
+            try:
+                if owner_peer_fn(store.get_run_state()):
+                    is_live = True
+            except Exception:
+                # A peer check that raises must NOT inhibit recovery — the orphan
+                # safety-net has to keep clearing genuine orphans.
+                is_live = False
+        result = recover_orphaned_run(store, live=is_live, reason=reason)
         if result.recovered:
             recovered.append(result)
     return CodingRunRecoverySummary(

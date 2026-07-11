@@ -1,10 +1,14 @@
 """Thin ``httpx`` client over the Errorta sidecar (F147 spec §4.1).
 
 The load-bearing invariant: **every** request carries the static origin header
-``x-errorta-origin: tauri-ui``. That header is the *only* guard on coding /
-gateway mutations (``coding.py:_require_tauri_origin`` → 403 if absent); there is
-no token and no crypto. Reads don't need it, but sending it universally is
-simplest and harmless.
+``x-errorta-origin: cli``. That header is the *only* guard on coding / gateway
+mutations (``coding.py:_require_tauri_origin`` → 403 if absent); there is no token
+and no crypto. The sidecar's origin allowlist trusts both ``tauri-ui`` (the
+desktop webview) and ``cli`` equally (F147 S9a ``errorta_app.origin``) — both are
+loopback-only, so this is not a privilege change; sending ``cli`` simply makes a
+CLI-initiated mutation *distinguishable in audit/logs* from a GUI one now that a
+GUI and the CLI can co-drive one shared sidecar (S9b). Reads don't need the
+header, but sending it universally is simplest and harmless.
 
 HTTP status + known sidecar error bodies are mapped to the typed exceptions in
 ``errors.py`` so the command layer never sees a raw ``httpx`` response and CI
@@ -28,9 +32,10 @@ from .errors import (
     SidecarUnreachable,
 )
 
-# The header the desktop app sends and the sidecar checks.
+# The origin header the sidecar checks. The desktop app sends ``tauri-ui``; the
+# CLI sends ``cli`` (both are trusted, loopback-only mutation origins — S9a).
 ORIGIN_HEADER = "x-errorta-origin"
-ORIGIN_VALUE = "tauri-ui"
+ORIGIN_VALUE = "cli"
 
 _DEFAULT_TIMEOUT = 30.0
 
