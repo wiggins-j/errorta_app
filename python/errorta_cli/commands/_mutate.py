@@ -99,3 +99,35 @@ def confirm(
     if not interactive_prompt:
         return True
     return prompt_yes_no(f"{action}? {note}")
+
+
+def confirm_outward(ctx: Context, args: dict[str, Any], action: str,
+                    details: list[str]) -> bool:
+    """The EXTRA-STRONG gate for an OUTWARD-FACING publish (F147 §14).
+
+    ``publish pr`` opens a real pull request; ``publish new-repo`` creates a real
+    GitHub repository — both create/modify content the user's collaborators (or
+    the whole world) can see. Unlike a run (which only spends the user's own
+    budget), this must NEVER fire silently:
+
+    * interactive: print EXACTLY what will happen (target repo, branch,
+      private/public, title) then require an explicit ``y/N`` yes;
+    * non-interactive OR ``--json``: REQUIRE ``--yes`` — a script can't open a PR
+      or create a public repo by omission. The refusal echoes the same detail
+      block so a CI author sees precisely what ``--yes`` would authorize.
+
+    Returns ``True`` to proceed, ``False`` on an interactive decline.
+    """
+    detail_block = "\n".join(f"  - {line}" for line in details)
+    if not args.get("yes"):
+        if ctx.json_mode or not is_interactive():
+            raise CliError(
+                f"refusing to {action} without --yes. This will:\n{detail_block}\n"
+                "This creates or modifies content on GitHub — pass --yes to authorize.",
+                code="confirmation_required",
+            )
+        # Interactive: show the exact effect BEFORE the prompt so the yes is informed.
+        print(f"About to {action}. This will:")
+        print(detail_block)
+        return prompt_yes_no(f"Proceed to {action}?")
+    return True
