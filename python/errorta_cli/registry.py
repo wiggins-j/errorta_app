@@ -209,6 +209,8 @@ _COMMAND_MODULES = (
     "attention", "runtime", "team", "models", "governance", "pm",
     "runctl",  # S3 — setup / run / cancel / resume / continue (mutations)
     "connect", "wizard",  # S4 — provider onboarding + conversational setup
+    "project", "focus",  # S5 — lifecycle (new/import/projects/open/switch/delete)
+                         #      + north-star / focus steering
 )
 
 for _name in _COMMAND_MODULES:

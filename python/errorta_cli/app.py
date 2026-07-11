@@ -183,7 +183,8 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     home = config.resolve_home(home_override)
     verbosity = Verbosity(level=resolve_level(verbosity_raw))
     ctx = Context.build(
-        home_override=home_override, verbosity=verbosity, poll_interval=poll_interval
+        home_override=home_override, verbosity=verbosity, poll_interval=poll_interval,
+        cwd=Path.cwd(),
     )
 
     try:
@@ -288,7 +289,8 @@ def _launch_repl() -> None:
     home = config.resolve_home(_G.home)
     verbosity = Verbosity(level=resolve_level(_G.verbosity))
     ctx = Context.build(
-        home_override=_G.home, verbosity=verbosity, poll_interval=_G.poll_interval
+        home_override=_G.home, verbosity=verbosity, poll_interval=_G.poll_interval,
+        cwd=Path.cwd(),
     )
     try:
         handle = sidecar.resolve(
