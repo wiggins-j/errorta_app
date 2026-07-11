@@ -348,6 +348,23 @@ def test_classify_exit(status, stop_reason, expected) -> None:
     assert runstream.classify_exit(payload) == expected
 
 
+def test_checkpoint_gloss_points_at_continue_not_resume() -> None:
+    # A checkpoint leaves the run `stopped`, which is continued with
+    # `errorta continue` — NOT `errorta resume` (resume is for a crash-
+    # `interrupted` run and would 409 on a checkpoint). The gloss must not
+    # mislead the user into the wrong command.
+    text = runstream.gloss("checkpoint")
+    assert "continue" in text
+    assert "resume" not in text
+    assert "errorta continue" in text
+
+
+def test_interrupted_gloss_still_points_at_resume() -> None:
+    # The interrupted (crash-recovery) gloss is correct as-is: `errorta resume`.
+    text = runstream.gloss("interrupted")
+    assert "resume" in text
+
+
 def test_run_stamps_exit_code_on_failure_terminal(make_ctx) -> None:
     # POST /run then a single GET /run that is already terminal-failed.
     def handler(request: httpx.Request) -> httpx.Response:

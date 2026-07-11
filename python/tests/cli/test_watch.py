@@ -82,3 +82,54 @@ def test_run_watch_allows_read_command(make_ctx):
     watch.run_watch("tasks", client, make_ctx(project_id="p"), [], iterations=1,
                     sleep=lambda _s: None, out=io.StringIO(), clear=False)
     assert any(method == "GET" for method, _ in client.calls)
+
+
+class _FakeTty(io.StringIO):
+    """A StringIO that reports a configurable ``isatty()`` (so ``_draw`` can be
+    exercised on both the real-terminal and piped paths)."""
+
+    def __init__(self, is_tty: bool = True) -> None:
+        super().__init__()
+        self._is_tty = is_tty
+
+    def isatty(self) -> bool:  # noqa: D401
+        return self._is_tty
+
+
+def test_draw_emits_no_ansi_when_not_a_tty():
+    # Piped output (`errorta log --watch | tee`) MUST stay plain text — no clear
+    # escape codes leak into the captured stream even with clear=True.
+    out = _FakeTty(is_tty=False)
+    watch._draw(out, "frame body", clear=True)
+    value = out.getvalue()
+    assert "\x1b" not in value
+    assert value == "frame body\n"
+
+
+def test_draw_homes_before_erasing_on_tty():
+    # The redraw clear must HOME the cursor (\x1b[H) BEFORE erasing (\x1b[2J) —
+    # erasing first is the macOS "scroll-into-scrollback" accumulation bug. It must
+    # NOT wipe scrollback (\x1b[3J) — that would nuke the user's history every tick.
+    out = _FakeTty(is_tty=True)
+    watch._draw(out, "frame body", clear=True)
+    value = out.getvalue()
+    assert value.startswith("\x1b[H\x1b[2J")  # home THEN erase, not the reverse
+    assert "\x1b[2J\x1b[H" not in value       # the old (buggy) ordering is gone
+    assert "\x1b[3J" not in value             # scrollback preserved (not wiped per tick)
+    assert value.endswith("frame body\n")
+
+
+def test_run_watch_clears_between_every_frame_on_tty(make_ctx):
+    # The redraw path is exercised on a TTY: every tick clears the previous frame,
+    # so the rendered view is REDRAWN in place, not appended forever. One clear
+    # per frame + one content render per frame ⇒ bounded, no accumulation.
+    client = RouteClient(default={"tasks": [
+        {"task_id": "t1", "title": "do it", "role": "dev", "state": "doing"}]})
+    out = _FakeTty(is_tty=True)
+    watch.run_watch(
+        "tasks", client, make_ctx(project_id="p"), [],
+        interval=0.0, iterations=3, sleep=lambda _s: None, out=out, clear=True,
+    )
+    value = out.getvalue()
+    assert value.count("\x1b[H\x1b[2J") == 3  # exactly one clear per redraw
+    assert value.count("do it") == 3          # content redrawn, not duplicated-and-kept

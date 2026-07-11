@@ -241,6 +241,17 @@ def _probe_route_status(provider_class: str) -> MemberFailure:
         result = run_coro(handler.probe_auth())
         state = str(result.get("state", "")) if isinstance(result, dict) else ""
         if state == "connected":
+            # Warm the shared observed-connectivity cache so the app's
+            # `connect status` / `/gateway/providers` show this provider
+            # `connected` without a manual Test — the preflight already made a
+            # real (billable) probe and it succeeded. Positive-only + best-effort:
+            # a cache-write hiccup must never fail an otherwise-healthy probe.
+            try:
+                from errorta_model_gateway import connectivity
+
+                connectivity.record_connected(provider_class, source="preflight")
+            except Exception:  # noqa: BLE001 — advisory cache; never break preflight
+                pass
             return MemberFailure(OK, "", "")
         if state == "logged_out":
             return MemberFailure(

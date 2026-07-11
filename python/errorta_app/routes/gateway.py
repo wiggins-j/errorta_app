@@ -101,15 +101,43 @@ def _cli_status_payload(provider: str) -> dict[str, Any]:
     override = settings.get_cli_binary(provider)
     details = handler.resolve_details(override_path=override)
     cached = _PROBE_CACHE.get(provider)
-    details["connected"] = cached["connected"] if cached else None
+    connected, connected_at = _observed_connection(provider)
+    details["connected"] = connected
     details["login"] = (cached or {}).get("login", details.get("login", ""))
-    details["verified_at"] = (cached or {}).get("verified_at")
+    details["verified_at"] = (cached or {}).get("verified_at") or connected_at
     return details
 
 
+def _observed_connection(provider: str) -> tuple[bool | None, float | None]:
+    """Most-recent ``(connected, at)`` across the explicit Test cache and the
+    shared observed-connectivity cache.
+
+    The explicit ``_PROBE_CACHE`` records BOTH success and failure (with a
+    ``verified_at``); the shared cache records only genuine ``connected``
+    observations (from the engine preflight / active use). Whichever signal is
+    NEWER wins — so a run that just succeeded shows ``connected`` even after a
+    stale failed Test, while a fresh failing Test still overrides an old observed
+    success. The shared cache can never falsely assert ``connected`` (positive
+    observations only), and it never wins over a later negative Test.
+    """
+    signals: list[tuple[float, bool]] = []
+    probe = _PROBE_CACHE.get(provider)
+    if probe is not None:
+        signals.append((float(probe.get("verified_at") or 0.0), bool(probe.get("connected"))))
+    from errorta_model_gateway import connectivity
+
+    observed_at = connectivity.observed_at(provider)
+    if observed_at is not None:
+        signals.append((observed_at, True))
+    if not signals:
+        return (None, None)
+    signals.sort(key=lambda s: s[0])
+    at, connected = signals[-1]
+    return (connected, at or None)
+
+
 def _cached_connected(provider: str) -> bool | None:
-    cached = _PROBE_CACHE.get(provider)
-    return cached["connected"] if cached else None
+    return _observed_connection(provider)[0]
 
 
 def _provider_configured(cls: str, keys: dict[str, Any]) -> bool:
@@ -279,8 +307,12 @@ def put_cli_binary(provider: str, body: _CliBinaryBody, request: Request) -> dic
         settings.set_cli_binary(provider, candidate)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # A new override may change resolution — drop the stale cached probe.
+    # A new override may change resolution — drop BOTH the stale explicit-Test
+    # probe AND the observed-connectivity signal, so `connected` isn't reported
+    # true for a binary path that hasn't itself been verified.
+    from errorta_model_gateway import connectivity
     _PROBE_CACHE.pop(provider, None)
+    connectivity.clear(provider)
     return _cli_status_payload(provider)
 
 
@@ -290,8 +322,10 @@ def delete_cli_binary(provider: str, request: Request) -> dict[str, Any]:
     _require_tauri_origin(request)
     if provider not in _CLI_PROVIDERS:
         raise HTTPException(status_code=404, detail=f"unknown cli provider: {provider!r}")
+    from errorta_model_gateway import connectivity
     settings.clear_cli_binary(provider)
     _PROBE_CACHE.pop(provider, None)
+    connectivity.clear(provider)
     return _cli_status_payload(provider)
 
 

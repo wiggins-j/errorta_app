@@ -17,7 +17,18 @@ _TAURI = {"x-errorta-origin": "tauri-ui"}
 @pytest.fixture(autouse=True)
 def _isolate_home(tmp_path, monkeypatch):
     monkeypatch.setenv("ERRORTA_HOME", str(tmp_path))
+    # The explicit-Test probe cache and the shared observed-connectivity cache are
+    # process-level module globals; reset them around every test so `connected`
+    # state can't leak between tests (or in from an engine preflight test earlier
+    # in the same pytest session).
+    from errorta_app.routes import gateway as _gw
+    from errorta_model_gateway import connectivity as _conn
+
+    _gw._PROBE_CACHE.clear()
+    _conn.clear()
     yield
+    _gw._PROBE_CACHE.clear()
+    _conn.clear()
 
 
 @pytest.fixture
@@ -449,6 +460,92 @@ def test_test_route_caches_probe_then_surfaced(client, monkeypatch) -> None:
 def test_test_connection_routes_require_tauri_origin(client) -> None:
     assert client.post("/provider-keys/local/test").status_code == 403
     assert client.post("/provider-keys/custom/test?alias=lmstudio").status_code == 403
+
+
+# ----------------------------------------------------------------------
+# Auto-warm: a provider observed CONNECTED (engine preflight / active use)
+# surfaces `connected` without a manual Test, via the shared connectivity cache.
+# ----------------------------------------------------------------------
+
+
+def test_observed_connectivity_warms_connected_without_manual_test(client, monkeypatch):
+    _patch_cheap_detect(monkeypatch, installed=True)
+    _ban_billable_probe(monkeypatch)  # the read paths must never probe
+    from errorta_model_gateway import connectivity
+
+    # Simulate what the engine preflight does on a successful `probe_auth`.
+    connectivity.record_connected("claude_cli", source="preflight")
+
+    # /gateway/providers now shows connected=True — no explicit Test was run.
+    body = client.get("/gateway/providers").json()
+    cc = next(p for p in body["providers"] if p["provider_class"] == "claude_cli")
+    assert cc["connected"] is True
+
+    # cli-status agrees and carries the observation timestamp.
+    status = client.get("/gateway/providers/claude_cli/cli-status", headers=_TAURI).json()
+    assert status["connected"] is True
+    assert status["verified_at"] is not None
+
+
+def test_a_newer_failed_test_overrides_an_older_observed_connect(client, monkeypatch):
+    _patch_cheap_detect(monkeypatch, installed=True)
+    from errorta_app.routes import gateway as gw
+    from errorta_model_gateway import connectivity
+
+    # Older observed-connected, then a NEWER explicit Test that failed. Most-recent
+    # signal wins → connected must read False (never a stale false positive).
+    connectivity.record_connected("claude_cli", source="preflight")
+    observed_at = connectivity.observed_at("claude_cli")
+    gw._PROBE_CACHE["claude_cli"] = {
+        "connected": False, "state": "logged_out", "login": "",
+        "verified_at": observed_at + 10.0,
+    }
+    body = client.get("/gateway/providers").json()
+    cc = next(p for p in body["providers"] if p["provider_class"] == "claude_cli")
+    assert cc["connected"] is False
+
+
+def test_cli_binary_change_clears_observed_connectivity(client, monkeypatch):
+    # Changing/clearing the CLI binary override may change resolution, so a prior
+    # observed-connected signal is stale and must be dropped — otherwise `connected`
+    # would read True for a binary path that hasn't itself been verified.
+    _patch_cheap_detect(monkeypatch, installed=True)
+    _ban_billable_probe(monkeypatch)
+    from errorta_model_gateway import connectivity
+
+    connectivity.record_connected("claude_cli", source="preflight")
+    assert connectivity.observed_at("claude_cli") is not None
+
+    r = client.delete("/provider-keys/claude_cli/cli-binary", headers=_TAURI)
+    assert r.status_code == 200
+
+    assert connectivity.observed_at("claude_cli") is None  # observation cleared
+    cc = next(p for p in client.get("/gateway/providers").json()["providers"]
+              if p["provider_class"] == "claude_cli")
+    assert cc["connected"] is None  # not a stale True
+
+
+def test_observed_connect_wins_over_an_older_failed_test(client, monkeypatch):
+    _patch_cheap_detect(monkeypatch, installed=True)
+    from errorta_app.routes import gateway as gw
+    from errorta_model_gateway import connectivity
+
+    # A stale failed Test, then a newer observed-connected (a run just used it).
+    gw._PROBE_CACHE["claude_cli"] = {
+        "connected": False, "state": "logged_out", "login": "", "verified_at": 1.0,
+    }
+    connectivity.record_connected("claude_cli", source="run")  # newer
+    body = client.get("/gateway/providers").json()
+    cc = next(p for p in body["providers"] if p["provider_class"] == "claude_cli")
+    assert cc["connected"] is True
+
+
+def test_connected_stays_null_when_nothing_observed(client, monkeypatch):
+    _patch_cheap_detect(monkeypatch, installed=True)
+    _ban_billable_probe(monkeypatch)
+    body = client.get("/gateway/providers").json()
+    cc = next(p for p in body["providers"] if p["provider_class"] == "claude_cli")
+    assert cc["connected"] is None  # no probe, no observation ⇒ unknown
 
 
 def test_put_cli_binary_requires_tauri_origin(client, tmp_path) -> None:
