@@ -93,6 +93,14 @@ _S2_ARGS = {
     "resume": ["--yes"],
     "continue": ["--yes"],
     # `setup` with no args is the read path (GET /run-setup) — no gate, no guard.
+    # S5 lifecycle: give each a form that hits exactly one deterministic route
+    # (no job poll, no confirmation stall) so the argv≡slash property is testable.
+    "new": ["np", "--yes"],          # POST /coding/projects
+    "open": ["p"],                    # GET  /coding/projects/p
+    "switch": ["p"],                  # GET  /coding/projects/p
+    "delete": ["p", "--yes"],         # DELETE /coding/projects/p
+    "import": ["github"],             # GET  .../import/github/auth-status (no url)
+    # `projects` (list), `north-star` (show), `focus` (list) are bare reads.
 }
 
 

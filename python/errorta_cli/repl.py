@@ -21,8 +21,14 @@ from .session import Context
 from .verbosity import parse_level
 
 # Builtin (non-route) REPL verbs.
+#
+# NOTE: channel-solo is ``/solo`` (not ``/focus``): ``focus`` is a first-class
+# registry command (Current Focus goals, F147 §8.3 / S5), so the ambient
+# per-channel solo meta-verb from S2 was renamed to ``/solo`` to free ``/focus``.
+# The verbosity model's internal ``set_focus`` name is unchanged.
 _QUIT = {"quit", "exit", "q"}
-_BUILTINS = {"help", "verbosity", "watch", "mute", "focus", "unfocus"} | _QUIT
+_CHANNEL_OPS = {"watch", "mute", "solo", "unsolo"}
+_BUILTINS = {"help", "verbosity"} | _CHANNEL_OPS | _QUIT
 
 
 def is_quit(line: str) -> bool:
@@ -41,7 +47,7 @@ def handle_line(line: str, ctx: Context, client: SidecarClient) -> str:
         return _help_text()
     if name == "verbosity":
         return _set_verbosity(ctx, raw_args)
-    if name in ("watch", "mute", "focus", "unfocus"):
+    if name in _CHANNEL_OPS:
         return _channel_op(ctx, name, raw_args)
 
     try:
@@ -58,7 +64,7 @@ def _help_text() -> str:
     for cmd in registry.all_commands():
         lines.append(f"  /{cmd.name:<12} {cmd.help}")
     lines.append("  /verbosity N   set global verbosity 0..5")
-    lines.append("  /watch CH      force-show a channel; /mute CH; /focus CH; /unfocus")
+    lines.append("  /watch CH      force-show a channel; /mute CH; /solo CH; /unsolo")
     lines.append("  /quit          leave the session")
     return "\n".join(lines)
 
@@ -71,9 +77,9 @@ def _set_verbosity(ctx: Context, raw_args: list[str]) -> str:
 
 
 def _channel_op(ctx: Context, op: str, raw_args: list[str]) -> str:
-    if op == "unfocus":
+    if op == "unsolo":
         ctx.verbosity.set_focus(None)
-        return "focus cleared"
+        return "solo cleared"
     if not raw_args:
         return f"usage: /{op} <channel>"
     channel = raw_args[0]
@@ -84,7 +90,7 @@ def _channel_op(ctx: Context, op: str, raw_args: list[str]) -> str:
         ctx.verbosity.mute(channel)
         return f"muted {channel}"
     ctx.verbosity.set_focus(channel)
-    return f"focused {channel}"
+    return f"soloing {channel}"
 
 
 def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) -> None:

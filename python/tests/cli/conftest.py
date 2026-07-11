@@ -103,13 +103,19 @@ def _neutralize_sole_owner_guard(monkeypatch):
 
 @pytest.fixture
 def make_ctx(tmp_path: Path):
-    """Factory for a :class:`Context` rooted at an isolated tmp home."""
+    """Factory for a :class:`Context` rooted at an isolated tmp home.
+
+    ``cwd`` is pinned to the same isolated tmp dir so an S5 directory-binding
+    command (``new`` / ``open`` / ``switch`` / ``import``) that writes a
+    ``.errorta-project`` pointer never lands one in the repository working tree.
+    """
 
     def _factory(project_id: str | None = None) -> Context:
         return Context(
             home=tmp_path,
             verbosity=Verbosity(),
             project_id=project_id,
+            cwd=tmp_path,
         )
 
     return _factory
