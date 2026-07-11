@@ -211,6 +211,7 @@ _COMMAND_MODULES = (
     "connect", "wizard",  # S4 — provider onboarding + conversational setup
     "project", "focus",  # S5 — lifecycle (new/import/projects/open/switch/delete)
                          #      + north-star / focus steering
+    "interject", "task", "files",  # S6 — mid-run steering + file/worktree edit/accept
 )
 
 for _name in _COMMAND_MODULES:

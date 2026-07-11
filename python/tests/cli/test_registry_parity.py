@@ -100,6 +100,13 @@ _S2_ARGS = {
     "switch": ["p"],                  # GET  /coding/projects/p
     "delete": ["p", "--yes"],         # DELETE /coding/projects/p
     "import": ["github"],             # GET  .../import/github/auth-status (no url)
+    # S6 steering / file-edit: one deterministic route each with a project bound.
+    "interject": ["hi", "--yes"],     # POST .../interject
+    "task": ["new", "hi", "--yes"],   # POST .../tasks
+    "files": ["f.py"],                # GET  .../files?path=f.py
+    "edit": ["f.py"],                 # GET  .../files (bails: no content source)
+    "accept": ["--yes"],              # POST .../worktree/accept
+    # `pm` (["chat"] above), `governance`/`attention`/`diff` bare reads.
     # `projects` (list), `north-star` (show), `focus` (list) are bare reads.
 }
 
