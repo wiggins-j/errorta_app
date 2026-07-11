@@ -22,10 +22,18 @@ factored, side-effect-free pieces.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Mapping
 
 # The env opt-out (mirrors the ``--no-onboarding`` flag).
 ONBOARDING_ENV = "ERRORTA_NO_ONBOARDING"
+
+# A marker written under ERRORTA_HOME the first time the welcome is shown, so it
+# appears ONCE (a genuine first-run nudge) rather than nagging on every launch
+# until a provider is connected — important for the local-Ollama persona, whose
+# `local` provider never registers as a "real" provider (it's an always-on
+# freebie) yet is a perfectly valid way to run the council.
+_ACK_FILENAME = ".cli-onboarded"
 
 # Providers that report ``configured: True`` unconditionally (no key / no binary
 # needed — gateway.py:_provider_configured). They are ALWAYS present in the
@@ -114,10 +122,31 @@ def welcome_text() -> str:
         "No AI provider is connected to this store yet. To get started:\n"
         "  errorta connect anthropic api   # or: openai / google / ollama / claudecode\n"
         "  errorta wizard                  # let the PM help you scope a project\n"
-        "  errorta new <name> --repo PATH  # or set up a project directly\n"
+        "  errorta new <name> --here       # greenfield project in this directory\n"
+        "  errorta import local .          # adopt the existing repo here\n"
         "Run `errorta connect status` anytime to see what's configured.\n"
         "(silence this with --no-onboarding or ERRORTA_NO_ONBOARDING=1)"
     )
+
+
+def _acknowledged(home: Path | None) -> bool:
+    """True if the first-run welcome has already been shown for this store."""
+    if home is None:
+        return False
+    try:
+        return (Path(home) / _ACK_FILENAME).exists()
+    except OSError:
+        return False
+
+
+def _acknowledge(home: Path | None) -> None:
+    """Record that the welcome has been shown (best-effort; never raises)."""
+    if home is None:
+        return
+    try:
+        (Path(home) / _ACK_FILENAME).write_text("shown\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def evaluate(
@@ -127,15 +156,21 @@ def evaluate(
     json_mode: bool,
     opted: bool,
     command: str | None = None,
+    home: Path | None = None,
 ) -> str | None:
     """Probe the sidecar and return the welcome text to show, or ``None``.
 
-    Best-effort: a probe failure (or any unexpected error) yields ``None`` —
-    onboarding must never break or block the command the user actually ran. The
-    cheap gates are checked first so a ``--json`` / non-interactive / opted-out /
-    ``connect`` invocation makes NO network probe at all.
+    Shown at most ONCE per store (a ``.cli-onboarded`` marker under ``home``), so
+    an unconfigured user — including a local-Ollama-only user — gets a single
+    first-run nudge, not a nag on every launch. Best-effort: a probe failure (or
+    any unexpected error) yields ``None`` — onboarding must never break or block
+    the command the user actually ran. The cheap gates are checked first so a
+    ``--json`` / non-interactive / opted-out / ``connect`` invocation makes NO
+    network probe at all.
     """
     if opted or json_mode or not interactive or command in _SKIP_COMMANDS:
+        return None
+    if _acknowledged(home):
         return None
     try:
         providers = client.get_json("/gateway/providers")
@@ -150,5 +185,6 @@ def evaluate(
         opted=opted,
         command=command,
     ):
+        _acknowledge(home)
         return welcome_text()
     return None

@@ -80,3 +80,37 @@ def test_cli_main_shim_imports() -> None:
     import cli_main
 
     assert cli_main.main is app.main
+
+
+def test_cli_spec_command_modules_match_registry() -> None:
+    """The frozen binary's bundled command list must match the registry EXACTLY.
+
+    A drift here silently drops a command from the frozen binary (the static
+    analyzer can't see the dynamic `import_module` loop), so this locks the exact
+    danger the spec header warns about.
+    """
+    import ast
+
+    from errorta_cli import registry
+
+    tree = ast.parse((_REPO_PYTHON / "cli.spec").read_text("utf-8"))
+    names: set[str] | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_CLI_COMMAND_MODULES"
+            for t in node.targets
+        ):
+            # Short command names are dotless string literals; the f-string
+            # prefix "errorta_cli.commands." has dots and is excluded.
+            names = {
+                n.value
+                for n in ast.walk(node)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and "." not in n.value
+            }
+    assert names is not None, "_CLI_COMMAND_MODULES not found in cli.spec"
+    assert names == set(registry._COMMAND_MODULES), (
+        "cli.spec command list drifted from registry — a command would be "
+        "missing from the frozen binary"
+    )

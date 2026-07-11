@@ -96,7 +96,9 @@ errorta wizard
 …or create a project directly and bind it to the current directory:
 
 ```bash
-errorta new my-project --repo .
+errorta new my-project --here   # greenfield project rooted in this directory
+# or, to adopt an existing repository you're standing in:
+errorta import local .
 ```
 
 Either way a `.errorta-project` pointer is written in the directory so future

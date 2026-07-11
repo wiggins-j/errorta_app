@@ -325,6 +325,7 @@ def _maybe_onboard(
             json_mode=json_mode,
             opted=opted,
             command=command_name,
+            home=config.resolve_home(_G.home),
         )
     if text:
         typer.echo(text, err=True)

@@ -186,3 +186,19 @@ def test_evaluate_swallows_probe_errors() -> None:
 
     # A probe failure must never propagate — onboarding is best-effort.
     assert _eval(_Boom()) is None
+
+
+def test_evaluate_shows_once_then_is_silent(tmp_path) -> None:
+    """Unconfigured (incl. local-Ollama-only) users get ONE nudge, not a nag."""
+    client = RouteClient({"/gateway/providers": _EMPTY, "/provider-keys": {}})
+    first = _eval(client, home=tmp_path)
+    assert first is not None                          # first run shows
+    assert (tmp_path / ".cli-onboarded").exists()     # marker written
+    second = _eval(client, home=tmp_path)
+    assert second is None                             # acknowledged → silent
+
+
+def test_welcome_text_uses_real_flags_not_invented_repo() -> None:
+    text = onboarding.welcome_text()
+    assert "--repo" not in text                        # invented flag must not appear
+    assert "--here" in text and "import local" in text  # real commands
