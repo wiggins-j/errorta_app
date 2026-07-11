@@ -120,6 +120,15 @@ class SidecarClient:
     ) -> Any:
         return _json_body(self.request("PUT", path, json=json, params=params))
 
+    def patch_json(
+        self,
+        path: str,
+        *,
+        json: Any | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return _json_body(self.request("PATCH", path, json=json, params=params))
+
     def delete_json(
         self,
         path: str,

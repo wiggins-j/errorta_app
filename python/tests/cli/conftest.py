@@ -41,6 +41,9 @@ class RecordingClient:
     def put_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
         return self._record("PUT", path)
 
+    def patch_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
+        return self._record("PATCH", path)
+
     def delete_json(self, path: str, *, params: dict | None = None) -> Any:
         return self._record("DELETE", path)
 
@@ -77,6 +80,9 @@ class RouteClient:
 
     def put_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
         return self._resp("PUT", path)
+
+    def patch_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
+        return self._resp("PATCH", path)
 
     def delete_json(self, path: str, *, params: dict | None = None) -> Any:
         return self._resp("DELETE", path)
