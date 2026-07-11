@@ -1,28 +1,34 @@
-"""CLI-owned single-instance sidecar lifecycle (F147 spec §4.2).
+"""Single-instance sidecar lifecycle for the CLI (F147 spec §4.2, §13.1 S9b).
 
-The CLI owns **exactly one** sidecar per ``ERRORTA_HOME``. Successive ``errorta``
-invocations and multiple terminals share that one sidecar by discovering it
-through ``${ERRORTA_HOME}/sidecar.json``:
+There is **exactly one** sidecar per ``ERRORTA_HOME``, SHARED between the desktop
+app and every ``errorta`` invocation. Front-ends discover it through
+``${ERRORTA_HOME}/sidecar.json``:
 
     resolve():
       under a cross-process file lock on sidecar.lock:
         read sidecar.json
-        if it points at a live, healthz-confirmed, started_by=="cli" sidecar:
-            adopt it
+        if it points at a live, healthz-confirmed sidecar (app- OR cli-started)
+        that is COORDINATED with us (our own cli sidecar, or ANY same-build
+        sidecar):
+            adopt it (co-drive is safe — one shared sidecar; S9a's cross-process
+            run lock + owner_pid + owner-aware boot recovery keep the two
+            front-ends from corrupting each other)
+        elif a live but VERSION-SKEWED foreign sidecar is advertised:
+            refuse (can't confirm a coordinated build — safe fallback)
         else:
             spawn a new one (self-re-exec `__serve__`), poll /healthz, persist
 
-Foreign-app detection (``detect_foreign_sidecar``): the desktop app spawns its
-sidecar on a random in-memory port that an external CLI cannot discover, and *any*
-second sidecar on the same ``ERRORTA_HOME`` corrupts a run live in the app's
-process — its boot recovery (``scan_and_recover``) and every ``GET /run`` sweep
-flip the app's ``running`` run to ``interrupted``, requeue its ``doing`` tasks,
-and prune its worktrees. So the sole-owner guarantee is enforced at the **spawn
-decision**: ``resolve()`` refuses to start a second sidecar (for *every* command,
-reads included) when a foreign ``Errorta.app`` / ``errorta-sidecar`` process — or
-a live sidecar on the app's default port (8770) — is detected. Adopting the CLI's
-own already-running sidecar is always safe and never triggers a refusal.
-``require_sole_owner`` stays as defense-in-depth on explicit run/mutation paths.
+**S9b co-drive.** Earlier slices refused to run the CLI next to a desktop app at
+all. Now the CLI ADOPTS the app's sidecar (and vice versa), so concurrent GUI+CLI
+on one store is supported. The refusal narrows to the genuinely unsafe cases: a
+version-skewed advertised sidecar, or — when NO adoptable sidecar is advertised —
+a foreign ``Errorta.app`` / ``errorta-sidecar`` process (or a live sidecar on the
+app's default port 8770) detected by ``detect_foreign_sidecar``. Spawning a
+*second* sidecar next to an unadoptable foreign one is the corruption hazard
+(its boot recovery / every ``GET /run`` could flip the other's ``running`` run to
+``interrupted``), so that stays refused. Adopting a coordinated sidecar never
+triggers a refusal. ``require_sole_owner`` stays as defense-in-depth: it refuses
+only when we are NOT driving the single advertised sidecar (a real second one).
 
 The HTTP probe and the process launch are module-level seams
 (``probe_healthz`` / ``_launch``) so tests exercise the adopt-vs-spawn logic and
@@ -30,6 +36,7 @@ the foreign-app refusal without a real sidecar or a real subprocess.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import json
 import os
@@ -137,6 +144,53 @@ def clear_record(home: Path) -> None:
         config.sidecar_record_path(home).unlink()
 
 
+# --------------------------------------------------------------------------- #
+# Watchdog client registry (F147 S9b) — refcount a shared/adopted sidecar.
+# --------------------------------------------------------------------------- #
+
+# Mirrors errorta_app.parent_watchdog's registry format WITHOUT importing it
+# (golden invariant #1: errorta_cli imports nothing from errorta_app). A pidfile
+# named/holding this process's pid under ${ERRORTA_HOME}/sidecar-clients/ marks
+# the CLI as a live client, so an app-started (watchdog-supervised) sidecar we
+# co-drive does not exit while a run we started is still in flight.
+_CLIENTS_DIRNAME = "sidecar-clients"
+_registered_client_atexit: set[int] = set()
+
+
+def _clients_dir(home: Path) -> Path:
+    return home / _CLIENTS_DIRNAME
+
+
+def _register_client(home: Path) -> None:
+    """Register this CLI process as a live watchdog client. Best-effort.
+
+    Written AFTER the sidecar is confirmed live: an app-started sidecar already
+    ran its watchdog startup, and a cli-started sidecar has no watchdog at all, so
+    a late pidfile never spuriously converts the persistent CLI sidecar into a
+    refcounted one. Deregistered on process exit (``atexit``) so a shared/adopted
+    sidecar can exit once its last client is gone."""
+    pid = os.getpid()
+    try:
+        d = _clients_dir(home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / str(pid)).write_text(str(pid), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - registration is best-effort
+        return
+    if pid not in _registered_client_atexit:
+        _registered_client_atexit.add(pid)
+        atexit.register(_unregister_client, home)
+
+
+def _unregister_client(home: Path) -> None:
+    """Remove this CLI's watchdog-client pidfile (a clean disconnect). Best-effort."""
+    try:
+        (_clients_dir(home) / str(os.getpid())).unlink()
+    except FileNotFoundError:
+        return
+    except Exception:  # noqa: BLE001 - best-effort
+        return
+
+
 @contextlib.contextmanager
 def _home_lock(home: Path) -> Iterator[None]:
     """Cross-process exclusive lock around the discover-or-spawn decision.
@@ -169,17 +223,19 @@ _ADOPT_PROBE_BACKOFF = 0.15
 
 
 def _record_is_adoptable(record: dict) -> dict | None:
-    """Return the live healthz body if ``record`` names an adoptable sidecar.
+    """Return the live healthz body if ``record`` names a discoverable sidecar.
 
-    Adoptable = ``started_by == "cli"`` and a live ``/healthz`` on its port.
-    Commit match is a *warning*, not an adoption gate (spec §4.2 step 4).
+    F147 S9b — a live ``/healthz`` on the recorded port is all that's required to
+    DISCOVER a candidate; ``started_by`` is NOT gated here (an ``app``-started
+    sidecar is just as discoverable as a ``cli``-started one — the desktop app now
+    advertises itself too). ``resolve`` applies the co-drive policy on top (adopt
+    a coordinated same-build sidecar; refuse a version-skewed foreign one). Commit
+    match is decided in ``resolve``, not here.
 
     Probes a few times before giving up: a single 1 s ``/healthz`` timeout on a
     momentarily-busy but *live* sidecar must not be read as "gone" (that would
     orphan it and double-spawn — see ``resolve``).
     """
-    if record.get("started_by") != "cli":
-        return None
     port = record.get("port")
     if not isinstance(port, int):
         return None
@@ -240,6 +296,10 @@ def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
     port = _free_port()
     env = {**os.environ, "ERRORTA_SIDECAR_PORT": str(port), "ERRORTA_HOME": str(home)}
     env.setdefault("ERRORTA_CLI_SIDECAR", "1")
+    # F147 S9b: stamp who spawned it so its /healthz + sidecar.json advertisement
+    # honestly report `started_by=cli` (the desktop app reads this when deciding
+    # whether to adopt this shared sidecar).
+    env.setdefault("ERRORTA_STARTED_BY", "cli")
     proc = _launch(_serve_argv(), env)
 
     try:
@@ -316,19 +376,43 @@ def resolve(
             body = _record_is_adoptable(record)
             if body is not None:
                 commit = _healthz_commit(body) or record.get("commit")
+                started = str(record.get("started_by") or "unknown")
                 mismatch = bool(
                     our_commit and commit and str(commit) != str(our_commit)
                 )
-                pid = record.get("pid")
-                port = int(record["port"])
-                return SidecarHandle(
-                    base_url=f"http://127.0.0.1:{port}",
-                    port=port,
-                    pid=int(pid) if isinstance(pid, int) else None,
-                    commit=str(commit) if commit else None,
-                    started_by="cli",
-                    adopted=True,
-                    commit_mismatch=mismatch,
+                # F147 S9b co-drive policy. Adopt when we can confirm a
+                # COORDINATED, single shared sidecar:
+                #   * our own previously-spawned CLI sidecar (mismatch is a
+                #     harmless upgrade warning — the CLI is still sole owner), OR
+                #   * ANY live sidecar (app- or cli-started) whose build commit
+                #     MATCHES ours — co-driving one same-build sidecar is safe
+                #     (S9a's cross-process lock + owner_pid + owner-aware boot
+                #     recovery coordinate the two front-ends).
+                # A live but VERSION-SKEWED non-CLI sidecar (e.g. an app built
+                # from a different commit) is NOT adopted and NOT spawned-next-to:
+                # we can't confirm a coordinated build, so we refuse (safe
+                # fallback — concurrency simply doesn't engage).
+                coordinated = (started == "cli") or (not mismatch)
+                if coordinated:
+                    pid = record.get("pid")
+                    port = int(record["port"])
+                    handle = SidecarHandle(
+                        base_url=f"http://127.0.0.1:{port}",
+                        port=port,
+                        pid=int(pid) if isinstance(pid, int) else None,
+                        commit=str(commit) if commit else None,
+                        started_by=started,
+                        adopted=True,
+                        commit_mismatch=mismatch,
+                    )
+                    _register_client(home)
+                    return handle
+                raise ForeignSidecar(
+                    "refusing to co-drive a version-skewed sidecar (it was built "
+                    f"from {str(commit)!r}, this CLI from {str(our_commit)!r}). "
+                    "Update so both match, or use a separate --home — co-driving "
+                    "a different build on one store can corrupt in-flight work.",
+                    code="foreign_sidecar",
                 )
             # The record didn't yield a live /healthz. Only discard it if the
             # recorded process is genuinely GONE. A slow-but-live sidecar (probe
@@ -336,7 +420,7 @@ def resolve(
             # the running one and double-spawns. Refuse instead of racing it.
             if _pid_alive(record.get("pid")):
                 raise SidecarUnreachable(
-                    f"the recorded CLI sidecar (pid {record.get('pid')}, port "
+                    f"the recorded sidecar (pid {record.get('pid')}, port "
                     f"{record.get('port')}) is not answering /healthz but its "
                     "process is still alive; refusing to spawn a duplicate. Run "
                     "`errorta sidecar restart` if it is wedged."
@@ -345,15 +429,17 @@ def resolve(
             clear_record(home)
         if not allow_spawn:
             raise SidecarUnreachable(
-                "no CLI sidecar is running and --no-spawn was given"
+                "no sidecar is running and --no-spawn was given"
             )
-        # About to spawn a *new* sidecar on this ERRORTA_HOME. A second sidecar
-        # next to a foreign desktop app / sidecar is the core B1 hazard: its boot
-        # recovery — and any GET /run — flips the app's live run to
-        # `interrupted`, requeues its `doing` tasks, and prunes its worktrees.
-        # So refuse to spawn when a foreign owner is detected — for ALL commands,
-        # reads included. (Adopting our own live CLI sidecar above is always safe
-        # and never reaches here.)
+        # About to spawn a *new* sidecar on this ERRORTA_HOME. We reach here only
+        # when NO adoptable sidecar was advertised. A second sidecar next to a
+        # foreign desktop app / sidecar is the core B1 hazard: its boot recovery —
+        # and any GET /run — flips the app's live run to `interrupted`, requeues
+        # its `doing` tasks, and prunes its worktrees. So refuse to spawn when a
+        # foreign owner is detected but could NOT be confirmed as an adoptable
+        # coordinated sidecar — for ALL commands, reads included. (Adopting a
+        # coordinated same-build sidecar above is always safe and never reaches
+        # here.)
         reasons = detect_foreign_sidecar(home)
         if reasons:
             joined = "; ".join(reasons)
@@ -364,7 +450,9 @@ def resolve(
                 "work.",
                 code="foreign_sidecar",
             )
-        return spawn(home, our_commit=our_commit)
+        handle = spawn(home, our_commit=our_commit)
+        _register_client(home)
+        return handle
 
 
 # --------------------------------------------------------------------------- #
@@ -440,15 +528,38 @@ def _scan_errorta_processes(*, exclude_pid: int | None) -> list[str]:
     return hits
 
 
-def require_sole_owner(home: Path, handle: SidecarHandle | None) -> None:
-    """Raise :class:`ForeignSidecar` if a foreign app owns this store.
+def _driving_advertised_sidecar(home: Path, handle: SidecarHandle) -> bool:
+    """Are we driving the ONE sidecar currently advertised in ``sidecar.json``?
 
-    **Defense-in-depth.** The primary sole-owner guarantee is enforced earlier,
-    at the spawn decision in :func:`resolve` (the CLI never starts a second
-    sidecar next to a foreign app). This is an extra guard called before every
-    run/mutation command (spec §4.2) — belt-and-suspenders for the case where the
-    CLI already adopted its own sidecar and the app was launched afterwards.
-    """
+    True when the on-disk record names the exact port we hold and a live
+    ``/healthz`` confirms it. That is the co-drive-safe case: a single, shared,
+    coordinated sidecar (whether the app adopted ours or we adopted the app's)
+    can't corrupt itself. If a DIFFERENT sidecar now owns the advertisement (e.g.
+    an app that couldn't adopt spawned its own second one), our port won't match
+    and this returns False → the foreign scan below decides."""
+    record = read_record(home)
+    if not record:
+        return False
+    if record.get("port") != handle.port:
+        return False
+    return probe_healthz(handle.port) is not None
+
+
+def require_sole_owner(home: Path, handle: SidecarHandle | None) -> None:
+    """Raise :class:`ForeignSidecar` unless we're driving the coordinated sidecar.
+
+    **Defense-in-depth** behind :func:`resolve`'s adopt/refuse decision. Called
+    before every run/mutation command (spec §4.2).
+
+    F147 S9b — co-driving is now *supported*: a desktop app and the CLI may share
+    ONE sidecar via adoption. So this guard no longer refuses merely because an
+    ``Errorta.app`` process exists. It refuses only an UNADOPTABLE foreign owner —
+    i.e. when we are NOT driving the single advertised sidecar (a second,
+    uncoordinated sidecar is genuinely present) — which is the real corruption
+    hazard. When we hold the advertised shared sidecar, co-drive is safe and this
+    is a no-op."""
+    if handle is not None and _driving_advertised_sidecar(home, handle):
+        return
     reasons = detect_foreign_sidecar(
         home,
         our_port=handle.port if handle else None,
@@ -457,10 +568,9 @@ def require_sole_owner(home: Path, handle: SidecarHandle | None) -> None:
     if reasons:
         joined = "; ".join(reasons)
         raise ForeignSidecar(
-            "refusing to co-drive: "
+            "refusing to co-drive an uncoordinated second sidecar: "
             f"{joined}. Close the desktop app (or use a separate --home) and "
-            "retry — concurrent GUI+CLI use on one store can corrupt in-flight "
-            "work.",
+            "retry — two sidecars on one store can corrupt in-flight work.",
             code="foreign_sidecar",
         )
 

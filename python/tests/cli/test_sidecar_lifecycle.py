@@ -113,6 +113,8 @@ def test_adopt_live_cli_record_does_not_spawn(monkeypatch, tmp_path: Path) -> No
 
 
 def test_adopt_flags_commit_mismatch(monkeypatch, tmp_path: Path) -> None:
+    # Our OWN prior cli sidecar with a mismatched (upgraded) commit: still adopt
+    # with a warning — the CLI is sole owner, so co-drive is not in play.
     sidecar.write_record(
         tmp_path, {"port": 5555, "pid": 77, "commit": "old", "started_by": "cli"}
     )
@@ -123,6 +125,88 @@ def test_adopt_flags_commit_mismatch(monkeypatch, tmp_path: Path) -> None:
     handle = sidecar.resolve(tmp_path, our_commit="new")
     assert handle.adopted is True
     assert handle.commit_mismatch is True
+
+
+def test_adopt_app_started_matching_sidecar_does_not_spawn(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """S9b co-drive: the CLI adopts the desktop APP's sidecar (started_by=app)
+    when its build commit matches — one shared, coordinated sidecar, no spawn."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": "abc", "started_by": "app"}
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"build": {"commit": "abc"}} if port == 5555 else None,
+    )
+    def _no_spawn(*a, **k):
+        raise AssertionError("must adopt, not spawn")
+
+    monkeypatch.setattr(sidecar, "_launch", _no_spawn)
+
+    handle = sidecar.resolve(tmp_path, our_commit="abc")
+
+    assert handle.adopted is True
+    assert handle.started_by == "app"
+    assert handle.port == 5555
+    assert handle.commit_mismatch is False
+
+
+def test_refuses_version_skewed_app_sidecar(monkeypatch, tmp_path: Path) -> None:
+    """A live but VERSION-SKEWED app sidecar is neither adopted nor spawned-next-
+    to: we can't confirm a coordinated build → refuse (safe fallback)."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": "old", "started_by": "app"}
+    )
+    monkeypatch.setattr(
+        sidecar, "probe_healthz", lambda port, **k: {"build": {"commit": "old"}}
+    )
+    monkeypatch.setattr(
+        sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn"))
+    )
+    with pytest.raises(ForeignSidecar):
+        sidecar.resolve(tmp_path, our_commit="new")
+
+
+def test_adopt_registers_client_pidfile(monkeypatch, tmp_path: Path) -> None:
+    """Adopting a shared sidecar registers this CLI as a watchdog client so the
+    sidecar refcounts us and doesn't exit under an in-flight run."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": "abc", "started_by": "app"}
+    )
+    monkeypatch.setattr(
+        sidecar, "probe_healthz", lambda port, **k: {"build": {"commit": "abc"}}
+    )
+    monkeypatch.setattr(sidecar, "_launch", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+
+    sidecar.resolve(tmp_path, our_commit="abc")
+
+    pidfile = tmp_path / "sidecar-clients" / str(os.getpid())
+    assert pidfile.is_file()
+    assert pidfile.read_text().strip() == str(os.getpid())
+
+
+def test_spawn_registers_client_pidfile(monkeypatch, tmp_path: Path) -> None:
+    def fake_launch(argv, env):
+        fake_launch.port = int(env["ERRORTA_SIDECAR_PORT"])  # type: ignore[attr-defined]
+        # The child's env carries started_by=cli so its advertisement is honest.
+        assert env["ERRORTA_STARTED_BY"] == "cli"
+        return _FakeProc(pid=4321)
+
+    monkeypatch.setattr(sidecar, "_launch", fake_launch)
+    monkeypatch.setattr(
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"build": {"commit": "abc"}}
+        if port == getattr(fake_launch, "port", None)
+        else None,
+    )
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: [])
+
+    sidecar.resolve(tmp_path, our_commit="abc")
+
+    assert (tmp_path / "sidecar-clients" / str(os.getpid())).is_file()
 
 
 def test_stale_record_respawns(monkeypatch, tmp_path: Path) -> None:
@@ -304,7 +388,9 @@ def test_concurrent_resolve_spawns_exactly_once(monkeypatch, tmp_path: Path) -> 
 # --------------------------------------------------------------------------- #
 
 def test_foreign_sidecar_detected_and_refused(monkeypatch, tmp_path: Path) -> None:
-    # Our CLI sidecar is on 6001; a foreign one answers on the app's 8770.
+    # S9b: two UNCOORDINATED sidecars. We hold 6001, a DIFFERENT sidecar answers
+    # on the app's 8770, and nothing on disk advertises our 6001 — so we are NOT
+    # driving the single advertised sidecar → require_sole_owner refuses.
     monkeypatch.setattr(
         sidecar,
         "probe_healthz",
@@ -322,6 +408,57 @@ def test_foreign_sidecar_detected_and_refused(monkeypatch, tmp_path: Path) -> No
         commit=None,
         started_by="cli",
         adopted=True,
+    )
+    with pytest.raises(ForeignSidecar):
+        sidecar.require_sole_owner(tmp_path, handle)
+
+
+def test_require_sole_owner_allows_driving_advertised_shared_sidecar(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """S9b co-drive: when we hold the ONE advertised sidecar, require_sole_owner
+    is a no-op EVEN with a desktop-app process present — the app and CLI share it."""
+    sidecar.write_record(
+        tmp_path, {"port": 5555, "pid": 77, "commit": "abc", "started_by": "app"}
+    )
+    # A live /healthz on our (advertised) port, and an Errorta.app process running.
+    monkeypatch.setattr(
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"service": "errorta-sidecar"} if port == 5555 else None,
+    )
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
+
+    handle = sidecar.SidecarHandle(
+        base_url="http://127.0.0.1:5555",
+        port=5555,
+        pid=77,
+        commit="abc",
+        started_by="app",
+        adopted=True,
+    )
+    # Must NOT raise — we're driving the coordinated shared sidecar.
+    sidecar.require_sole_owner(tmp_path, handle)
+
+
+def test_require_sole_owner_refuses_when_a_different_sidecar_is_advertised(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """We hold 6001 but sidecar.json advertises a DIFFERENT sidecar on 8770 (an
+    app that spawned its own) + a foreign process → a real second sidecar → refuse."""
+    sidecar.write_record(
+        tmp_path, {"port": 8770, "pid": 55, "commit": "abc", "started_by": "app"}
+    )
+    monkeypatch.setattr(
+        sidecar,
+        "probe_healthz",
+        lambda port, **k: {"service": "errorta-sidecar"} if port == 8770 else None,
+    )
+    monkeypatch.setattr(sidecar, "_scan_errorta_processes", lambda **k: ["Errorta"])
+
+    handle = sidecar.SidecarHandle(
+        base_url="http://127.0.0.1:6001", port=6001, pid=123, commit="abc",
+        started_by="cli", adopted=False,
     )
     with pytest.raises(ForeignSidecar):
         sidecar.require_sole_owner(tmp_path, handle)

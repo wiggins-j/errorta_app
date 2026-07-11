@@ -188,6 +188,11 @@ pub fn run() {
                     });
                 }
             }
+            // F147 S9b: drop our watchdog-client pidfile so a shared/adopted
+            // sidecar can exit once its last client is gone. Then terminate the
+            // child we spawned (a no-op in the ADOPT case — no child — so an
+            // adopted CLI sidecar keeps running for its other clients).
+            sidecar::unregister_client_pidfile();
             if let Some(handle) = app_handle.try_state::<SidecarHandle>() {
                 handle.terminate();
             }

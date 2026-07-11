@@ -237,7 +237,17 @@ async def lifespan(app: FastAPI):
 
         # F087-13 WS-3: pass real liveness so recovery never reaps a worker that
         # started during/just-before the scan (empty at a clean boot).
-        summary = _scan_coding(live_project_ids=_live_project_ids())
+        # F147 S9b: ALSO pass an owner-aware peer check so a *second* sidecar's
+        # boot never reconciles a run that is live in ANOTHER sidecar (§13.1 —
+        # the S9a boot-recovery gap). This reads the CURRENT ${ERRORTA_HOME}/
+        # sidecar.json — which, at this point in lifespan, still names the peer
+        # (our own advertisement is written LATER, below) — and cross-checks the
+        # run's owner_pid against it + a /healthz probe to defeat pid-reuse. It is
+        # fail-OPEN toward recovery, so a genuine orphan is always still cleared.
+        summary = _scan_coding(
+            live_project_ids=_live_project_ids(),
+            owner_peer_fn=_coding_owner_peer_fn,
+        )
         app.state.coding_recovery = summary
         if summary.interrupted_projects:
             logging.getLogger("errorta.coding").info(
@@ -634,6 +644,50 @@ def _resolve_port() -> int:
     # 8770 chosen to avoid the common AIAR/Reaper ports (8765, 8766) the
     # user may already have running on the same machine.
     return 8770
+
+
+def _probe_peer_healthz(port: int) -> dict | None:
+    """GET ``/healthz`` on loopback ``port``; return the JSON body or ``None``.
+
+    Used by boot recovery's owner-aware peer check to confirm the sidecar
+    advertised in ``sidecar.json`` is really live (defeats a stale advertisement
+    + a reused owner_pid). Short timeout, never raises — an unreachable/slow port
+    just means "no confirmed peer", which fails OPEN toward recovery."""
+    try:
+        import httpx
+
+        with httpx.Client(timeout=1.0) as client:
+            resp = client.get(f"http://127.0.0.1:{int(port)}/healthz")
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        return body if isinstance(body, dict) else None
+    except Exception:  # noqa: BLE001 - best-effort probe
+        return None
+
+
+def _coding_owner_peer_fn(state: dict) -> bool:
+    """F147 S9b — boot-recovery owner-aware seam (see ``scan_and_recover``).
+
+    Confirms a ``running`` coding run is owned by a live, *advertised* peer
+    sidecar so boot recovery stands down instead of clobbering it. Reads the
+    CURRENT ``${ERRORTA_HOME}/sidecar.json`` and cross-checks the run's
+    ``owner_pid`` against the advertised pid + a ``/healthz`` probe (defeats
+    pid-reuse). Fail-OPEN: on any error, returns ``False`` (recover the orphan)."""
+    try:
+        from errorta_app import sidecar_advert
+        from errorta_app.parent_watchdog import parent_alive
+        from errorta_council.coding.locks import owner_is_live_peer_sidecar
+
+        return owner_is_live_peer_sidecar(
+            state,
+            my_pid=os.getpid(),
+            alive_fn=parent_alive,
+            advert=sidecar_advert.read_advertisement(),
+            healthz_fn=_probe_peer_healthz,
+        )
+    except Exception:  # noqa: BLE001 - never let the peer check block recovery
+        return False
 
 
 def main() -> None:

@@ -256,8 +256,89 @@ def run_owned_by_live_process(
     except Exception:  # noqa: BLE001 - a probe failure must not clobber a run
         # Fail toward "owned/live" so we never reconcile a run we couldn't prove
         # dead. A genuinely orphaned run is caught by boot recovery, which is
-        # intentionally NOT owner-pid gated.
+        # now owner-aware but fail-OPEN toward recovery (see
+        # ``owner_is_live_peer_sidecar``) so it can never wedge a real orphan.
         return True
+
+
+def owner_is_live_peer_sidecar(
+    state: object,
+    *,
+    my_pid: int,
+    alive_fn: Callable[[int], bool],
+    advert: object,
+    healthz_fn: Callable[[int], "Optional[dict]"],
+) -> bool:
+    """F147 S9b — is this ``running`` run owned by a DIFFERENT, live, *advertised*
+    peer sidecar? The predicate BOOT recovery consults so it stands down instead
+    of reconciling a run that is live in another sidecar (closing the S9a boot-
+    recovery gap, §13.1).
+
+    Returns ``True`` ONLY on a POSITIVE confirmation of a real peer:
+
+    * ``owner_pid`` is a different, non-blank pid that is currently alive, AND
+    * the on-disk ``sidecar.json`` advertisement (``advert``) names that *same*
+      pid, AND
+    * a ``/healthz`` probe of the advertised port answers with that *same* pid.
+
+    Any uncertainty — no owner_pid, our own pid, a dead pid, a missing/mismatched
+    advertisement, or a healthz probe that fails / times out / reports a different
+    pid — returns ``False``, i.e. "treat as a recoverable orphan". This is the
+    deliberate fail-OPEN direction for the orphan safety-net: a genuine orphan
+    (its owner_pid dead, or a pid that got *reused* by an unrelated process that
+    isn't the advertised sidecar) is ALWAYS still cleared, so recovery can never
+    wedge a real orphan forever. The advert+healthz cross-check is what defeats
+    the pid-reuse false positive that plain ``os.kill(pid, 0)`` liveness can't.
+
+    ``advert`` is passed as data (the parsed ``sidecar.json`` dict, or ``None``)
+    and ``healthz_fn``/``alive_fn`` are injected, so this stays a pure predicate
+    with no import of ``errorta_app`` (the caller supplies the app-side seams).
+    """
+    if not isinstance(state, dict):
+        return False
+    if str(state.get("status") or "") != "running":
+        return False
+    raw = state.get("owner_pid")
+    try:
+        owner_pid = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if owner_pid <= 0 or owner_pid == int(my_pid):
+        return False
+    # 1. The owning pid must currently exist. A dead owner_pid → orphan → recover.
+    try:
+        if not alive_fn(owner_pid):
+            return False
+    except Exception:  # noqa: BLE001 - can't prove alive → treat as orphan
+        return False
+    # 2. The live advertisement must name that same pid. A missing/mismatched
+    #    advert means the alive owner_pid is a REUSED pid (or a crash left no
+    #    advert) — not a real peer sidecar → recover.
+    if not isinstance(advert, dict):
+        return False
+    try:
+        advert_pid = int(advert.get("pid"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if advert_pid != owner_pid:
+        return False
+    try:
+        port = int(advert.get("port"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    # 3. A /healthz probe of the advertised port must confirm the SAME pid is
+    #    serving there. A reused pid whose owner isn't actually a sidecar fails
+    #    this; a probe error also fails it (fail-OPEN toward recovery).
+    try:
+        body = healthz_fn(port)
+    except Exception:  # noqa: BLE001 - probe failure → treat as orphan
+        return False
+    if not isinstance(body, dict):
+        return False
+    try:
+        return int(body.get("pid")) == owner_pid  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
 
 
 __all__ = [
@@ -265,5 +346,6 @@ __all__ = [
     "RunLockBusy",
     "cross_process_lock",
     "lock_for_dir",
+    "owner_is_live_peer_sidecar",
     "run_owned_by_live_process",
 ]
