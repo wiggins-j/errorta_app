@@ -407,12 +407,17 @@ def test_north_star_set_puts_body(make_ctx, monkeypatch) -> None:
         return httpx.Response(200, json={"project": {"id": PID, "north_star": "new ns"}})
 
     with _mock_client(handler) as client:
-        registry.dispatch("north-star", client, make_ctx(project_id=PID),
-                          ["set", "--north-star", "new ns", "--dod", "done", "--yes"])
+        payload, text = registry.dispatch(
+            "north-star", client, make_ctx(project_id=PID),
+            ["set", "--north-star", "new ns", "--dod", "done", "--yes"])
     m, p, body = bodies[0]
     assert (m, p) == ("PUT", f"/coding/projects/{PID}/north-star")
     assert body == {"north_star": "new ns", "definition_of_done": "done"}
     assert spy, "sole-owner guard not invoked on north-star set"
+    # The response is unwrapped exactly once (not {"project": {"project": ...}}),
+    # so the rendered view shows the new North Star rather than a blank.
+    assert payload["project"]["id"] == PID
+    assert "new ns" in text
 
 
 def test_north_star_proposal_reads(make_ctx) -> None:

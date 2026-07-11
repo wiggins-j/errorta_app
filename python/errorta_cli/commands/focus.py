@@ -95,7 +95,8 @@ def _north_star_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) 
         if dod is not None:
             body["definition_of_done"] = str(dod)
         return {"_kind": "set",
-                "project": client.put_json(f"/coding/projects/{pid}/north-star", json=body)}
+                "project": (client.put_json(
+                    f"/coding/projects/{pid}/north-star", json=body) or {}).get("project")}
 
     if sub == "accept":
         _mutate.guard_sole_owner(ctx)
