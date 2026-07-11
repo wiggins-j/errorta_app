@@ -38,6 +38,7 @@ class _Globals:
     no_spawn: bool = False
     json: bool = False
     poll_interval: Optional[float] = None
+    no_onboarding: bool = False
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -66,12 +67,16 @@ def _root(
     poll_interval: Optional[float] = typer.Option(
         None, "--poll-interval", help="Seconds between --watch re-renders / poll ticks."
     ),
+    no_onboarding: bool = typer.Option(
+        False, "--no-onboarding", help="Suppress the first-run welcome hint."
+    ),
 ) -> None:
     _G.home = home
     _G.verbosity = verbosity
     _G.no_spawn = no_spawn
     _G.json = json_out
     _G.poll_interval = poll_interval
+    _G.no_onboarding = no_onboarding
     if ctx.invoked_subcommand is None:
         _launch_repl()
         raise typer.Exit()
@@ -179,6 +184,7 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     no_spawn = _G.no_spawn or post.get("no_spawn", False)
     json_mode = _G.json or post.get("json", False)
     poll_interval = post.get("poll_interval", _G.poll_interval)
+    no_onboarding = _G.no_onboarding or post.get("no_onboarding", False)
 
     home = config.resolve_home(home_override)
     verbosity = Verbosity(level=resolve_level(verbosity_raw))
@@ -201,6 +207,8 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
             "different commits; behavior may differ.",
             err=True,
         )
+    _maybe_onboard(handle, json_mode=json_mode, no_onboarding=no_onboarding,
+                   command_name=name)
 
     # `--watch` on a read command re-renders on the poll loop (never in --json/CI).
     if "--watch" in raw_args and not json_mode:
@@ -252,6 +260,8 @@ def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[
             overrides["json"] = True
         elif token == "--no-spawn":
             overrides["no_spawn"] = True
+        elif token == "--no-onboarding":
+            overrides["no_onboarding"] = True
         elif token in ("--home", "--verbosity", "-V", "--poll-interval"):
             if token == "--poll-interval":
                 key = "poll_interval"
@@ -280,6 +290,47 @@ def _fail(exc: CliError) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# First-run onboarding (F147 §7, §11).
+# --------------------------------------------------------------------------- #
+
+def _maybe_onboard(
+    handle: sidecar.SidecarHandle,
+    *,
+    json_mode: bool,
+    no_onboarding: bool,
+    command_name: str | None,
+) -> None:
+    """Print the first-run welcome to stderr when the store is unconfigured.
+
+    Gated cheaply BEFORE any network probe so a ``--json`` / non-interactive /
+    opted-out / ``connect`` invocation costs nothing (golden invariant #3 —
+    onboarding never blocks the scriptable surface). The definitive decision
+    (including the provider probe) lives in the pure, unit-tested
+    :func:`onboarding.evaluate`.
+    """
+    from . import onboarding
+    from .commands._mutate import is_interactive
+
+    opted = onboarding.opted_out(no_onboarding)
+    interactive = is_interactive()
+    # Cheap gate first — no network probe for a --json / non-interactive / opted
+    # invocation (invariant #3). `evaluate` still makes the definitive decision
+    # (and skips setup commands like `connect`).
+    if opted or json_mode or not interactive:
+        return
+    with SidecarClient(handle.base_url) as client:
+        text = onboarding.evaluate(
+            client,
+            interactive=interactive,
+            json_mode=json_mode,
+            opted=opted,
+            command=command_name,
+        )
+    if text:
+        typer.echo(text, err=True)
+
+
+# --------------------------------------------------------------------------- #
 # REPL launch.
 # --------------------------------------------------------------------------- #
 
@@ -300,6 +351,8 @@ def _launch_repl() -> None:
         typer.echo(f"error: {exc.message}", err=True)
         raise typer.Exit(code=exc.exit_code)
     ctx.handle = handle
+    _maybe_onboard(handle, json_mode=_G.json, no_onboarding=_G.no_onboarding,
+                   command_name=None)
     with SidecarClient(handle.base_url) as client:
         repl.run_repl(ctx, client, cwd=Path.cwd())
 

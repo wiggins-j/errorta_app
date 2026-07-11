@@ -184,6 +184,14 @@ subscription**, and drives them to shipped code.
   devices are read-only until granted more from the desktop. Tailscale support
   (F071) extends this off-LAN.
 
+### Headless CLI — drive the Coding Team from a terminal
+- **`errorta` (F147).** A terminal front-end for the Coding Council: connect a
+  provider, scope a project, start a run, and watch it live — no window needed.
+  It ships as one self-contained binary that is both the CLI and its own embedded
+  sidecar, shares the same on-disk store as the desktop app, and has a layered
+  verbosity dial plus a `--json` surface for scripting. See
+  [`docs/CLI.md`](docs/CLI.md).
+
 ### Platform
 - **Tauri 2 desktop shell** (Rust) with a system tray (Show / Quit / check for
   updates, hide-on-close) and an auto-updater skeleton.
