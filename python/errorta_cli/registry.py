@@ -161,9 +161,29 @@ def dispatch(
     detected_json, rest = extract_json_flag(raw_args)
     effective_json = detected_json if json_mode is None else json_mode
     args = resolve_args(command, rest)
+    # Surface the effective --json mode to the command's call (S3 run gating needs
+    # it before the payload exists). Read-only for reads; mutations may branch.
+    ctx.json_mode = effective_json
     payload = command.call(client, ctx, args)
     text = command.render(payload, ctx.verbosity, effective_json)
     return payload, text
+
+
+def exit_code_for(payload: Any) -> int:
+    """The process exit code a command wants AFTER its text is printed.
+
+    Most commands return ``0`` (success) or raise a ``CliError`` (mapped exit
+    code) instead. The S3 ``run`` command, however, must PRINT its terminal
+    status (human summary or ``--json`` block) *and* exit non-zero when the run
+    ended in a failure-class ``stop_reason`` — so it stamps ``_exit_code`` on its
+    returned payload and the argv front-end honors it here. Returns ``0`` for any
+    payload without the marker (every read command).
+    """
+    if isinstance(payload, dict):
+        code = payload.get("_exit_code")
+        if isinstance(code, int):
+            return code
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -183,6 +203,7 @@ import importlib as _importlib  # noqa: E402
 _COMMAND_MODULES = (
     "status", "log", "decisions", "tasks", "prs", "tokens", "turns",
     "attention", "runtime", "team", "models", "governance", "pm",
+    "runctl",  # S3 — setup / run / cancel / resume / continue (mutations)
 )
 
 for _name in _COMMAND_MODULES:

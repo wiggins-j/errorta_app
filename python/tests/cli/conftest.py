@@ -85,6 +85,22 @@ class RouteClient:
         return [p for _, p in self.calls]
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_sole_owner_guard(monkeypatch):
+    """No CLI test may scan the host for a foreign Errorta app.
+
+    The S3 mutation guard calls ``_mutate.require_sole_owner`` →
+    ``sidecar.detect_foreign_sidecar`` (a ``psutil`` process scan + an 8770
+    ``/healthz`` probe). Pin the guard to a no-op so dispatching a mutation in the
+    suite never scans the host (real detection is exercised directly by the S1
+    ``test_sidecar_lifecycle`` tests, which this does NOT touch). Tests that assert
+    the guard is *invoked* re-``setattr`` a spy over this in their own body.
+    """
+    monkeypatch.setattr(
+        "errorta_cli.commands._mutate.require_sole_owner", lambda *a, **k: None
+    )
+
+
 @pytest.fixture
 def make_ctx(tmp_path: Path):
     """Factory for a :class:`Context` rooted at an isolated tmp home."""

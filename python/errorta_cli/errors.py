@@ -8,7 +8,7 @@ parsing stderr.
 
     0   ok
     1   generic CLI error (unclassified)
-    3   LockBusy           — 409 "a run is already in progress"
+    3   LockBusy           — 409 "a run is already in progress" (and other run-state 409s)
     4   ResidencyRefused   — this data plane is remote; run it where the data lives
     5   AlphaLocked        — 403 alpha_locked (gated build, not activated)
     6   OriginDenied       — 403 origin_not_authorized
@@ -16,6 +16,8 @@ parsing stderr.
     8   NotFound           — 404
     9   SidecarUnreachable — could not reach / spawn the sidecar
     10  ForeignSidecar     — a desktop app / foreign sidecar owns this ERRORTA_HOME
+    11  PreflightFailed    — 409 member_health_preflight_failed (a provider isn't ready)
+    12  SetupRequired      — 409 run_setup_required (confirm run setup before the first run)
 """
 from __future__ import annotations
 
@@ -31,6 +33,8 @@ EXIT_RUN_FAILED = 7
 EXIT_NOT_FOUND = 8
 EXIT_SIDECAR_UNREACHABLE = 9
 EXIT_FOREIGN_SIDECAR = 10
+EXIT_PREFLIGHT_FAILED = 11
+EXIT_SETUP_REQUIRED = 12
 
 
 class CliError(Exception):
@@ -91,6 +95,37 @@ class SidecarUnreachable(CliError):
     exit_code = EXIT_SIDECAR_UNREACHABLE
 
 
+class PreflightFailed(CliError):
+    """A run refused to start because a team member's provider isn't ready.
+
+    Maps the ``409 member_health_preflight_failed`` structured detail
+    (``coding.py:2291``). Carries the ``unhealthy`` list so the command layer can
+    render each provider's ``reason`` + ``remediation`` before exiting.
+    """
+
+    exit_code = EXIT_PREFLIGHT_FAILED
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        unhealthy: list | None = None,
+    ) -> None:
+        super().__init__(message, code=code)
+        self.unhealthy = unhealthy or []
+
+
+class SetupRequired(CliError):
+    """A fresh run refused because run setup hasn't been confirmed.
+
+    Maps the ``409 run_setup_required`` structured detail (``coding.py:2237``).
+    The fix is ``errorta setup --confirm`` (then re-run).
+    """
+
+    exit_code = EXIT_SETUP_REQUIRED
+
+
 class ForeignSidecar(CliError):
     """A desktop app (or other foreign sidecar) is driving this ERRORTA_HOME.
 
@@ -114,4 +149,6 @@ ERROR_CLASSES: tuple[type[CliError], ...] = (
     NotFound,
     SidecarUnreachable,
     ForeignSidecar,
+    PreflightFailed,
+    SetupRequired,
 )

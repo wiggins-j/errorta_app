@@ -86,6 +86,13 @@ _S2_ARGS = {
     "pr": ["pr-1"],
     "turn": ["t1", "tn-1"],
     "pm": ["chat"],
+    # S3 mutations: --yes arms them non-interactively; --detach keeps `run` from
+    # entering its live-stream loop (so a bare RouteClient can't hang the test).
+    "run": ["--yes", "--detach"],
+    "cancel": ["--yes"],
+    "resume": ["--yes"],
+    "continue": ["--yes"],
+    # `setup` with no args is the read path (GET /run-setup) — no gate, no guard.
 }
 
 
@@ -110,6 +117,34 @@ def test_all_commands_parity_with_bound_project(make_ctx) -> None:
 
         assert argv_client.calls == slash_client.calls, cmd.name
         assert argv_client.calls, f"{cmd.name} made no route call with a project bound"
+
+
+# --- S3: the new run-control commands are registered + parity-clean ----------
+
+def test_s3_commands_are_registered() -> None:
+    for name in ("setup", "run", "cancel", "resume", "continue"):
+        assert registry.get(name) is not None, name
+
+
+def test_s3_mutations_hit_expected_routes_via_both_surfaces(make_ctx) -> None:
+    """run/cancel/resume/continue POST to the real coding.py routes, identically
+    on argv and slash."""
+    from .conftest import RouteClient
+
+    expected = {
+        "run": ("POST", "/coding/projects/p/run", ["--yes", "--detach"]),
+        "cancel": ("POST", "/coding/projects/p/run/cancel", ["--yes"]),
+        "resume": ("POST", "/coding/projects/p/run/resume", ["--yes"]),
+        "continue": ("POST", "/coding/projects/p/run/continue", ["--yes"]),
+    }
+    for name, (method, path, args) in expected.items():
+        argv_client = RouteClient()
+        slash_client = RouteClient()
+        registry.dispatch(name, argv_client, make_ctx(project_id="p"), list(args))
+        n_s, base = registry.split_slash("/" + name + " " + " ".join(args))
+        registry.dispatch(n_s, slash_client, make_ctx(project_id="p"), base)
+        assert argv_client.calls == slash_client.calls, name
+        assert (method, path) in argv_client.calls, (name, argv_client.calls)
 
 
 def test_json_bypasses_render_for_every_command(make_ctx) -> None:
