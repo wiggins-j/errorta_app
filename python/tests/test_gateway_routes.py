@@ -505,6 +505,26 @@ def test_a_newer_failed_test_overrides_an_older_observed_connect(client, monkeyp
     assert cc["connected"] is False
 
 
+def test_cli_binary_change_clears_observed_connectivity(client, monkeypatch):
+    # Changing/clearing the CLI binary override may change resolution, so a prior
+    # observed-connected signal is stale and must be dropped — otherwise `connected`
+    # would read True for a binary path that hasn't itself been verified.
+    _patch_cheap_detect(monkeypatch, installed=True)
+    _ban_billable_probe(monkeypatch)
+    from errorta_model_gateway import connectivity
+
+    connectivity.record_connected("claude_cli", source="preflight")
+    assert connectivity.observed_at("claude_cli") is not None
+
+    r = client.delete("/provider-keys/claude_cli/cli-binary", headers=_TAURI)
+    assert r.status_code == 200
+
+    assert connectivity.observed_at("claude_cli") is None  # observation cleared
+    cc = next(p for p in client.get("/gateway/providers").json()["providers"]
+              if p["provider_class"] == "claude_cli")
+    assert cc["connected"] is None  # not a stale True
+
+
 def test_observed_connect_wins_over_an_older_failed_test(client, monkeypatch):
     _patch_cheap_detect(monkeypatch, installed=True)
     from errorta_app.routes import gateway as gw

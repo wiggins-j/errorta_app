@@ -106,16 +106,16 @@ def test_draw_emits_no_ansi_when_not_a_tty():
     assert value == "frame body\n"
 
 
-def test_draw_homes_before_erasing_and_drops_scrollback_on_tty():
+def test_draw_homes_before_erasing_on_tty():
     # The redraw clear must HOME the cursor (\x1b[H) BEFORE erasing (\x1b[2J) —
-    # erasing first is the macOS "scroll-into-scrollback" accumulation bug — and
-    # also drop the scrollback (\x1b[3J) so stale frames can't be scrolled back to.
+    # erasing first is the macOS "scroll-into-scrollback" accumulation bug. It must
+    # NOT wipe scrollback (\x1b[3J) — that would nuke the user's history every tick.
     out = _FakeTty(is_tty=True)
     watch._draw(out, "frame body", clear=True)
     value = out.getvalue()
     assert value.startswith("\x1b[H\x1b[2J")  # home THEN erase, not the reverse
     assert "\x1b[2J\x1b[H" not in value       # the old (buggy) ordering is gone
-    assert "\x1b[3J" in value                 # scrollback cleared
+    assert "\x1b[3J" not in value             # scrollback preserved (not wiped per tick)
     assert value.endswith("frame body\n")
 
 

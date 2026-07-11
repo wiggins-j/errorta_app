@@ -307,8 +307,12 @@ def put_cli_binary(provider: str, body: _CliBinaryBody, request: Request) -> dic
         settings.set_cli_binary(provider, candidate)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # A new override may change resolution — drop the stale cached probe.
+    # A new override may change resolution — drop BOTH the stale explicit-Test
+    # probe AND the observed-connectivity signal, so `connected` isn't reported
+    # true for a binary path that hasn't itself been verified.
+    from errorta_model_gateway import connectivity
     _PROBE_CACHE.pop(provider, None)
+    connectivity.clear(provider)
     return _cli_status_payload(provider)
 
 
@@ -318,8 +322,10 @@ def delete_cli_binary(provider: str, request: Request) -> dict[str, Any]:
     _require_tauri_origin(request)
     if provider not in _CLI_PROVIDERS:
         raise HTTPException(status_code=404, detail=f"unknown cli provider: {provider!r}")
+    from errorta_model_gateway import connectivity
     settings.clear_cli_binary(provider)
     _PROBE_CACHE.pop(provider, None)
+    connectivity.clear(provider)
     return _cli_status_payload(provider)
 
 

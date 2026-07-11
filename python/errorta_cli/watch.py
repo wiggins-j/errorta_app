@@ -86,10 +86,11 @@ def run_watch(
 # (`\x1b[2J`): erasing first while the cursor sits at the bottom of a full screen
 # makes some terminals (macOS Terminal.app among them) scroll the old frame up
 # into the scrollback instead of clearing it in place — which is exactly the
-# "the watched view accumulates every tick" bug. `tput clear` emits ESC[H ESC[2J
-# for this same ordering reason. The trailing `\x1b[3J` drops the scrollback so a
-# stale frame can't even be scrolled back to.
-_CLEAR_SCREEN = "\x1b[H\x1b[2J\x1b[3J"
+# "the watched view accumulates every tick" bug. This matches what `tput clear`
+# emits (ESC[H ESC[2J) for the same ordering reason. We deliberately do NOT add
+# `\x1b[3J` (drop scrollback): wiping the user's terminal history on every poll
+# tick is hostile, and homing-then-erasing already fixes the accumulation.
+_CLEAR_SCREEN = "\x1b[H\x1b[2J"
 
 
 def _draw(stream: TextIO, text: str, clear: bool) -> None:
