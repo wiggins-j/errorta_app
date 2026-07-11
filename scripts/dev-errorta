@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Run the Errorta headless CLI (`errorta`) straight from a source checkout —
+# no packaging step, no `pip install`. Put it on your PATH once and `errorta`
+# works from any directory:
+#
+#     ln -sf "$PWD/scripts/dev-errorta" /usr/local/bin/errorta   # or ~/bin, ~/.local/bin
+#
+# It runs `python -m errorta_cli` against THIS checkout. The Python it uses must
+# have the engine deps (fastapi + uvicorn + aiar) so the CLI can boot its
+# embedded sidecar. Resolution order:
+#
+#     $ERRORTA_PY  >  <repo>/python/.venv/bin/python  >  `python3` on PATH
+#
+# Create that venv once with:  scripts/setup-cli-venv.sh
+#
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+
+py="${ERRORTA_PY:-}"
+if [ -z "$py" ]; then
+  if [ -x "$repo/python/.venv/bin/python" ]; then
+    py="$repo/python/.venv/bin/python"
+  else
+    py="$(command -v python3 || true)"
+  fi
+fi
+
+if [ -z "$py" ]; then
+  echo "dev-errorta: no Python found." >&2
+  echo "  Run: $repo/scripts/setup-cli-venv.sh   (creates python/.venv)" >&2
+  echo "  Or set ERRORTA_PY=/path/to/a/python-with-fastapi+aiar" >&2
+  exit 1
+fi
+
+# PYTHONPATH points at this checkout so both the CLI and the sidecar it re-execs
+# (`<py> -m errorta_cli __serve__`) import errorta_cli + errorta_app from here.
+exec env PYTHONPATH="$repo/python${PYTHONPATH:+:$PYTHONPATH}" "$py" -m errorta_cli "$@"

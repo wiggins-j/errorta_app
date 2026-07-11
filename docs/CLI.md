@@ -51,6 +51,29 @@ In this mode the CLI re-execs `python -m errorta_cli __serve__` to run its
 sidecar; in the frozen binary it re-execs itself. Either way you get one
 process tree that owns exactly one sidecar per data store.
 
+### Option C — run from a checkout without installing (`dev-errorta`)
+
+For hacking on the CLI, `scripts/dev-errorta` runs it straight from the source
+tree. One-time: create the venv (installs the engine + CLI + AIAR editable), then
+put `errorta` on your `PATH`:
+
+```bash
+scripts/setup-cli-venv.sh
+ln -sf "$PWD/scripts/dev-errorta" /usr/local/bin/errorta
+errorta --help
+```
+
+`dev-errorta` finds its Python in this order: `$ERRORTA_PY`, then
+`python/.venv/bin/python`, then `python3` on `PATH`. So if you already have a
+Python env with the engine deps (fastapi + uvicorn + aiar), you can skip the
+venv step and just point at it:
+
+```bash
+ln -sf "$PWD/scripts/dev-errorta" /usr/local/bin/errorta
+export ERRORTA_PY=/path/to/that/python   # e.g. add to ~/.zshrc
+errorta connect status
+```
+
 ---
 
 ## First run
