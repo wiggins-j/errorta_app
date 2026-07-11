@@ -212,6 +212,9 @@ _COMMAND_MODULES = (
     "project", "focus",  # S5 — lifecycle (new/import/projects/open/switch/delete)
                          #      + north-star / focus steering
     "interject", "task", "files",  # S6 — mid-run steering + file/worktree edit/accept
+    "publish", "grounding", "testcfg",  # S7 — publish + grounding + test-command config
+    # NB: `runtime` (S2 read) is re-imported below; S7 rewrote it in place with the
+    # runtime-control sub-actions. It already appears in this tuple above.
 )
 
 for _name in _COMMAND_MODULES:
