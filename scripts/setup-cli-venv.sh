@@ -31,7 +31,7 @@ if [ -d "$aiar" ]; then
   "$venv" -m pip install -e "$aiar"
 else
   echo "!!  AIAR source not found at '$aiar'." >&2
-  echo "    Set AIAR_SRC=/path/to/aiar and re-run, or `pip install aiar-rag[rag]`," >&2
+  printf '    Set AIAR_SRC=/path/to/aiar and re-run, or: pip install "aiar-rag[rag]",\n' >&2
   echo "    otherwise the CLI can't boot its sidecar (it imports aiar)." >&2
 fi
 

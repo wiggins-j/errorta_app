@@ -16,7 +16,19 @@
 #
 set -euo pipefail
 
-repo="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+# Resolve this script's real location THROUGH symlinks, so a PATH symlink like
+# /usr/local/bin/errorta -> <repo>/scripts/dev-errorta still finds the checkout.
+# (BSD readlink has no -f, so walk the symlink chain by hand.)
+src="${BASH_SOURCE[0]:-$0}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  target="$(readlink "$src")"
+  case "$target" in
+    /*) src="$target" ;;
+    *)  src="$dir/$target" ;;
+  esac
+done
+repo="$(cd -P "$(dirname "$src")/.." && pwd)"
 
 py="${ERRORTA_PY:-}"
 if [ -z "$py" ]; then
