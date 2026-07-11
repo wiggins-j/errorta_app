@@ -173,7 +173,7 @@ def _run_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict
     # (coding.py:2333). So when the user didn't pass --members/--room, fall back
     # to the team they assembled with `team set` / `team apply` (the CLI-local
     # draft), which is exactly the shape /run wants.
-    if not body.get("members") and not body.get("room_id"):
+    if "members" not in body and "room_id" not in body:
         draft = teamdraft.load(ctx.home, ctx.project_id)
         if draft.get("members"):
             body["members"] = draft["members"]

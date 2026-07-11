@@ -93,6 +93,25 @@ def test_run_falls_back_to_team_draft_when_no_members(make_ctx) -> None:
     assert members[0]["gateway_route_id"] == "claude_cli.sonnet"
 
 
+def test_run_explicit_empty_members_does_not_fall_back_to_draft(make_ctx) -> None:
+    """An explicit --members value wins, even when empty; the draft fallback is
+    only for commands where the user omitted team input entirely."""
+    from errorta_cli import teamdraft
+
+    ctx = make_ctx(project_id=PID)
+    teamdraft.save(ctx.home, PID, teamdraft.set_route(
+        {"members": [], "room_id": None}, "dev", "claude_cli.sonnet"))
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content) if request.content else None
+        return httpx.Response(200, json={"started": True})
+
+    with _mock_client(handler) as client:
+        registry.dispatch("run", client, ctx, ["--members", "[]", "--yes", "--detach"])
+    assert seen["body"] == {"members": []}
+
+
 def test_run_no_team_remessages_engine_400(make_ctx) -> None:
     """The engine's raw 'no members' 400 is re-messaged with CLI guidance."""
     from errorta_cli.errors import CliError
