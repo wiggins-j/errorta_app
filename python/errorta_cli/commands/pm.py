@@ -130,7 +130,8 @@ def _control(client: SidecarClient, ctx: Context, args: dict[str, Any],
                            "{\"dev\":\"sonnet\"}}]'")
     _mutate.guard_sole_owner(ctx)
     if not _mutate.confirm(ctx, args, "apply PM control-actions",
-                           note="changes team config (each change is reviewable)",
+                           note="changes team config (each change is reviewable); "
+                                "a start_run action spends model budget",
                            interactive_prompt=False):
         return {"_kind": "aborted"}
     result = client.post_json(

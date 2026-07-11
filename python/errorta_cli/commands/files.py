@@ -165,9 +165,10 @@ def _accept_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> d
     if not _base.has_project(ctx):
         return _base.no_project()
     _mutate.guard_sole_owner(ctx)
+    # Destructive (writes the delivered tree into the user's real files): prompt
+    # interactively (default) — a bare `accept` must not merge without a y/N.
     if not _mutate.confirm(ctx, args, "accept (merge-back) the delivered code",
-                           note="merges the delivered tree into your real files",
-                           interactive_prompt=False):
+                           note="merges the delivered tree into your real files"):
         return {"_kind": "aborted"}
     body: dict[str, Any] = {"confirm": True}
     if args.get("override"):

@@ -184,13 +184,13 @@ def test_governance_settings_sends_only_set_fields(make_ctx) -> None:
     rec = _Recorder()
     with _capture(rec) as client:
         registry.dispatch("governance", client, make_ctx(project_id=PID),
-                          ["settings", "--mode", "careful",
+                          ["settings", "--mode", "strict",
                            "--block-on-problems", "false",
                            "--max-review-rounds", "3", "--yes"])
     put = rec.last("PUT")
     assert put["path"] == f"/coding/projects/{PID}/governance/settings"
     # ONLY the three fields the user set — no phase/human_code_approval/monitor.
-    assert put["body"] == {"mode": "careful", "block_on_problems": False,
+    assert put["body"] == {"mode": "strict", "block_on_problems": False,
                            "max_review_rounds": 3}
 
 
@@ -394,6 +394,30 @@ def test_accept_requires_yes_non_interactive(make_ctx) -> None:
     assert client.calls == []
 
 
+def test_accept_prompts_interactively_and_decline_skips_merge(make_ctx, monkeypatch) -> None:
+    """A bare interactive `accept` must prompt (M1); declining does NOT merge-back."""
+    monkeypatch.setattr("errorta_cli.commands._mutate.is_interactive", lambda: True)
+    monkeypatch.setattr("errorta_cli.commands._mutate.prompt_yes_no",
+                        lambda *a, **k: False)
+    client = RouteClient()
+    registry.dispatch("accept", client, make_ctx(project_id=PID), [])
+    assert client.calls == []  # user declined the y/N → no worktree/accept POST
+
+
+def test_steering_mutation_never_reads_run_state(make_ctx) -> None:
+    """No steering command issues a request on the side-effecting /run route (L2).
+
+    Mid-run steering must not gate on run state; a stray /run call would also
+    trip the recovery side-effect the sole-owner model forbids.
+    """
+    rec = _Recorder()
+    with _capture(rec) as client:
+        registry.dispatch("interject", client, make_ctx(project_id=PID),
+                          ["steer the team now", "--yes"])
+    assert rec.seen, "interject issued no request"
+    assert all("/run" not in e["path"] for e in rec.seen), rec.seen
+
+
 # --------------------------------------------------------------------------- #
 # 4. files / diff reads.
 # --------------------------------------------------------------------------- #
@@ -426,7 +450,7 @@ _S6_MUTATIONS = [
     ("pm", ["decline", "c1", "--yes"]),
     ("task", ["new", "t", "--yes"]),
     ("task", ["set", "t1", "--state", "done", "--yes"]),
-    ("governance", ["settings", "--mode", "careful", "--yes"]),
+    ("governance", ["settings", "--mode", "strict", "--yes"]),
     ("governance", ["approve", "a1", "--yes"]),
     ("governance", ["reject", "a1", "--yes"]),
     ("governance", ["artifact", "accept", "art1", "--yes"]),
@@ -490,7 +514,7 @@ def test_s6_mutation_requires_yes_non_interactive(make_ctx, name, args) -> None:
 
 @pytest.mark.parametrize("name, args", [
     ("pm", ["control", "d", "--yes", "--watch"]),
-    ("governance", ["settings", "--mode", "careful", "--yes", "--watch"]),
+    ("governance", ["settings", "--mode", "strict", "--yes", "--watch"]),
     ("attention", ["resolve", "s1", "--action", "x", "--yes", "--watch"]),
 ])
 def test_watch_on_steering_subcommand_refused(make_ctx, name, args) -> None:

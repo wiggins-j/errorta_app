@@ -36,7 +36,8 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     _mutate.guard_sole_owner(ctx)
     if not _mutate.confirm(
         ctx, args, "interject a directive to the PM",
-        note="steers the team; the PM reads it on its next plan turn",
+        note="steers the team; the PM reads it on its next plan turn "
+             "and may start/continue a run (spends model budget)",
         interactive_prompt=False,
     ):
         return {"_kind": "aborted"}
