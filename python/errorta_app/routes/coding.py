@@ -119,17 +119,25 @@ def _validate_repo_path(repo_path: Optional[str]) -> None:
         pass
 
 
-def _validate_delivery_root(delivery_root: Optional[str]) -> Optional[str]:
+def _validate_delivery_root(
+    delivery_root: Optional[str], *, create: bool = False
+) -> Optional[str]:
     """F105: validate the user-selected greenfield delivery PARENT directory.
 
     The accepted MVP is exported into ``<delivery_root>/<project_id>``, so the
     root is a filesystem WRITE boundary — validate fail-closed (mirrors
     ``_validate_repo_path``). ``None``/blank means the default
-    (~/Errorta Projects) and is allowed. Otherwise the root must be an absolute,
-    existing directory that is not a filesystem/OS/protected root, not the home
-    dir itself, not ERRORTA_HOME (or under it), and not a hidden dot-directory
+    (~/Errorta Projects) and is allowed. Otherwise the root must be an absolute
+    directory that is not a filesystem/OS/protected root, not the home dir
+    itself, not ERRORTA_HOME (or under it), and not a hidden dot-directory
     directly under home. Returns the normalized absolute path (or None for the
-    default). Raises HTTPException 422 on rejection."""
+    default). Raises HTTPException 422 on rejection.
+
+    F149: with ``create=True`` a non-existent (but otherwise valid) root is
+    created with ``mkdir(parents=True)`` — AFTER every safety guard passes, so a
+    protected/hidden target is rejected before anything is written. Default
+    ``create=False`` preserves the fail-closed behavior for all other callers
+    (which re-validate an already-stored root)."""
     from pathlib import Path
 
     if delivery_root is None or not str(delivery_root).strip():
@@ -141,8 +149,9 @@ def _validate_delivery_root(delivery_root: Optional[str]) -> Optional[str]:
                             detail=f"invalid delivery_root: {exc}") from exc
     if not real.is_absolute():
         raise HTTPException(status_code=422, detail="delivery_root must be absolute")
-    if not real.is_dir():
-        raise HTTPException(status_code=422, detail="delivery_root is not a directory")
+    # NOTE: the is-a-directory check is deferred to the end so `create=True` can
+    # mkdir a not-yet-existing root, but only after the protected-path guards
+    # below have vetted the (resolved) target.
 
     home = Path.home().resolve()
     # Filesystem root (POSIX "/" or a Windows drive root like "C:\\").
@@ -190,6 +199,20 @@ def _validate_delivery_root(delivery_root: Optional[str]) -> Optional[str]:
                     detail="delivery_root is inside a hidden home directory")
     except AttributeError:  # pragma: no cover
         pass
+
+    # All guards passed. Now enforce (or, with create=True, establish) that the
+    # vetted root is a real directory.
+    if not real.is_dir():
+        if real.exists():
+            raise HTTPException(status_code=422, detail="delivery_root is not a directory")
+        if not create:
+            raise HTTPException(status_code=422, detail="delivery_root is not a directory")
+        try:
+            real.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"could not create delivery_root: {exc}") from exc
     return str(real)
 
 
@@ -533,7 +556,9 @@ def create_project(body: _NewProject, request: Request) -> dict[str, Any]:
     if body.target == "existing":
         delivery_root = None
     else:
-        delivery_root = _validate_delivery_root(body.delivery_root)
+        # F149: greenfield create may point at a not-yet-existing location — the
+        # guarded auto-mkdir establishes it (protected targets still 422).
+        delivery_root = _validate_delivery_root(body.delivery_root, create=True)
     # F088: stage/validate grounding BEFORE writing project state, so a bad
     # grounding payload can't leave a half-created project behind.
     _validate_grounding_payload(body.grounding, repo_path=body.repo_path)
@@ -3762,7 +3787,10 @@ def accept_worktree(project_id: str, body: dict[str, Any], request: Request) -> 
         dest = deliverable_dir(project_id, delivery_root)
         if dest.exists():
             try:
-                non_empty = any(dest.iterdir())
+                # F149: the CLI drops a `.errorta-project` binding pointer into a
+                # freshly-created project dir; it doesn't count as user content,
+                # so an otherwise-empty destination still delivers.
+                non_empty = any(p.name != ".errorta-project" for p in dest.iterdir())
             except OSError:
                 non_empty = True
             if non_empty:

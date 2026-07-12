@@ -153,6 +153,7 @@ a = Analysis(
         # The CLI package + its dynamically-imported command modules (see above).
         "errorta_cli",
         "errorta_cli.serve",
+        "errorta_cli.shellinit",  # F149 shell-init hook (lazy-imported in app.py)
         *_CLI_COMMAND_MODULES,
         # ---- Embedded sidecar (`errorta __serve__`) ---------------------- #
         # Everything below MUST mirror sidecar.spec: `__serve__` boots
