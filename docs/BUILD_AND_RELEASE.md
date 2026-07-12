@@ -14,8 +14,13 @@ Signing / notarization credential setup for both: `docs/SIGNING_MACOS.md`.
 ## Releasing the `errorta` CLI (Homebrew)
 
 The `errorta` CLI ships as a **single self-contained binary** built by
-`pyinstaller python/cli.spec` (it embeds the sidecar + the AIAR engine, so a user
-needs no Python and no other deps). Distribution is a Homebrew tap:
+`pyinstaller python/cli.spec` (it embeds the sidecar, so a user needs no Python
+and no other deps). By default it's a **lean council-only binary** — AIAR /
+grounding is **not** bundled (the Coding Council doesn't need it; every `import
+aiar` call site is lazy + guarded, so the sidecar boots and reports
+`aiar_pin.source="absent"`). Pass **`--with-grounding`** to embed AIAR + its RAG
+runtime for grounding/retrieval (see "Optional: grounding" below). Distribution
+is a Homebrew tap:
 
 ```sh
 brew install errorta/tap/errorta
@@ -113,7 +118,22 @@ script writes `Formula/errorta.rb` but leaves the commit/push to you.
 | `--push-tap` | After rendering, `git add`/`commit`/`push` the tap. Requires `--tap-dir`. |
 | `--skip-notarize` | Skip macOS codesign + notarization (produces an **ad-hoc-signed** binary — installs+runs via brew, but a browser download is Gatekeeper-blocked). Auto-set on Linux. |
 | `--check` | Validate prerequisites and exit **without building**. Add `--online` to also probe notary credentials. |
+| `--with-grounding` | Bundle AIAR + its RAG runtime (grounding/retrieval). Default off → lean council-only binary. Requires an AIAR editable install in the build venv. |
 | `--dry-run` | Print the plan (and the pruned formula); build/upload/push nothing. |
+
+### Optional: grounding (AIAR)
+
+The default binary is **council-only** — it does not carry AIAR, so `errorta
+grounding …` reports grounding unavailable and the sidecar runs with
+`aiar_pin.source="absent"`. This keeps the CLI lean and dependency-free for the
+coding-council use case.
+
+To ship a binary **with** grounding/retrieval, add `--with-grounding` (which sets
+`ERRORTA_BUNDLE_AIAR=1`, read by `python/cli.spec`). The build venv must have
+AIAR installed editable (`AIAR_SRC=… scripts/setup-cli-venv.sh`), plus
+`aiar-rag[rag]` for the full RAG runtime (chromadb + sentence-transformers).
+Because a frozen binary can't add AIAR later, this is a **build-time** choice —
+the same tap can't be both; pick per release.
 
 ### How other-arch values are preserved
 
@@ -146,9 +166,11 @@ ticket.)
 
 ### Binary size
 
-The tarball is large — **~100–200 MB** — because the binary bundles AIAR,
-chromadb, sentence-transformers, and uvicorn. Homebrew handles it fine; the
-release notes call it out so users aren't surprised.
+The **council-only** default binary is ~60 MB (sidecar engine + uvicorn, no
+AIAR). A **`--with-grounding`** build is much larger — **~100–200 MB** — once
+AIAR's RAG runtime (chromadb, sentence-transformers, and the torch it pulls) is
+embedded. Homebrew handles either fine; the release notes call out the size for
+the grounding build so users aren't surprised.
 
 ### After the release
 

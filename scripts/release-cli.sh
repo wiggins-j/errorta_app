@@ -45,6 +45,10 @@ Options:
                     identity) and exit WITHOUT building. Combine with --online to
                     also probe notarization credentials (a network round-trip).
   --online          With --check, additionally probe notary credentials.
+  --with-grounding  Bundle AIAR + its RAG runtime (grounding/retrieval) into the
+                    binary (sets ERRORTA_BUNDLE_AIAR=1). Default OFF: the CLI is
+                    council-only and doesn't require AIAR. Requires an AIAR
+                    editable install in the build venv.
   --dry-run         Print every step without building, uploading, or pushing.
   --help            Show this help.
 
@@ -64,12 +68,14 @@ SKIP_NOTARIZE=0
 DRY_RUN=0
 CHECK=0
 CHECK_ONLINE=0
+WITH_GROUNDING=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)      VERSION="${2:?--version needs a value}"; shift 2 ;;
     --version=*)    VERSION="${1#*=}"; shift ;;
     --tap-dir)      TAP_DIR="${2:?--tap-dir needs a value}"; shift 2 ;;
     --tap-dir=*)    TAP_DIR="${1#*=}"; shift ;;
+    --with-grounding) WITH_GROUNDING=1; shift ;;
     --push-tap)     PUSH_TAP=1; shift ;;
     --skip-notarize) SKIP_NOTARIZE=1; shift ;;
     --check)        CHECK=1; shift ;;
@@ -84,6 +90,10 @@ if [[ $PUSH_TAP -eq 1 && -z "$TAP_DIR" ]]; then
   echo "[release-cli] --push-tap requires --tap-dir." >&2
   exit 2
 fi
+
+# Grounding (AIAR) is opt-in; python/cli.spec reads ERRORTA_BUNDLE_AIAR. Default
+# OFF => a lean council-only binary that never requires AIAR.
+if [[ $WITH_GROUNDING -eq 1 ]]; then export ERRORTA_BUNDLE_AIAR=1; else unset ERRORTA_BUNDLE_AIAR; fi
 
 log()  { printf '[release-cli] %s\n' "$*"; }
 step() { printf '\n[release-cli] == %s ==\n' "$*"; }
@@ -120,6 +130,25 @@ preflight() {
   resolve_pyinstaller
   if [[ -n "$PYINSTALLER" ]]; then log "OK    pyinstaller: $PYINSTALLER"
   else log "FAIL  pyinstaller not found (activate python/.venv or 'pip install -e python[dev]')"; ok=0; fi
+
+  if [[ $WITH_GROUNDING -eq 1 ]]; then
+    # PyInstaller only WARNS on a missing hiddenimport, so a --with-grounding
+    # build with an incomplete venv silently ships a binary that ImportErrors at
+    # grounding time. Enforce the full runtime here: aiar itself AND its RAG deps
+    # (chromadb + sentence_transformers, from aiar-rag[rag]).
+    local venv_py="$REPO_ROOT/python/.venv/bin/python"
+    if [[ ! -x "$venv_py" ]]; then
+      log "FAIL  --with-grounding needs the build venv at python/.venv (run scripts/setup-cli-venv.sh)"; ok=0
+    elif ! "$venv_py" -c 'import aiar' >/dev/null 2>&1; then
+      log "FAIL  --with-grounding but AIAR not importable in python/.venv (install it editable — see setup-cli-venv.sh)"; ok=0
+    elif ! "$venv_py" -c 'import chromadb, sentence_transformers' >/dev/null 2>&1; then
+      log "FAIL  --with-grounding: AIAR present but its RAG runtime is not (pip install 'aiar-rag[rag]') — the binary would ImportError at grounding time"; ok=0
+    else
+      log "OK    grounding: AIAR + RAG runtime importable in build venv (will bundle)"
+    fi
+  else
+    log "n/a   grounding: off (council-only build; --with-grounding to include AIAR)"
+  fi
 
   for f in "$REPO_ROOT/python/cli.spec" "$ENTITLEMENTS" "$NOTARIZE_LIB" "$TEMPLATE" \
            "$REPO_ROOT/scripts/lib/prune-formula.awk"; do
@@ -212,6 +241,7 @@ log "platform:  $OS/$ARCH"
 log "binary:    $BINARY"
 log "tarball:   $TARBALL"
 log "gh repo:   $GH_REPO"
+log "grounding: $([[ $WITH_GROUNDING -eq 1 ]] && echo 'ON (AIAR bundled)' || echo 'off (council-only, --with-grounding to include)')"
 [[ $DRY_RUN -eq 1 ]] && log "MODE:      dry-run (no build / upload / push)"
 
 # --check: validate prerequisites and exit before the (long) build.
