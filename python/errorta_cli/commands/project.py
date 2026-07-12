@@ -26,6 +26,7 @@ The pointer is a LOCAL scratch file, never part of the engine store.
 """
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -87,6 +88,57 @@ def _project_dir(project: dict[str, Any]) -> Path | None:
     return None
 
 
+def _resolve_new_root(args: dict[str, Any], base_dir: Path) -> str | None:
+    """F149: resolve the greenfield delivery ROOT from the mutually-exclusive
+    ``--here`` / positional ``location`` / ``--delivery-root`` inputs.
+
+    ``base_dir`` is the binding cwd (``ctx.bind_cwd()``) used for ``--here`` and
+    to absolutize a relative location. Returns an absolute path string (expanded,
+    NOT symlink-resolved — the server does its own resolve and hands back the
+    canonical dir), or None for the server default (~/Errorta Projects). Raises
+    CliError on a conflict."""
+    here = bool(args.get("here"))
+    location = (str(args.get("location")).strip() if args.get("location") else "")
+    droot = (str(args.get("delivery-root")).strip() if args.get("delivery-root") else "")
+
+    if here and (location or droot):
+        raise CliError("--here cannot be combined with a location / --delivery-root.")
+    if location and droot and location != droot:
+        raise CliError(
+            f"location '{location}' and --delivery-root '{droot}' disagree — pass one.")
+    if here:
+        return str(base_dir)
+    if not (location or droot):
+        return None
+    p = Path(location or droot).expanduser()
+    if not p.is_absolute():
+        p = base_dir / p
+    return str(p)
+
+
+def emit_cd_target(path: str | os.PathLike[str] | None) -> None:
+    """F149: hand a directory to the shell-integration hook so it can `cd` there.
+
+    The `errorta shell-init` wrapper exports ``ERRORTA_CD_FILE``; we append the
+    absolute path when that env var is set. A no-op otherwise, so a plain shell
+    (no hook) sees zero behavior change."""
+    if not path:
+        return
+    cd_file = os.environ.get("ERRORTA_CD_FILE")
+    if not cd_file:
+        return
+    try:
+        # Defense-in-depth: the hook hands us a fresh, empty temp file. Refuse to
+        # truncate a pre-existing non-empty file, so a misconfigured/hostile
+        # ERRORTA_CD_FILE can't turn `errorta new` into a clobber primitive.
+        if os.path.exists(cd_file) and os.path.getsize(cd_file) > 0:
+            return
+        with open(cd_file, "w", encoding="utf-8") as fh:
+            fh.write(str(Path(path)) + "\n")
+    except OSError:
+        pass  # best-effort; never break the command over the cd handshake
+
+
 # --------------------------------------------------------------------------- #
 # `projects` — list.
 # --------------------------------------------------------------------------- #
@@ -102,7 +154,7 @@ def _projects_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) ->
 def _new_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     project_id = str(args.get("id") or "").strip()
     if not project_id:
-        return _base.usage("new <id> [--here|--delivery-root PATH] [--north-star ...] [--dod ...]")
+        return _base.usage("new <id> [location] [--here] [--north-star ...] [--dod ...]")
     _mutate.guard_sole_owner(ctx)
     if not _mutate.confirm(ctx, args, f"create project '{project_id}'",
                            note="creates a new project on disk",
@@ -115,15 +167,31 @@ def _new_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict
         "definition_of_done": str(args.get("dod") or ""),
         "work_request": str(args.get("work-request") or ""),
     }
-    if args.get("here"):
-        body["delivery_root"] = str(ctx.bind_cwd())
-    elif args.get("delivery-root"):
-        body["delivery_root"] = str(args["delivery-root"])
+    root = _resolve_new_root(args, ctx.bind_cwd())  # None => default (~/Errorta Projects)
+    if root is not None:
+        body["delivery_root"] = root
     result = client.post_json("/coding/projects", json=body)
     project = (result or {}).get("project") or {}
     ctx.switch_project(project_id)
-    pointer = _write_binding(ctx, project_id)
-    return {"_kind": "created", "project": project, "pointer": pointer}
+
+    # F149: the project's working directory = planned_delivery_dir (<root>/<id>).
+    # Create it (empty) so the user has a folder to sit in — deliver() reuses an
+    # empty dir. Bind the pointer INTO that dir so it self-identifies even when
+    # several projects share one delivery root (e.g. the default ~/Errorta
+    # Projects); delivery ignores the pointer file. Then hand the dir to the hook.
+    cd_dir: Path | None = None
+    planned = project.get("planned_delivery_dir")
+    if planned:
+        cd_dir = Path(str(planned))
+        try:
+            cd_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            cd_dir = None
+    pointer = _write_binding(ctx, project_id, directory=cd_dir)
+    emit_cd_target(cd_dir)
+    return {"_kind": "created", "project": project, "pointer": pointer,
+            "cd_dir": str(cd_dir) if cd_dir else None,
+            "hooked": bool(os.environ.get("ERRORTA_CD_FILE"))}
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +362,16 @@ def _lifecycle_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
         body = _rp.render_project({"project": payload.get("project")}, verbosity)
         pointer = payload.get("pointer")
         note = f"\n{render(muted(f'bound this directory ({pointer})'))}" if pointer else ""
+        # F149: a `new` with a resolved project dir. If the shell hook moved us
+        # there, say so; otherwise print the path + a one-time integration hint.
+        cd_dir = payload.get("cd_dir")
+        if cd_dir:
+            if payload.get("hooked"):
+                note += "\n" + render(muted(f"→ {cd_dir}"))
+            else:
+                tip = ('tip: add  eval "$(errorta shell-init zsh)"  to ~/.zshrc '
+                       'to jump into new projects automatically')
+                note += "\n" + render(f"cd {cd_dir}") + "\n" + render(muted(tip))
         if kind == "cloned":
             body = _rp.render_branches(payload.get("branches"), verbosity) + "\n" + body
         return f"{render(muted(verb + ':'))}\n{body}{note}"
@@ -325,8 +403,12 @@ register(Command(
     render=_lifecycle_render,
     params=(
         Param("id", "Project id (slug).", required=True),
+        Param("location", "Directory to create the project under (its <id> folder "
+                          "lands here; created if missing). Default: ~/Errorta Projects.",
+              is_flag=False),
         Param("here", "Use the current directory as the delivery root.", is_flag=True),
-        Param("delivery-root", "Parent directory to deliver into.", is_flag=False),
+        Param("delivery-root", "Alias for the positional location (parent directory).",
+              is_flag=False),
         Param("north-star", "The project's North Star.", is_flag=False),
         Param("dod", "Definition of Done.", is_flag=False),
         Param("work-request", "Initial Current Focus directive.", is_flag=False),

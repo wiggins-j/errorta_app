@@ -145,6 +145,23 @@ def _stop_line(result: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# F149 shell integration — top-level so it never spawns a sidecar (it is eval'd
+# from the user's rc file on every shell startup).
+# --------------------------------------------------------------------------- #
+
+@app.command("shell-init")
+def _shell_init(
+    shell: str = typer.Argument("zsh", help="Shell to emit the hook for: zsh | bash."),
+) -> None:
+    """Print the shell hook that auto-cds into a project after `errorta new`."""
+    from .shellinit import render_hook
+    try:
+        typer.echo(render_hook(shell), nl=False)
+    except CliError as exc:
+        _fail(exc)
+
+
+# --------------------------------------------------------------------------- #
 # Registry commands → argv commands.
 # --------------------------------------------------------------------------- #
 
