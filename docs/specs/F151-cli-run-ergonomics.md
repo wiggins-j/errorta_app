@@ -49,10 +49,17 @@ Add `stop` as a true alias so `errorta stop` == `errorta cancel` (same call,
 confirm gate, `--yes`, render).
 
 **Design.** Add an `aliases: tuple[str, ...] = ()` field to the registry
-`Command`; `register()` also indexes the command under each alias, and the
-argv/Typer exposure (`_add_argv_command`) registers the alias name too, so both
-`errorta cancel` and `errorta stop` dispatch identically. Give `cancel`
-`aliases=("stop",)`. (General mechanism — future aliases are one line.)
+`Command`. `register()` records aliases in a **separate `_ALIASES: dict[str,str]`
+map** (alias → canonical name) — NOT a second entry in `_REGISTRY`, so
+`all_commands()` / `names()` stay canonical and the parity tests that loop every
+command (`tests/cli/test_registry_parity.py`) don't double-dispatch a mutating
+command. `get()` falls back to `_ALIASES`. The argv/Typer exposure
+(`_add_argv_command` / `_register_argv_commands`) must **explicitly register an
+extra Typer command per alias** (Typer resolves subcommands by registered name,
+so `errorta stop` 404s otherwise) whose handler dispatches under the canonical
+name. Add aliases to the REPL `WordCompleter` for `/stop` autocomplete. Give
+`cancel` `aliases=("stop",)`. No conflict: `errorta sidecar stop` /
+`errorta runtime stop` are namespaced sub-actions, not top-level.
 
 **Acceptance.** `errorta stop` and `errorta stop --yes` behave exactly like
 `cancel`; `--help` lists `stop` (or notes it as an alias); slash `/stop` resolves
@@ -80,12 +87,25 @@ proceeds with the normal `/run` (or `/continue` / `/resume`). No server change:
   every_n_tasks|on_merge_ready>` on `run`/`continue` for the non-binary cases;
   `--autonomous` is the headline shortcut for `off`.
 
+The autonomous confirm sends **policy fields only** (never the team) — verified
+against `confirm_run_setup` (coding.py:2778): step 2 does load→merge→save of the
+autonomy policy (preserves other knobs + governance), `set_run_config` is guarded
+`if members:` so an empty-members confirm leaves the applied team intact, and
+`_set_run_setup_confirmed(True)` is unconditional so the confirm itself satisfies
+the readiness gate. (Do NOT use `PUT /autonomy` — `policy_from_dict` fills every
+omitted field from defaults, silently clobbering `max_iterations` etc.)
+
+For `continue`/`resume`, the loop reads the policy once per worker start
+(`runner.run(load_policy(store), …)`), and continue/resume spawns a fresh worker
+— so setting the policy then continuing works exactly as claimed.
+
 **Acceptance.** After `errorta run --autonomous --yes`, the resolved setup shows
-`checkpoint_cadence: off` and the run does not emit a `checkpoint` stop; it runs
-until DoD/budget/blocker/cancel. `errorta continue --autonomous` on a
-checkpoint-stopped run resumes without re-stopping at the next checkpoint.
-`--autonomous` on a fresh run with an unconfirmed setup still ends up confirmed
-(the policy set counts as a confirm, or the command confirms the team too).
+`checkpoint_cadence: off`, no `checkpoint` stop is emitted; runs until
+DoD/budget/blocker/cancel. `errorta continue --autonomous` on a checkpoint-stopped
+run resumes without re-stopping. New behavior to test: `run --autonomous` on a
+project with **no team assembled** now passes the readiness gate (the confirm sets
+it) and fails later at the `/run` "no members" 400 — a different, still-clean
+error surface than today's setup-required 409.
 
 ## Item 3 — `log --watch` as a real tail
 
@@ -99,19 +119,40 @@ and — when the clear doesn't take cleanly — stacks frames.
 - **snapshot** (current behavior) — `status` / `tasks` / `board` / most reads:
   full re-render + in-place clear each tick. Unchanged.
 - **stream/tail** — `log` (and candidates `decisions` / `turns`): fetch the log
-  each tick, print **only events newer than the last one shown**, appended below
-  (no screen clear). A stable per-event key (event index, or `id`/monotonic
-  timestamp from the `team-log` payload) drives the "what's new" diff; the loop
-  keeps the last-seen key across ticks. Behaves like `tail -f`: old lines scroll
-  naturally, new events stream in, nothing repaints.
+  each tick, print **only the new events**, appended below (no screen clear).
+  Behaves like `tail -f`: old lines scroll naturally, new events stream in,
+  nothing repaints.
 
-A command declares its watch mode (e.g. a `watch_mode = "stream" | "snapshot"` on
-the `Command`, defaulting `snapshot`); `log` opts into `stream`.
+A command declares its watch mode (e.g. `watch_mode = "stream" | "snapshot"` on
+the `Command`, default `snapshot`); `log` opts into `stream`.
 
-The `team-log` route (`coding.py:1428`) currently returns a **full** snapshot with
-no `since`. v1 does the new-event diff **client-side** (CLI-only — dedup by event
-key). A follow-up can add an optional `?since=<cursor>` to the route so the tail
-fetches only the delta (bandwidth for long runs).
+**No stable per-event key exists (the crux).** The `team-log` payload
+(`coding.py:1428` → `build_team_log`, `team_log.py`) is a **derived, re-sorted**
+view: entries are `{at, role, member, kind, message}` with **no id / seq**, `at`
+is **non-unique** (e.g. `context_request`/`context_delivered` share a timestamp),
+the list is **rebuilt and re-sorted by `at` every call** (so a late-arriving
+earlier-timestamped source event can insert mid-list), and some entries **mutate
+in place** across ticks (an approval renders "requested…" then later "approved…").
+So an index- or timestamp-keyed diff is **unsound**.
+
+**v1 approach — content longest-common-prefix (LCP) diff, CLI-only.** Keep the
+previous rendered-entry list; each tick, compute the LCP against the new list
+(compare per-entry content after applying the same `--role/--member/--grep`
+filter). Print the entries after the LCP. If the LCP is **shorter** than what was
+shown (a mid-list insertion, mutation, or log reset diverged the prefix), reprint
+from the divergence point. Live runs are append-mostly at the tail, so this is a
+clean tail in practice and degrades to an occasional reprint — never a wrong or
+dropped event.
+
+**Render refactor (required).** `render_log` (`render/log.py`) renders the whole
+list as one block; the stream path can't reuse that string. Factor out a
+per-entry renderer (`_render_entry(entry) -> Text`) used by both the block
+renderer and the tail. The loop reads the structured `payload["entries"]` (already
+captured but discarded at `watch.py:69`) and reuses `render.log._filter`.
+
+The clean long-term fix — a server-side monotonic `seq` stamped per entry — is a
+**recommended follow-up**, not v1 (it needs an engine change to `build_team_log`);
+the LCP diff makes v1 correct-enough without touching the server.
 
 **Acceptance.** `errorta log --watch` on a live run **appends** new events as they
 occur, never reprints the existing log, and never stacks duplicate frames; on a
@@ -129,13 +170,19 @@ streamed events.
   `commands/runctl.py`: a shared helper that, when `--autonomous` (or an explicit
   `--checkpoint-cadence`) is set, POSTs the policy to `run-setup/confirm` before
   the start/continue call. Add the `Param`s. Reuse `_CONFIRM_FIELDS` coercion.
-- **Item 3** — `watch.run_watch` gains stream mode; `commands/log.py` marks itself
-  `stream`. The stream path needs the payload's event list + a key; check
-  `render.log` / the `team-log` payload for a per-event id or use the list index.
-  Keep the snapshot path byte-identical for everything else.
+- **Item 3** — factor `_render_entry` out of `render_log`; `watch.run_watch` gains
+  a `stream` mode that consumes `payload["entries"]` (available at `watch.py:69`),
+  applies `render.log._filter`, LCP-diffs against the prior list, and appends the
+  suffix (no `_CLEAR_SCREEN`). `commands/log.py` sets `watch_mode="stream"`; the
+  snapshot path stays byte-identical for everything else. Also verify
+  `stream.isatty()` in the **frozen binary** — if a wrapped stdout reads
+  non-TTY, today's snapshot clear is skipped and the log appends every tick
+  (a second, frozen-only cause of the observed stacking); the tail removes this
+  failure mode regardless.
 - **cli.spec** — no new modules; all changes live in already-bundled files.
-- **No server change required** for v1 (confirm-merge for policy; client-side
-  event diff for the tail). `?since=` on team-log is an optional follow-up.
+- **No server change required** for v1: confirm-merge for the policy (Item 2) and
+  the content-LCP tail (Item 3). The per-entry `seq` (correct tail) and `?since=`
+  (bandwidth) on `team-log` are follow-ups.
 
 ## Edge cases
 
