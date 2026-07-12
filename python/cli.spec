@@ -11,16 +11,19 @@
 # CLI spawns its own sidecar by re-executing THIS binary with `__serve__`
 # (errorta_cli/sidecar.py:_serve_argv — `sys.executable` is the frozen binary,
 # so there is no separate `python` to shell out to). Because `__serve__` imports
-# errorta_app.server (the whole engine), this spec MUST bundle exactly what
-# sidecar.spec bundles — the same AIAR-editable finder resolution + the same
-# hiddenimports — PLUS the CLI front-end deps (typer / rich / prompt_toolkit) and
-# the dynamically-imported command modules.
+# errorta_app.server (the whole engine), this spec bundles the sidecar engine +
+# the CLI front-end deps (typer / rich / prompt_toolkit) + the dynamically-
+# imported command modules.
 #
-# Building is a maintainer / CI step from a fully-configured venv (AIAR editable,
-# pyinstaller installed); it is NOT run in the dev/test loop. Keep this file in
-# lockstep with sidecar.spec: any hiddenimport added there for the sidecar must
-# be mirrored here, or the frozen `errorta __serve__` regresses vs the desktop
-# sidecar.
+# AIAR / grounding is OPT-IN (ERRORTA_BUNDLE_AIAR=1 — see the _BUNDLE_AIAR gate
+# below). The Coding Council doesn't need it, so the default build is a lean
+# council-only binary; opting in mirrors sidecar.spec's AIAR bundling for
+# grounding/retrieval.
+#
+# Building is a maintainer / CI step from a fully-configured venv (pyinstaller
+# installed; AIAR editable only when bundling grounding); it is NOT run in the
+# dev/test loop. Keep the sidecar hiddenimports in lockstep with sidecar.spec, or
+# the frozen `errorta __serve__` regresses vs the desktop sidecar.
 
 # -*- mode: python ; coding: utf-8 -*-
 
@@ -28,9 +31,9 @@ import os
 
 block_cipher = None
 
-# AIAR is installed editable (PEP 660 via setuptools) using a meta-path
-# finder; PyInstaller's static Analyzer can't follow the custom finder so
-# we resolve the AIAR source root from the installed finder file and add
+# When grounding is opted in, AIAR is installed editable (PEP 660 via setuptools)
+# using a meta-path finder; PyInstaller's static Analyzer can't follow the custom
+# finder so we resolve the AIAR source root from the installed finder file and add
 # its parent to pathex so the `aiar` package gets included directly. The
 # finder lives at .venv/lib/pythonX.Y/site-packages/__editable___aiar_*_finder.py
 # and exposes a MAPPING dict pointing at the source dir.
@@ -69,7 +72,37 @@ def _aiar_source_path() -> str:
     return ""
 
 
-_AIAR_PATHEX = _aiar_source_path()
+# AIAR / grounding is OPT-IN in the frozen CLI binary. The Coding Council does
+# NOT need it: every `import aiar` call site is lazy and guarded (the sidecar's
+# startup probe sets aiar_pin.source="absent", and errorta_judge/errorta_query
+# fall back to a StubPipeline), so a council-only binary boots and runs fine.
+# Grounding/retrieval (which additionally needs AIAR's heavy RAG runtime —
+# chromadb + sentence_transformers) is embedded ONLY when a builder opts in with
+# ERRORTA_BUNDLE_AIAR=1 (release-cli.sh exposes this as --with-grounding).
+# Default (unset) => lean council-only binary that never requires AIAR.
+_BUNDLE_AIAR = os.environ.get("ERRORTA_BUNDLE_AIAR", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+_AIAR_PATHEX = _aiar_source_path() if _BUNDLE_AIAR else ""
+
+# AIAR hiddenimports, declared only when bundling grounding. (fastapi is NOT here
+# — it is the sidecar's own web framework, imported by errorta_app.server
+# regardless, so it stays in the always-on list below.)
+_AIAR_HIDDENIMPORTS = [
+    "aiar",
+    "aiar.harness",
+    "aiar.harness.pipeline",
+    "aiar.grounding",
+    "aiar.grounding.store",
+    "chromadb",
+    "sentence_transformers",
+] if _BUNDLE_AIAR else []
+
+# When NOT bundling, actively exclude the external AIAR package + its RAG runtime
+# so PyInstaller's function-body import scan can't pull them in. (Excludes the
+# `aiar` package only — errorta's own aiar_adapter/aiar_pin/aiar_retrieve modules
+# have different top-level names and are kept.)
+_AIAR_EXCLUDES = [] if _BUNDLE_AIAR else ["aiar", "chromadb", "sentence_transformers"]
 
 # Build provenance: scripts/build-sidecar.sh (or the CLI build script) writes
 # errorta_app/_build_info.json from the git HEAD right before this spec runs, so
@@ -170,25 +203,16 @@ a = Analysis(
         # bring up the watchdog tunnel.
         "errorta_tunnels",
         "errorta_tunnels.manager",
-        # AIAR — every call site that touches it is lazy (inside function
-        # bodies in errorta_app.health.aiar_pin, errorta_judge.aiar_adapter,
-        # errorta_query.pipeline). PyInstaller's static analyzer skips
-        # those by design, so the package and its used submodules must be
-        # declared explicitly or the frozen sidecar reports
-        # aiar_pin.source="absent" and the Council demo runs without
-        # retrieval.
-        "aiar",
-        "aiar.harness",
-        "aiar.harness.pipeline",
-        "aiar.grounding",
-        "aiar.grounding.store",
-        # AIAR's optional-but-likely-needed hiddenimports. The aiar-rag[rag]==0.2.*
-        # pin  pulls chromadb + sentence_transformers + fastapi as
-        # runtime deps; PyInstaller's dynamic-import scanner misses them inside
-        # AIAR's lazy-loaded paths, so they have to be declared explicitly.
-        "chromadb",
-        "sentence_transformers",
+        # fastapi is the sidecar's own web framework (errorta_app.server), needed
+        # whether or not grounding is bundled — keep it unconditional.
         "fastapi",
+        # AIAR — OPT-IN only (ERRORTA_BUNDLE_AIAR=1). Every call site that touches
+        # it is lazy + guarded (errorta_app.health.aiar_pin, errorta_judge.
+        # aiar_adapter, errorta_query.pipeline), so a council-only binary omits it
+        # cleanly: the sidecar reports aiar_pin.source="absent" and retrieval
+        # falls back to the StubPipeline. When opted in, _AIAR_HIDDENIMPORTS also
+        # pulls AIAR's RAG runtime (chromadb + sentence_transformers).
+        *_AIAR_HIDDENIMPORTS,
         # F147 CLI foreign-app detection (errorta_cli.sidecar._scan_errorta_processes)
         # imports psutil in a function body to spot a running Errorta.app /
         # errorta-sidecar before spawning a second sidecar. psutil is already
@@ -205,6 +229,15 @@ a = Analysis(
         # variant of torch is enormous. These excludes are tuned over time.)
         "torch.utils.tensorboard",
         "torch.testing",
+        # Council-only build: PyInstaller's analyzer scans function-body imports,
+        # so the lazy `import aiar` call sites would otherwise pull AIAR in even
+        # though it's absent from hiddenimports. Exclude it (and its RAG runtime)
+        # so a default build carries no AIAR; the guarded call sites degrade to
+        # aiar_pin.source="absent" + StubPipeline. Only excludes the external
+        # `aiar` package — errorta's own aiar_adapter/aiar_pin/aiar_retrieve
+        # modules (different top-level names) are unaffected. Empty when
+        # --with-grounding (ERRORTA_BUNDLE_AIAR=1) so AIAR is bundled.
+        *_AIAR_EXCLUDES,
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
