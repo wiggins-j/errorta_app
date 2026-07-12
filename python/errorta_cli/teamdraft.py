@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,48 @@ def set_pool(draft: dict[str, Any], role: str, routes: list[str]) -> dict[str, A
     member["model_mode"] = "multi"
     member["model_pool"] = list(routes)
     member.pop("gateway_route_id", None)
+    return {"members": members, "room_id": draft.get("room_id")}
+
+
+def _next_index(members: list[dict[str, Any]], role: str) -> int:
+    """Highest N among existing ids ``<role>-<N>`` (a bare ``<role>`` counts as 1),
+    +1. So counting scans ids — mixing ``team set dev`` (id ``dev``) with
+    ``team add --dev`` (``dev-1``) never collides."""
+    pat = re.compile(rf"^{re.escape(role)}-(\d+)$")
+    mx = 0
+    for m in members:
+        mid = str(m.get("id") or "")
+        if mid == role:
+            mx = max(mx, 1)
+        else:
+            g = pat.match(mid)
+            if g:
+                mx = max(mx, int(g.group(1)))
+    return mx + 1
+
+
+def add_members(
+    draft: dict[str, Any], role: str, count: int,
+    *, route: str | None = None, pool: list[str] | None = None,
+) -> dict[str, Any]:
+    """F150: append ``count`` NEW members of ``role`` (ids ``<role>-<n>``,
+    continuing from the max existing suffix). ``route`` → single mode; ``pool`` →
+    multi mode. Exactly one of ``route`` / ``pool`` must be given."""
+    if (route is None) == (pool is None):
+        raise ValueError("add_members needs exactly one of route= / pool=")
+    members = list(draft.get("members") or [])
+    start = _next_index(members, role)
+    for i in range(count):
+        member = _new_member(role)
+        member["id"] = f"{role}-{start + i}"
+        if pool is not None:
+            member["model_mode"] = "multi"
+            member["model_pool"] = list(pool)
+            member.pop("gateway_route_id", None)
+        else:
+            member["model_mode"] = "single"
+            member["gateway_route_id"] = route
+        members.append(member)
     return {"members": members, "room_id": draft.get("room_id")}
 
 

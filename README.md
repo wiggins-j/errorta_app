@@ -166,8 +166,12 @@ errorta connect anthropic api
 # Create a project rooted in the current directory.
 errorta new my-project --here --north-star "A CLI that renders Markdown tables"
 
-# Choose the team, commit it to the run config, and start the run.
-errorta team set dev anthropic.claude-sonnet-4-6
+# Build a multi-model coding team, commit it, and start the run.
+# (Or one-shot it: errorta team create --codingteam --default)
+errorta team create --codingteam
+errorta team add --pm       anthropic.claude-opus-4-8
+errorta team add --dev      anthropic.claude-sonnet-4-6 --count 3
+errorta team add --reviewer anthropic.claude-sonnet-4-6
 errorta team apply --yes
 errorta run --yes
 

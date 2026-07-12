@@ -300,14 +300,38 @@ sidecar. See [One sidecar, one owner](#one-sidecar-one-owner).
 | Command | What it does | Key flags |
 |---|---|---|
 | `connect [<target> <kind>\|status]` ‡ | Configure AI providers (keys / CLIs / ollama / custom) and show status. | `--key-file`, `--binary`, `--login`, `--host`, `--base-url`, `--api-style`, `--model`, `--auth-header`, `--auth-prefix`, `--yes` |
-| `team [show\|set\|pool\|mode\|enable\|disable\|room\|preflight\|apply\|clear]` ‡ | Show / assemble / apply the coding team (draft → run-setup). | `--yes` |
+| `team [show\|create\|add\|set\|pool\|mode\|enable\|disable\|room\|preflight\|apply\|clear]` ‡ | Show / build / apply the coding team (draft → run-setup). | `--default`, `--count`, `--pm\|--dev\|--reviewer\|--tester`, `--yes` |
 | `wizard` ‡ | Conversational project + team setup (AI Wizard). | `--model`, `--project`, `--delivery-root`, `--yes` |
 | `models` | What the PM learned (cross-project) + this project's assignments. | |
 
-The `team` sub-verbs edit a **local draft** (no store write): `set <role> <route>`,
-`pool <role> <route,route,…>`, `mode <role> single\|multi`, `enable\|disable <member>`,
-`room <room_id>` (back the team with a Council room). Only `team apply` (‡) writes
-the draft to the run config, and `team preflight` probes member health.
+The `team` sub-verbs edit a **local draft** (no store write). Only `team apply` (‡)
+writes the draft to the run config; `team preflight` probes member health.
+
+**Build a coding team (F150).** The canonical coding roles are `pm`, `dev`,
+`reviewer`, `tester`, and the engine supports **multiple members per role**:
+
+```sh
+errorta team create --codingteam
+errorta team add --pm       claude_cli.opus
+errorta team add --dev      cursor_cli.composer-2.5 --count 3
+errorta team add --reviewer claude_cli.sonnet
+errorta team add --tester   claude_cli.sonnet
+errorta team apply --yes
+```
+
+- `team create [--default]` starts a fresh draft. `--default` auto-assembles
+  **1 pm / 3 dev / 1 reviewer / 1 tester**, picking models from your usable
+  providers (reasoning-strong PM, coding-strong devs, a reviewer from a different
+  provider for diversity) and printing the assignment + rationale.
+- `team add --<role> <value> [--count N]` appends N members of a role. `<value>`
+  is a **full route id** (`claude_cli.opus`) for a single model, or a **bare
+  provider** (`cursor_cli`, `claude_cli`) for a multi-model member pooled over
+  that provider's routes. Discover routes with `errorta models`.
+- `--count` on `--pm` is capped at 1. "N devs" is *capacity*: parallel dev work
+  ramps as the project's foundation lands and the PM splits the backlog.
+
+The lower-level `set <role> <route>` (one per role), `pool <role> <r,r,…>`,
+`mode`, `enable\|disable`, and `room <room_id>` (Council-room backing) still work.
 
 ### Run control
 
