@@ -332,6 +332,8 @@ errorta team apply --yes
 
 The lower-level `set <role> <route>` (one per role), `pool <role> <r,r,…>`,
 `mode`, `enable\|disable`, and `room <room_id>` (Council-room backing) still work.
+Note: these key on `coding_role`, so on a multi-member role (e.g. 3 devs) they act
+on the **first** member — use `team create` + `team add` to (re)build the set.
 
 ### Run control
 

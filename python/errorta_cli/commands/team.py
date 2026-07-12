@@ -195,11 +195,18 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
         return _show(client, ctx)
 
     if sub == "create":
+        # Note (don't silently swallow) if we're replacing a non-empty draft.
+        prior = teamdraft.load(ctx.home, ctx.project_id or "")
+        replaced = len(prior.get("members") or [])
         teamdraft.clear(ctx.home, ctx.project_id or "")
         if args.get("default"):
-            return _assemble_default(client, ctx)
-        teamdraft.save(ctx.home, ctx.project_id or "", {"members": [], "room_id": None})
-        return {"_kind": "draft", "draft": teamdraft.load(ctx.home, ctx.project_id or "")}
+            out = _assemble_default(client, ctx)
+        else:
+            teamdraft.save(ctx.home, ctx.project_id or "", {"members": [], "room_id": None})
+            out = {"_kind": "draft", "draft": teamdraft.load(ctx.home, ctx.project_id or "")}
+        if replaced:
+            out["replaced"] = replaced
+        return out
 
     if sub == "add":
         role, value = _add_role_value(args, a, b)
@@ -310,6 +317,9 @@ def _render(payload: Any, verbosity: Any, json_mode: bool) -> str:
         return _rt.render_rooms(payload.get("rooms"))
     if kind == "draft":
         body = _rt.render_draft(payload.get("draft"))
+        replaced = payload.get("replaced")
+        if replaced:
+            body = render(muted(f"(replaced a {replaced}-member draft)")) + "\n" + body
         assignments = payload.get("assignments")
         if assignments:
             lines = [render(muted("default team — auto-assigned from your providers:"))]
