@@ -5,8 +5,8 @@
 # arch-matrix scenarios a real release walks through, runs the shared pruner
 # (scripts/lib/prune-formula.awk), and asserts the result is a valid,
 # publishable formula: no @@placeholder@@ tokens survive, the right arch blocks
-# are kept/dropped, `ruby -c` parses it, and (advisory) `brew style`/`brew audit`
-# are clean when brew is available.
+# are kept/dropped, `ruby -c` parses it, and (advisory) `brew style` is clean
+# when brew is available.
 #
 # No build, no network, no credentials — safe to run anywhere.
 set -euo pipefail
