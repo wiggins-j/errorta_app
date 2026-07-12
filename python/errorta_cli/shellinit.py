@@ -7,10 +7,11 @@ their rc file:
     eval "$(errorta shell-init bash)"    # ~/.bashrc
 
 The wrapper runs the real binary with ``ERRORTA_CD_FILE`` pointed at a temp file;
-if the binary writes a directory there (it does after ``new`` / ``open`` /
-``switch`` / ``import`` — see commands.project.emit_cd_target), the wrapper
-``cd``s the *parent shell* into it. A binary cannot change its parent's working
-directory itself, which is why this must be a shell function.
+if the binary writes a directory there (it does after ``errorta new`` — see
+commands.project.emit_cd_target; ``open``/``switch``/``import`` are a documented
+follow-up), the wrapper ``cd``s the *parent shell* into it. A binary cannot
+change its parent's working directory itself, which is why this must be a shell
+function.
 
 Nothing here spawns a sidecar — it is pure text output, safe to run at every
 shell startup.

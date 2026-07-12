@@ -128,6 +128,11 @@ def emit_cd_target(path: str | os.PathLike[str] | None) -> None:
     if not cd_file:
         return
     try:
+        # Defense-in-depth: the hook hands us a fresh, empty temp file. Refuse to
+        # truncate a pre-existing non-empty file, so a misconfigured/hostile
+        # ERRORTA_CD_FILE can't turn `errorta new` into a clobber primitive.
+        if os.path.exists(cd_file) and os.path.getsize(cd_file) > 0:
+            return
         with open(cd_file, "w", encoding="utf-8") as fh:
             fh.write(str(Path(path)) + "\n")
     except OSError:
