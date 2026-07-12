@@ -55,6 +55,135 @@ def _edit(ctx: Context, mutate) -> dict[str, Any]:
     return {"_kind": "draft", "draft": new_draft}
 
 
+# --------------------------------------------------------------------------- #
+# F150 team builder — `create` / `add` + `--default`.
+# --------------------------------------------------------------------------- #
+
+# role flag / alias -> canonical coding role.
+_ROLE_FLAGS = {
+    "pm": "pm", "dev": "dev", "reviewer": "reviewer", "tester": "tester",
+    "test": "tester", "prog": "dev", "programmer": "dev",
+}
+
+
+def _add_role_value(args: dict[str, Any], a: Any, b: Any) -> tuple[str, str]:
+    """Resolve (role, value) for `team add`, from role flags OR positionals.
+
+    flag form:  team add --dev <route>   -> role from the flag, value = a
+    positional: team add dev <route>     -> role = a, value = b
+    """
+    flagged = sorted({_ROLE_FLAGS[f] for f in _ROLE_FLAGS if args.get(f)})
+    if flagged:
+        if len(flagged) > 1:
+            raise CliError("pick exactly one role: --pm / --dev / --reviewer / --tester.")
+        return flagged[0], (str(a).strip() if a else "")
+    role = _ROLE_FLAGS.get(str(a or "").strip().lower(), str(a or "").strip().lower())
+    return role, (str(b).strip() if b else "")
+
+
+def _add_count(args: dict[str, Any]) -> int:
+    raw = args.get("count")
+    if raw is None or str(raw).strip() == "":
+        return 1
+    try:
+        n = int(str(raw).strip())
+    except ValueError as exc:
+        raise CliError(f"--count must be a positive integer (got {raw!r}).") from exc
+    if n < 1:
+        raise CliError("--count must be >= 1.")
+    return n
+
+
+def _routes_index(client: SidecarClient) -> tuple[dict[str, list[str]], set[str]]:
+    """({provider_class: [route_id,...]}, {all route_ids})."""
+    data = client.get_json("/gateway/routes") or {}
+    by_provider: dict[str, list[str]] = {}
+    all_routes: set[str] = set()
+    for r in data.get("routes") or []:
+        rid, prov = r.get("route_id"), r.get("provider_class")
+        if rid:
+            all_routes.add(rid)
+            if prov:
+                by_provider.setdefault(prov, []).append(rid)
+    return by_provider, all_routes
+
+
+def _resolve_value(value: str, by_provider: dict[str, list[str]],
+                   all_routes: set[str]) -> tuple[str | None, list[str] | None]:
+    """value -> (route|None, pool|None). A known provider => multi pool; a known
+    route id => single; else error."""
+    if value in by_provider:
+        pool = sorted(by_provider[value])
+        if not pool:
+            raise CliError(
+                f"provider '{value}' has no available routes — connect it (`errorta connect`).")
+        return None, pool
+    if value in all_routes:
+        return value, None
+    raise CliError(f"unknown route or provider '{value}' — see `errorta models`.")
+
+
+def _bucket(route_id: str) -> str:
+    """Capability class by keyword in the route_id model suffix (not family)."""
+    s = route_id.lower()
+    # Light first: `mini`/`nano`/`haiku` are strong small-model signals that would
+    # otherwise be swallowed by the reasoning check (e.g. `gpt-5-mini`).
+    if any(k in s for k in ("haiku", "mini", "nano", ":7b", ":3b")):
+        return "light"
+    reasoning = (any(k in s for k in ("opus", "o1", "o3"))
+                 or ("gpt-5" in s and "codex" not in s) or "-pro" in s)
+    if reasoning:
+        return "reasoning"
+    if any(k in s for k in ("codex", "composer", "sonnet", "coder")):
+        return "coding"
+    return "mid"
+
+
+def _pick(cands: list[tuple[str, str]], prefs: tuple[str, ...],
+          exclude_provider: str | None = None) -> tuple[str, str] | None:
+    """First (route_id, provider) matching the bucket preference, deterministic
+    (sorted route_id tie-break). Falls back to best usable."""
+    for want in prefs:
+        pool = sorted((r, p) for (r, p) in cands if _bucket(r) == want and p != exclude_provider)
+        if pool:
+            return pool[0]
+    pool = sorted((r, p) for (r, p) in cands if p != exclude_provider)
+    return pool[0] if pool else None
+
+
+def _assemble_default(client: SidecarClient, ctx: Context) -> dict[str, Any]:
+    """F150 --default: 1 pm / 3 dev / 1 reviewer / 1 tester, models chosen from the
+    user's usable providers by the documented keyword policy."""
+    providers = (client.get_json("/gateway/providers") or {}).get("providers") or []
+    usable = {p.get("provider_class") for p in providers
+              if p.get("connected") is True or p.get("configured") is True}
+    by_provider, _all = _routes_index(client)
+    cands = [(rid, prov) for prov, rids in by_provider.items()
+             if prov in usable for rid in rids]
+    if not cands:
+        raise CliError("no usable providers — run `errorta connect <provider>` first.")
+
+    pm = _pick(cands, ("reasoning", "coding", "mid"))
+    dev = _pick(cands, ("coding", "mid"))
+    dev_prov = dev[1] if dev else None
+    reviewer = _pick(cands, ("reasoning", "coding", "mid"), exclude_provider=dev_prov) \
+        or _pick(cands, ("reasoning", "coding", "mid"))
+    tester = _pick(cands, ("mid", "coding"))
+
+    draft: dict[str, Any] = {"members": [], "room_id": None}
+    plan = [("pm", pm, 1), ("dev", dev, 3), ("reviewer", reviewer, 1), ("tester", tester, 1)]
+    assignments: list[dict[str, str]] = []
+    for role, pick, count in plan:
+        if not pick:
+            continue
+        rid, prov = pick
+        draft = teamdraft.add_members(draft, role, count, route=rid)
+        assignments.append({"role": role, "count": str(count), "route": rid,
+                            "why": f"{_bucket(rid)} route from {prov}"})
+    teamdraft.save(ctx.home, ctx.project_id or "", draft)
+    return {"_kind": "draft", "draft": draft, "assignments": assignments}
+
+
 def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if not _base.has_project(ctx):
         return _base.no_project()
@@ -64,6 +193,36 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
 
     if sub in ("show", ""):
         return _show(client, ctx)
+
+    if sub == "create":
+        # Note (don't silently swallow) if we're replacing a non-empty draft.
+        prior = teamdraft.load(ctx.home, ctx.project_id or "")
+        replaced = len(prior.get("members") or [])
+        teamdraft.clear(ctx.home, ctx.project_id or "")
+        if args.get("default"):
+            out = _assemble_default(client, ctx)
+        else:
+            teamdraft.save(ctx.home, ctx.project_id or "", {"members": [], "room_id": None})
+            out = {"_kind": "draft", "draft": teamdraft.load(ctx.home, ctx.project_id or "")}
+        if replaced:
+            out["replaced"] = replaced
+        return out
+
+    if sub == "add":
+        role, value = _add_role_value(args, a, b)
+        if role not in teamdraft.CODING_ROLES:
+            return _base.usage("team add --<pm|dev|reviewer|tester> <route|provider> [--count N]")
+        if not value:
+            return _base.usage("team add --<role> <route|provider> [--count N]")
+        count = _add_count(args)
+        if role == "pm" and count > 1:
+            raise CliError("a coding team has one PM (use --count 1).")
+        by_provider, all_routes = _routes_index(client)
+        route, pool = _resolve_value(value, by_provider, all_routes)
+        draft = teamdraft.load(ctx.home, ctx.project_id or "")
+        new_draft = teamdraft.add_members(draft, role, count, route=route, pool=pool)
+        teamdraft.save(ctx.home, ctx.project_id or "", new_draft)
+        return {"_kind": "draft", "draft": new_draft}
 
     if sub == "set":
         if not a or not b:
@@ -131,7 +290,8 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
         return {"_kind": "applied", "confirmed": confirmed}
 
     return _base.usage(
-        "team [show] | set <role> <route> | pool <role> <r,r> | mode <role> single|multi "
+        "team [show] | create [--default] | add --<role> <route|provider> [--count N] "
+        "| set <role> <route> | pool <role> <r,r> | mode <role> single|multi "
         "| enable|disable <role> | room [<id>] | preflight | apply | clear"
     )
 
@@ -156,7 +316,23 @@ def _render(payload: Any, verbosity: Any, json_mode: bool) -> str:
     if kind == "rooms":
         return _rt.render_rooms(payload.get("rooms"))
     if kind == "draft":
-        return _rt.render_draft(payload.get("draft"))
+        body = _rt.render_draft(payload.get("draft"))
+        replaced = payload.get("replaced")
+        if replaced:
+            body = render(muted(f"(replaced a {replaced}-member draft)")) + "\n" + body
+        assignments = payload.get("assignments")
+        if assignments:
+            lines = [render(muted("default team — auto-assigned from your providers:"))]
+            for asg in assignments:
+                n = asg.get("count", "1")
+                suffix = f" ×{n}" if n not in ("1", 1) else ""
+                lines.append(render(muted(
+                    f"  {asg.get('role')}{suffix}: {asg.get('route')}  ({asg.get('why')})")))
+            lines.append(render(muted(
+                "note: extra devs are capacity — parallel work ramps up as the PM "
+                "splits the backlog.")))
+            return "\n".join(lines) + "\n" + body
+        return body
     if kind == "show":
         return _rt.render_show(payload)
     return render(muted("team: nothing to show"))
@@ -169,12 +345,26 @@ register(
         call=_call,
         render=_render,
         params=(
-            Param("sub", "show|set|pool|mode|enable|disable|room|preflight|apply|clear",
+            Param("sub", "show|create|add|set|pool|mode|enable|disable|room|preflight|apply|clear",
                   default="show"),
-            Param("a", "role / room id (subcommand arg).", default=None),
+            Param("a", "role / route / room id (subcommand arg).", default=None),
             Param("b", "route / routes / mode (subcommand arg).", default=None),
             Param("yes", "Skip the apply confirmation (required non-interactively).",
                   is_flag=True),
+            # F150 team builder:
+            Param("codingteam", "team create: build a coding team (the default type).",
+                  is_flag=True),
+            Param("default", "team create: auto-assemble a default team from your providers.",
+                  is_flag=True),
+            Param("count", "team add: number of members of the role (default 1).",
+                  default=None),
+            Param("pm", "team add: role = PM.", is_flag=True),
+            Param("dev", "team add: role = developer.", is_flag=True),
+            Param("reviewer", "team add: role = reviewer.", is_flag=True),
+            Param("tester", "team add: role = tester.", is_flag=True),
+            Param("test", "team add: alias of --tester.", is_flag=True),
+            Param("prog", "team add: alias of --dev.", is_flag=True),
+            Param("programmer", "team add: alias of --dev.", is_flag=True),
         ),
     )
 )
