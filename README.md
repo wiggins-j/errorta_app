@@ -25,6 +25,23 @@ per room, per member, per coding agent — you decide where each call goes.
 
 ---
 
+## Install the CLI (fastest way to try Errorta)
+
+There's a headless **`errorta` CLI** — drive the multi-model coding team from your
+terminal, no desktop build required. It's a single self-contained binary:
+
+```sh
+brew install errorta/tap/errorta
+errorta --help
+```
+
+That's the whole install (macOS Apple Silicon; alpha). Next steps and the full
+command reference are in **[docs/CLI.md](docs/CLI.md)**; a quick tour is in
+[Headless CLI](#headless-cli-errorta) below. Prefer the desktop app? See the
+build-from-source **Quick start** next.
+
+---
+
 ## Quick start — build & install on macOS
 
 Errorta builds from source with the scripts already in this repo — no extra
@@ -139,6 +156,9 @@ GUI. Connect a provider, scope a project, start a run, and watch it live, with a
 layered verbosity dial and a `--json` surface for scripting and CI.
 
 ```bash
+# Install (macOS Apple Silicon):
+brew install errorta/tap/errorta
+
 # Point errorta at your store (defaults to ~/.errorta); connect a model provider.
 # The API key is read from a hidden prompt, never from argv.
 errorta connect anthropic api
