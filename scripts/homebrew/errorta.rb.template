@@ -10,9 +10,10 @@
 #
 # Assets are hosted as GitHub Releases on wiggins-j/errorta_app (tag cli-vX.Y.Z).
 class Errorta < Formula
-  desc "Headless Errorta Coding Council CLI"
+  desc "Headless AI coding-council CLI"
   homepage "https://github.com/wiggins-j/errorta_app"
   version "@@VERSION@@"
+  license "Apache-2.0"
 
   on_macos do
     on_arm do
@@ -26,8 +27,10 @@ class Errorta < Formula
   end
 
   on_linux do
-    url "@@LINUX_X86_64_URL@@"
-    sha256 "@@LINUX_X86_64_SHA@@"
+    on_intel do
+      url "@@LINUX_X86_64_URL@@"
+      sha256 "@@LINUX_X86_64_SHA@@"
+    end
   end
 
   def install

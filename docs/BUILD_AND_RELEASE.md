@@ -53,13 +53,24 @@ Windows is out of scope for Homebrew (brew is macOS/Linux only); a Windows build
 
 - **PyInstaller** in `python/.venv` (`pip install -e python[dev]`) or on `PATH`.
 - **`gh` CLI**, authenticated (`gh auth login`) — for the release upload.
-- **macOS signing** (required so Gatekeeper doesn't quarantine the download):
-  a Developer ID Application identity in `APPLE_SIGNING_IDENTITY` (or
+- **macOS signing — optional for `brew`, required for direct downloads.**
+  `brew install` fetches the tarball with `curl`, which does **not** quarantine
+  it, so an ad-hoc-signed binary (PyInstaller's default) installs and runs fine —
+  no Apple credentials needed (`--skip-notarize`). Do the full **Developer ID +
+  notarization** pass only when you also want the tarball to survive a **browser
+  download** off the Releases page (a browser *does* quarantine): a Developer ID
+  Application identity in `APPLE_SIGNING_IDENTITY` (or
   `~/.config/errorta-release.env`) plus notarization credentials (the
   `errorta-notary` keychain profile, or `APPLE_ID` / `APPLE_TEAM_ID` /
   `APPLE_APP_SPECIFIC_PASSWORD`). Full setup: `docs/SIGNING_MACOS.md`.
 - A **local clone of the tap** (`errorta/homebrew-tap`) if you want the script to
   update the formula.
+- The release repo (`wiggins-j/errorta_app`) Releases must be **public** (brew
+  downloads them anonymously), and you need push access to both it and the tap.
+
+Validate all of the above without building via `bash scripts/release-cli.sh
+--check [--tap-dir …] [--skip-notarize]` (add `--online` to also probe the
+notary credentials — a network round-trip).
 
 ### One-time: clone the tap
 
@@ -100,8 +111,9 @@ script writes `Formula/errorta.rb` but leaves the commit/push to you.
 | `--version X.Y.Z` | Override the version (default: `python/pyproject.toml`). |
 | `--tap-dir PATH` | Local clone of `errorta/homebrew-tap`; render the formula into it. Omit to skip formula work entirely. |
 | `--push-tap` | After rendering, `git add`/`commit`/`push` the tap. Requires `--tap-dir`. |
-| `--skip-notarize` | Skip macOS codesign + notarization (produces an **unsigned** binary — local testing only). Auto-set on Linux. |
-| `--dry-run` | Print the plan; build/upload/push nothing. |
+| `--skip-notarize` | Skip macOS codesign + notarization (produces an **ad-hoc-signed** binary — installs+runs via brew, but a browser download is Gatekeeper-blocked). Auto-set on Linux. |
+| `--check` | Validate prerequisites and exit **without building**. Add `--online` to also probe notary credentials. |
+| `--dry-run` | Print the plan (and the pruned formula); build/upload/push nothing. |
 
 ### How other-arch values are preserved
 
