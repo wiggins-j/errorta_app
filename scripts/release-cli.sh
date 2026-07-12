@@ -132,11 +132,19 @@ preflight() {
   else log "FAIL  pyinstaller not found (activate python/.venv or 'pip install -e python[dev]')"; ok=0; fi
 
   if [[ $WITH_GROUNDING -eq 1 ]]; then
+    # PyInstaller only WARNS on a missing hiddenimport, so a --with-grounding
+    # build with an incomplete venv silently ships a binary that ImportErrors at
+    # grounding time. Enforce the full runtime here: aiar itself AND its RAG deps
+    # (chromadb + sentence_transformers, from aiar-rag[rag]).
     local venv_py="$REPO_ROOT/python/.venv/bin/python"
-    if [[ -x "$venv_py" ]] && "$venv_py" -c 'import aiar' >/dev/null 2>&1; then
-      log "OK    grounding: AIAR importable in build venv (will bundle)"
-    else
+    if [[ ! -x "$venv_py" ]]; then
+      log "FAIL  --with-grounding needs the build venv at python/.venv (run scripts/setup-cli-venv.sh)"; ok=0
+    elif ! "$venv_py" -c 'import aiar' >/dev/null 2>&1; then
       log "FAIL  --with-grounding but AIAR not importable in python/.venv (install it editable — see setup-cli-venv.sh)"; ok=0
+    elif ! "$venv_py" -c 'import chromadb, sentence_transformers' >/dev/null 2>&1; then
+      log "FAIL  --with-grounding: AIAR present but its RAG runtime is not (pip install 'aiar-rag[rag]') — the binary would ImportError at grounding time"; ok=0
+    else
+      log "OK    grounding: AIAR + RAG runtime importable in build venv (will bundle)"
     fi
   else
     log "n/a   grounding: off (council-only build; --with-grounding to include AIAR)"
