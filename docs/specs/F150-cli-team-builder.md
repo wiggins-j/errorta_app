@@ -53,6 +53,24 @@ errorta team create --codingteam --default
 - Legible output at every step (who's on the team, on what model) and thorough
   docs (`docs/CLI.md` + README).
 
+## Parallelism, honestly (so the demo doesn't oversell)
+
+"3 devs" is a **capacity**, not a guarantee of three agents typing at once.
+Confirmed against the scheduler (`coding/topology.py:plan_next_batch`,
+`autonomy.py:effective_parallelism`/`runtime_cap`):
+
+- The coding scheduler **does** fan distinct ready tasks across same-role
+  members, and AUTO parallelism defaults to the non-PM worker count — so a
+  1pm/3dev/1reviewer/1tester team genuinely runs up to ~5 workers concurrently.
+- **But it ramps.** A fresh `errorta new` project is clamped to **1 worker while
+  the foundation is pending**, then `min(2, base)` until the first feature PR
+  merges, then full. So the 3 devs scaffold serially first, then ramp 1→2→3.
+- **And it's backlog-bound.** Three devs only work at once when the PM decomposes
+  the work into ≥3 independent ready dev tasks. One ready task → one busy dev.
+
+None of this needs changing here — but the `--default` output and the docs
+should describe "3 devs" as capacity, not instant triple-throughput.
+
 ## Non-goals
 
 - Changing the engine's team/scheduler model (already supports N-per-role).
@@ -101,10 +119,23 @@ Appends **N** members of `<role>` to the draft.
     the member is **multi-model**: `model_mode: "multi"` with `model_pool` =
     that provider's currently-available routes (from `GET /gateway/routes?
     provider=<p>`). This is the `#multi model` case in your sketch.
-- **`--count N`** (default `1`; `-n N` alias) — create N members with ids
-  `<role>-1` … `<role>-N`. If members of that role already exist, N more are
-  appended (ids continue the sequence). `--pm` is capped at **1** (a second PM
-  is rejected with a clear message).
+- **`--count N`** (default `1`) — create N members with ids `<role>-1` …
+  `<role>-N`. If members of that role already exist, N more are appended, the
+  suffix continuing from the **max existing `<role>-<k>`** (scan ids, don't count
+  members — so mixing `team set dev` (id `dev`) with `team add --dev` (id
+  `dev-1`) never collides). `--pm` is capped at **1** (a second PM is rejected —
+  the scheduler only ever uses the first PM, so extras are dead weight).
+  `--count` arrives as a string; non-integer / `< 1` → error.
+
+  > **Routes are provider-specific.** `cursor_cli.composer-2.5` etc. are examples;
+  > a provider's real routes depend on what it exposes (Cursor lists models
+  > dynamically). Discover them with `errorta models`. `team add` validates the
+  > value against the live route list and errors on an unknown route/provider.
+
+  > Role flags carry **no framework mutual-exclusion** — the `add` handler
+  > enforces "exactly one role" itself, and every alias (`--test`, `--prog`,
+  > `--programmer`) must be a *registered* Param or a flag-form typo is silently
+  > ignored instead of erroring.
 
 Each added member is `{"id": "<role>-<n>", "role": "answerer", "enabled": true,
 "metadata": {"coding_role": "<role>"}, …}` with either `gateway_route_id`
@@ -135,26 +166,38 @@ Output: the updated draft (`team show`), highlighting what was just added.
 
 **Selection policy** (deterministic + explainable):
 
-1. Fetch connected providers (`GET /gateway/providers`, `connected == true`) and
-   their routes (`GET /gateway/routes`). If **zero** connected providers → error:
-   "no connected providers — run `errorta connect <provider>` first."
-2. Tag each available route with a coarse capability class by model-name
-   heuristic (documented, overridable later by model-learning stats):
-   - **reasoning-strong**: `opus`, `gpt-5`, `o1`/`o3`, `gemini-*-pro`
-   - **coding-strong**: `composer`, `*-codex`, `sonnet`, `deepseek-coder`
-   - **mid**: `sonnet`, `gpt-5-mini`, `composer` (a route may be both)
-   - **light**: `haiku`, `*-mini`, small local (`qwen:7b`) — avoided for pm/dev
-3. Assign by role using an ordered preference over the tags, first available wins:
-   - **pm** → reasoning-strong → coding-strong → mid → (single best available)
-   - **dev** → coding-strong → mid → (best available); all 3 devs share the pick
-     unless the user later edits.
-   - **reviewer** → a strong route from a provider **≠** the dev's provider if
-     one exists (diversity), else best strong route.
-   - **tester** → mid → coding-strong → (best available).
-4. If the same route is the only viable one, it's reused across roles (with a
-   `log()` note that diversity couldn't be honored).
-5. **Print the assignment + the one-line rationale per role** so the choice is
+1. Fetch providers (`GET /gateway/providers`) and routes (`GET /gateway/routes`).
+   A provider is **usable** when `connected is True` (CLI providers) **OR**
+   `configured is True` (API-key providers — anthropic/openai/google carry no
+   `connected` field at all, and a CLI's `connected` can read `null` before its
+   first probe, so filtering on `connected==true` alone would wrongly exclude a
+   working API-key or freshly-logged-in user). If **no** usable provider → error:
+   "no usable providers — run `errorta connect <provider>` first."
+2. Tag each usable route by a keyword heuristic matched against the **`route_id`
+   model suffix** — NOT `family` (`family` is coarse and misleading, e.g.
+   `cursor_cli.claude-4.5-opus-high` has `family="claude"`). Buckets (first match
+   wins, checked in this order):
+   - **reasoning-strong**: `opus`, `o1`/`o3`, `gpt-5` (not `-codex`), `*-pro`
+   - **coding-strong**: `codex`, `composer`, `sonnet`, `coder`
+   - **light** (avoided for pm/dev): `haiku`, `mini`, `nano`, small local (`:7b`,
+     `:3b`)
+   - **mid / usable**: everything else (incl. `default` routes)
+3. Assign by role, first available in the preference order:
+   - **pm** → reasoning-strong → coding-strong → mid → (best usable)
+   - **dev** → coding-strong → mid → (best usable); all 3 devs share the pick.
+   - **reviewer** → a route from a provider **≠** the dev's provider if one has a
+     strong/mid route (diversity), else best strong/mid route.
+   - **tester** → mid → coding-strong → (best usable).
+4. **Deterministic tie-break** within any bucket / "best usable": sort candidate
+   `route_id`s ascending and take the first. (The spec's determinism — and its
+   unit tests — depend on this; never rely on dict/route-list order.)
+5. If one route is the only viable one, it's reused across roles (with a `log()`
+   note that diversity couldn't be honored).
+6. **Print the assignment + a one-line rationale per role**, so the choice is
    transparent (important for the marketing demo).
+
+A follow-up can weight this by the F129 model-learning acceptance stats
+(`GET /model-learning`); the keyword heuristic is the deterministic v1.
 
 The heuristic is intentionally simple and self-documenting; a follow-up can weight
 it by the F129 model-learning acceptance stats (`GET /model-learning`).
