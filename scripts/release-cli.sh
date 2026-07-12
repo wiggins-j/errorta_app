@@ -38,8 +38,13 @@ Options:
                     platforms' values are preserved). Omit to skip formula work.
   --push-tap        After rendering the formula, git commit + push the tap.
                     Requires --tap-dir. Omit to leave the change uncommitted.
-  --skip-notarize   Skip macOS codesign + notarization (produces an unsigned
-                    binary — for local testing only; auto-skipped on Linux).
+  --skip-notarize   Skip macOS codesign + notarization (produces an ad-hoc
+                    signed binary — installs+runs via brew, but a browser
+                    download is Gatekeeper-blocked; auto-skipped on Linux).
+  --check           Validate prerequisites (pyinstaller, gh auth, files, signing
+                    identity) and exit WITHOUT building. Combine with --online to
+                    also probe notarization credentials (a network round-trip).
+  --online          With --check, additionally probe notary credentials.
   --dry-run         Print every step without building, uploading, or pushing.
   --help            Show this help.
 
@@ -57,6 +62,8 @@ TAP_DIR=""
 PUSH_TAP=0
 SKIP_NOTARIZE=0
 DRY_RUN=0
+CHECK=0
+CHECK_ONLINE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)      VERSION="${2:?--version needs a value}"; shift 2 ;;
@@ -65,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     --tap-dir=*)    TAP_DIR="${1#*=}"; shift ;;
     --push-tap)     PUSH_TAP=1; shift ;;
     --skip-notarize) SKIP_NOTARIZE=1; shift ;;
+    --check)        CHECK=1; shift ;;
+    --online)       CHECK_ONLINE=1; shift ;;
     --dry-run)      DRY_RUN=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "[release-cli] unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -80,6 +89,85 @@ log()  { printf '[release-cli] %s\n' "$*"; }
 step() { printf '\n[release-cli] == %s ==\n' "$*"; }
 die()  { echo "[release-cli] ERROR: $*" >&2; exit 1; }
 
+# --- shared resolvers (used by both --check and the real run) ---
+resolve_pyinstaller() { # sets PYINSTALLER ("" if not found)
+  if [[ -x "$REPO_ROOT/python/.venv/bin/pyinstaller" ]]; then
+    PYINSTALLER="$REPO_ROOT/python/.venv/bin/pyinstaller"
+  elif command -v pyinstaller >/dev/null 2>&1; then
+    PYINSTALLER="pyinstaller"
+  else
+    PYINSTALLER=""
+  fi
+}
+
+source_release_env() { # source ~/.config/errorta-release.env if present
+  local env_file="${HOME}/.config/errorta-release.env"
+  if [[ -f "$env_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$env_file"
+  fi
+}
+
+# preflight: validate prerequisites for THIS run; return 0 iff all pass.
+# Honors OS/ARCH/SKIP_NOTARIZE (resolved before this is called). A Developer-ID
+# build (macOS, not --skip-notarize) additionally checks the signing identity,
+# and — only with --online — the notary credentials (a network round-trip).
+preflight() {
+  local ok=1 mac_sign=0 f
+  [[ "$OS" == "darwin" && $SKIP_NOTARIZE -eq 0 ]] && mac_sign=1
+  step "preflight ($OS/$ARCH — $([[ $mac_sign -eq 1 ]] && echo 'Developer ID' || echo 'ad-hoc') signing)"
+
+  resolve_pyinstaller
+  if [[ -n "$PYINSTALLER" ]]; then log "OK    pyinstaller: $PYINSTALLER"
+  else log "FAIL  pyinstaller not found (activate python/.venv or 'pip install -e python[dev]')"; ok=0; fi
+
+  for f in "$REPO_ROOT/python/cli.spec" "$ENTITLEMENTS" "$NOTARIZE_LIB" "$TEMPLATE" \
+           "$REPO_ROOT/scripts/lib/prune-formula.awk"; do
+    if [[ -f "$f" ]]; then log "OK    present: ${f#"$REPO_ROOT"/}"
+    else log "FAIL  missing: ${f#"$REPO_ROOT"/}"; ok=0; fi
+  done
+
+  if command -v gh >/dev/null 2>&1; then
+    if gh auth status >/dev/null 2>&1; then log "OK    gh authenticated"
+    else log "FAIL  gh present but not authenticated (run 'gh auth login')"; ok=0; fi
+  else
+    log "FAIL  gh CLI not found (https://cli.github.com/)"; ok=0
+  fi
+
+  if [[ -n "$TAP_DIR" ]]; then
+    if [[ -d "$TAP_DIR/.git" ]]; then log "OK    tap clone: $TAP_DIR"
+    else log "FAIL  --tap-dir is not a git clone: $TAP_DIR"; ok=0; fi
+  else
+    log "n/a   tap: no --tap-dir (formula step will be skipped)"
+  fi
+
+  if [[ $mac_sign -eq 1 ]]; then
+    source_release_env
+    if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+      log "FAIL  APPLE_SIGNING_IDENTITY not set (env or ~/.config/errorta-release.env) — see docs/SIGNING_MACOS.md"; ok=0
+    elif security find-identity -v -p codesigning 2>/dev/null | grep -F "$APPLE_SIGNING_IDENTITY" >/dev/null; then
+      log "OK    signing identity in keychain"
+    else
+      log "FAIL  signing identity not in codesigning keychain: $APPLE_SIGNING_IDENTITY (docs/SIGNING_MACOS.md)"; ok=0
+    fi
+    if [[ $CHECK_ONLINE -eq 1 ]]; then
+      # shellcheck source=scripts/lib/notarize.sh
+      source "$NOTARIZE_LIB"
+      local mode; mode="$(_notary_creds_mode)"
+      if [[ -n "$mode" ]]; then log "OK    notary credentials ($mode)"
+      else log "FAIL  no notary credentials (errorta-notary profile or APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD)"; ok=0; fi
+    else
+      log "skip  notary credential probe (network) — add --online to include it"
+    fi
+  else
+    log "n/a   macOS signing: ad-hoc build — no Developer ID / notary creds needed for brew"
+  fi
+
+  echo
+  if [[ $ok -eq 1 ]]; then log "preflight: all required checks passed."; return 0
+  else log "preflight: one or more checks FAILED (see above)."; return 1; fi
+}
+
 # --- resolve version (single source: python/pyproject.toml) ---
 if [[ -z "$VERSION" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -87,6 +175,12 @@ if [[ -z "$VERSION" ]]; then
   [[ -n "$VERSION" ]] || die "could not read version from python/pyproject.toml (pass --version)."
 fi
 TAG="cli-v${VERSION}"
+
+# A pre-release version (alpha/beta/rc) marks the GitHub Release as a prerelease.
+PRERELEASE_FLAG=""
+case "$VERSION" in
+  *alpha*|*beta*|*rc*) PRERELEASE_FLAG="--prerelease" ;;
+esac
 
 # --- resolve host OS/arch ---
 case "$(uname -s)" in
@@ -120,27 +214,23 @@ log "tarball:   $TARBALL"
 log "gh repo:   $GH_REPO"
 [[ $DRY_RUN -eq 1 ]] && log "MODE:      dry-run (no build / upload / push)"
 
+# --check: validate prerequisites and exit before the (long) build.
+if [[ $CHECK -eq 1 ]]; then
+  preflight
+  exit $?
+fi
+
 # ---------------------------------------------------------------------------
 # 1. Build the binary with PyInstaller.
 # ---------------------------------------------------------------------------
 step "build (pyinstaller python/cli.spec)"
-if [[ -x "$REPO_ROOT/python/.venv/bin/pyinstaller" ]]; then
-  PYINSTALLER="$REPO_ROOT/python/.venv/bin/pyinstaller"
-elif command -v pyinstaller >/dev/null 2>&1; then
-  PYINSTALLER="pyinstaller"
-else
-  PYINSTALLER=""
-fi
+resolve_pyinstaller
 
 # Export the signing env the spec honors (python/cli.spec reads
 # ERRORTA_CODESIGN_IDENTITY / ERRORTA_ENTITLEMENTS_PLIST) so PyInstaller signs
 # the onefile during assembly; we re-sign explicitly below as the authority.
 if [[ "$OS" == "darwin" && $SKIP_NOTARIZE -eq 0 ]]; then
-  ENV_FILE="${HOME}/.config/errorta-release.env"
-  if [[ -f "$ENV_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-  fi
+  source_release_env
   if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
     if [[ $DRY_RUN -eq 1 ]]; then
       log "[dry-run] APPLE_SIGNING_IDENTITY not set — using a placeholder for the preview (docs/SIGNING_MACOS.md)."
@@ -239,18 +329,21 @@ fi
 step "upload to GitHub Release ($TAG on $GH_REPO)"
 if [[ $DRY_RUN -eq 1 ]]; then
   log "[dry-run] gh auth status"
-  log "[dry-run] gh release create $TAG dist/$TARBALL_NAME --repo $GH_REPO --title 'errorta CLI $VERSION' --notes ... \\"
+  log "[dry-run] gh release create $TAG dist/$TARBALL_NAME --repo $GH_REPO --title 'errorta CLI $VERSION' ${PRERELEASE_FLAG:+$PRERELEASE_FLAG }--notes ... \\"
   log "[dry-run]   || gh release upload $TAG dist/$TARBALL_NAME --repo $GH_REPO --clobber"
 else
   command -v gh >/dev/null 2>&1 || die "gh CLI not found (https://cli.github.com/)."
   gh auth status >/dev/null 2>&1 || die "gh is not authenticated — run 'gh auth login'."
   REL_NOTES="errorta CLI ${VERSION} — self-contained binary (embeds sidecar + AIAR; ~100-200 MB).
 Install: brew install errorta/tap/errorta"
+  # $PRERELEASE_FLAG is intentionally unquoted: empty -> no arg, set -> --prerelease.
+  # shellcheck disable=SC2086
   if gh release create "$TAG" "$TARBALL" \
         --repo "$GH_REPO" \
         --title "errorta CLI ${VERSION}" \
+        $PRERELEASE_FLAG \
         --notes "$REL_NOTES" 2>/dev/null; then
-    log "created release $TAG and uploaded $TARBALL_NAME."
+    log "created release $TAG${PRERELEASE_FLAG:+ (prerelease)} and uploaded $TARBALL_NAME."
   else
     log "release $TAG exists — uploading asset with --clobber."
     gh release upload "$TAG" "$TARBALL" --repo "$GH_REPO" --clobber \
@@ -313,6 +406,18 @@ else
   D_X86_URL="$(asset_url darwin x86_64)"
   L_X86_URL="$(asset_url linux x86_64)"
 
+  # Survivors = arches whose sha is real (not a @@placeholder@@). When the
+  # formula ends up arm64-only, add `depends_on arch: :arm64` so an install on an
+  # unbuilt arch fails with a clear message rather than a nil-url crash. (For any
+  # multi-arch survivor set we add no guard — depends_on would wrongly restrict.)
+  GUARD=""
+  _surv=""
+  [[ "$D_ARM_SHA" != @@* ]] && _surv="${_surv} arm"
+  [[ "$D_X86_SHA" != @@* ]] && _surv="${_surv} intel"
+  [[ "$L_X86_SHA" != @@* ]] && _surv="${_surv} linux"
+  _surv="${_surv# }"
+  [[ "$_surv" == "arm" ]] && GUARD="depends_on arch: :arm64"
+
   render_formula() {
     sed -e "s|@@VERSION@@|${VERSION}|g" \
         -e "s|@@DARWIN_ARM64_URL@@|${D_ARM_URL}|g" \
@@ -324,21 +429,31 @@ else
         "$TEMPLATE"
   }
 
+  # prune_formula: stdin=rendered formula, stdout=publishable formula. Drops
+  # unbuilt-arch blocks (placeholder sha), an emptied on_macos, inserts $GUARD
+  # after `license`, collapses blank lines. Logic lives in the shared awk lib so
+  # scripts/test-render-formula.sh can exercise the same pass in isolation.
+  prune_formula() {
+    awk -v guard="$GUARD" -f "$REPO_ROOT/scripts/lib/prune-formula.awk"
+  }
+
+  log "published arches: ${_surv:-(none)}${GUARD:+  (+guard: $GUARD)}"
+
   if [[ $DRY_RUN -eq 1 ]]; then
     log "[dry-run] would write $FORMULA with:"
     log "[dry-run]   version=$VERSION  this=${OS}-${ARCH} sha=${SHA256}"
     log "[dry-run]   darwin-arm64 sha=${D_ARM_SHA}"
     log "[dry-run]   darwin-x86_64 sha=${D_X86_SHA}"
     log "[dry-run]   linux-x86_64 sha=${L_X86_SHA}"
-    log "[dry-run] rendered formula preview:"
-    render_formula | sed 's/^/    /'
+    log "[dry-run] rendered formula preview (unbuilt-arch blocks pruned):"
+    render_formula | prune_formula | sed 's/^/    /'
   else
     [[ -d "$TAP_DIR/.git" ]] || die "--tap-dir '$TAP_DIR' is not a git clone of errorta/homebrew-tap."
     mkdir -p "$FORMULA_DIR"
-    render_formula > "$FORMULA"
+    render_formula | prune_formula > "$FORMULA"
     log "wrote $FORMULA"
     if grep -q '@@' "$FORMULA"; then
-      log "NOTE: some platform sha256 placeholders remain (that arch isn't built for $VERSION yet)."
+      die "unexpected @@placeholder@@ left in $FORMULA after prune (formula pruning bug)."
     fi
   fi
 
