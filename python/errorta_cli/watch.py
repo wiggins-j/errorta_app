@@ -63,6 +63,9 @@ def run_watch(
         )
     stream = out or sys.stdout
     tick = interval if interval is not None else (ctx.poll_interval or DEFAULT_INTERVAL)
+    if command is not None and command.watch_mode == "stream":
+        _run_stream(name, client, ctx, raw_args, stream, tick, iterations, sleep)
+        return
     count = 0
     while True:
         try:
@@ -73,6 +76,66 @@ def run_watch(
         except CliError as exc:
             text = f"error: {exc.message}"
         _draw(stream, text, clear)
+        count += 1
+        if iterations is not None and count >= iterations:
+            return
+        try:
+            sleep(float(tick))
+        except KeyboardInterrupt:
+            return
+
+
+# F151 — stream/tail mode: append only NEW events each tick, never repaint.
+INITIAL_WINDOW = 200  # on the first tick, print at most this much backlog
+
+
+def _entry_key(e: dict) -> tuple:
+    return (e.get("at"), e.get("role"), e.get("member"), e.get("kind"), e.get("message"))
+
+
+def _common_prefix_len(a: list, b: list) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if _entry_key(x) == _entry_key(y):
+            n += 1
+        else:
+            break
+    return n
+
+
+def _run_stream(
+    name: str, client: Any, ctx: Context, raw_args: list[str],
+    stream: TextIO, tick: float, iterations: int | None,
+    sleep: Callable[[float], None],
+) -> None:
+    """Tail a stream command (log): print only entries appended since last tick.
+
+    The team-log has no stable per-event key (it's re-sorted, entries mutate), so
+    diff by content longest-common-prefix: append the suffix after the shared
+    prefix; if the prefix diverged (mid-list insert / mutation / reset), reprint
+    from the divergence point. Never clears the screen."""
+    from .render.log import filtered_entries, render_entries
+    shown: list = []
+    first = True
+    count = 0
+    while True:
+        try:
+            payload, _text = registry.dispatch(name, client, ctx, raw_args, json_mode=False)
+            entries = filtered_entries(payload)
+        except KeyError:
+            print(f"unknown command: {name}", file=sys.stderr)
+            return
+        except CliError as exc:
+            stream.write(f"error: {exc.message}\n")
+            stream.flush()
+            entries = shown  # don't lose the cursor on a transient error
+        lcp = _common_prefix_len(shown, entries)
+        to_print = entries[-INITIAL_WINDOW:] if first else entries[lcp:]
+        first = False
+        for line in render_entries(to_print):
+            stream.write(line + "\n")
+        stream.flush()
+        shown = entries
         count += 1
         if iterations is not None and count >= iterations:
             return

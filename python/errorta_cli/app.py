@@ -176,14 +176,19 @@ def _add_argv_command(command: registry.Command) -> None:
     def _handler(ctx: typer.Context) -> None:
         _run_registry_command(command_name, list(ctx.args))
 
-    app.command(
-        name=command.name,
-        help=command.help,
-        context_settings={
-            "allow_extra_args": True,
-            "ignore_unknown_options": True,
-        },
-    )(_handler)
+    # F151: register the canonical name + each alias as its own Typer command
+    # (Typer resolves subcommands by registered name), all dispatching under the
+    # canonical name.
+    for exposed in (command.name, *command.aliases):
+        app.command(
+            name=exposed,
+            help=command.help if exposed == command.name
+            else f"Alias of `{command.name}`.",
+            context_settings={
+                "allow_extra_args": True,
+                "ignore_unknown_options": True,
+            },
+        )(_handler)
 
 
 def _run_registry_command(name: str, raw_args: list[str]) -> None:
