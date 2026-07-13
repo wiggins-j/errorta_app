@@ -340,19 +340,30 @@ on the **first** member — use `team create` + `team add` to (re)build the set.
 | Command | What it does | Key flags |
 |---|---|---|
 | `setup` ‡ | Show / preflight / confirm run setup — the readiness gate. | `--preflight`, `--confirm`, `--room`, `--governance`, `--guardrail`, `--max-iterations`, `--max-model-calls`, `--max-parallel`, `--max-review-rounds`, `--checkpoint-cadence`, `--checkpoint-n`, `--block-on-problems`, `--human-code-approval`, `--member-failure-limit`, `--preflight-enabled`, `--yes` |
-| `run` ‡ | Start a fresh run and stream the live view until it finishes. | `--room`, `--members`, `--detach`, `--yes` |
-| `cancel` ‡ | Request cancellation of the running run (observed at the next turn boundary). | `--yes` |
-| `resume` ‡ | Resume an interrupted run (recovers its saved team). | `--room`, `--members`, `--yes` |
-| `continue` ‡ | Continue a run that stopped at a governance gate (F100). | `--room`, `--members`, `--yes` |
+| `run` ‡ | Start a fresh run and stream the live view until it finishes. | `--room`, `--members`, `--autonomous`, `--checkpoint-cadence`, `--detach`, `--yes` |
+| `cancel` (alias `stop`) ‡ | Request cancellation of the running run (observed at the next turn boundary). | `--yes` |
+| `resume` ‡ | Resume an interrupted run (recovers its saved team). | `--room`, `--members`, `--autonomous`, `--yes` |
+| `continue` ‡ | Continue a run that stopped at a governance gate (F100). | `--room`, `--members`, `--autonomous`, `--yes` |
 
 `run` streams the live view to completion on its own — `--watch` is redundant on
 it (the CLI notes this and continues). Use `--detach` to fire the run and return
 immediately. There is **no pause**: a pause is a checkpoint plus `resume`.
 
+**Autonomous (F151).** `--autonomous` on `run` / `continue` / `resume` sets the
+autonomy `checkpoint-cadence` to `off`, so the council runs without stopping at
+checkpoints (it still stops on Definition-of-Done, budget, a hard blocker, or
+`errorta cancel`). It's the one-flag form of `errorta setup --confirm
+--checkpoint-cadence off`; `continue --autonomous` un-sticks a run already stopped
+at a checkpoint. `--checkpoint-cadence <off|per_milestone|every_n_tasks|
+on_merge_ready>` is the non-binary form. `errorta stop` is an alias of `cancel`.
+
 ### Observability & logs
 
 All read-only (except `attention`'s resolve sub-verb). Add `--watch` to
 re-render on the poll loop; re-run any of them anytime for a fresh snapshot.
+`log --watch` **tails** — it appends new events as they arrive (like `tail -f`)
+rather than repainting; the snapshot views (`status`/`tasks`/`board`) redraw
+in place.
 
 | Command | What it does | Key flags |
 |---|---|---|

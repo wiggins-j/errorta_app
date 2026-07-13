@@ -173,9 +173,9 @@ errorta team add --pm       anthropic.claude-opus-4-8
 errorta team add --dev      anthropic.claude-sonnet-4-6 --count 3
 errorta team add --reviewer anthropic.claude-sonnet-4-6
 errorta team apply --yes
-errorta run --yes
+errorta run --autonomous --yes
 
-# Follow the team log live from another terminal.
+# Follow the team log live from another terminal (tails as events land).
 errorta log --watch
 ```
 

@@ -27,25 +27,38 @@ def _filter(entries: list, filters: dict) -> list:
     return out
 
 
-def render_log(payload: Any, verbosity: Any) -> str:
+def _entry_text(entry: dict) -> Text:
+    """One team-log entry as a colorized line (F151: shared by the block renderer
+    and the `--watch` tail)."""
+    role = str(entry.get("role") or "system")
+    member = str(entry.get("member") or "")
+    kind = str(entry.get("kind") or "")
+    message = str(entry.get("message") or "")
+    line = Text()
+    line.append(f"{ts(entry.get('at')):>8} ", style="cli.muted")
+    who = role if not member else f"{role}:{member}"
+    line.append(f"{who:<16} ", style=role_style(role))
+    if kind:
+        line.append(f"[{kind}] ", style="cli.muted")
+    line.append(message)
+    return line
+
+
+def filtered_entries(payload: Any) -> list:
+    """The entries a --watch tail should consider: raw entries after the
+    ``--role/--member/--grep`` filter (F151)."""
     entries = (payload or {}).get("entries") or []
     filters = (payload or {}).get("_filters") or {}
-    if filters:
-        entries = _filter(entries, filters)
+    return _filter(entries, filters) if filters else list(entries)
+
+
+def render_entries(entries: list) -> list[str]:
+    """Render each entry to its own line-string (F151 tail: append one at a time)."""
+    return [render(_entry_text(e)) for e in entries]
+
+
+def render_log(payload: Any, verbosity: Any) -> str:
+    entries = filtered_entries(payload)
     if not entries:
         return render(muted("(team log empty)"))
-    lines: list[Text] = []
-    for entry in entries:
-        role = str(entry.get("role") or "system")
-        member = str(entry.get("member") or "")
-        kind = str(entry.get("kind") or "")
-        message = str(entry.get("message") or "")
-        line = Text()
-        line.append(f"{ts(entry.get('at')):>8} ", style="cli.muted")
-        who = role if not member else f"{role}:{member}"
-        line.append(f"{who:<16} ", style=role_style(role))
-        if kind:
-            line.append(f"[{kind}] ", style="cli.muted")
-        line.append(message)
-        lines.append(line)
-    return render(*lines)
+    return render(*[_entry_text(e) for e in entries])

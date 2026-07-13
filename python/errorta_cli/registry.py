@@ -51,6 +51,11 @@ class Command:
     # setup). ``--watch`` is rejected on these: a watched mutation would re-fire
     # the write every poll tick and spend real model budget (F147 S3 review #3).
     mutating: bool = False
+    # F151: extra names that resolve to this command (e.g. ``stop`` -> ``cancel``).
+    aliases: tuple[str, ...] = ()
+    # F151: how ``--watch`` renders. "snapshot" (default) = full re-render + clear
+    # each tick (status/tasks/…); "stream" = tail (append only new events; log).
+    watch_mode: str = "snapshot"
 
 
 # --------------------------------------------------------------------------- #
@@ -58,16 +63,31 @@ class Command:
 # --------------------------------------------------------------------------- #
 
 _REGISTRY: dict[str, Command] = {}
+# F151: alias -> canonical name. Kept SEPARATE from _REGISTRY so all_commands() /
+# names() stay canonical (no duplicate entries, no double-dispatch in the parity
+# tests that loop every command).
+_ALIASES: dict[str, str] = {}
 
 
 def register(command: Command) -> Command:
     """Register a command (idempotent replace by name)."""
     _REGISTRY[command.name] = command
+    for alias in command.aliases:
+        _ALIASES[alias] = command.name
     return command
 
 
 def get(name: str) -> Command | None:
-    return _REGISTRY.get(name)
+    cmd = _REGISTRY.get(name)
+    if cmd is not None:
+        return cmd
+    canonical = _ALIASES.get(name)
+    return _REGISTRY.get(canonical) if canonical else None
+
+
+def aliases() -> dict[str, str]:
+    """Alias -> canonical-name map (a copy)."""
+    return dict(_ALIASES)
 
 
 def all_commands() -> tuple[Command, ...]:

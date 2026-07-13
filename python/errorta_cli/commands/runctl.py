@@ -161,12 +161,28 @@ def _setup_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
 # `run` — start a fresh run + stream the live view to terminal.
 # --------------------------------------------------------------------------- #
 
+def _apply_autonomy(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> None:
+    """F151: --autonomous / --checkpoint-cadence sugar. POST a POLICY-ONLY
+    run-setup/confirm before starting — the confirm merges the autonomy policy
+    (preserves team + other knobs) and marks setup confirmed. Never bundles the
+    team (a bare policy confirm must not touch it)."""
+    body: dict[str, Any] = {}
+    if args.get("autonomous"):
+        body["checkpoint_cadence"] = "off"
+    if args.get("checkpoint-cadence"):
+        body["checkpoint_cadence"] = str(args["checkpoint-cadence"])
+    if not body:
+        return
+    client.post_json(f"/coding/projects/{ctx.project_id}/run-setup/confirm", json=body)
+
+
 def _run_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if not _base.has_project(ctx):
         return _base.no_project()
     _mutate.guard_sole_owner(ctx)
     if not _mutate.confirm(ctx, args, "start a run"):
         return {"_aborted": True}
+    _apply_autonomy(client, ctx, args)
     body = _team_body(args)
     # A fresh /run REQUIRES a team in the request — the engine only recovers the
     # saved team from run_config on resume/continue, not a fresh start
@@ -297,6 +313,7 @@ def _resume_like_call(client: SidecarClient, ctx: Context, args: dict[str, Any],
     _mutate.guard_sole_owner(ctx)
     if not _mutate.confirm(ctx, args, "resume the run"):
         return {"_aborted": True}
+    _apply_autonomy(client, ctx, args)  # F151: policy re-read on the fresh worker
     body = _team_body(args)
     return {"_started": client.post_json(f"/coding/projects/{ctx.project_id}/{path}", json=body)}
 
@@ -339,6 +356,14 @@ _TEAM_PARAMS = (
 )
 _YES_PARAM = Param("yes", "Skip the confirmation prompt (required non-interactively).",
                    is_flag=True)
+# F151: one-flag autonomy on run / continue / resume (sugar over the setup
+# checkpoint-cadence knob — no checkpoint stops).
+_AUTONOMY_PARAMS = (
+    Param("autonomous", "Run without stopping at checkpoints (checkpoint-cadence off).",
+          is_flag=True),
+    Param("checkpoint-cadence", "Set checkpoint cadence (off|per_milestone|"
+          "every_n_tasks|on_merge_ready).", is_flag=False),
+)
 
 
 register(Command(
@@ -377,6 +402,7 @@ register(Command(
     render=_run_render,
     params=(
         *_TEAM_PARAMS,
+        *_AUTONOMY_PARAMS,
         _YES_PARAM,
         Param("detach", "Fire the run and return immediately (no live stream).",
               is_flag=True),
@@ -391,6 +417,7 @@ register(Command(
     render=_cancel_render,
     params=(_YES_PARAM,),
     mutating=True,
+    aliases=("stop",),
 ))
 
 register(Command(
@@ -398,7 +425,7 @@ register(Command(
     help="Resume an interrupted run (recovers its saved team).",
     call=_resume_call,
     render=_make_resume_render("resume"),
-    params=(*_TEAM_PARAMS, _YES_PARAM),
+    params=(*_TEAM_PARAMS, *_AUTONOMY_PARAMS, _YES_PARAM),
     mutating=True,
 ))
 
@@ -407,6 +434,6 @@ register(Command(
     help="Continue a run that stopped at a governance gate (F100).",
     call=_continue_call,
     render=_make_resume_render("continue"),
-    params=(*_TEAM_PARAMS, _YES_PARAM),
+    params=(*_TEAM_PARAMS, *_AUTONOMY_PARAMS, _YES_PARAM),
     mutating=True,
 ))

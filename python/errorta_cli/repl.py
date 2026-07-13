@@ -100,7 +100,9 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
     from prompt_toolkit.history import InMemoryHistory
 
     completer = WordCompleter(
-        [f"/{n}" for n in registry.names()] + [f"/{b}" for b in sorted(_BUILTINS)],
+        [f"/{n}" for n in registry.names()]
+        + [f"/{a}" for a in sorted(registry.aliases())]  # F151: alias autocomplete
+        + [f"/{b}" for b in sorted(_BUILTINS)],
         sentence=True,
     )
     session: PromptSession = PromptSession(
