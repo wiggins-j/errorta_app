@@ -6,4 +6,4 @@ on app launch. The frontend talks to it over localhost HTTP.
 See `docs/specs/F006-tauri-shell.md` for the architecture.
 """
 
-__version__ = "0.1.0-alpha.1"
+__version__ = "0.1.0-alpha.2"
