@@ -361,6 +361,39 @@ def test_non_python_crash_is_crash(tmp_errorta_home: Path) -> None:
     assert "ReferenceError" in res["detail"]
 
 
+def test_survived_server_with_benign_error_log_is_clean(tmp_errorta_home: Path) -> None:
+    # Review regression guard: a live server logs generic runtime errors
+    # (SyntaxError on a bad request, "Exception in thread" from a worker) as normal
+    # operation. A SURVIVING process must NOT be flipped to crashed by the broad
+    # crash-signature set — only the narrow `_survived_crash_signature` markers.
+    noisy = ["python", "-c",
+             "import time; print('SyntaxError: Unexpected token in JSON', flush=True); "
+             "print('Exception in thread pool-2', flush=True); time.sleep(30)"]
+    mgr = _manager("f146c-noisy", noisy, kind="api")
+    assert mgr.launch_probe("default", head="deadbeef")["status"] == "clean"
+
+
+def test_survived_with_python_traceback_is_crash(tmp_errorta_home: Path) -> None:
+    # But a SURVIVING process that logged a real Python traceback IS a crash — the
+    # original F146 heuristic, preserved by the narrow survived set.
+    tb = ["python", "-c",
+          "import time; print('Traceback (most recent call last)', flush=True); "
+          "time.sleep(30)"]
+    mgr = _manager("f146c-surv-tb", tb, kind="api")
+    assert mgr.launch_probe("default", head="deadbeef")["status"] == "crashed"
+
+
+def test_exit_zero_with_crash_marker_in_log_is_clean(tmp_errorta_home: Path) -> None:
+    # Review regression guard: a one-shot that logs a crash-looking line but EXITS 0
+    # (caught the exception, logged it, exited cleanly) ran to completion — clean.
+    # rc==0 must be classified before the crash-signature branch.
+    argv = ["python", "-c",
+            "import sys; sys.stderr.write('ReferenceError: x is not defined\\n'); "
+            "sys.exit(0)"]
+    mgr = _manager("f146c-zero-noise", argv, kind="cli")
+    assert mgr.launch_probe("default", head="deadbeef")["status"] == "clean"
+
+
 # --- F152: HTTP serve assertion (a server that binds but only errors) ----------
 
 def _http_manager(pid: str, start_argv, *, kind: str = "web") -> RuntimeProcessManager:

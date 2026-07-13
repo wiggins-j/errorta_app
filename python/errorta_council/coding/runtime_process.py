@@ -100,9 +100,29 @@ def _has_crash_signature(tail: str) -> tuple[bool, str]:
     """(matched, signature) if the log tail contains a known startup-crash phrase.
 
     F153 (G2) / F152: framework-agnostic replacement for the CPython-only traceback
-    grep. A legitimate non-zero CLI usage exit prints none of these, so it stays
-    clean; a real crash in any of the common runtimes is caught."""
+    grep. Only safe to apply to a process that has EXITED (a legitimate non-zero
+    CLI usage exit prints none of these; a real crash in any common runtime does).
+    For a STILL-RUNNING process use ``_survived_crash_signature`` — the broad set
+    would false-positive on a healthy server's request logs."""
     for sig in _CRASH_SIGNATURES:
+        if sig in tail:
+            return True, sig
+    return False, ""
+
+
+# F153 review: markers safe for a STILL-RUNNING process. A live server logs
+# generic runtime errors (SyntaxError on a malformed request body, an
+# "Exception in thread" from a recovered worker) as normal operation, so the broad
+# set above would flip a healthy survivor to "crashed". These two phrases instead
+# mean "broken at startup" and do NOT appear in a healthy server's request logs.
+_SURVIVED_CRASH_SIGNATURES = (
+    "Traceback (most recent call last)",  # a Python startup crash logged but swallowed
+    "Failed to compile",                   # a dev server that compiled-but-broke
+)
+
+
+def _survived_crash_signature(tail: str) -> tuple[bool, str]:
+    for sig in _SURVIVED_CRASH_SIGNATURES:
         if sig in tail:
             return True, sig
     return False, ""
@@ -1051,9 +1071,12 @@ class RuntimeProcessManager:
         logs = self.get_logs(sid)
         tail_lines = logs.get("lines", [])[-40:]
         tail = "\n".join(tail_lines)
-        # F153 (G2): language-agnostic crash detection (supersedes the CPython-only
-        # "Traceback (most recent call last)" grep).
+        # F153 (G2): language-agnostic crash detection for an EXITED process
+        # (supersedes the CPython-only "Traceback" grep). `surv_crash` is the
+        # narrow, high-precision variant used only while the process is STILL
+        # RUNNING (the broad set would false-positive on a live server's logs).
         has_crash, crash_sig = _has_crash_signature(tail)
+        surv_crash, surv_sig = _survived_crash_signature(tail)
         long_running = profile.kind in _LONG_RUNNING_KINDS
         win = int(window)
 
@@ -1077,18 +1100,19 @@ class RuntimeProcessManager:
             self.rstore.update_session(sid, state="crashed", exit_code=rc,
                                        ended_at=_now())
             status, passed = "crashed", False
-            sig_line = f" ({crash_sig})" if has_crash else ""
+            sig_line = f" ({surv_sig})" if surv_crash else ""
             detail = (f"served only errors ({http_error_detail}){sig_line} at "
                       f"{health_url} — the app does not serve; log tail:\n{tail}")
         # --- F153: process-exit / survival classification -----------------------
-        elif survived and has_crash:
-            # Still running at the window end but printed a crash signature during
-            # startup — a crash the app swallowed/logged; surface it (fail toward
-            # catching real crashes; a benign logged startup crash line is rare).
+        elif survived and surv_crash:
+            # Still running at the window end but printed a high-precision crash /
+            # compile-failure signature during startup — a failure the app logged
+            # but did not exit on. Narrow markers only (`_survived_crash_signature`)
+            # so a healthy server's normal error logs don't flip it to crashed.
             self.rstore.update_session(sid, state="crashed", exit_code=None,
                                        ended_at=_now())
             status, passed = "crashed", False
-            detail = (f"printed a crash signature ({crash_sig}) during startup "
+            detail = (f"printed a crash signature ({surv_sig}) during startup "
                       f"(still running at {win}s); log tail:\n{tail}")
         elif survived:
             # Ran the whole startup window without exiting or crashing — clean (a
@@ -1099,22 +1123,33 @@ class RuntimeProcessManager:
             self.rstore.update_session(sid, state="stopped", exit_code=None,
                                        error="probe_window_elapsed", ended_at=_now())
             status, passed, detail = "clean", True, f"survived the {win}s startup window"
+        # --- the process EXITED during the window (rc is not None) ---------------
+        elif rc is not None and rc < 0:
+            # Killed by a signal (segfault / abort) — an unambiguous crash, for any
+            # kind. Checked first so the detail names the signal (a long-running
+            # kind killed by a signal would otherwise read as a plain "exited").
+            self.rstore.update_session(sid, state="crashed", exit_code=rc,
+                                       ended_at=_now())
+            status, passed = "crashed", False
+            detail = f"killed by signal {-rc} on startup; log tail:\n{tail}"
         elif long_running:
             # F153 (G1): a window/server runtime EXITED during the startup window —
-            # ANY exit code, including 0, means it failed to stay up. This must be
-            # checked BEFORE the generic `rc == 0` clean branch (a server that binds
-            # nothing and sys.exit(0)s on a config error is not a clean launch).
+            # ANY exit code, including 0, means it failed to stay up. Checked BEFORE
+            # the generic `rc == 0` clean branch (a server that binds nothing and
+            # sys.exit(0)s on a config error is not a clean launch).
             self.rstore.update_session(sid, state="crashed", exit_code=rc,
                                        ended_at=_now())
             status, passed = "crashed", False
             detail = (f"a {profile.kind} runtime exited during startup (exit {rc}) — "
                       f"it must keep running; log tail:\n{tail}")
-        elif rc is not None and rc < 0:
-            # Killed by a signal (segfault / abort) — an unambiguous crash.
-            self.rstore.update_session(sid, state="crashed", exit_code=rc,
+        elif rc == 0:
+            # A one-shot cli/binary that finished successfully. A zero exit is a
+            # success regardless of scary-looking log lines (a script that catches
+            # an exception, logs it, and exits 0 ran to completion) — so this is
+            # checked BEFORE the crash-signature branch, matching the pre-F153 order.
+            self.rstore.update_session(sid, state="stopped", exit_code=0,
                                        ended_at=_now())
-            status, passed = "crashed", False
-            detail = f"killed by signal {-rc} on startup; log tail:\n{tail}"
+            status, passed, detail = "clean", True, "exited cleanly (0)"
         elif has_crash:
             # Non-zero exit WITH a crash signature — the crash catcher's core case
             # (the pygame.font import error; a Node ReferenceError; a Rust panic).
@@ -1122,11 +1157,6 @@ class RuntimeProcessManager:
                                        ended_at=_now())
             status, passed = "crashed", False
             detail = f"crashed on startup (exit {rc}, {crash_sig}); log tail:\n{tail}"
-        elif rc == 0:
-            # A one-shot cli/binary that finished successfully.
-            self.rstore.update_session(sid, state="stopped", exit_code=0,
-                                       ended_at=_now())
-            status, passed, detail = "clean", True, "exited cleanly (0)"
         else:
             # A one-shot cli/binary that exited non-zero without a crash signature
             # ran to completion with a status (a usage/validation exit) — NOT a
