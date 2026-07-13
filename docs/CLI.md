@@ -291,7 +291,7 @@ sidecar. See [One sidecar, one owner](#one-sidecar-one-owner).
 | `projects` | List all coding projects (with derived status). | |
 | `open <id>` | Bind this directory to a project and show it. | `--id` |
 | `switch <id>` | Switch the session to another project (alias of `open`). | `--id` |
-| `delete <id>` ‡ | Delete a project (refused while a run is active). | `--id`, `--yes` |
+| `delete <id>` ‡ | Delete a project (refused while a run is active; stops any running managed-local runtime first, F157). | `--id`, `--yes` |
 | `north-star [show\|set\|proposal\|accept]` ‡ | Show / set the North Star + Definition of Done, or accept a PM-inferred proposal. | `--north-star`, `--dod`, `--yes` |
 | `focus [list\|add\|edit\|reorder\|accept\|work-request]` ‡ | List / add / edit / reorder / accept Current Focus goals. | `--status`, `--title`, `--body`, `--yes` |
 
@@ -625,6 +625,12 @@ errorta runtime logs <session> --watch  # tail that session's output
 Launches are offscreen by default (`SDL_VIDEODRIVER=dummy` and friends), so this
 works on a headless box. `runtime test` records a runtime-test result; screenshots
 captured server-side are surfaced as a path (inlined on iTerm/kitty).
+
+Managed-local servers never outlive their owner (F157): the sidecar tears them
+down on a clean exit, `delete` stops a project's server before removing its
+worktree, and on startup the sidecar reaps any server orphaned by a **non-graceful**
+prior exit (a crash / force-quit) — so a bound port is never leaked across a
+restart.
 
 ### Scripting & CI: `--json` and exit codes
 

@@ -1524,6 +1524,161 @@ def teardown_project(project_id: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# F157 — persisted-session orphan reaping.
+#
+# `_LIVE` only tracks processes THIS sidecar spawned, and `teardown_all` runs
+# only on a graceful shutdown (server.py lifespan finally). A crash / SIGKILL, or
+# a delete against a project whose server outlived a prior sidecar, leaves an
+# orphaned process group that nothing reaps. The pgid is already persisted per
+# session (`update_session(sid, pgid=...)`), so we can reap by pgid from the store
+# even when `_LIVE` is empty. Kept SEPARATE from `_kill_group` (the proven,
+# Popen-driven in-memory teardown) so this cross-restart path can't regress it.
+# --------------------------------------------------------------------------- #
+def _pgid_alive(pgid: int) -> bool:
+    """True if the process group still exists (signal 0 probes without killing)."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists but not ours to signal — treat as alive
+    except OSError:
+        return False
+
+
+def _kill_pgid(pgid: int, *, grace: float | None = None) -> bool:
+    """SIGTERM -> grace -> SIGKILL a process GROUP by bare pgid (no Popen handle).
+
+    Returns True if the group is gone afterward. Best-effort: swallows
+    ProcessLookupError / PermissionError / OSError. This is the persisted-reap
+    counterpart to `_kill_group`; ownership MUST already be confirmed by the
+    caller (`_pgid_is_ours`) — this function does not re-check."""
+    grace = _GRACE_SECONDS if grace is None else grace
+
+    def _reap_if_child() -> None:
+        # If the group leader is OUR child, reap it so it doesn't linger as a
+        # zombie (which killpg(,0) still reports as a live group). In production
+        # the orphan was reparented to init after its sidecar died -> ECHILD here,
+        # and init reaps it; either way this is harmless best-effort.
+        try:
+            os.waitpid(pgid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        _reap_if_child()
+        return not _pgid_alive(pgid)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        _reap_if_child()
+        if not _pgid_alive(pgid):
+            break
+        time.sleep(0.05)
+    if _pgid_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        time.sleep(0.05)
+        _reap_if_child()
+    return not _pgid_alive(pgid)
+
+
+def _pgid_is_ours(pgid: int, *, workspace_root: Path) -> bool:
+    """PID-reuse guard — the safety-critical gate before any persisted-reap kill.
+
+    Returns True ONLY if the group leader (pid == pgid for our setsid spawns) is
+    a live, non-zombie process whose resolved cwd is inside this project's
+    workspace_root — the invariant every managed_local spawn enforces (spawn cwd =
+    (workspace_root / working_dir).resolve(), guarded to stay within the root).
+
+    Fail-closed: no psutil, an unreadable/zombie process, or a cwd we cannot
+    resolve to inside the workspace -> False. We would rather leave an orphan than
+    risk SIGKILLing a stranger's process that happens to reuse the pgid after a
+    reboot. There is deliberately NO argv fallback: a generic `npm run dev`
+    cmdline is not a safe identity signal."""
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return False
+    try:
+        proc = psutil.Process(pgid)
+        if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        cwd = Path(proc.cwd()).resolve()
+    except Exception:
+        return False
+    try:
+        root = Path(workspace_root).resolve()
+    except Exception:
+        return False
+    return cwd == root or cwd.is_relative_to(root)
+
+
+def _project_workspace_root(project_id: str) -> Path | None:
+    """The apply-workspace root for a project, computed WITHOUT side effects
+    (ApplyWorkspace.__init__ only derives paths; it creates nothing)."""
+    try:
+        from errorta_tools.runner.apply_workspace import ApplyWorkspace
+        return ApplyWorkspace(run_id=f"coding-{project_id}").root
+    except Exception:
+        return None
+
+
+def reap_persisted_sessions(rstore: RuntimeProfileStore, *, project_id: str,
+                            grace: float | None = None) -> int:
+    """Reap orphaned managed-local servers recorded in one project's session store.
+
+    For each persisted session that is non-terminal and has a pgid: if it is
+    positively confirmed ours (`_pgid_is_ours`), kill its group and mark the
+    session ``stopped``/``reaped_orphan``; otherwise (already dead, foreign, or
+    unconfirmable) leave any process untouched and mark the session
+    ``stopped``/``orphan_gone`` so the store stops advertising a phantom live
+    server. Returns the number of groups actually killed."""
+    workspace_root = _project_workspace_root(project_id)
+    if workspace_root is None:
+        return 0
+    killed = 0
+    for sess in rstore.list_sessions():
+        if sess.state in _TERMINAL or sess.pgid is None:
+            continue
+        if _pgid_is_ours(sess.pgid, workspace_root=workspace_root):
+            _kill_pgid(sess.pgid, grace=grace)
+            rstore.update_session(sess.session_id, state="stopped",
+                                  error="reaped_orphan", ended_at=_now())
+            killed += 1
+        else:
+            rstore.update_session(sess.session_id, state="stopped",
+                                  error="orphan_gone", ended_at=_now())
+    return killed
+
+
+def reap_all_persisted_orphans() -> int:
+    """Boot sweep: reap managed-local servers orphaned by a NON-graceful prior
+    exit, across every project. Best-effort and defensive per project — one
+    unreadable store must not abort the sweep or block sidecar startup."""
+    from .ledger import LedgerStore, list_projects
+    total = 0
+    try:
+        projects = list_projects()
+    except Exception:
+        return 0
+    for entry in projects:
+        pid = entry.get("id") if isinstance(entry, dict) else None
+        if not pid:
+            continue
+        try:
+            rstore = RuntimeProfileStore.for_ledger(LedgerStore(pid))
+            total += reap_persisted_sessions(rstore, project_id=pid)
+        except Exception:
+            continue
+    return total
+
+
+# --------------------------------------------------------------------------- #
 # Small free functions
 # --------------------------------------------------------------------------- #
 def _now() -> str:
@@ -1555,4 +1710,6 @@ __all__ = [
     "redact_log_line",
     "teardown_all",
     "teardown_project",
+    "reap_persisted_sessions",
+    "reap_all_persisted_orphans",
 ]

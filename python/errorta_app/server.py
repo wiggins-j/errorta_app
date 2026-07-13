@@ -261,6 +261,25 @@ async def lifespan(app: FastAPI):
         )
         app.state.coding_recovery = None
 
+    # F157: reap managed-local runtime servers orphaned by a NON-graceful prior
+    # exit. The shutdown teardown_all (below, in the finally) only runs on a clean
+    # exit; a crash / SIGKILL leaks every spawned dev server, and nothing else
+    # reconciles the persisted pgids against reality. Best-effort — never block
+    # startup on it (an ownership guard fails closed, so a stranger is never hit).
+    try:
+        from errorta_council.coding import runtime_process as _runtime
+
+        reaped = _runtime.reap_all_persisted_orphans()
+        if reaped:
+            logging.getLogger("errorta.coding").info(
+                "F157: reaped %d orphaned runtime server(s) from a prior sidecar",
+                reaped,
+            )
+    except Exception as exc:  # pragma: no cover - defensive only
+        logging.getLogger("errorta.coding").debug(
+            "F157 boot reap skipped: %s", exc
+        )
+
     # F065: bring up the mobile LAN listener if the connector is enabled
     # (off by default — no socket otherwise). Best-effort; a failure here must
     # not block the main sidecar.
