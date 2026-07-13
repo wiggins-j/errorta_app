@@ -22,7 +22,7 @@ def test_level_gate_is_monotonic_per_channel() -> None:
 def test_level_N_shows_exactly_channels_leq_N() -> None:
     # The §6.1 table, asserted at each level boundary.
     assert {c for c in CHANNELS if should_emit(c, 0)} == set()
-    assert {c for c in CHANNELS if should_emit(c, 1)} == {"team-log", "attention", "prs"}
+    assert {c for c in CHANNELS if should_emit(c, 1)} == {"team-log", "attention", "prs", "pm"}
     assert should_emit("decisions", 2) and should_emit("runtime", 2)
     assert not should_emit("turns", 2)
     assert should_emit("turns", 3) and should_emit("tokens", 3)
@@ -125,10 +125,11 @@ def test_every_level_boundary_matches_the_channel_table() -> None:
     # Level N shows exactly the channels whose min-level ≤ N — asserted end-to-end.
     expected = {
         0: set(),
-        1: {"team-log", "attention", "prs"},
-        2: {"team-log", "attention", "prs", "decisions", "runtime"},
-        3: {"team-log", "attention", "prs", "decisions", "runtime", "turns", "tokens"},
-        4: {"team-log", "attention", "prs", "decisions", "runtime", "turns", "tokens", "tools"},
+        1: {"team-log", "attention", "prs", "pm"},
+        2: {"team-log", "attention", "prs", "pm", "decisions", "runtime"},
+        3: {"team-log", "attention", "prs", "pm", "decisions", "runtime", "turns", "tokens"},
+        4: {"team-log", "attention", "prs", "pm", "decisions", "runtime",
+            "turns", "tokens", "tools"},
         5: set(CHANNELS),
     }
     for level, shown in expected.items():

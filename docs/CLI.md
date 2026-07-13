@@ -405,7 +405,7 @@ Everything here works while a run is live.
 | Command | What it does | Key flags |
 |---|---|---|
 | `interject "<directive>"` ‡ | Send an authoritative directive to the PM (consumed on the next plan turn). | `--artifact-id`, `--yes` |
-| `pm [chat\|changes\|ask\|control\|accept\|decline\|"<question>"]` ‡ | Read PM chat / changes, or steer (ask, control-actions, accept / decline a PM Change). | `--actions`, `--watch`, `--yes` |
+| `pm [chat\|changes\|ask\|control\|accept\|decline\|"<question>"]` ‡ | Read PM chat / changes, or steer (ask, control-actions, accept / decline a PM Change). `pm chat -i` opens an interactive back-and-forth; `pm chat --watch` tails the transcript. | `--interactive`/`-i`, `--actions`, `--watch`, `--yes` |
 | `governance [show\|settings\|approve\|reject\|artifact]` ‡ | Read governance state, or steer (settings, approve / reject, artifacts). | `--mode`, `--phase`, `--human-code-approval`, `--max-review-rounds`, `--block-on-problems`, `--monitor`, `--feedback`, `--target-path`, `--title`, `--watch`, `--yes` |
 | `task [new\|set]` ‡ | Add (`new`) or edit (`set`) a backlog task — works mid-run. | `--role`, `--detail`, `--state`, `--title`, `--depends-on`, `--yes` |
 
@@ -499,7 +499,7 @@ channels; you don't have to drown in output to see the one stream you care about
 | Level | Name | Adds channels |
 |------:|------|---------------|
 | 0 | `quiet` | (headlines only: run started/stopped + `stop_reason`, PR opened/merged, blockers) |
-| 1 | `default` | team-log, attention, prs |
+| 1 | `default` | team-log, attention, prs, pm (PM chat messages posted mid-run) |
 | 2 | `verbose` | + decisions, runtime (task transitions / test runs / launches) |
 | 3 | `debug` | + turns, tokens |
 | 4 | `trace` | + tools (tool events, prompt/response) |
@@ -569,6 +569,18 @@ errorta pm "why did you drop the caching task?"
 errorta pm changes                 # pending PM Changes
 errorta pm accept <change_id>      # keep a change (or: pm decline <change_id>)
 ```
+
+For a back-and-forth, open an interactive session (a terminal only) — type a
+question and the PM answers inline; prefix a line with `!` to send a directive
+instead; `/changes` reviews pending PM Changes, `/exit` (or Ctrl-D) leaves:
+
+```bash
+errorta pm chat -i
+```
+
+While a run streams (`errorta run` / `errorta log --watch`), PM messages posted
+mid-run appear on the `pm` channel at the default verbosity — so the PM can
+reach you without your having to poll `pm chat` yourself.
 
 Structured control actions (reassign models, change autonomy/governance) go
 through `pm control` with a JSON array and land as reviewable PM Changes:

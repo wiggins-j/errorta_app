@@ -56,6 +56,20 @@ class Command:
     # F151: how ``--watch`` renders. "snapshot" (default) = full re-render + clear
     # each tick (status/tasks/…); "stream" = tail (append only new events; log).
     watch_mode: str = "snapshot"
+    # F158: a command with BOTH tail-able and snapshot sub-verbs (e.g. `pm chat`
+    # streams, `pm changes` snapshots) sets this to pick the mode from the
+    # resolved args; default returns the static ``watch_mode``.
+    watch_mode_fn: Callable[[dict[str, Any]], str] | None = None
+    # F158: stream-mode hooks so a command supplies its own tail extractor +
+    # per-entry renderer; default (None) uses the team-log implementation.
+    stream_entries_fn: Callable[[Any], list] | None = None
+    stream_render_fn: Callable[[list], list[str]] | None = None
+
+    def watch_mode_for(self, args: dict[str, Any]) -> str:
+        """Resolve the watch mode for THIS invocation (sub-verb aware)."""
+        if self.watch_mode_fn is not None:
+            return self.watch_mode_fn(args)
+        return self.watch_mode
 
 
 # --------------------------------------------------------------------------- #

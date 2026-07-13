@@ -63,6 +63,10 @@ def handle_line(line: str, ctx: Context, client: SidecarClient) -> str:
     if name in {"cd", "ls", "pwd"}:
         return ("the REPL stays in the directory it launched from — use /projects "
                 "then /open <id> to switch projects, or /quit and cd in your shell.")
+    # Bare `/pm` opens the interactive PM conversation (same path as
+    # `pm --interactive` on the argv side); `/pm chat`, `/pm ask …` stay one-shot.
+    if name == "pm" and not raw_args:
+        raw_args = ["--interactive"]
 
     try:
         _payload, text = registry.dispatch(name, client, ctx, raw_args)

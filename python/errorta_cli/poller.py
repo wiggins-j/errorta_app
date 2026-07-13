@@ -58,6 +58,8 @@ DEFAULT_SOURCES: tuple[Source, ...] = (
            key="prs", interval=2.5),
     Source("attention", "/coding/projects/{project_id}/attention", "attention", "append",
            key="signals", interval=2.5),
+    Source("pm-chat", "/coding/projects/{project_id}/pm-chat", "pm", "append",
+           key="thread", interval=4.0),
     Source("tokens", "/coding/projects/{project_id}/usage-summary", "tokens", "snapshot",
            interval=4.0),
     Source("runtime", "/coding/projects/{project_id}/runtime/profiles", "runtime", "snapshot",
