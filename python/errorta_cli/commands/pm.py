@@ -76,12 +76,19 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     sub = str(args.get("sub") or "chat").lower()
 
     # -- interactive conversation (`pm chat -i` / bare `pm -i`) ---------------
-    # `--interactive` maps via the flag param; `-i` (single dash) doesn't go
-    # through the generic parser, so accept it as a stray token / mis-read sub.
-    interactive = (bool(args.get("interactive"))
-                   or sub == "-i" or "-i" in (args.get("_extra") or []))
-    if sub == "-i":
-        sub = "chat"
+    # `--interactive` maps via the flag param; `-i` (single dash) is NOT parsed
+    # as a flag, so the generic positional parser drops it into whichever slot
+    # its position lands in — `sub` (`pm -i`), then the `a` / `actions`
+    # positionals (`pm chat -i`, `pm chat q -i`), then `_extra`. Detect it in any
+    # slot and scrub the mis-read token so it isn't treated as a sub / question /
+    # actions payload.
+    _slots = ("sub", "a", "actions")
+    interactive = (bool(args.get("interactive")) or "-i" in (args.get("_extra") or [])
+                   or any(args.get(s) == "-i" for s in _slots))
+    for s in _slots:
+        if args.get(s) == "-i":
+            args[s] = None
+    sub = str(args.get("sub") or "chat").lower()
     if interactive:
         if ctx.json_mode or not _mutate.is_interactive():
             raise CliError(
@@ -257,6 +264,8 @@ def _classify_line(line: str) -> tuple[str, str]:
     a leading meta-verb (`/exit` etc.) is meta; a leading ``!`` is a directive
     (``\\!`` escapes it back to a literal question); everything else — including a
     question that merely starts with ``/`` (e.g. a path) — is a question."""
+    if not line.strip():                    # defensive: empty → treat as question
+        return "question", line
     first = line.split(maxsplit=1)[0].lower()
     if first in _META_VERBS:
         return "meta", first.lstrip("/")

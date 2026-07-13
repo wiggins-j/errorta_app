@@ -141,6 +141,58 @@ def test_interactive_refuses_under_json(make_ctx):
     assert ei.value.code == "interactive_requires_tty"
 
 
+@pytest.mark.parametrize("argv", [["-i"], ["chat", "-i"], ["--interactive"],
+                                  ["chat", "--interactive"], ["chat", "q", "-i"]])
+def test_argv_forms_reach_interactive_loop(make_ctx, monkeypatch, argv):
+    # Drive the REAL parser (registry.dispatch → resolve_args → _call): every
+    # documented interactive form must enter run_pm_chat, including `pm chat -i`
+    # where `-i` lands in the `a` positional (the shipped-broken case).
+    monkeypatch.setattr(pm._mutate, "is_interactive", lambda: True)
+    seen = {}
+    monkeypatch.setattr(pm, "run_pm_chat",
+                        lambda *a, **k: seen.setdefault("ran", True))
+    registry.dispatch("pm", RouteClient(), make_ctx(project_id="p"), argv)
+    assert seen.get("ran") is True, argv
+
+
+def test_argv_interactive_refuses_without_tty(make_ctx, monkeypatch):
+    # Same argv path, but non-interactive: must refuse (not silently read/hang).
+    monkeypatch.setattr(pm._mutate, "is_interactive", lambda: False)
+    with pytest.raises(CliError) as ei:
+        registry.dispatch("pm", RouteClient(), make_ctx(project_id="p"), ["chat", "-i"])
+    assert ei.value.code == "interactive_requires_tty"
+
+
+def test_repl_bare_pm_reaches_interactive_branch(make_ctx):
+    # repl.py maps bare `/pm` → `--interactive`; in the (non-TTY) test env that
+    # reaches the interactive branch and surfaces the refusal — proving the wiring.
+    from errorta_cli import repl
+    out = repl.handle_line("pm", make_ctx(project_id="p"), RouteClient())
+    assert "needs a terminal" in out
+
+
+def test_interactive_eof_immediately_exits(make_ctx):
+    # An immediate EOFError (Ctrl-D at the first prompt) leaves the loop cleanly.
+    w = _Writer()
+    pm.run_pm_chat(RouteClient(), make_ctx(project_id="p"),
+                   read_line=_scripted([]), write=w)
+    assert "leaving PM chat" in w.text
+
+
+def test_interactive_applied_change_hint_reaches_writer(make_ctx):
+    # A question whose reply applied a change surfaces the `pm changes` hint
+    # through the loop (not just in _render_ask_reply in isolation).
+    client = RouteClient(responses={
+        "/pm-chat": {"thread": []},
+        "/pm-ask": {"reply": {"kind": "chat", "message": "done"}, "answered": True,
+                    "applied": [{"change_id": "c1", "summary": "assigned dev"}]},
+    })
+    w = _Writer()
+    pm.run_pm_chat(client, make_ctx(project_id="p"),
+                   read_line=_scripted(["put devs on sonnet", "/exit"]), write=w)
+    assert "review with `pm changes`" in w.text
+
+
 # --------------------------------------------------------------------------- #
 # Item 2a — the `pm` live channel
 # --------------------------------------------------------------------------- #
