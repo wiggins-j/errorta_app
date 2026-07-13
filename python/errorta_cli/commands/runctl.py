@@ -154,7 +154,7 @@ def _setup_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
         unhealthy = (payload["_preflight"] or {}).get("unhealthy") or []
         return _rr.render_preflight(unhealthy)
     if "_confirmed" in payload:
-        return render("run setup confirmed. Start with: errorta run --room <id> --yes")
+        return render("run setup confirmed. Start with: errorta run --yes")
     return _rr.render_setup(payload.get("_setup"))
 
 

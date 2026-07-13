@@ -50,9 +50,13 @@ THEME = Theme(
 )
 
 # The friendly line for a command that needs a bound project but has none.
+# Names the actual first step for someone with zero projects (create one) — the
+# old text only offered ways to select a project that must already exist. Bare
+# command names read correctly on both surfaces (shell `errorta new`, REPL `/new`).
 NO_PROJECT_MSG = (
-    "no project bound to this directory — cd into a project, pass --home, "
-    "or select one with /open <id>"
+    "no project bound to this directory — create one with `errorta new <id>` "
+    "(or `errorta import` / `errorta wizard`), or open an existing one with "
+    "`errorta open <id>`. Pass --home to use a different store."
 )
 
 

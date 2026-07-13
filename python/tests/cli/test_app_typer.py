@@ -33,6 +33,18 @@ def test_invalid_post_subcommand_poll_interval_fails_cleanly() -> None:
     assert "--poll-interval must be a number" in result.output
 
 
+def test_trailing_value_global_without_value_errors() -> None:
+    # A value option as the last token (`errorta status --home`) used to be
+    # silently dropped — now it's a clean error, not a no-op against the default.
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    for token in ("--home", "--verbosity", "-V", "--poll-interval"):
+        with pytest.raises(CliError, match="needs a value"):
+            app_module._extract_post_globals([token])
+
+
 def test_watch_uses_post_subcommand_poll_interval(monkeypatch, tmp_path) -> None:
     seen: dict[str, object] = {}
 

@@ -41,6 +41,15 @@ def handle_line(line: str, ctx: Context, client: SidecarClient) -> str:
     name, raw_args = registry.split_slash(line)
     if not name:
         return ""
+    # A user fresh from the shell instructions often types the whole
+    # `errorta <cmd>` line inside the REPL (the prompt even reprints "errorta").
+    # Drop the redundant prefix and run the rest, with a one-line nudge.
+    if name == "errorta":
+        if not raw_args:
+            return "you're already inside errorta — type a command (try /help), or /quit to leave."
+        inner = handle_line(" ".join(raw_args), ctx, client)
+        hint = "note: you're already inside errorta — drop the 'errorta' prefix."
+        return f"{hint}\n{inner}" if inner else hint
     if name in _QUIT:
         return "bye"
     if name == "help":
@@ -49,11 +58,16 @@ def handle_line(line: str, ctx: Context, client: SidecarClient) -> str:
         return _set_verbosity(ctx, raw_args)
     if name in _CHANNEL_OPS:
         return _channel_op(ctx, name, raw_args)
+    # Shell muscle-memory that the REPL has no equivalent for: point at the real
+    # verbs rather than an opaque "unknown command: /cd".
+    if name in {"cd", "ls", "pwd"}:
+        return ("the REPL stays in the directory it launched from — use /projects "
+                "then /open <id> to switch projects, or /quit and cd in your shell.")
 
     try:
         _payload, text = registry.dispatch(name, client, ctx, raw_args)
     except KeyError:
-        return f"unknown command: /{name} (try /help)"
+        return f"unknown command: /{name} (try /help, or /quit to leave)"
     except CliError as exc:
         return f"error: {exc.message}"
     return text

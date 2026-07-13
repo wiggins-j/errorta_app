@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import config
+from .. import config, shellinit
 from ..client import SidecarClient
 from ..errors import CliError
 from ..registry import Command, Param, register, render_json
@@ -369,7 +369,8 @@ def _lifecycle_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
             if payload.get("hooked"):
                 note += "\n" + render(muted(f"→ {cd_dir}"))
             else:
-                tip = ('tip: add  eval "$(errorta shell-init zsh)"  to ~/.zshrc '
+                sh, rc = shellinit.detect_shell()
+                tip = (f'tip: add  eval "$(errorta shell-init {sh})"  to {rc} '
                        'to jump into new projects automatically')
                 note += "\n" + render(f"cd {cd_dir}") + "\n" + render(muted(tip))
         if kind == "cloned":

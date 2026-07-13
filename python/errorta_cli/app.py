@@ -301,15 +301,16 @@ def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[
                 key = "verbosity"
             else:
                 key = "home"
-            if i + 1 < len(raw_args):
-                if key == "poll_interval":
-                    try:
-                        overrides[key] = float(raw_args[i + 1])
-                    except ValueError:
-                        raise CliError("--poll-interval must be a number") from None
-                else:
-                    overrides[key] = raw_args[i + 1]
-                i += 1
+            if i + 1 >= len(raw_args):
+                raise CliError(f"{token} needs a value") from None
+            if key == "poll_interval":
+                try:
+                    overrides[key] = float(raw_args[i + 1])
+                except ValueError:
+                    raise CliError("--poll-interval must be a number") from None
+            else:
+                overrides[key] = raw_args[i + 1]
+            i += 1
         else:
             rest.append(token)
         i += 1

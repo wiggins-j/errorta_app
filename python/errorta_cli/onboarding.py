@@ -125,6 +125,8 @@ def welcome_text() -> str:
         "  errorta new <name> --here       # greenfield project in this directory\n"
         "  errorta import local .          # adopt the existing repo here\n"
         "Run `errorta connect status` anytime to see what's configured.\n"
+        "Tip: `eval \"$(errorta shell-init zsh)\"` in your shell rc makes "
+        "`errorta new` cd you into the project.\n"
         "(silence this with --no-onboarding or ERRORTA_NO_ONBOARDING=1)"
     )
 

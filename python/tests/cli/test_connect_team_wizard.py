@@ -39,6 +39,42 @@ def _key_file(tmp_path, value: str = SENTINEL):
     return str(p)
 
 
+def test_read_key_refuses_prompt_under_json(monkeypatch):
+    # --json is contractually never allowed to prompt, even at a real TTY. The
+    # key acquisition must gate on json_mode, not only is_interactive() — else
+    # `errorta connect anthropic api --json --yes` drops into a blocking getpass.
+    from errorta_cli.commands import connect
+
+    monkeypatch.setattr(connect._mutate, "is_interactive", lambda: True)
+    with pytest.raises(CliError) as ei:
+        connect._read_key({}, label="anthropic API key", json_mode=True)
+    assert ei.value.code == "key_required"
+
+
+def test_wizard_created_not_ready_omits_run_hint():
+    # A wizard `create` with no runnable provider returns run_setup_confirmed=False
+    # + warnings; the render must NOT tell the user to `run` (that dead-ends at
+    # exit-12) — it surfaces the warning and the connect/team/run recovery path.
+    from errorta_cli.commands import wizard
+
+    payload = {"_kind": "created", "project_id": "p",
+               "created": {"run_setup_confirmed": False,
+                           "warnings": ["no_models_available: connect a provider first"]}}
+    out = wizard._render(payload, None, False)
+    assert "not ready to run yet" in out
+    assert "run it with:" not in out
+    assert "no_models_available" in out
+
+
+def test_wizard_created_ready_shows_run_hint():
+    from errorta_cli.commands import wizard
+
+    payload = {"_kind": "created", "project_id": "p",
+               "created": {"run_setup_confirmed": True, "warnings": []}}
+    out = wizard._render(payload, None, False)
+    assert "run it with: errorta run --yes" in out
+
+
 # --------------------------------------------------------------------------- #
 # 1. §14 — the API key NEVER appears in argv / stdout / stderr / logs (#4).
 # --------------------------------------------------------------------------- #
