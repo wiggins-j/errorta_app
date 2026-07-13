@@ -26,6 +26,7 @@ _STATUS_STYLE = {
 _TERMINAL_BAD = {
     "budget_exhausted", "no_progress", "hard_blocker", "member_unhealthy",
     "worker_unproductive", "completion_blocked", "not_converging",
+    "delivery_review_stalled",
 }
 
 

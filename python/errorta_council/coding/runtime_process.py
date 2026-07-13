@@ -70,6 +70,44 @@ _PROBE_TIMEOUT = 2.0
 # little generous to catch the common startup-time crash.
 _LAUNCH_PROBE_SECONDS = 12.0
 
+# F152: a widened window for an HTTP-serving profile. A JS dev server's first
+# compile is routinely 10-30s, so the 12s CLI window is too short to fairly demand
+# a served response; the probe still early-exits the moment the app answers.
+_LAUNCH_HTTP_PROBE_SECONDS = 45.0
+
+# F153 (G2): language-agnostic startup-crash signatures. The pre-F153 probe scanned
+# only for the CPython ``"Traceback (most recent call last)"`` string, so a Node /
+# Rust / Go / TS crash exited "clean". These are high-precision crash/compile
+# phrases (NOT bare "error"/"fail" substrings) scanned over the log tail; a match
+# classifies a launch as crashed. F152 reuses this to enrich a served-500 finding
+# (once an HTTP request triggers a lazy compile, "Failed to compile" lands here).
+_CRASH_SIGNATURES = (
+    "Traceback (most recent call last)",  # CPython
+    "Failed to compile",                   # Next.js / webpack
+    "Module not found",                    # webpack / node
+    "Cannot find module",                  # node
+    "SyntaxError",                         # node / babel
+    "ReferenceError",                      # node
+    "error TS",                            # tsc
+    "ERROR in ",                           # webpack
+    "panicked at",                         # Rust
+    "goroutine ",                          # Go panic dump
+    "Exception in thread",                 # JVM
+)
+
+
+def _has_crash_signature(tail: str) -> tuple[bool, str]:
+    """(matched, signature) if the log tail contains a known startup-crash phrase.
+
+    F153 (G2) / F152: framework-agnostic replacement for the CPython-only traceback
+    grep. A legitimate non-zero CLI usage exit prints none of these, so it stays
+    clean; a real crash in any of the common runtimes is caught."""
+    for sig in _CRASH_SIGNATURES:
+        if sig in tail:
+            return True, sig
+    return False, ""
+
+
 # F146 Slice C: runtime kinds whose delivered program is meant to KEEP RUNNING
 # (a window/server). For these, exiting during the startup window — even with a
 # clean non-zero code and no traceback — is a launch failure (it failed to stay
@@ -902,9 +940,15 @@ class RuntimeProcessManager:
                     "detail": f"sandbox unavailable: {blocked.error}",
                     "session_id": blocked.session_id}
 
+        # F152: an HTTP-serving profile gets a widened default window (a JS dev
+        # server's first compile is 10-30s) — but the probe early-exits the moment
+        # the app answers, so a fast app pays nothing. An explicit override wins.
+        is_http = str((profile.health or {}).get("type")) == "http"
+        default_window = (_LAUNCH_HTTP_PROBE_SECONDS if is_http
+                          else _LAUNCH_PROBE_SECONDS)
         window = _clamp(
             float(timeout_seconds if timeout_seconds is not None
-                  else _LAUNCH_PROBE_SECONDS), 1.0, 120.0)
+                  else default_window), 1.0, 120.0)
         # A desktop app draws its own window; under headless drivers it still
         # doesn't need the OS window server, so we do NOT grant display (keeps the
         # probe at T0 sandboxed-headless — the CI-safe posture).
@@ -953,10 +997,23 @@ class RuntimeProcessManager:
         # state — surviving the window is a clean launch. Wrapped so the child
         # GROUP is ALWAYS torn down (no leaked process/port) even on an
         # unexpected error between spawn and classification.
+        #
+        # F152: for an HTTP-serving profile we ALSO request the app each tick (this
+        # both triggers a lazy first compile — Next.js/Vite compile per route on
+        # first request — and observes whether it actually serves). Any response
+        # <500 (2xx/3xx/4xx: it compiled and is routing) => served_ok, early-exit
+        # clean. A response that is only ever >=500 through the window is a
+        # compile/load error (the reported failure). Connection-refused just means
+        # "not up yet" — keep polling.
+        health_url = (_sub_port(str((profile.health or {}).get("url", "")), port)
+                      if is_http else "")
         deadline = time.monotonic() + window
         rc: int | None = None
         survived = False
         cancelled = False
+        http_served_ok = False       # saw a <500 response — up and serving
+        http_saw_error = False       # saw a >=500 response — server error
+        http_error_detail = ""
         try:
             while True:
                 rc = proc.poll()
@@ -970,6 +1027,18 @@ class RuntimeProcessManager:
                     if stop:
                         cancelled = True
                         break
+                if health_url and not http_served_ok:
+                    try:
+                        _ok, _detail = _probe(health_url)
+                    except Exception:  # noqa: BLE001 — our probe erroring is not an
+                        _detail = ""   # app crash; ignore and keep observing
+                    if _detail.isdigit():
+                        code = int(_detail)
+                        if code < 500:
+                            http_served_ok = True
+                            break  # up and serving — clean, no need to wait out the window
+                        http_saw_error = True
+                        http_error_detail = f"HTTP {code}"
                 if time.monotonic() >= deadline:
                     survived = True
                     break
@@ -982,7 +1051,9 @@ class RuntimeProcessManager:
         logs = self.get_logs(sid)
         tail_lines = logs.get("lines", [])[-40:]
         tail = "\n".join(tail_lines)
-        has_traceback = "Traceback (most recent call last)" in tail
+        # F153 (G2): language-agnostic crash detection (supersedes the CPython-only
+        # "Traceback (most recent call last)" grep).
+        has_crash, crash_sig = _has_crash_signature(tail)
         long_running = profile.kind in _LONG_RUNNING_KINDS
         win = int(window)
 
@@ -991,49 +1062,74 @@ class RuntimeProcessManager:
                                        ended_at=_now())
             return {"status": "cannot_verify", "detail": "launch probe cancelled",
                     "session_id": sid}
-        if survived and not has_traceback:
-            # Ran the whole startup window without exiting — clean (a server /
-            # desktop that keeps running is the intended state).
+        # --- F152: HTTP-serving verdicts (only when we got HTTP signal) ---------
+        if http_served_ok:
+            # Answered <500 — the app is up AND its route compiled + serves. The
+            # strongest possible clean signal (stronger than "process alive").
             self.rstore.update_session(sid, state="stopped", exit_code=None,
-                                       error="probe_window_elapsed", ended_at=_now())
-            status, passed, detail = "clean", True, f"survived the {win}s startup window"
-        elif survived and has_traceback:
-            # Still running at the window end but printed a traceback during
+                                       error="probe_served_ok", ended_at=_now())
+            status, passed, detail = "clean", True, f"served a healthy response at {health_url}"
+        elif is_http and http_saw_error and not http_served_ok:
+            # Bound a port but only ever answered >=500 through the window — a
+            # compile/load error (the delivered site does not serve). Once the
+            # request triggered a lazy compile, the framework's own error
+            # ("Failed to compile ...") is now in the tail.
+            self.rstore.update_session(sid, state="crashed", exit_code=rc,
+                                       ended_at=_now())
+            status, passed = "crashed", False
+            sig_line = f" ({crash_sig})" if has_crash else ""
+            detail = (f"served only errors ({http_error_detail}){sig_line} at "
+                      f"{health_url} — the app does not serve; log tail:\n{tail}")
+        # --- F153: process-exit / survival classification -----------------------
+        elif survived and has_crash:
+            # Still running at the window end but printed a crash signature during
             # startup — a crash the app swallowed/logged; surface it (fail toward
-            # catching real crashes; a benign logged startup traceback is rare).
+            # catching real crashes; a benign logged startup crash line is rare).
             self.rstore.update_session(sid, state="crashed", exit_code=None,
                                        ended_at=_now())
             status, passed = "crashed", False
-            detail = (f"printed a traceback during startup (still running at {win}s); "
-                      f"traceback:\n{tail}")
-        elif rc == 0:
-            self.rstore.update_session(sid, state="stopped", exit_code=0,
+            detail = (f"printed a crash signature ({crash_sig}) during startup "
+                      f"(still running at {win}s); log tail:\n{tail}")
+        elif survived:
+            # Ran the whole startup window without exiting or crashing — clean (a
+            # server / desktop that keeps running is the intended state). For an
+            # HTTP profile that never answered, this stays clean-by-survival (F152:
+            # a never-served slow build must not false-fail; the >=500 path is what
+            # catches the real failure).
+            self.rstore.update_session(sid, state="stopped", exit_code=None,
+                                       error="probe_window_elapsed", ended_at=_now())
+            status, passed, detail = "clean", True, f"survived the {win}s startup window"
+        elif long_running:
+            # F153 (G1): a window/server runtime EXITED during the startup window —
+            # ANY exit code, including 0, means it failed to stay up. This must be
+            # checked BEFORE the generic `rc == 0` clean branch (a server that binds
+            # nothing and sys.exit(0)s on a config error is not a clean launch).
+            self.rstore.update_session(sid, state="crashed", exit_code=rc,
                                        ended_at=_now())
-            status, passed, detail = "clean", True, "exited cleanly (0)"
+            status, passed = "crashed", False
+            detail = (f"a {profile.kind} runtime exited during startup (exit {rc}) — "
+                      f"it must keep running; log tail:\n{tail}")
         elif rc is not None and rc < 0:
             # Killed by a signal (segfault / abort) — an unambiguous crash.
             self.rstore.update_session(sid, state="crashed", exit_code=rc,
                                        ended_at=_now())
             status, passed = "crashed", False
             detail = f"killed by signal {-rc} on startup; log tail:\n{tail}"
-        elif has_traceback:
-            # Non-zero exit WITH a traceback — the crash catcher's core case
-            # (e.g. the pygame.font import error).
+        elif has_crash:
+            # Non-zero exit WITH a crash signature — the crash catcher's core case
+            # (the pygame.font import error; a Node ReferenceError; a Rust panic).
             self.rstore.update_session(sid, state="crashed", exit_code=rc,
                                        ended_at=_now())
             status, passed = "crashed", False
-            detail = f"crashed on startup (exit {rc}); traceback:\n{tail}"
-        elif long_running:
-            # A window/server runtime exited during the startup window — even a
-            # clean non-zero with no traceback means it failed to stay up.
-            self.rstore.update_session(sid, state="crashed", exit_code=rc,
+            detail = f"crashed on startup (exit {rc}, {crash_sig}); log tail:\n{tail}"
+        elif rc == 0:
+            # A one-shot cli/binary that finished successfully.
+            self.rstore.update_session(sid, state="stopped", exit_code=0,
                                        ended_at=_now())
-            status, passed = "crashed", False
-            detail = (f"a {profile.kind} runtime exited during startup (exit {rc}) — "
-                      f"it must keep running; log tail:\n{tail}")
+            status, passed, detail = "clean", True, "exited cleanly (0)"
         else:
-            # A one-shot cli/binary that exited non-zero without a traceback ran
-            # to completion with a status (a usage/validation exit) — NOT a
+            # A one-shot cli/binary that exited non-zero without a crash signature
+            # ran to completion with a status (a usage/validation exit) — NOT a
             # startup crash (matches run_cli's non-finding treatment).
             self.rstore.update_session(sid, state="stopped", exit_code=rc,
                                        ended_at=_now())

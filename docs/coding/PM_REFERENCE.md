@@ -125,7 +125,9 @@ burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
 / `model_escalation_limit` (2) / `task_reassignment_limit` (2) / `pm_assist_limit`
 (1) — the F127 escalate-up ladder, `completion_refused_limit` (2, F128 — false
 "done" guard), `foundation_stall_limit` (12) / `convergence_stall_limit` (20, F139
-— stop when nothing is converging).
+— stop when nothing is converging), `delivery_review_round_limit` (3, F155 — stop
+`delivery_review_stalled` when the delivery review keeps rejecting the integrated
+result instead of looping to budget).
 
 **Presets:** **CAREFUL** (checkpoints per-milestone, `max_parallel_workers=1`,
 tight caps, block-on-problems on) vs **AUTONOMOUS** (checkpoints `off`,
@@ -294,12 +296,13 @@ and FastAPI routers. Update the prose and this contract together.
   "coding_roles": ["dev", "pm", "reviewer", "tester"],
   "model_modes": ["multi", "single"],
   "pm_model_modes": ["single"],
-  "run_setup_fields": ["block_on_problems", "checkpoint_cadence", "checkpoint_n", "governance_mode", "grounding", "guardrail_enabled", "human_code_approval", "max_iterations", "max_model_calls", "max_parallel_workers", "max_review_rounds", "member_failure_limit", "members", "preflight_enabled", "team_room_id"],
+  "run_setup_fields": ["block_on_problems", "checkpoint_cadence", "checkpoint_n", "delivery_review_round_limit", "governance_mode", "grounding", "guardrail_enabled", "human_code_approval", "max_iterations", "max_model_calls", "max_parallel_workers", "max_review_rounds", "member_failure_limit", "members", "preflight_enabled", "team_room_id"],
   "autonomy_defaults": {
     "checkpoint_cadence": "per_milestone",
     "checkpoint_n": 5,
     "completion_refused_limit": 2,
     "convergence_stall_limit": 20,
+    "delivery_review_round_limit": 3,
     "foundation_stall_limit": 12,
     "max_iterations": 200,
     "max_model_calls": null,

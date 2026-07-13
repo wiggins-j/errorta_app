@@ -45,6 +45,41 @@ _CRASH = ["python", "-c",
           "raise RuntimeError('startup boom: pygame.font not available')"]
 _LONG_LIVED = ["python", "-c", "import time; print('serving'); time.sleep(30)"]
 
+# F153: a long-running (web) runtime that EXITS 0 during the window — a server
+# that binds nothing and exits cleanly on a config error still failed to stay up.
+_WEB_EXIT_ZERO = ["python", "-c", "import sys; print('bye'); sys.exit(0)"]
+# F153 (G2): a non-Python crash (a Node-style stack) exits non-zero with no
+# CPython traceback — the pre-F153 Python-only grep called this "clean".
+_JS_CRASH = ["python", "-c",
+             "import sys; sys.stderr.write('ReferenceError: x is not defined\\n'); "
+             "sys.exit(1)"]
+
+# F152: real HTTP servers that bind the probe-allocated PORT.
+_HTTP_SERVER = (
+    "import os,http.server,socketserver\n"
+    "p=int(os.environ['PORT'])\n"
+    "print('serving',flush=True)\n"
+    "class H(http.server.BaseHTTPRequestHandler):\n"
+    "    def do_GET(self):\n"
+    "        self.send_response({code}); self.end_headers(); self.wfile.write(b'x')\n"
+    "    def log_message(self,*a): pass\n"
+    "socketserver.TCPServer(('127.0.0.1',p),H).serve_forever()\n"
+)
+_HTTP_500 = ["python", "-c", _HTTP_SERVER.format(code=500)]
+_HTTP_200 = ["python", "-c", _HTTP_SERVER.format(code=200)]
+_HTTP_WARMUP = ["python", "-c",
+    "import os,time,http.server,socketserver\n"
+    "p=int(os.environ['PORT']); t0=time.time()\n"
+    "print('serving',flush=True)\n"
+    "class H(http.server.BaseHTTPRequestHandler):\n"
+    "    def do_GET(self):\n"
+    "        self.send_response(200 if time.time()-t0>0.6 else 500)\n"
+    "        self.end_headers(); self.wfile.write(b'x')\n"
+    "    def log_message(self,*a): pass\n"
+    "socketserver.TCPServer(('127.0.0.1',p),H).serve_forever()\n"]
+
+_HTTP_HEALTH = {"type": "http", "url": "http://127.0.0.1:{port}", "timeout_seconds": 5}
+
 
 @pytest.fixture(autouse=True)
 def _fast_and_clean(monkeypatch):
@@ -52,6 +87,7 @@ def _fast_and_clean(monkeypatch):
     monkeypatch.setattr(rp, "_POLL_INTERVAL", 0.05)
     monkeypatch.setattr(rp, "_GRACE_SECONDS", 1.0)
     monkeypatch.setattr(rp, "_LAUNCH_PROBE_SECONDS", 1.0)
+    monkeypatch.setattr(rp, "_LAUNCH_HTTP_PROBE_SECONDS", 2.5)  # F152 window
     yield
     rp.teardown_all()
 
@@ -287,3 +323,103 @@ def test_launch_probe_signal_death_is_crash(tmp_errorta_home: Path) -> None:
     res = mgr.launch_probe("default", head="deadbeef")
     assert res["status"] == "crashed", res
     assert "signal" in res["detail"].lower()
+
+
+# --- F153: launch classifier hardening (exit-during-window; non-Python crash) --
+
+def test_crash_signature_helper() -> None:
+    for sample in ("Traceback (most recent call last)", "Failed to compile",
+                   "Module not found: x", "ReferenceError: y", "error TS2304",
+                   "thread 'main' panicked at src/main.rs"):
+        ok, sig = rp._has_crash_signature(f"noise\n{sample}\nmore")
+        assert ok and sig, sample
+    assert rp._has_crash_signature("all clean\nlistening on 3000")[0] is False
+
+
+def test_long_running_exit_zero_is_crash(tmp_errorta_home: Path) -> None:
+    # G1: a web/api/desktop runtime that exits 0 during the window failed to stay
+    # up — it must be a crash, not "clean". This is the branch-ordering fix
+    # (long_running is now checked BEFORE the generic rc==0 clean branch).
+    mgr = _manager("f146c-web-exit0", _WEB_EXIT_ZERO, kind="web")
+    res = mgr.launch_probe("default", head="deadbeef")
+    assert res["status"] == "crashed", res
+    assert "must keep running" in res["detail"]
+
+
+def test_one_shot_exit_zero_still_clean(tmp_errorta_home: Path) -> None:
+    # Regression for the reorder: a one-shot cli that exits 0 stays clean.
+    mgr = _manager("f146c-cli-ok", _CLEAN_EXIT, kind="cli")
+    assert mgr.launch_probe("default", head="deadbeef")["status"] == "clean"
+
+
+def test_non_python_crash_is_crash(tmp_errorta_home: Path) -> None:
+    # G2: a non-long-running program that prints a non-Python (JS) stack and exits
+    # non-zero is now a crash (was "clean" under the CPython-only traceback grep).
+    mgr = _manager("f146c-js-crash", _JS_CRASH, kind="cli")
+    res = mgr.launch_probe("default", head="deadbeef")
+    assert res["status"] == "crashed", res
+    assert "ReferenceError" in res["detail"]
+
+
+# --- F152: HTTP serve assertion (a server that binds but only errors) ----------
+
+def _http_manager(pid: str, start_argv, *, kind: str = "web") -> RuntimeProcessManager:
+    store = LedgerStore(pid)
+    store.create_project(north_star="n", definition_of_done="d",
+                         target="new", repo_path=None)
+    ws = CodingWorkspace(pid, store)
+    ws.setup(target="new", repo_path=None)
+    rstore = RuntimeProfileStore.for_ledger(store)
+    rstore.upsert_profile(validate_profile(
+        {"kind": kind, "runtime_mode": "managed_local", "start": start_argv,
+         "sandbox": "auto", "health": dict(_HTTP_HEALTH)},
+        profile_id="default", project_id=pid))
+    return RuntimeProcessManager.for_project(pid)
+
+
+def test_http_500_through_window_is_crash(tmp_errorta_home: Path) -> None:
+    # The reported failure: the dev server binds its port but serves only HTTP 500
+    # (a compile error). The process stays alive, so the pre-F152 probe called it
+    # "clean"; now the served-error is caught.
+    mgr = _http_manager("f152-500", _HTTP_500)
+    res = mgr.launch_probe("default", head="deadbeef")
+    assert res["status"] == "crashed", res
+    assert "HTTP 500" in res["detail"]
+
+
+def test_http_200_is_clean_and_early_exits(tmp_errorta_home: Path) -> None:
+    mgr = _http_manager("f152-200", _HTTP_200)
+    import time as _t
+    t0 = _t.monotonic()
+    res = mgr.launch_probe("default", head="deadbeef")
+    assert res["status"] == "clean", res
+    # Early-exit: a healthy app clears well under the 2.5s window.
+    assert _t.monotonic() - t0 < 2.0
+
+
+def test_http_warmup_500_then_200_is_clean(tmp_errorta_home: Path) -> None:
+    # A transient warmup 500 that resolves to 200 must NOT false-fail.
+    mgr = _http_manager("f152-warmup", _HTTP_WARMUP)
+    assert mgr.launch_probe("default", head="deadbeef")["status"] == "clean"
+
+
+def test_http_500_blocks_delivery_done(tmp_errorta_home: Path) -> None:
+    # End-to-end: a delivered web app that only 500s fails the delivery review
+    # (the reviewer auto-approves, so the verdict rests on the launch) and files a
+    # dev finding so the run re-opens instead of declaring done.
+    store = LedgerStore("f152-e2e")
+    store.create_project(north_star="a web app", definition_of_done="it serves",
+                         target="new", repo_path=None)
+    ws = CodingWorkspace("f152-e2e", store)
+    ws.setup(target="new", repo_path=None)
+    ws.write_file("app.py", "print('hi')\n", task_id="seed")
+    rstore = RuntimeProfileStore.for_ledger(store)
+    rstore.upsert_profile(validate_profile(
+        {"kind": "web", "runtime_mode": "managed_local", "start": _HTTP_500,
+         "sandbox": "auto", "health": dict(_HTTP_HEALTH)},
+        profile_id="default", project_id="f152-e2e"))
+    result = _run_delivery_review(store, ws)
+    assert result.passed is False
+    titles = [str(getattr(t, "title", "")).lower() for t in store.list_tasks()]
+    assert any("launch" in t or "crash" in t for t in titles), \
+        f"a launch-crash fix task should be filed; got {titles}"

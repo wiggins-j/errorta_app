@@ -44,6 +44,7 @@ MEMBER_UNHEALTHY = "member_unhealthy"          # F120: a member can't run
 WORKER_UNPRODUCTIVE = "worker_unproductive"    # F127: no member can do a task
 COMPLETION_BLOCKED = "completion_blocked"      # F128: PM claimed done, open work remains
 NOT_CONVERGING = "not_converging"              # F139 WS-E: nothing moved for N iterations
+DELIVERY_REVIEW_STALLED = "delivery_review_stalled"  # F155: delivery review kept rejecting
 
 # --- checkpoint cadences ----------------------------------------------------
 CADENCE_OFF = "off"
@@ -92,6 +93,13 @@ class CodingAutonomyPolicy:
     # transition, no F127 ladder activity — for this many consecutive iterations,
     # the run stops with `not_converging` instead of burning the iteration cap.
     convergence_stall_limit: int = 20
+    # F155: how many times the delivery review may REJECT the integrated head
+    # (filing fix findings) before the run stops with `delivery_review_stalled`.
+    # A filed finding resets pm_idle (it IS progress) and changes the head, so
+    # neither no_progress nor not_converging trips — without this cap a run that
+    # keeps failing delivery review loops to budget_exhausted instead of stopping
+    # truthfully. A passing review resets the count.
+    delivery_review_round_limit: int = 3
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -108,6 +116,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "max_parallel_workers": p.max_parallel_workers,
         "foundation_stall_limit": p.foundation_stall_limit,
         "convergence_stall_limit": p.convergence_stall_limit,
+        "delivery_review_round_limit": p.delivery_review_round_limit,
     }
 
 
@@ -137,6 +146,8 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             1, int(d.get("foundation_stall_limit", base.foundation_stall_limit))),
         convergence_stall_limit=max(
             1, int(d.get("convergence_stall_limit", base.convergence_stall_limit))),
+        delivery_review_round_limit=max(
+            1, int(d.get("delivery_review_round_limit", base.delivery_review_round_limit))),
     )
 
 
@@ -318,6 +329,10 @@ class LoopCounters:
     # loops behave identically.
     last_progress_fp: tuple = ()
     last_progress_iter: int = 0
+    # F155: consecutive delivery-review rejections (findings filed) in this run.
+    # At delivery_review_round_limit the loop stops `delivery_review_stalled`.
+    # Reset to 0 on a PASSING delivery review.
+    delivery_review_rounds: int = 0
 
 
 @dataclass
@@ -838,6 +853,13 @@ def _run_sequential_loop(
 
         milestone = _apply_outcome(rec, ledger, action, outcome, c, delivery_review)
 
+        # F155: the delivery review kept rejecting the integrated head. A filed
+        # finding counts as progress (resets pm_idle) and changes the head, so
+        # no_progress / not_converging never trip — cap the rejected rounds here so
+        # a persistently-failing delivery ends truthfully, not at budget_exhausted.
+        if c.delivery_review_rounds >= policy.delivery_review_round_limit:
+            return LoopResult(DELIVERY_REVIEW_STALLED, c)
+
         # F128: the runner refused a PM done=true claim (open work remained). The
         # PM is re-prompted next turn; if it keeps falsely claiming done, escalate
         # to a blocking completion_blocked Problem instead of a silent no_progress.
@@ -1084,6 +1106,13 @@ def _run_concurrent_loop(
                     continue
                 milestone = _apply_outcome(
                     rec, ledger, action, outcome, c, delivery_review) or milestone
+                # F155: cap delivery-review reject rounds (mirrors the sequential
+                # loop). A filed finding resets pm_idle + changes the head, so
+                # no_progress / not_converging never trip — stop truthfully instead
+                # of looping to budget_exhausted. Drain-stop like the other caps.
+                if (c.delivery_review_rounds >= policy.delivery_review_round_limit
+                        and pending_stop is None):
+                    pending_stop = LoopResult(DELIVERY_REVIEW_STALLED, c)
                 # F128: a refused PM done-claim escalates to a blocking
                 # completion_blocked Problem if the PM keeps falsely claiming done;
                 # otherwise any productive turn resets the streak.
@@ -1191,9 +1220,15 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
             if not getattr(result, "passed", True):
                 if getattr(result, "filed_findings", False):
                     c.pm_idle = 0
+                    # F155: count this rejected round. The caller stops the run
+                    # `delivery_review_stalled` once the cap is reached, instead of
+                    # looping fix->re-review to budget_exhausted.
+                    c.delivery_review_rounds += 1
                 else:
                     c.pm_idle += 1
                 return False
+            # F155: a passing delivery review clears the stall count.
+            c.delivery_review_rounds = 0
         ledger.set_project_status("done")
         c.pm_idle = 0
         # Not a checkpoint milestone: the next decide_next returns Complete

@@ -89,6 +89,7 @@ _CONFIRM_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("max-model-calls", "max_model_calls", "int"),
     ("max-parallel", "max_parallel_workers", "int"),
     ("member-failure-limit", "member_failure_limit", "int"),
+    ("delivery-review-round-limit", "delivery_review_round_limit", "int"),
     ("preflight-enabled", "preflight_enabled", "bool"),
 )
 
@@ -389,6 +390,9 @@ register(Command(
         Param("max-model-calls", "Max model calls (int).", is_flag=False),
         Param("max-parallel", "Max parallel workers (int).", is_flag=False),
         Param("member-failure-limit", "Member failure limit (int).", is_flag=False),
+        Param("delivery-review-round-limit",
+              "Max delivery-review reject rounds before stopping (int, default 3).",
+              is_flag=False),
         Param("preflight-enabled", "Member-health preflight on/off (true/false).",
               is_flag=False),
     ),
