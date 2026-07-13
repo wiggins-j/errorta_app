@@ -400,7 +400,7 @@ Everything here works while a run is live.
 |---|---|---|
 | `files` | Show a delivered file on master (content + sha). | `--a` (path) |
 | `edit <path>` ‡ | Edit a delivered file (`--content-file` or `$EDITOR`; never via argv). | `--content-file`, `--yes` |
-| `diff` | Worktree diff preview of the delivered code. | `--watch` |
+| `diff` | Delivered code as a per-file summary; `--full` prints the whole unified diff. | `--full`, `--watch` |
 | `accept` ‡ | Merge-back the delivered tree into your real files (deliberate accept). | `--override`, `--allow-conflicts`, `--yes` |
 | `publish [targets\|events\|auth-status\|manual-export\|pr\|new-repo]` ‡ | Export the delivered work, open a PR, or create a repo (outward-facing). | `--kind`, `--name`, `--public`, `--local-only`, `--branch`, `--title`, `--body`, `--override`, `--yes` |
 
@@ -408,13 +408,17 @@ Everything here works while a run is live.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `runtime [(profiles)\|detect\|setup\|start\|stop\|run\|run-cli\|logs\|health\|test\|repair]` ‡ | Run the delivered program: read profiles, or detect / set up / launch / probe it. | `--p1`, `--p2`, `--session`, `--kind`, `--args`, `--timeout`, `--go`, `--reduced-isolation`, `--profile`, `--watch`, `--yes` |
+| `runtime [(profiles)\|detect\|setup\|start\|stop\|run\|run-cli\|logs\|health\|test\|repair]` ‡ | Run the delivered program: read profiles, or detect / set up / launch / probe it. | `--p1`, `--p2`, `--session`, `--kind`, `--args`, `--timeout`, `--go`, `--reduced-isolation`, `--open`, `--no-open`, `--profile`, `--watch`, `--yes` |
 | `test-commands [show\|set]` ‡ | Show or set the project's merge-gate test commands. | `--commands`, `--yes` |
 | `test-settings [show\|set]` ‡ | Show or set project test settings (`require_sandbox`). | `--require-sandbox`, `--yes` |
 | `test-runs` | List the recorded test-command runs. | |
 
 `runtime run` produces a **preview** by default; add `--go` to actually launch the
-program. `runtime logs <session>` tails a session's logs (`--watch` follows).
+program. When the delivered program is a **web/API server**, `run --go` prints the
+served URL (`http://localhost:PORT`) and — on an interactive terminal — opens it in
+your browser once the dev server answers. Use `--no-open` to just print the URL, or
+`--open` to force-open even when output is piped. `runtime logs <session>` tails a
+session's logs (`--watch` follows).
 
 ### Grounding
 
@@ -602,7 +606,8 @@ errorta runtime                         # read the detected run profiles
 errorta runtime detect --yes            # (re)detect how to run this project
 errorta runtime setup --yes             # install deps (e.g. a managed venv)
 errorta runtime run                     # PREVIEW the launch (no process yet)
-errorta runtime run --go --yes          # actually launch it (bounded, headless)
+errorta runtime run --go --yes          # launch it; a web app prints + opens its URL
+errorta runtime run --go --yes --no-open # launch, print the URL, don't open a browser
 errorta runtime logs <session> --watch  # tail that session's output
 ```
 

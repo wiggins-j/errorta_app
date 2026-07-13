@@ -6,7 +6,7 @@ sub-actions, grounded against the real ``coding.py`` (file:line inline):
 * ``runtime`` (bare)            → ``GET  .../runtime/profiles``            (2966)
 * ``runtime --session <sid>``   → ``GET  .../runtime/sessions/{sid}``      (3268)
 * ``runtime detect``            → ``POST .../runtime/detect``              (2995)
-* ``runtime run [--go --reduced-isolation]`` → ``POST .../runtime/run`` (``confirm``) (3006)
+* ``runtime run [--go --reduced-isolation] [--open|--no-open]`` → ``POST .../runtime/run`` (``confirm``) (3006)
 * ``runtime setup <id>``        → ``POST .../runtime/{id}/setup`` (``confirm:true``) (3143)
 * ``runtime start <id>``        → ``POST .../runtime/{id}/start``          (3160)
 * ``runtime run-cli <id> [--args ...] [--timeout N]`` → ``POST .../runtime/{id}/run-cli`` (3178)
@@ -34,7 +34,10 @@ the mutating actions (a watched launch would re-spawn every tick).
 from __future__ import annotations
 
 import json as _json
-from typing import Any
+import sys
+import time
+import webbrowser
+from typing import Any, Callable
 
 from ..client import SidecarClient
 from ..errors import CliError, NotFound
@@ -105,7 +108,85 @@ def _run(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str,
         if not _mutate.confirm(ctx, args, "launch the delivered program",
                                note="spawns a real local process"):
             return {"_kind": "aborted"}
-    return {"_kind": "run", "run": client.post_json(f"{_rt(ctx)}/run", json=body) or {}}
+    run = client.post_json(f"{_rt(ctx)}/run", json=body) or {}
+    payload: dict[str, Any] = {"_kind": "run", "run": run}
+    if execute:
+        # A web/API launch serves at a local URL the user needs. Surface it (so a
+        # headless caller can read `_url`) and — interactively — open it once the
+        # dev server answers.
+        _surface_served_url(args, run, payload)
+    return payload
+
+
+def _served_url(run: dict[str, Any]) -> str | None:
+    """The ``http://localhost:PORT`` a server-modality launch serves at, or None.
+
+    Only server modality (``web``/``api`` -> ``server``) binds a port; a CLI or
+    desktop launch has no URL. The port is the one the sidecar actually allocated
+    (``session.allocated_ports``), so it reflects the real bind, not a guess."""
+    plan = run.get("plan") or {}
+    if str(plan.get("modality") or "") != "server":
+        return None
+    session = run.get("session") or {}
+    ports = session.get("allocated_ports") or []
+    port = ports[0] if ports else None
+    return f"http://localhost:{port}" if port else None
+
+
+def _should_open(args: dict[str, Any]) -> bool:
+    """Auto-open the browser? ``--no-open`` never, ``--open`` always, else only on
+    an interactive TTY (a piped/headless run must not spawn a browser)."""
+    if args.get("no-open"):
+        return False
+    if args.get("open"):
+        return True
+    try:
+        return bool(sys.stdout.isatty())
+    except (ValueError, AttributeError):  # pragma: no cover — closed stdout
+        return False
+
+
+def _await_http(url: str, *, attempts: int = 40, interval: float = 0.5,
+                sleep: Callable[[float], None] = time.sleep) -> bool:
+    """Poll ``url`` until it answers (any HTTP status) or ``attempts`` elapse.
+
+    A freshly-spawned dev server (Next.js, Vite, …) takes seconds to compile
+    before it binds; opening the browser before then just shows a connection
+    error. Best-effort and bounded (~20-30s worst case): returns True once the
+    server responds, False on timeout — either way the caller then opens the
+    browser. Ctrl-C propagates (``KeyboardInterrupt`` is not an ``Exception``).
+    """
+    import httpx
+    for _ in range(attempts):
+        try:
+            httpx.get(url, timeout=0.75)
+            return True
+        except Exception:  # noqa: BLE001 — any transport error means "not up yet"
+            sleep(interval)
+    return False
+
+
+def _echo(message: str) -> None:  # pragma: no cover — thin stderr wrapper
+    print(message, file=sys.stderr, flush=True)
+
+
+def _surface_served_url(
+    args: dict[str, Any], run: dict[str, Any], payload: dict[str, Any], *,
+    opener: Callable[[str], bool] = webbrowser.open,
+    waiter: Callable[[str], bool] = _await_http,
+    echo: Callable[[str], None] = _echo,
+) -> None:
+    url = _served_url(run)
+    if not url:
+        return
+    payload["_url"] = url
+    if not _should_open(args):
+        return
+    # Announce the URL up front (to stderr) so the wait isn't a silent hang, then
+    # open the browser once the dev server answers.
+    echo(f"serving at {url} — waiting for the dev server, then opening your browser…")
+    waiter(url)
+    payload["_opened"] = bool(opener(url))
 
 
 def _setup(client: SidecarClient, ctx: Context, pid: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -248,7 +329,7 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     if action == "evidence":
         return _evidence(client, ctx)
     return _base.usage(
-        "runtime [ | --session <sid> | detect | run [--go --reduced-isolation] | "
+        "runtime [ | --session <sid> | detect | run [--go --reduced-isolation] [--open|--no-open] | "
         "setup <id> | start <id> | stop <id> | run-cli <id> [--args ...] [--timeout N] | "
         "health <id> | test <id> --kind K | repair <id> | logs <sid> [--watch] | "
         "profile set <id> --profile <json> | evidence ]")
@@ -307,6 +388,9 @@ register(Command(
         Param("go", "run: actually launch (default is a preview).", is_flag=True),
         Param("reduced-isolation", "run: consent to reduced-isolation launch.",
               is_flag=True),
+        Param("open", "run --go: open the served URL in your browser (default on a TTY).",
+              is_flag=True),
+        Param("no-open", "run --go: never auto-open the browser.", is_flag=True),
         Param("profile", "profile set: the profile as a JSON object.", is_flag=False),
         Param("watch", "re-render on the poll loop (read views only).", is_flag=True),
         Param("yes", "Skip the confirmation prompt (required non-interactively).",

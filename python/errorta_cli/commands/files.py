@@ -34,10 +34,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
+
 from ..client import SidecarClient
 from ..errors import CliError, LockBusy
+from ..pager import format_diff
 from ..registry import Command, Param, register, render_json
-from ..render import is_no_project, muted, no_project, render, truncate
+from ..render import heading, is_no_project, muted, no_project, render, truncate
 from ..session import Context
 from . import _base, _mutate
 
@@ -60,7 +63,10 @@ def _diff_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dic
     if not _base.has_project(ctx):
         return _base.no_project()
     result = client.get_json(f"/coding/projects/{ctx.project_id}/worktree") or {}
-    return {"_kind": "diff", **result}
+    # `--full` prints the whole unified diff; the default is a per-file stat
+    # summary (the whole delivered app is thousands of lines — a firehose in the
+    # terminal). The renderer branches on `_full`.
+    return {"_kind": "diff", "_full": bool(args.get("full")), **result}
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +226,46 @@ def _files_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
     return f"{header}\n{content}"
 
 
+# git-style single-letter change markers for the stat summary.
+_CHANGE_MARK = {"added": "A", "modified": "M", "deleted": "D", "renamed": "R"}
+
+
+def _diff_stat(file_diffs: list[dict[str, Any]]) -> str:
+    """A `git diff --stat`-style summary: one line per file + a totals footer.
+
+    The whole delivered app is thousands of diff lines, so the default `diff`
+    view is this summary; `diff --full` prints the unified diff."""
+    lines = [heading("Worktree diff")]
+    total_add = total_del = 0
+    for fd in file_diffs:
+        added = int(fd.get("addedLines") or 0)
+        removed = int(fd.get("removedLines") or 0)
+        total_add += added
+        total_del += removed
+        mark = _CHANGE_MARK.get(str(fd.get("changeType") or ""), "?")
+        path = str(fd.get("path") or "?")
+        old = fd.get("oldPath")
+        if mark == "R" and old:
+            path = f"{old} -> {path}"
+        row = Text()
+        row.append(f"  {mark}  ", style="cli.muted")
+        row.append(f"{truncate(path, 60):<60} ")
+        row.append(f"+{added}", style="cli.ok")
+        row.append("  ")
+        row.append(f"-{removed}", style="cli.bad")
+        lines.append(row)
+    n = len(file_diffs)
+    footer = Text()
+    footer.append(f"{n} file{'s' if n != 1 else ''} changed, ", style="cli.muted")
+    footer.append(f"+{total_add}", style="cli.ok")
+    footer.append(" ", style="cli.muted")
+    footer.append(f"-{total_del}", style="cli.bad")
+    lines.append(footer)
+    lines.append(muted("run `errorta diff --full` for the unified diff, or "
+                       "`errorta files <path>` for one file."))
+    return render(*lines)
+
+
 def _diff_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
     if json_mode:
         return render_json(payload)
@@ -227,9 +273,18 @@ def _diff_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
         return no_project()
     p = payload or {}
     diff = p.get("diff")
-    if not diff:
+    file_diffs = p.get("file_diffs") or []
+    if not diff and not file_diffs:
         return render(muted("(no worktree changes)"))
-    return render(str(diff)) if not isinstance(diff, str) else diff
+    if not p.get("_full") and file_diffs:
+        return _diff_stat(file_diffs)
+    # `--full` (or no structured file_diffs to summarize): the whole unified diff,
+    # through `delta` when it's on PATH, else the raw text.
+    diff_text = diff if isinstance(diff, str) else str(diff or "")
+    if not diff_text.strip():
+        return render(muted("(no worktree changes)"))
+    formatted = format_diff(diff_text)
+    return formatted if formatted is not None else diff_text
 
 
 def _edit_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
@@ -300,10 +355,14 @@ register(Command(
 
 register(Command(
     name="diff",
-    help="Worktree diff preview of the delivered code.",
+    help="Worktree diff of the delivered code (file summary; --full for the whole diff).",
     call=_diff_call,
     render=_diff_render,
-    params=(Param("watch", "re-render on the poll loop", is_flag=True),),
+    params=(
+        Param("full", "print the whole unified diff (default: per-file summary)",
+              is_flag=True),
+        Param("watch", "re-render on the poll loop", is_flag=True),
+    ),
 ))
 
 register(Command(

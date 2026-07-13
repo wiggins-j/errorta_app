@@ -112,6 +112,14 @@ def render_run(payload: Any) -> str:
         lines.append(Text("launched", style="cli.ok"))
         lines.append(_kv("session", session.get("session_id") or ""))
         lines.append(_kv("state", session.get("state") or ""))
+        url = (payload or {}).get("_url")
+        if url:
+            lines.append(_kv("open", url))
+            if (payload or {}).get("_opened"):
+                lines.append(muted("opened in your browser."))
+            else:
+                lines.append(muted("visit that URL in your browser (the dev server "
+                                   "may take a few seconds to compile)."))
     else:
         lines.append(muted("preview only — re-run with --go --yes to launch."))
         if run.get("requires_reduced_isolation_consent"):
