@@ -239,6 +239,22 @@ errorta import local .
 Either way a `.errorta-project` pointer is written in the directory so future
 `errorta` invocations from here (or the GUI) resolve to the same project.
 
+### Shell integration (auto-cd into new projects)
+
+A greenfield `errorta new <id>` (without `--here`) creates the project under
+`~/Errorta Projects/<id>`. A binary can't change its parent shell's working
+directory, so to have your shell **cd into the new project automatically**, add
+the one-line hook to your shell rc:
+
+```bash
+eval "$(errorta shell-init zsh)"     # ~/.zshrc
+eval "$(errorta shell-init bash)"    # ~/.bashrc
+```
+
+Without it, `errorta new` prints the `cd <dir>` line for you to run (and a
+one-time reminder about this hook). The hook only affects `new`; `open` /
+`switch` / `import` don't emit a cd target yet.
+
 ---
 
 ## Command reference
@@ -287,7 +303,7 @@ sidecar. See [One sidecar, one owner](#one-sidecar-one-owner).
 | Command | What it does | Key flags |
 |---|---|---|
 | `new <id>` ‡ | Create a greenfield project and bind this directory to it. | `--here`, `--delivery-root`, `--north-star`, `--dod`, `--work-request`, `--id`, `--yes` |
-| `import <local\|github> <path\|url>` ‡ | Import an existing project (local folder or GitHub clone). | `--sub`, `--id`, `--branch`, `--git-init`, `--yes` |
+| `import <local\|github> <path\|url>` ‡ | Import an existing project (local folder or GitHub clone). `local`/`github` is a positional, not a flag. | `--id`, `--branch`, `--git-init`, `--yes` |
 | `projects` | List all coding projects (with derived status). | |
 | `open <id>` | Bind this directory to a project and show it. | `--id` |
 | `switch <id>` | Switch the session to another project (alias of `open`). | `--id` |
@@ -319,16 +335,19 @@ errorta team add --tester   claude_cli.sonnet
 errorta team apply --yes
 ```
 
-- `team create [--default]` starts a fresh draft. `--default` auto-assembles
-  **1 pm / 3 dev / 1 reviewer / 1 tester**, picking models from your usable
-  providers (reasoning-strong PM, coding-strong devs, a reviewer from a different
-  provider for diversity) and printing the assignment + rationale.
+- `team create [--default]` starts a fresh draft. Coding is the only team type,
+  so `--codingteam` is optional (accepted for clarity; bare `team create` is
+  identical). `--default` auto-assembles **1 pm / 3 dev / 1 reviewer / 1 tester**,
+  picking models from your usable providers (reasoning-strong PM, coding-strong
+  devs, a reviewer from a different provider for diversity) and printing the
+  assignment + rationale.
 - `team add --<role> <value> [--count N]` appends N members of a role. `<value>`
   is a **full route id** (`claude_cli.opus`) for a single model, or a **bare
   provider** (`cursor_cli`, `claude_cli`) for a multi-model member pooled over
   that provider's routes. Discover routes with `errorta models`.
-- `--count` on `--pm` is capped at 1. "N devs" is *capacity*: parallel dev work
-  ramps as the project's foundation lands and the PM splits the backlog.
+- A coding team has exactly one PM, so `team add --pm --count N` with `N > 1` is
+  rejected. "N devs" is *capacity*: parallel dev work ramps as the project's
+  foundation lands and the PM splits the backlog.
 
 The lower-level `set <role> <route>` (one per role), `pool <role> <r,r,…>`,
 `mode`, `enable\|disable`, and `room <room_id>` (Council-room backing) still work.
@@ -398,7 +417,7 @@ Everything here works while a run is live.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `files` | Show a delivered file on master (content + sha). | `--a` (path) |
+| `files <path>` | Show a delivered file on master (content + sha). `<path>` is a positional (repo-relative). | |
 | `edit <path>` ‡ | Edit a delivered file (`--content-file` or `$EDITOR`; never via argv). | `--content-file`, `--yes` |
 | `diff` | Delivered code as a per-file summary; `--full` prints the whole unified diff. | `--full`, `--watch` |
 | `accept` ‡ | Merge-back the delivered tree into your real files (deliberate accept). | `--override`, `--allow-conflicts`, `--yes` |
@@ -408,7 +427,7 @@ Everything here works while a run is live.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `runtime [(profiles)\|detect\|setup\|start\|stop\|run\|run-cli\|logs\|health\|test\|repair]` ‡ | Run the delivered program: read profiles, or detect / set up / launch / probe it. | `--p1`, `--p2`, `--session`, `--kind`, `--args`, `--timeout`, `--go`, `--reduced-isolation`, `--open`, `--no-open`, `--profile`, `--watch`, `--yes` |
+| `runtime [(profiles)\|detect\|setup\|start\|stop\|run\|run-cli\|logs\|health\|test\|repair\|profile\|evidence]` ‡ | Run the delivered program: read profiles, or detect / set up / launch / probe it. `profile set <id> --profile <json>` overrides a run profile; `evidence` reads a session's captured evidence. | `--p1`, `--p2`, `--session`, `--kind`, `--args`, `--timeout`, `--go`, `--reduced-isolation`, `--open`, `--no-open`, `--profile`, `--watch`, `--yes` |
 | `test-commands [show\|set]` ‡ | Show or set the project's merge-gate test commands. | `--commands`, `--yes` |
 | `test-settings [show\|set]` ‡ | Show or set project test settings (`require_sandbox`). | `--require-sandbox`, `--yes` |
 | `test-runs` | List the recorded test-command runs. | |

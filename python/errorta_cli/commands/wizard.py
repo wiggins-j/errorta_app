@@ -124,8 +124,19 @@ def _render(payload: Any, verbosity: Any, json_mode: bool) -> str:
     if kind == "aborted":
         return render(muted("wizard: aborted — no project created."))
     if kind == "created":
-        return render(muted(f"project '{payload.get('project_id')}' created — "
-                            "run it with: errorta run --yes"))
+        pid = payload.get("project_id")
+        created = payload.get("created") or {}
+        # Only point at `run` when the route actually confirmed setup (a team
+        # resolved). With no runnable provider it returns run_setup_confirmed=False
+        # + warnings; echoing "run it" there just sends the user into exit-12.
+        if created.get("run_setup_confirmed"):
+            return render(muted(f"project '{pid}' created — run it with: errorta run --yes"))
+        msg = f"project '{pid}' created, but it's not ready to run yet."
+        for w in (created.get("warnings") or []):
+            msg += f"\n  - {w}"
+        msg += ("\nConnect a provider and assign a team, then run:"
+                "\n  errorta connect <provider>   errorta team apply --yes   errorta run --yes")
+        return render(muted(msg))
     return render_wizard(payload)
 
 

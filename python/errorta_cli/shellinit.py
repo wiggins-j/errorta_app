@@ -18,9 +18,23 @@ shell startup.
 """
 from __future__ import annotations
 
+import os
+
 from .errors import CliError
 
 _SUPPORTED = ("zsh", "bash")
+
+
+def detect_shell() -> tuple[str, str]:
+    """Best-effort ``(shell, rc_file)`` from ``$SHELL`` for the auto-cd tip.
+
+    Only zsh and bash are supported by the hook; anything else (or an unset
+    ``$SHELL``) falls back to zsh + ``~/.zshrc`` (the macOS default login shell).
+    """
+    shell = (os.environ.get("SHELL") or "").rsplit("/", 1)[-1]
+    if shell == "bash":
+        return "bash", "~/.bashrc"
+    return "zsh", "~/.zshrc"
 
 # One POSIX-ish function body serves both zsh and bash: `local`, `builtin cd`,
 # and `command <tool>` all work in each. Quoting is careful because the default

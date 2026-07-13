@@ -73,14 +73,15 @@ _KEY_NOTE = "writes to your local provider-keys.json"
 # Key acquisition — no-echo prompt or --key-file; NEVER argv.
 # --------------------------------------------------------------------------- #
 
-def _read_key(args: dict[str, Any], *, label: str) -> str:
+def _read_key(args: dict[str, Any], *, label: str, json_mode: bool = False) -> str:
     """Acquire an API key WITHOUT it ever touching argv (§14, invariant #4).
 
     ``--key-file PATH`` (preferred for scripts) reads the file's first non-empty
     line; interactively we fall back to a ``getpass`` no-echo prompt. Refuses in a
     non-interactive session with no ``--key-file`` (a getpass over a pipe is unsafe
-    and pointless). The returned value is sensitive: callers must never log/render
-    it.
+    and pointless) — and equally under ``--json``, which is contractually never
+    allowed to prompt, even at a real TTY. The returned value is sensitive:
+    callers must never log/render it.
     """
     key_file = args.get("key-file")
     if key_file:
@@ -98,7 +99,7 @@ def _read_key(args: dict[str, Any], *, label: str) -> str:
         if not key:
             raise CliError("--key-file is empty", code="key_file_empty")
         return key
-    if not _mutate.is_interactive():
+    if json_mode or not _mutate.is_interactive():
         raise CliError(
             "no key source: provide the key via --key-file PATH "
             "(a key is never passed as a CLI argument)",
@@ -120,7 +121,7 @@ def _connect_api(client: SidecarClient, ctx: Context, provider: str,
     if not _mutate.confirm(ctx, args, f"save the {provider} API key",
                            note=_KEY_NOTE, interactive_prompt=False):
         return {"_kind": "aborted"}
-    key = _read_key(args, label=f"{provider} API key")
+    key = _read_key(args, label=f"{provider} API key", json_mode=ctx.json_mode)
     # PUT /provider-keys/{provider} (gateway.py:436) — returns mask_all().
     masked = client.put_json(f"/provider-keys/{provider}", json={"api_key": key})
     # POST /provider-keys/{provider}/test (gateway.py:477) — warms `connected`.
@@ -178,7 +179,7 @@ def _connect_custom(client: SidecarClient, ctx: Context,
     if not _mutate.confirm(ctx, args, f"save the custom provider '{alias}'",
                            note=_KEY_NOTE, interactive_prompt=False):
         return {"_kind": "aborted"}
-    key = _read_key(args, label=f"custom '{alias}' API key")
+    key = _read_key(args, label=f"custom '{alias}' API key", json_mode=ctx.json_mode)
     body: dict[str, Any] = {
         "alias": alias, "base_url": base_url, "api_key": key, "api_style": api_style,
     }

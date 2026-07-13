@@ -62,6 +62,19 @@ def test_run_watch_rejects_mutating_commands(make_ctx, name):
     assert client.calls == []  # never dispatched → nothing mutated / no budget spent
 
 
+def test_run_watch_reraises_internally_gated_mutation(make_ctx):
+    # `pm`/`runtime` register mutating=False (they have read AND write sub-verbs)
+    # and reject a watched mutation INSIDE the command. run_watch must surface
+    # that rejection ONCE and stop — not render "error: …" and re-loop forever.
+    client = RouteClient()
+    with pytest.raises(CliError) as ei:
+        watch.run_watch("runtime", client, make_ctx(project_id="p"),
+                        ["setup", "--watch"], iterations=5, sleep=lambda _s: None,
+                        out=io.StringIO(), clear=False)
+    assert ei.value.code == "watch_on_mutation"
+    assert client.calls == []  # guard fires before any HTTP
+
+
 def test_run_watch_run_streams_once(make_ctx, monkeypatch):
     # `run --watch` is NOT rejected: `run` already streams live, so run_watch
     # dispatches it exactly ONCE (no poll loop, no re-fire), not an error.

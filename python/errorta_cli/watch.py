@@ -74,6 +74,12 @@ def run_watch(
             print(f"unknown command: {name}", file=sys.stderr)
             return
         except CliError as exc:
+            # A command that rejects --watch on one of its OWN mutating sub-verbs
+            # (pm/runtime register mutating=False but guard internally) fails the
+            # same way every tick — re-raise so the caller prints it once and
+            # exits, instead of redrawing the rejection forever.
+            if exc.code == "watch_on_mutation":
+                raise
             text = f"error: {exc.message}"
         _draw(stream, text, clear)
         count += 1
@@ -126,6 +132,8 @@ def _run_stream(
             print(f"unknown command: {name}", file=sys.stderr)
             return
         except CliError as exc:
+            if exc.code == "watch_on_mutation":
+                raise  # deterministic rejection — surface once, don't tail forever
             stream.write(f"error: {exc.message}\n")
             stream.flush()
             entries = shown  # don't lose the cursor on a transient error
