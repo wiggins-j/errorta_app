@@ -156,27 +156,23 @@ GUI. Connect a provider, scope a project, start a run, and watch it live, with a
 layered verbosity dial and a `--json` surface for scripting and CI.
 
 ```bash
-# Install (macOS Apple Silicon):
+# 1 — Install (macOS Apple Silicon; alpha).
 brew install errorta/tap/errorta
 
-# Point errorta at your store (defaults to ~/.errorta); connect a model provider.
-# The API key is read from a hidden prompt, never from argv.
-errorta connect anthropic api
+# 2 — Connect a model provider. A Claude subscription is shown (no key stored);
+#      or use an API key: errorta connect anthropic api | openai api | ollama.
+errorta connect claudecode cli
 
-# Create a project rooted in the current directory.
-errorta new my-project --here --north-star "A CLI that renders Markdown tables"
+# 3 — Create a project. The folder is created for you under ~/Errorta Projects/<id>.
+errorta new my-app --north-star "A CLI that renders Markdown tables"
 
-# Build a multi-model coding team, commit it, and start the run.
-# (Or one-shot it: errorta team create --codingteam --default)
-errorta team create --codingteam
-errorta team add --pm       anthropic.claude-opus-4-8
-errorta team add --dev      anthropic.claude-sonnet-4-6 --count 3
-errorta team add --reviewer anthropic.claude-sonnet-4-6
+# 4 — Auto-assemble a default team (1 PM / 3 devs / reviewer / tester) and commit it.
+errorta team create --codingteam --default
 errorta team apply --yes
-errorta run --autonomous --yes
 
-# Follow the team log live from another terminal (tails as events land).
-errorta log --watch
+# 5 — Confirm the readiness gate, then run autonomously until it's done.
+errorta setup --confirm --yes
+errorta run --autonomous --yes
 ```
 
 **Full CLI documentation: [docs/CLI.md](docs/CLI.md)** — the complete command
