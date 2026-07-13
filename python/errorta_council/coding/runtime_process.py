@@ -1524,6 +1524,215 @@ def teardown_project(project_id: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# F157 — persisted-session orphan reaping.
+#
+# `_LIVE` only tracks processes THIS sidecar spawned, and `teardown_all` runs
+# only on a graceful shutdown (server.py lifespan finally). A crash / SIGKILL, or
+# a delete against a project whose server outlived a prior sidecar, leaves an
+# orphaned process group that nothing reaps. The pgid is already persisted per
+# session (`update_session(sid, pgid=...)`), so we can reap by pgid from the store
+# even when `_LIVE` is empty. Kept SEPARATE from `_kill_group` (the proven,
+# Popen-driven in-memory teardown) so this cross-restart path can't regress it.
+# --------------------------------------------------------------------------- #
+def _valid_pgid(pgid: Any) -> bool:
+    """A pgid we are allowed to signal. Rejects None and anything <= 1 — pgid 0
+    means the CALLER's own process group (killpg(0, …) would signal the sidecar
+    itself) and pgid 1 is init. Defense-in-depth for every signal path so a
+    corrupt/legacy persisted pgid can never turn a reap into self-immolation."""
+    return isinstance(pgid, int) and pgid > 1
+
+
+def _pgid_alive(pgid: int) -> bool:
+    """True if the process group still exists (signal 0 probes without killing)."""
+    if not _valid_pgid(pgid):
+        return False
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists but not ours to signal — treat as alive
+    except OSError:
+        return False
+
+
+def _kill_pgid(pgid: int, *, grace: float | None = None) -> bool:
+    """SIGTERM -> grace -> SIGKILL a process GROUP by bare pgid (no Popen handle).
+
+    Returns True if the group is gone afterward. Best-effort: swallows
+    ProcessLookupError / PermissionError / OSError. This is the persisted-reap
+    counterpart to `_kill_group`; ownership MUST already be confirmed by the
+    caller (`_pgid_is_ours`) — this function does not re-check."""
+    if not _valid_pgid(pgid):
+        return False   # never signal pgid 0 (our own group) / 1 (init)
+    grace = _GRACE_SECONDS if grace is None else grace
+
+    def _reap_if_child() -> None:
+        # If the group leader is OUR child, reap it so it doesn't linger as a
+        # zombie (which killpg(,0) still reports as a live group). In production
+        # the orphan was reparented to init after its sidecar died -> ECHILD here,
+        # and init reaps it; either way this is harmless best-effort.
+        try:
+            os.waitpid(pgid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        _reap_if_child()
+        return not _pgid_alive(pgid)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        _reap_if_child()
+        if not _pgid_alive(pgid):
+            break
+        time.sleep(0.05)
+    if _pgid_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        time.sleep(0.05)
+        _reap_if_child()
+    return not _pgid_alive(pgid)
+
+
+def _pgid_is_ours(pgid: int, *, workspace_root: Path) -> bool:
+    """PID-reuse guard — the safety-critical gate before any persisted-reap kill.
+
+    Returns True ONLY if the group leader (pid == pgid for our setsid spawns) is
+    a live, non-zombie process whose resolved cwd is inside this project's
+    workspace_root — the invariant every managed_local spawn enforces (spawn cwd =
+    (workspace_root / working_dir).resolve(), guarded to stay within the root).
+
+    Fail-closed: no psutil, an unreadable/zombie process, or a cwd we cannot
+    resolve to inside the workspace -> False. We would rather leave an orphan than
+    risk SIGKILLing a stranger's process that happens to reuse the pgid after a
+    reboot. There is deliberately NO argv fallback: a generic `npm run dev`
+    cmdline is not a safe identity signal."""
+    if not _valid_pgid(pgid):
+        return False
+    # The kill acts on the GROUP `pgid`; verify the process we are about to
+    # identity-check (pid == pgid) is actually THAT group's leader
+    # (getpgid(pid) == pgid) — every setsid spawn is. This ties the ownership
+    # check to the exact target killpg() will signal, so PID reuse can't make us
+    # validate one process (pid==pgid) while killpg signals a different group.
+    try:
+        if os.getpgid(pgid) != pgid:
+            return False
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return False
+    try:
+        proc = psutil.Process(pgid)
+        if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        cwd = Path(proc.cwd()).resolve()
+    except Exception:
+        return False
+    try:
+        root = Path(workspace_root).resolve()
+    except Exception:
+        return False
+    return cwd == root or cwd.is_relative_to(root)
+
+
+def _project_workspace_root(project_id: str) -> Path | None:
+    """The apply-workspace root for a project, computed WITHOUT side effects
+    (ApplyWorkspace.__init__ only derives paths; it creates nothing)."""
+    try:
+        from errorta_tools.runner.apply_workspace import ApplyWorkspace
+        return ApplyWorkspace(run_id=f"coding-{project_id}").root
+    except Exception:
+        return None
+
+
+def reap_persisted_sessions(rstore: RuntimeProfileStore, *, project_id: str,
+                            grace: float | None = None) -> int:
+    """Reap orphaned managed-local servers recorded in one project's session store.
+
+    For each persisted non-terminal session, decided by the pgid:
+
+    - a pgid the CURRENT sidecar is actively tracking (in ``_LIVE``) is left
+      strictly alone — it is a healthy running server, not an orphan;
+    - a pgid whose group is already GONE is recorded ``stopped``/``orphan_gone``
+      so the store stops advertising a phantom;
+    - a pgid confirmed ours (`_pgid_is_ours`) AND whose group we then confirm dead
+      after the kill is recorded ``stopped``/``reaped_orphan``;
+    - a pgid that is ALIVE but not confirmable as ours (or a kill we could not
+      confirm) is left NON-terminal on purpose — we neither kill a stranger that
+      may have reused the pgid nor mark a real orphan terminal (which would
+      abandon it); a later sweep retries once it is confirmable or gone.
+
+    Returns the number of groups actually killed. Per-session failures are
+    isolated so one bad session can't abort the rest of the sweep."""
+    workspace_root = _project_workspace_root(project_id)
+    if workspace_root is None:
+        return 0
+    # Never reap a process this sidecar is actively running (defends the public
+    # entrypoint: without this a call while a healthy server is live would
+    # SIGKILL it, since its pgid IS alive and its cwd IS in the workspace).
+    with _LIVE_LOCK:
+        live_pgids = {v.pgid for v in _LIVE.values() if v.pgid is not None}
+    killed = 0
+    for sess in rstore.list_sessions():
+        if sess.state in _TERMINAL:
+            continue
+        pgid = sess.pgid
+        try:
+            if not _valid_pgid(pgid):
+                # None is a mid-spawn session (leave it); a corrupt <=1 pgid is
+                # never signalable — record it gone so it stops being advertised.
+                if pgid is not None:
+                    rstore.update_session(sess.session_id, state="stopped",
+                                          error="orphan_gone", ended_at=_now())
+                continue
+            if pgid in live_pgids:
+                continue  # a server THIS sidecar owns — not an orphan
+            if not _pgid_alive(pgid):
+                rstore.update_session(sess.session_id, state="stopped",
+                                      error="orphan_gone", ended_at=_now())
+            elif _pgid_is_ours(pgid, workspace_root=workspace_root):
+                if _kill_pgid(pgid, grace=grace):
+                    rstore.update_session(sess.session_id, state="stopped",
+                                          error="reaped_orphan", ended_at=_now())
+                    killed += 1
+                # else: kill unconfirmed — leave non-terminal, a later sweep retries
+            # else: alive but not confirmable as ours — leave non-terminal (never
+            # abandon a real orphan, never kill a pgid-reuse stranger)
+        except Exception:  # noqa: BLE001 — isolate one session; sweep the rest
+            continue
+    return killed
+
+
+def reap_all_persisted_orphans() -> int:
+    """Boot sweep: reap managed-local servers orphaned by a NON-graceful prior
+    exit, across every project. Best-effort and defensive per project — one
+    unreadable store must not abort the sweep or block sidecar startup."""
+    from .ledger import LedgerStore, list_projects
+    total = 0
+    try:
+        projects = list_projects()
+    except Exception:
+        return 0
+    for entry in projects:
+        pid = entry.get("id") if isinstance(entry, dict) else None
+        if not pid:
+            continue
+        try:
+            rstore = RuntimeProfileStore.for_ledger(LedgerStore(pid))
+            total += reap_persisted_sessions(rstore, project_id=pid)
+        except Exception:
+            continue
+    return total
+
+
+# --------------------------------------------------------------------------- #
 # Small free functions
 # --------------------------------------------------------------------------- #
 def _now() -> str:
@@ -1555,4 +1764,6 @@ __all__ = [
     "redact_log_line",
     "teardown_all",
     "teardown_project",
+    "reap_persisted_sessions",
+    "reap_all_persisted_orphans",
 ]

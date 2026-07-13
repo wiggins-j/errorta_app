@@ -605,6 +605,19 @@ def delete_project(project_id: str, request: Request) -> dict[str, Any]:
     with store.lock:
         if _thread_alive(project_id):
             raise HTTPException(status_code=409, detail="project run is still active")
+        # F157: stop any managed-local runtime BEFORE removing its worktree — a
+        # live `next dev`/`vite`/`uvicorn` writing into the tree would otherwise
+        # race the rmtree (the observed delete 500) and, if orphaned across a
+        # prior sidecar, leak past the delete entirely. Reap in-memory servers
+        # this sidecar owns AND any persisted orphan for the project.
+        from errorta_council.coding import runtime_process as _runtime
+        from errorta_council.coding.runtime import RuntimeProfileStore
+        try:
+            _runtime.teardown_project(project_id)
+            _runtime.reap_persisted_sessions(
+                RuntimeProfileStore.for_ledger(store), project_id=project_id)
+        except Exception:  # noqa: BLE001 — reaping is best-effort; never block delete
+            pass
         ws.destroy()
         store.delete_project()
         _RUNS.pop(project_id, None)

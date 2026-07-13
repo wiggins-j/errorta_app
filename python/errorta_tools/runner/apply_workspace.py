@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,32 @@ def _safe_run_id(run_id: str) -> str:
     if not run_id or ".." in run_id or not _SAFE_RUN_ID_RE.match(run_id):
         raise ApplyWorkspaceError("apply_unsafe_run_id")
     return run_id
+
+
+def resilient_rmtree(path: Path, *, attempts: int = 3) -> None:
+    """F157: rmtree that tolerates a still-quiescing writer. A managed-local dev
+    server (e.g. `next dev` rewriting `.next`) that is still winding down after a
+    reap can make a plain ``rmtree`` race a vanishing/re-created file and raise —
+    the observed delete-500. Chmod-and-retry read-only entries, then retry the
+    whole removal a few times with a short backoff; the final attempt raises so a
+    genuinely stuck tree is still surfaced, not silently ignored."""
+    def _on_error(func, p, exc_info):  # noqa: ANN001 — shutil.rmtree onerror shape
+        # Read-only entry: chmod and retry the op. If it STILL fails, let it
+        # propagate — shutil.rmtree then re-raises out of the call below, which the
+        # retry/backoff loop catches (transient) or surfaces on the final attempt
+        # (genuinely stuck). Never swallow here, or the loop and the raise both die.
+        os.chmod(p, 0o700)
+        func(p)
+    for i in range(attempts):
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path, onerror=_on_error)
+            return
+        except Exception:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.2 * (i + 1))
 
 
 def _git(repo: Path, *args: str, _stdin: str | None = None,
@@ -431,7 +458,7 @@ class ApplyWorkspace:
             except Exception:
                 continue
         if self._worktrees_root.exists():
-            shutil.rmtree(self._worktrees_root)
+            resilient_rmtree(self._worktrees_root)  # F157: same quiescing-writer tolerance
         try:
             self._worktree_registry_path.unlink()
         except FileNotFoundError:
@@ -442,7 +469,7 @@ class ApplyWorkspace:
         with self._lock:
             self._clear_owned_worktrees()
             if self._root.exists():
-                shutil.rmtree(self._root)
+                resilient_rmtree(self._root)   # F157: tolerate a quiescing writer
             try:
                 self._meta_path.unlink()
             except FileNotFoundError:

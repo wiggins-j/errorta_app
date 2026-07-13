@@ -261,6 +261,43 @@ async def lifespan(app: FastAPI):
         )
         app.state.coding_recovery = None
 
+    # F157: reap managed-local runtime servers orphaned by a NON-graceful prior
+    # exit. The shutdown teardown_all (below, in the finally) only runs on a clean
+    # exit; a crash / SIGKILL leaks every spawned dev server, and nothing else
+    # reconciles the persisted pgids against reality. Run OFF the startup critical
+    # path in a daemon thread: a crash that left N SIGTERM-ignoring servers would
+    # otherwise add up to N×grace of dead-air before `yield` (each kill waits out
+    # its grace). The reap skips any pgid this sidecar is actively tracking, so
+    # running it concurrently with early serving is safe; the ownership guard
+    # fails closed, so a stranger is never hit. `app.state` exposes the thread for
+    # tests / observability.
+    try:
+        import threading as _threading
+
+        from errorta_council.coding import runtime_process as _runtime
+
+        def _f157_boot_reap() -> None:
+            try:
+                reaped = _runtime.reap_all_persisted_orphans()
+                if reaped:
+                    logging.getLogger("errorta.coding").info(
+                        "F157: reaped %d orphaned runtime server(s) from a prior "
+                        "sidecar", reaped,
+                    )
+            except Exception as exc:  # pragma: no cover - defensive only
+                logging.getLogger("errorta.coding").debug(
+                    "F157 boot reap failed: %s", exc
+                )
+
+        app.state.f157_reap_thread = _threading.Thread(
+            target=_f157_boot_reap, name="f157-boot-reap", daemon=True)
+        app.state.f157_reap_thread.start()
+    except Exception as exc:  # pragma: no cover - defensive only
+        logging.getLogger("errorta.coding").debug(
+            "F157 boot reap not started: %s", exc
+        )
+        app.state.f157_reap_thread = None
+
     # F065: bring up the mobile LAN listener if the connector is enabled
     # (off by default — no socket otherwise). Best-effort; a failure here must
     # not block the main sidecar.

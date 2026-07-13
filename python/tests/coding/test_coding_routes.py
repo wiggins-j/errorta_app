@@ -182,6 +182,55 @@ def test_delete_project_removes_ledger_and_owned_workspace(tmp_errorta_home: Pat
     assert "pdel" not in ids
 
 
+def test_delete_project_reaps_running_runtime(tmp_errorta_home: Path) -> None:
+    # F157: deleting a project whose managed-local server is still running must
+    # stop that server (no leaked process/port) AND not 500 on the worktree
+    # removal. Reproduces the live failure (a `next dev` outliving delete).
+    import os
+    import time
+
+    from errorta_council.coding import runtime_process as rp
+    from errorta_council.coding.ledger import LedgerStore
+    from errorta_council.coding.runtime import (
+        RuntimeProfileStore,
+        validate_profile,
+    )
+    from errorta_council.coding.workspace import CodingWorkspace
+
+    c = _client(tmp_errorta_home)
+    c.post("/coding/projects", json={"project_id": "preap", "north_star": "n",
+           "definition_of_done": "d", "target": "new"})
+    store = LedgerStore("preap")
+    ws = CodingWorkspace("preap", store)
+    workspace_root = ws.setup(target="new", repo_path=None)
+    rstore = RuntimeProfileStore.for_ledger(store)
+    rstore.upsert_profile(validate_profile(
+        {"kind": "web", "runtime_mode": "managed_local",
+         "start": ["python", "-c", "import time; print('serving'); time.sleep(60)"],
+         "sandbox": "none"}, profile_id="default", project_id="preap"))
+
+    mgr = rp.RuntimeProcessManager.for_project("preap")
+    sess = mgr.start("default")
+    try:
+        time.sleep(0.4)
+        sess = rstore.get_session(sess.session_id)
+        assert sess.pgid is not None
+        assert rp._pgid_alive(sess.pgid) is True, "server should be running"
+
+        r = c.delete("/coding/projects/preap")
+
+        assert r.status_code == 200, r.text
+        assert not workspace_root.exists()
+        # The server's process group is gone — no leak past delete.
+        assert rp._pgid_alive(sess.pgid) is False, "delete must reap the server"
+    finally:
+        if sess.pgid is not None:
+            try:
+                os.killpg(sess.pgid, 9)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
 def test_delete_project_refuses_live_run(tmp_errorta_home: Path) -> None:
     from errorta_app.routes import coding as coding_routes
     from errorta_council.coding.ledger import LedgerStore

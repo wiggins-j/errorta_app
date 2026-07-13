@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import tempfile
 import uuid
 from collections.abc import Iterable
@@ -664,7 +663,8 @@ class LedgerStore:
                 root.relative_to(parent)
             except ValueError as exc:
                 raise LedgerError("project directory escapes ledger root") from exc
-            shutil.rmtree(root)
+            from errorta_tools.runner.apply_workspace import resilient_rmtree
+            resilient_rmtree(root)   # F157: tolerate a briefly-open file on delete
             return True
 
     # --- backlog ---------------------------------------------------------
