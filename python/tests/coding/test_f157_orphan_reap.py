@@ -143,10 +143,13 @@ def test_reap_kills_confirmed_orphan(tmp_errorta_home: Path, _spawned) -> None:
     assert sess.state == "stopped" and sess.error == "reaped_orphan"
 
 
-def test_reap_spares_foreign_and_records_orphan_gone(
+def test_reap_spares_foreign_alive_and_leaves_nonterminal(
         tmp_errorta_home: Path, _spawned, tmp_path: Path) -> None:
-    # SAFETY: a foreign live process (cwd outside the workspace) is NOT killed;
-    # the phantom session is still cleared so the store stops advertising it.
+    # SAFETY (C1): a foreign live process (cwd outside the workspace) is NEVER
+    # killed, and — because it is still ALIVE — the session is left NON-terminal so
+    # a later sweep retries. We must not mark a live process terminal: if it were
+    # actually a real orphan we merely couldn't identify this pass, marking it
+    # stopped would abandon it forever.
     rstore, root = _project("f157-reap-foreign")
     foreign_cwd = tmp_path / "elsewhere"
     foreign_cwd.mkdir()
@@ -156,8 +159,50 @@ def test_reap_spares_foreign_and_records_orphan_gone(
     killed = rp.reap_persisted_sessions(rstore, project_id="f157-reap-foreign")
     assert killed == 0
     assert rp._pgid_alive(pgid) is True, "a foreign process must never be killed"
-    sess = rstore.get_session(sid)
-    assert sess.state == "stopped" and sess.error == "orphan_gone"
+    assert rstore.get_session(sid).state == "running", \
+        "a live-but-unconfirmed process must stay non-terminal for a later retry"
+
+
+def test_valid_pgid_guard() -> None:
+    # A6: pgid 0 (the caller's OWN group) and 1 (init) are never signalable.
+    assert rp._valid_pgid(0) is False
+    assert rp._valid_pgid(1) is False
+    assert rp._valid_pgid(None) is False
+    assert rp._valid_pgid(-5) is False
+    assert rp._valid_pgid(12345) is True
+    # The signal helpers fail closed on an invalid pgid (no killpg(0) self-hit).
+    assert rp._pgid_alive(0) is False
+    assert rp._kill_pgid(0) is False
+
+
+def test_reap_skips_pgid_zero_without_signaling(tmp_errorta_home: Path) -> None:
+    # A corrupt/legacy session with pgid=0 must NOT reach os.killpg(0, …) (which
+    # would signal the sidecar's own group). It is recorded gone instead.
+    rstore, root = _project("f157-pgid0")
+    sid = _record_session(rstore, pgid=0, state="running")
+    killed = rp.reap_persisted_sessions(rstore, project_id="f157-pgid0")
+    assert killed == 0
+    assert rstore.get_session(sid).error == "orphan_gone"
+
+
+def test_reap_skips_live_sidecar_server(tmp_errorta_home: Path, _spawned) -> None:
+    # A5: a session whose pgid the current sidecar is actively tracking (in _LIVE)
+    # is a healthy running server, not an orphan — it must never be reaped, even
+    # though its pgid is alive and its cwd is inside the workspace.
+    rstore, root = _project("f157-live")
+    proc, pgid = _spawned(root)
+    sid = _record_session(rstore, pgid=pgid, state="running")
+    live = rp._Live(session_id="rs-live", project_id="f157-live", pgid=pgid)
+    with rp._LIVE_LOCK:
+        rp._LIVE["rs-live"] = live
+    try:
+        killed = rp.reap_persisted_sessions(rstore, project_id="f157-live")
+    finally:
+        with rp._LIVE_LOCK:
+            rp._LIVE.pop("rs-live", None)
+    assert killed == 0
+    assert rp._pgid_alive(pgid) is True, "a live sidecar-owned server must not be reaped"
+    assert rstore.get_session(sid).state == "running"
 
 
 def test_reap_skips_terminal_and_null_pgid(tmp_errorta_home: Path,
@@ -233,6 +278,26 @@ def test_resilient_rmtree_noop_on_missing(tmp_path: Path) -> None:
     resilient_rmtree(tmp_path / "does-not-exist")  # must not raise
 
 
+def test_resilient_rmtree_retries_then_raises_when_stuck(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A genuinely un-removable tree must be SURFACED, not silently swallowed:
+    # resilient_rmtree retries `attempts` times and then re-raises (regression for
+    # the onerror that used to swallow every failure, killing both loop and raise).
+    import errorta_tools.runner.apply_workspace as aw
+    root = tmp_path / "stuck"
+    root.mkdir()
+    calls = {"n": 0}
+
+    def _always_fail(path, onerror=None):  # noqa: ANN001
+        calls["n"] += 1
+        raise OSError("Device or resource busy")
+
+    monkeypatch.setattr(aw.shutil, "rmtree", _always_fail)
+    with pytest.raises(OSError):
+        aw.resilient_rmtree(root, attempts=3)
+    assert calls["n"] == 3, "must retry all attempts before raising, not swallow"
+
+
 # --- boot-reap integration (the sidecar startup actually invokes the sweep) ---
 
 def test_sidecar_boot_reaps_prior_orphan(tmp_errorta_home: Path, _spawned) -> None:
@@ -248,7 +313,12 @@ def test_sidecar_boot_reaps_prior_orphan(tmp_errorta_home: Path, _spawned) -> No
 
     from errorta_app.server import app
     with TestClient(app, headers={"x-errorta-origin": "tauri-ui"}):
-        pass  # entering/exiting the context runs startup (then shutdown)
+        # The boot reap runs in a daemon thread (off the startup critical path);
+        # join it before asserting.
+        thread = getattr(app.state, "f157_reap_thread", None)
+        assert thread is not None, "boot reap thread should have started"
+        thread.join(timeout=15)
+        assert not thread.is_alive(), "boot reap did not finish in time"
 
     assert rp._pgid_alive(pgid) is False, "boot reap must kill the orphan"
     assert rstore.get_session(sid).error == "reaped_orphan"

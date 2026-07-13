@@ -249,7 +249,41 @@ Deviations from the design above, chosen to reduce risk:
   `LedgerStore.delete_project`) both route through a shared
   `resilient_rmtree` (chmod-and-retry `onerror` + bounded retry).
 - **Boot reap** lives in the lifespan next to the existing coding boot-recovery
-  block and is fully best-effort (never blocks `yield`).
+  block. It runs in a **daemon thread** (not inline) so a crash that left several
+  SIGTERM-ignoring servers can't add N×grace of startup latency before `yield`.
+
+### Safety hardening (from the high-effort review)
+
+The reap is the safety-critical path (it SIGKILLs process groups). These guards
+were added after review:
+
+- **`_valid_pgid` rejects pgid ≤ 1** on every signal path. pgid `0` is the
+  caller's own process group — `killpg(0, …)` would signal the sidecar itself — so
+  a corrupt/legacy persisted pgid can never cause self-immolation.
+- **Group-leader identity check.** `_pgid_is_ours` first confirms
+  `os.getpgid(pgid) == pgid` (the validated pid is the leader of the group
+  `killpg` will signal). This ties the identity check to the exact kill target, so
+  PID reuse can't make us validate one process while signalling a different group.
+- **Never reap a live sidecar-owned server.** `reap_persisted_sessions` skips any
+  pgid currently in `_LIVE`, so the public entrypoint can't SIGKILL a healthy
+  server this sidecar is running.
+- **Terminal only when confirmed dead/killed.** A session is marked terminal only
+  when its group is gone (`orphan_gone`) or a confirmed kill succeeded
+  (`reaped_orphan`). A process that is alive but not confirmable as ours (or a kill
+  we couldn't confirm) is left NON-terminal so a later sweep retries — never
+  abandoning a real orphan, never killing a stranger.
+- **`resilient_rmtree` re-raises genuine failures.** Its `onerror` chmod-retries a
+  read-only entry and otherwise propagates, so the retry/backoff loop drives
+  transient races and the final attempt surfaces a genuinely stuck tree (an earlier
+  swallow-all `onerror` made both the loop and the raise dead code). Both delete
+  rmtrees (`_root` and the owned-worktrees root) use it.
+- **Per-session isolation.** One session's failure can't abort the rest of a
+  project's sweep.
+
+Known limitation (follow-up): if a group's LEADER exits while child processes
+survive in the group, the leader-based ownership check can't confirm it; that
+session is left non-terminal (retried), not force-killed. In practice the managed
+leader (npm/node) persists for the server's lifetime.
 
 ## Out of scope
 

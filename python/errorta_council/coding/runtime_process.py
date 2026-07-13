@@ -1534,8 +1534,18 @@ def teardown_project(project_id: str) -> int:
 # even when `_LIVE` is empty. Kept SEPARATE from `_kill_group` (the proven,
 # Popen-driven in-memory teardown) so this cross-restart path can't regress it.
 # --------------------------------------------------------------------------- #
+def _valid_pgid(pgid: Any) -> bool:
+    """A pgid we are allowed to signal. Rejects None and anything <= 1 — pgid 0
+    means the CALLER's own process group (killpg(0, …) would signal the sidecar
+    itself) and pgid 1 is init. Defense-in-depth for every signal path so a
+    corrupt/legacy persisted pgid can never turn a reap into self-immolation."""
+    return isinstance(pgid, int) and pgid > 1
+
+
 def _pgid_alive(pgid: int) -> bool:
     """True if the process group still exists (signal 0 probes without killing)."""
+    if not _valid_pgid(pgid):
+        return False
     try:
         os.killpg(pgid, 0)
         return True
@@ -1554,6 +1564,8 @@ def _kill_pgid(pgid: int, *, grace: float | None = None) -> bool:
     ProcessLookupError / PermissionError / OSError. This is the persisted-reap
     counterpart to `_kill_group`; ownership MUST already be confirmed by the
     caller (`_pgid_is_ours`) — this function does not re-check."""
+    if not _valid_pgid(pgid):
+        return False   # never signal pgid 0 (our own group) / 1 (init)
     grace = _GRACE_SECONDS if grace is None else grace
 
     def _reap_if_child() -> None:
@@ -1600,6 +1612,18 @@ def _pgid_is_ours(pgid: int, *, workspace_root: Path) -> bool:
     risk SIGKILLing a stranger's process that happens to reuse the pgid after a
     reboot. There is deliberately NO argv fallback: a generic `npm run dev`
     cmdline is not a safe identity signal."""
+    if not _valid_pgid(pgid):
+        return False
+    # The kill acts on the GROUP `pgid`; verify the process we are about to
+    # identity-check (pid == pgid) is actually THAT group's leader
+    # (getpgid(pid) == pgid) — every setsid spawn is. This ties the ownership
+    # check to the exact target killpg() will signal, so PID reuse can't make us
+    # validate one process (pid==pgid) while killpg signals a different group.
+    try:
+        if os.getpgid(pgid) != pgid:
+            return False
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
     try:
         import psutil  # type: ignore
     except Exception:
@@ -1632,27 +1656,57 @@ def reap_persisted_sessions(rstore: RuntimeProfileStore, *, project_id: str,
                             grace: float | None = None) -> int:
     """Reap orphaned managed-local servers recorded in one project's session store.
 
-    For each persisted session that is non-terminal and has a pgid: if it is
-    positively confirmed ours (`_pgid_is_ours`), kill its group and mark the
-    session ``stopped``/``reaped_orphan``; otherwise (already dead, foreign, or
-    unconfirmable) leave any process untouched and mark the session
-    ``stopped``/``orphan_gone`` so the store stops advertising a phantom live
-    server. Returns the number of groups actually killed."""
+    For each persisted non-terminal session, decided by the pgid:
+
+    - a pgid the CURRENT sidecar is actively tracking (in ``_LIVE``) is left
+      strictly alone — it is a healthy running server, not an orphan;
+    - a pgid whose group is already GONE is recorded ``stopped``/``orphan_gone``
+      so the store stops advertising a phantom;
+    - a pgid confirmed ours (`_pgid_is_ours`) AND whose group we then confirm dead
+      after the kill is recorded ``stopped``/``reaped_orphan``;
+    - a pgid that is ALIVE but not confirmable as ours (or a kill we could not
+      confirm) is left NON-terminal on purpose — we neither kill a stranger that
+      may have reused the pgid nor mark a real orphan terminal (which would
+      abandon it); a later sweep retries once it is confirmable or gone.
+
+    Returns the number of groups actually killed. Per-session failures are
+    isolated so one bad session can't abort the rest of the sweep."""
     workspace_root = _project_workspace_root(project_id)
     if workspace_root is None:
         return 0
+    # Never reap a process this sidecar is actively running (defends the public
+    # entrypoint: without this a call while a healthy server is live would
+    # SIGKILL it, since its pgid IS alive and its cwd IS in the workspace).
+    with _LIVE_LOCK:
+        live_pgids = {v.pgid for v in _LIVE.values() if v.pgid is not None}
     killed = 0
     for sess in rstore.list_sessions():
-        if sess.state in _TERMINAL or sess.pgid is None:
+        if sess.state in _TERMINAL:
             continue
-        if _pgid_is_ours(sess.pgid, workspace_root=workspace_root):
-            _kill_pgid(sess.pgid, grace=grace)
-            rstore.update_session(sess.session_id, state="stopped",
-                                  error="reaped_orphan", ended_at=_now())
-            killed += 1
-        else:
-            rstore.update_session(sess.session_id, state="stopped",
-                                  error="orphan_gone", ended_at=_now())
+        pgid = sess.pgid
+        try:
+            if not _valid_pgid(pgid):
+                # None is a mid-spawn session (leave it); a corrupt <=1 pgid is
+                # never signalable — record it gone so it stops being advertised.
+                if pgid is not None:
+                    rstore.update_session(sess.session_id, state="stopped",
+                                          error="orphan_gone", ended_at=_now())
+                continue
+            if pgid in live_pgids:
+                continue  # a server THIS sidecar owns — not an orphan
+            if not _pgid_alive(pgid):
+                rstore.update_session(sess.session_id, state="stopped",
+                                      error="orphan_gone", ended_at=_now())
+            elif _pgid_is_ours(pgid, workspace_root=workspace_root):
+                if _kill_pgid(pgid, grace=grace):
+                    rstore.update_session(sess.session_id, state="stopped",
+                                          error="reaped_orphan", ended_at=_now())
+                    killed += 1
+                # else: kill unconfirmed — leave non-terminal, a later sweep retries
+            # else: alive but not confirmable as ours — leave non-terminal (never
+            # abandon a real orphan, never kill a pgid-reuse stranger)
+        except Exception:  # noqa: BLE001 — isolate one session; sweep the rest
+            continue
     return killed
 
 

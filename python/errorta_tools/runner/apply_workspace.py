@@ -109,11 +109,12 @@ def resilient_rmtree(path: Path, *, attempts: int = 3) -> None:
     whole removal a few times with a short backoff; the final attempt raises so a
     genuinely stuck tree is still surfaced, not silently ignored."""
     def _on_error(func, p, exc_info):  # noqa: ANN001 — shutil.rmtree onerror shape
-        try:
-            os.chmod(p, 0o700)
-            func(p)
-        except Exception:
-            pass  # swallowed here; a persistent failure re-raises via the retry loop
+        # Read-only entry: chmod and retry the op. If it STILL fails, let it
+        # propagate — shutil.rmtree then re-raises out of the call below, which the
+        # retry/backoff loop catches (transient) or surfaces on the final attempt
+        # (genuinely stuck). Never swallow here, or the loop and the raise both die.
+        os.chmod(p, 0o700)
+        func(p)
     for i in range(attempts):
         if not path.exists():
             return
@@ -457,7 +458,7 @@ class ApplyWorkspace:
             except Exception:
                 continue
         if self._worktrees_root.exists():
-            shutil.rmtree(self._worktrees_root)
+            resilient_rmtree(self._worktrees_root)  # F157: same quiescing-writer tolerance
         try:
             self._worktree_registry_path.unlink()
         except FileNotFoundError:
