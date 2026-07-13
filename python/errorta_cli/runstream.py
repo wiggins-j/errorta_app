@@ -67,6 +67,7 @@ TERMINAL_STATUSES = frozenset({"stopped", "failed", "interrupted"})
 FAILURE_STOP_REASONS = frozenset({
     "budget_exhausted", "no_progress", "hard_blocker", "member_unhealthy",
     "worker_unproductive", "completion_blocked", "not_converging",
+    "delivery_review_stalled",
 })
 
 # stop_reasons that are a clean finish / benign stop (exit 0).
@@ -87,6 +88,8 @@ STOP_REASON_GLOSS: dict[str, str] = {
     "worker_unproductive": "a worker produced no usable output",
     "completion_blocked": "completion was refused / blocked",
     "not_converging": "the work stopped converging",
+    "delivery_review_stalled": ("delivery review kept rejecting the integrated "
+                                "result — stopped instead of burning budget"),
     "interrupted": "the run was interrupted (recoverable — resume it)",
     "failed": "the run failed with an unexpected error",
 }

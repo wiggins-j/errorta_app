@@ -195,6 +195,8 @@ function summaryOutcome(
     case "member_unhealthy":
     case "worker_unproductive":
     case "completion_blocked":
+    case "not_converging":
+    case "delivery_review_stalled":
       return { label: `⚠ Stopped without completing (${reason})`, tone: "warn" };
     default:
       return projectStatus === "done"

@@ -17,7 +17,10 @@ from pathlib import Path
 from errorta_council.coding.autonomy import (
     CADENCE_OFF,
     DEFINITION_OF_DONE,
+    DELIVERY_REVIEW_STALLED,
     CodingAutonomyPolicy,
+    policy_from_dict,
+    policy_to_dict,
 )
 from errorta_council.coding.evidence import merge_review
 from errorta_council.coding.ledger import LedgerStore
@@ -313,3 +316,47 @@ def test_delivery_review_skipped_without_reviewer_or_pm(tmp_errorta_home: Path) 
     result = rt.delivery_review(store)
     assert result.passed
     assert calls == []
+
+
+# --- F155: delivery-review round cap ------------------------------------------
+
+def test_delivery_review_round_limit_roundtrip() -> None:
+    p = CodingAutonomyPolicy(delivery_review_round_limit=5)
+    assert policy_to_dict(p)["delivery_review_round_limit"] == 5
+    assert policy_from_dict(policy_to_dict(p)).delivery_review_round_limit == 5
+    # Clamped to >= 1.
+    assert policy_from_dict({"delivery_review_round_limit": 0}
+                            ).delivery_review_round_limit == 1
+    # Default present.
+    assert CodingAutonomyPolicy().delivery_review_round_limit == 3
+
+
+class DeliveryStallFake(DeliveryFake):
+    """Always rejects delivery, and each dev turn writes DIFFERENT content so the
+    integrated head changes every round — forcing a real re-review + fresh findings
+    each time (the reject->fix->re-review livelock the round cap must stop)."""
+
+    def __init__(self) -> None:
+        super().__init__(deliver_approved=False)
+        self.dev_calls = 0
+
+    def __call__(self, member: dict, prompt: str) -> str:
+        if "You are a developer" in prompt:
+            self.dev_calls += 1
+            body = _ADD + f"\n# fix attempt {self.dev_calls}\n"
+            return _dev_env(_task_id(prompt, "developer"), [("calc.py", body)])
+        return super().__call__(member, prompt)
+
+
+def test_delivery_review_stalls_at_round_limit(tmp_errorta_home: Path) -> None:
+    # A delivery review that keeps rejecting a genuinely-changing head stops the
+    # run `delivery_review_stalled` at the cap — NOT budget_exhausted, NOT a loop.
+    store = _make("f155-stall", _PASS_CMD)
+    fake = DeliveryStallFake()
+    runner = CodingRunner("f155-stall", MEMBERS, fake, guardrail_enabled=True)
+    res = runner.run(CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF,
+                                          max_iterations=80,
+                                          delivery_review_round_limit=2))
+    assert res.stop_reason == DELIVERY_REVIEW_STALLED, res.stop_reason
+    assert store.get_project().status != "done"
+    assert fake.delivery_review_calls >= 2

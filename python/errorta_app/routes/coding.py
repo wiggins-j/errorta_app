@@ -2714,6 +2714,7 @@ class _RunSetupConfirmBody(BaseModel):
     max_model_calls: Optional[int] = None
     max_parallel_workers: Optional[int] = None
     member_failure_limit: Optional[int] = None
+    delivery_review_round_limit: Optional[int] = None  # F155
     preflight_enabled: Optional[bool] = None
     team_room_id: Optional[str] = None
     members: Optional[list[dict[str, Any]]] = None
@@ -2821,7 +2822,8 @@ def confirm_run_setup(
     # 2) Autonomy policy (cadence + spend caps + member_failure_limit).
     pol = policy_to_dict(load_policy(store))
     for key in ("checkpoint_cadence", "checkpoint_n", "max_iterations",
-                "max_model_calls", "max_parallel_workers", "member_failure_limit"):
+                "max_model_calls", "max_parallel_workers", "member_failure_limit",
+                "delivery_review_round_limit"):
         val = getattr(body, key)
         if val is not None:
             pol[key] = val

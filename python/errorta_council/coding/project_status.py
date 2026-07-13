@@ -30,6 +30,7 @@ _NEEDS_ATTENTION_REASONS = {
     "no_progress": "conflict_or_blocker",
     "completion_blocked": "conflict_or_blocker",
     "test_failure_blocked": "conflict_or_blocker",
+    "delivery_review_stalled": "conflict_or_blocker",  # F155
     "budget_exhausted": "budget_exhausted",
 }
 

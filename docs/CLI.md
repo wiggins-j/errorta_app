@@ -339,7 +339,7 @@ on the **first** member — use `team create` + `team add` to (re)build the set.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `setup` ‡ | Show / preflight / confirm run setup — the readiness gate. | `--preflight`, `--confirm`, `--room`, `--governance`, `--guardrail`, `--max-iterations`, `--max-model-calls`, `--max-parallel`, `--max-review-rounds`, `--checkpoint-cadence`, `--checkpoint-n`, `--block-on-problems`, `--human-code-approval`, `--member-failure-limit`, `--preflight-enabled`, `--yes` |
+| `setup` ‡ | Show / preflight / confirm run setup — the readiness gate. | `--preflight`, `--confirm`, `--room`, `--governance`, `--guardrail`, `--max-iterations`, `--max-model-calls`, `--max-parallel`, `--max-review-rounds`, `--checkpoint-cadence`, `--checkpoint-n`, `--block-on-problems`, `--human-code-approval`, `--member-failure-limit`, `--delivery-review-round-limit`, `--preflight-enabled`, `--yes` |
 | `run` ‡ | Start a fresh run and stream the live view until it finishes. | `--room`, `--members`, `--autonomous`, `--checkpoint-cadence`, `--detach`, `--yes` |
 | `cancel` (alias `stop`) ‡ | Request cancellation of the running run (observed at the next turn boundary). | `--yes` |
 | `resume` ‡ | Resume an interrupted run (recovers its saved team). | `--room`, `--members`, `--autonomous`, `--yes` |
@@ -599,7 +599,18 @@ For a runnable deliverable (a game, a server, a CLI), Errorta can launch the
 delivered code to prove it actually starts. The engine already does this in-loop
 as part of the F146 delivery review — a final reviewer pass, a final test run, and
 a headless launch probe — so "done" means the code was reviewed, tested, *and*
-ran. From the CLI you can also drive it directly:
+ran. The launch probe is strict: for a **web/API** deliverable it **requests the
+app and requires it to serve** (a server that binds a port but only returns HTTP
+5xx — the "it doesn't compile" case — fails the gate); **any** exit of a web/API/
+desktop program during startup is a failed launch; and crashes are detected across
+languages (not only Python tracebacks). A build failure that only shows on a route
+the probe doesn't request is caught by registering a build command — e.g.
+`errorta test-commands set --commands '["npm run build"]'`.
+
+If the delivery review keeps rejecting the integrated result, the run stops with
+`delivery_review_stalled` after `--delivery-review-round-limit` rounds (default 3)
+instead of looping to `budget_exhausted`. From the CLI you can also drive the
+launch directly:
 
 ```bash
 errorta runtime                         # read the detected run profiles
