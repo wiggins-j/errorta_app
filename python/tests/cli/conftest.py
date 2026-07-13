@@ -35,7 +35,8 @@ class RecordingClient:
     def get_json(self, path: str, *, params: dict | None = None) -> Any:
         return self._record("GET", path)
 
-    def post_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
+    def post_json(self, path: str, *, json: Any | None = None, params: dict | None = None,
+                  timeout: float | None = None) -> Any:
         return self._record("POST", path)
 
     def put_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
@@ -75,7 +76,8 @@ class RouteClient:
     def get_json(self, path: str, *, params: dict | None = None) -> Any:
         return self._resp("GET", path)
 
-    def post_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:
+    def post_json(self, path: str, *, json: Any | None = None, params: dict | None = None,
+                  timeout: float | None = None) -> Any:
         return self._resp("POST", path)
 
     def put_json(self, path: str, *, json: Any | None = None, params: dict | None = None) -> Any:

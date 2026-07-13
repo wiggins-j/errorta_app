@@ -20,20 +20,32 @@ def render_pm(payload: Any, verbosity: Any) -> str:
     return _render_chat(payload)
 
 
+def _chat_line(msg: dict) -> Text:
+    """One PM-chat turn as a colorized line (shared by the block render + the
+    F158 `pm chat --watch` tail)."""
+    role = str(msg.get("role") or "user")
+    body = msg.get("message") or msg.get("text") or msg.get("content") or ""
+    line = Text()
+    line.append(f"{ts(msg.get('at')):>8} ", style="cli.muted")
+    line.append(f"{role:<8} ", style=role_style(role))
+    line.append(truncate(body, 120))
+    return line
+
+
 def _render_chat(payload: Any) -> str:
     thread = (payload or {}).get("thread") or []
     if not thread:
         return render(muted("(no PM chat history)"))
-    lines: list[Text] = []
-    for msg in thread:
-        role = str(msg.get("role") or "user")
-        body = msg.get("message") or msg.get("text") or msg.get("content") or ""
-        line = Text()
-        line.append(f"{ts(msg.get('at')):>8} ", style="cli.muted")
-        line.append(f"{role:<8} ", style=role_style(role))
-        line.append(truncate(body, 120))
-        lines.append(line)
-    return render(heading("PM chat"), *lines)
+    return render(heading("PM chat"), *[_chat_line(m) for m in thread])
+
+
+# F158 stream hooks — extractor + per-turn renderer for `pm chat --watch`.
+def thread_entries(payload: Any) -> list:
+    return (payload or {}).get("thread") or []
+
+
+def render_chat_entries(entries: list) -> list[str]:
+    return [render(_chat_line(m)) for m in entries]
 
 
 def _render_changes(payload: Any) -> str:

@@ -94,6 +94,17 @@ def render_stream_event(event: Any) -> str | None:
         line.append(f" → {item.get('status') or ''}")
         return render(line)
 
+    if channel == "pm":
+        # F158: surface the PM's turns mid-run. Skip the user's own turns — they
+        # typed them; echoing them back is noise.
+        if str(item.get("role") or "") != "pm":
+            return None
+        line = Text()
+        line.append(f"{ts(item.get('at')):>8} ", style="cli.muted")
+        line.append("PM ", style=role_style("pm"))
+        line.append(str(item.get("message") or ""))
+        return render(line)
+
     return None
 
 

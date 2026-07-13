@@ -63,8 +63,14 @@ def run_watch(
         )
     stream = out or sys.stdout
     tick = interval if interval is not None else (ctx.poll_interval or DEFAULT_INTERVAL)
-    if command is not None and command.watch_mode == "stream":
-        _run_stream(name, client, ctx, raw_args, stream, tick, iterations, sleep)
+    # F158: resolve the watch mode per-invocation so a command with mixed sub-verbs
+    # (e.g. `pm chat` streams, `pm changes` snapshots) picks the right one.
+    mode = "snapshot"
+    if command is not None:
+        mode = command.watch_mode_for(registry.resolve_args(command, raw_args))
+    if mode == "stream":
+        _run_stream(name, client, ctx, raw_args, stream, tick, iterations, sleep,
+                    command=command)
         return
     count = 0
     while True:
@@ -113,21 +119,30 @@ def _run_stream(
     name: str, client: Any, ctx: Context, raw_args: list[str],
     stream: TextIO, tick: float, iterations: int | None,
     sleep: Callable[[float], None],
+    *, command: Any | None = None,
 ) -> None:
-    """Tail a stream command (log): print only entries appended since last tick.
+    """Tail a stream command: print only entries appended since last tick.
 
-    The team-log has no stable per-event key (it's re-sorted, entries mutate), so
-    diff by content longest-common-prefix: append the suffix after the shared
-    prefix; if the prefix diverged (mid-list insert / mutation / reset), reprint
-    from the divergence point. Never clears the screen."""
-    from .render.log import filtered_entries, render_entries
+    The source has no stable per-event key (the team-log is re-sorted and entries
+    mutate; a chat transcript is append-mostly), so diff by content
+    longest-common-prefix: append the suffix after the shared prefix; if the
+    prefix diverged (mid-list insert / mutation / reset), reprint from the
+    divergence point. Never clears the screen.
+
+    F158: the entry extractor + per-entry renderer come from the command
+    (``stream_entries_fn`` / ``stream_render_fn``); both default to the team-log
+    implementation so `log --watch` is unchanged."""
+    from .render.log import filtered_entries
+    from .render.log import render_entries as _log_render
+    extract = getattr(command, "stream_entries_fn", None) or filtered_entries
+    render_entries = getattr(command, "stream_render_fn", None) or _log_render
     shown: list = []
     first = True
     count = 0
     while True:
         try:
             payload, _text = registry.dispatch(name, client, ctx, raw_args, json_mode=False)
-            entries = filtered_entries(payload)
+            entries = extract(payload)
         except KeyError:
             print(f"unknown command: {name}", file=sys.stderr)
             return

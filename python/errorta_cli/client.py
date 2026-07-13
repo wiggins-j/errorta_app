@@ -83,12 +83,19 @@ class SidecarClient:
         *,
         json: Any | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         """Issue a request with the origin header; map errors to CliError.
 
         The header is set on the client *and* re-asserted per request so it can
-        never be dropped by a caller passing custom headers later.
+        never be dropped by a caller passing custom headers later. ``timeout``
+        overrides the client default for this one call — needed for the
+        synchronous ``pm-ask`` turn, which can run far longer than the 30s
+        default (the sidecar waits up to ~120s for the PM model).
         """
+        # httpx uses a sentinel for "no per-request override"; only pass timeout
+        # when the caller set one, so the client default applies otherwise.
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
             resp = self._http.request(
                 method,
@@ -96,6 +103,7 @@ class SidecarClient:
                 json=json,
                 params=params,
                 headers={ORIGIN_HEADER: ORIGIN_VALUE},
+                **extra,
             )
         except httpx.HTTPError as exc:
             raise SidecarUnreachable(
@@ -113,8 +121,11 @@ class SidecarClient:
         *,
         json: Any | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
-        return _json_body(self.request("POST", path, json=json, params=params))
+        return _json_body(
+            self.request("POST", path, json=json, params=params, timeout=timeout)
+        )
 
     def put_json(
         self,

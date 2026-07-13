@@ -33,7 +33,7 @@ class Level(IntEnum):
 
 # The known live-view channels and the minimum global level at which each one
 # appears by default. Mirrors the §6.1 table:
-#   L1 default : team-log, attention, prs
+#   L1 default : team-log, attention, prs, pm (PM chat messages mid-run)
 #   L2 verbose : + decisions, runtime (task transitions/test runs/launch)
 #   L3 debug   : + turns (per-turn headers), tokens
 #   L4 trace   : + tools (tool-events, prompt/response)
@@ -42,6 +42,7 @@ CHANNEL_MIN_LEVEL: dict[str, int] = {
     "team-log": Level.DEFAULT,
     "attention": Level.DEFAULT,
     "prs": Level.DEFAULT,
+    "pm": Level.DEFAULT,  # F158: PM messages posted mid-run (a message to you)
     "decisions": Level.VERBOSE,
     "runtime": Level.VERBOSE,
     "turns": Level.DEBUG,
