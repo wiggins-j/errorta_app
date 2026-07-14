@@ -175,5 +175,8 @@ the grounding build so users aren't surprised.
 ### After the release
 
 - Verify: `brew install errorta/tap/errorta && errorta --help`.
+- **Adoption:** `scripts/install-stats.sh` prints per-release download counts —
+  the best install proxy for a tap (Homebrew publishes no analytics for a
+  third-party tap; each `brew install`/`upgrade` fetches the release tarball once).
 - The PyPI path (`pip install errorta-cli`) is a **separate, later** track gated
   on AIAR being published to PyPI — see the F148 spec §5.
