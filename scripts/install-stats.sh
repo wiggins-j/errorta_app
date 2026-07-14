@@ -26,8 +26,8 @@ gh auth status >/dev/null 2>&1 || { echo "error: gh not authenticated (gh auth l
 
 # Pull every release + its assets. Filter to CLI releases (tag prefix cli-v),
 # which is where the Homebrew tarballs live.
-releases="$(gh api "repos/${REPO}/releases" --paginate \
-  --jq '[ .[] | select(.tag_name | startswith("cli-v"))
+releases="$(gh api "repos/${REPO}/releases" --paginate --slurp \
+  | jq '[ .[][] | select(.tag_name | startswith("cli-v"))
           | { tag: .tag_name, prerelease: .prerelease, published: .published_at,
               assets: [ .assets[] | { name: .name, downloads: .download_count } ] } ]')"
 
