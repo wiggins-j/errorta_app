@@ -18,6 +18,7 @@ from errorta_council.coding.topology import (
     DEV,
     PM,
     REVIEWER,
+    TESTER,
     Assign,
     plan_next_batch,
 )
@@ -209,3 +210,102 @@ def test_freeze_lifts_when_no_paths(tmp_path: Path):
     c.hot_freeze_stall = 5
     _account_hot_file_freeze(s, c, CodingAutonomyPolicy())
     assert c.hot_freeze_stall == 0  # reset when nothing is frozen
+
+
+# --------------------------------------------------------------------------- #
+# Freeze "teeth": a freeze must hold prose-silent DEV writers, not just tasks
+# that happen to name the frozen file. The mockData.ts non-convergence was a
+# freeze that was set but inert because real dev tasks name no file.
+# --------------------------------------------------------------------------- #
+
+def test_freeze_holds_prose_silent_dev_writer(tmp_path: Path):
+    s = _store(tmp_path)
+    owner = s.add_task(title="centralize", role=DEV, target_files=["src/mockData.ts"])
+    # A real dev task that will thrash the file but declares nothing and names it
+    # nowhere — `task_touched_paths` is empty for it.
+    silent = s.add_task(title="Add real-time activity indicators", role=DEV)
+    assert paths.task_touched_paths(silent) == set()
+    frozen = {"src/mockData.ts"}
+
+    # Under the freeze, the prose-silent writer waits (can't prove it won't touch
+    # the frozen file); the frozen owner is still allowed through.
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev1", DEV), ("m-dev2", DEV)],
+        frozen=frozen, frozen_owner_task_id=owner.task_id))}
+    assert owner.task_id in ids
+    assert silent.task_id not in ids
+
+
+def test_no_freeze_dispatches_prose_silent_writer(tmp_path: Path):
+    # Regression lock: with no freeze active, a prose-silent dev task dispatches
+    # exactly as before — the teeth only bite under an active freeze.
+    s = _store(tmp_path)
+    silent = s.add_task(title="Add real-time activity indicators", role=DEV)
+    ids = {a.task_id for a in _assigns(plan_next_batch(s, [("m-dev1", DEV)]))}
+    assert silent.task_id in ids
+
+
+def test_freeze_does_not_hold_reviewer_or_declared_noncolliding(tmp_path: Path):
+    s = _store(tmp_path)
+    owner = s.add_task(title="centralize", role=DEV, target_files=["src/mockData.ts"])
+    # A dev task with a KNOWN non-colliding path set is fine to run during a freeze.
+    other = s.add_task(title="unrelated", role=DEV, target_files=["src/other.ts"])
+    # A reviewer task (a non-writer role) must not be starved by the freeze, so the
+    # owner's PR can still be reviewed + merged (which is what lifts the freeze).
+    reviewer = s.add_task(title="review PR: centralize", role=REVIEWER)
+    frozen = {"src/mockData.ts"}
+    # Two devs so the frozen owner (dev1) doesn't starve the non-colliding dev task.
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev1", DEV), ("m-dev2", DEV), ("m-rev", REVIEWER)],
+        frozen=frozen, frozen_owner_task_id=owner.task_id))}
+    assert other.task_id in ids       # declared non-colliding path → runs
+    assert reviewer.task_id in ids    # non-writer role → runs
+
+
+# --------------------------------------------------------------------------- #
+# Observed `changed_paths` — the reliable ownership signal where prose is silent.
+# --------------------------------------------------------------------------- #
+
+def test_record_pr_seeds_changed_paths(tmp_path: Path):
+    s = _store(tmp_path)
+    t = s.add_task(title="x", role=DEV)
+    pr = s.record_pr(task_id=t.task_id, branch="br", head="h", dev_member="m-dev1")
+    assert pr["changed_paths"] == []
+
+
+def test_hot_owned_paths_uses_observed_changed_paths(tmp_path: Path):
+    s = _store(tmp_path)
+    # The file is hot from history.
+    for i in range(2):
+        h = s.add_task(title=f"hist{i}", role=DEV)
+        _conflicted_pr(s, h.task_id, f"br-hist{i}", ["src/mockData.ts"])
+        s.update_task(h.task_id, state="done")
+    # Owner: a PROSE-SILENT dev task (declares nothing, names no file) whose OPEN PR
+    # is OBSERVED to have changed the hot file. Without the observed signal this PR
+    # would own nothing and the merge-scoped hold would never engage.
+    owner = s.add_task(title="Add real-time activity indicators", role=DEV)
+    s.update_task(owner.task_id, state="doing")
+    pr = s.record_pr(task_id=owner.task_id, branch="br-own", head="h", dev_member="m-dev1")
+    s.update_pr(pr["pr_id"], changed_paths=["src/mockData.ts"])
+    assert paths.task_touched_paths(owner) == set()  # prose gives nothing
+
+    hot = hot_files(s, threshold=2)
+    assert "src/mockData.ts" in hot_owned_paths(s, hot)  # observed diff → owned
+
+
+# --------------------------------------------------------------------------- #
+# Resolve-retry-cap → force escalate to centralize + freeze (loop terminator).
+# --------------------------------------------------------------------------- #
+
+def test_force_escalation_freezes_below_threshold(tmp_path: Path):
+    s = _store(tmp_path)
+    t = s.add_task(title="t", role=DEV)
+    # Only ONE conflict recorded — well below the escalation threshold (4).
+    _conflicted_pr(s, t.task_id, "br", ["src/mockData.ts"])
+    # Non-forced escalation must NOT freeze (count 1 < 4).
+    runner._maybe_escalate_hot_files(s, ["src/mockData.ts"])
+    assert frozen_paths(s) == set()
+    # Forced (the resolve-cap path) freezes regardless of count.
+    runner._maybe_escalate_hot_files(s, ["src/mockData.ts"], force=True)
+    assert "src/mockData.ts" in frozen_paths(s)
+    assert s.get_run_state().get("contract_owner_task_id")

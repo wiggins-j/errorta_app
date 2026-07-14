@@ -858,6 +858,28 @@ def _redispatch_conflict_pr(
             rationale="resolve retry cap reached; human intervention required",
             related_task_ids=[task_id],
         )
+        # F159: a file we failed to auto-rebase `_CONFLICT_RESOLVE_RETRY_CAP` times
+        # is hot by definition — hand it to the centralize owner + freeze parallel
+        # edits so the churn stops, instead of leaving the PR silently blocked while
+        # other writers keep re-colliding on it. Force-escalate regardless of count.
+        capped_paths = list(pr.get("conflicts") or [])
+        if capped_paths:
+            _maybe_escalate_hot_files(store, capped_paths, force=True)
+        # And tell a human — the cap is a genuine stuck point, not just a decision row.
+        try:
+            from . import attention
+            from .governance import GovernanceStore
+            gstate = GovernanceStore.for_ledger(store).load_state()
+            attention.raise_monitor_problem(
+                store.project_id,
+                stage=(gstate.phase if gstate.mode != "off" else "build"),
+                detector="conflict_resolve_capped",
+                reason=(f"PR {branch} hit the conflict-resolve retry cap on "
+                        f"{', '.join(capped_paths) or 'unknown files'}; centralized "
+                        "the file + froze parallel edits — a human may need to look"),
+                store=store)
+        except Exception:  # noqa: BLE001 — the alert must never break the sweep
+            pass
         return True
 
     update = workspace.update_branch_from_base(task_id, branch)
@@ -2165,10 +2187,16 @@ def _contract_owner_for(store: LedgerStore, pr: dict[str, Any],
         return None
 
 
-def _maybe_escalate_hot_files(store: LedgerStore, conflict_paths: list[str]) -> None:
+def _maybe_escalate_hot_files(store: LedgerStore, conflict_paths: list[str],
+                              *, force: bool = False) -> None:
     """F159: when a file crosses the conflict-count escalation threshold, centralize
     it (reuse the WS-D2 contract owner) and FREEZE parallel edits to it — only the
-    owner task may touch it until it merges. Best-effort; never raises into a turn."""
+    owner task may touch it until it merges. Best-effort; never raises into a turn.
+
+    ``force=True`` escalates the given paths regardless of the count — used when a
+    conflict has exhausted the resolve-retry cap (`_CONFLICT_RESOLVE_RETRY_CAP`): a
+    file we failed to auto-rebase that many times IS hot, so hand it to the
+    centralize owner + freeze it instead of leaving the PR silently blocked."""
     try:
         try:
             from .autonomy import load_policy
@@ -2186,7 +2214,7 @@ def _maybe_escalate_hot_files(store: LedgerStore, conflict_paths: list[str]) -> 
         newly = sorted(
             p for cp in conflict_paths
             if (p := _paths.normalize_path(str(cp))) and p not in frozen
-            and counts.get(p, 0) >= esc
+            and (force or counts.get(p, 0) >= esc)
         )
         if not newly:
             return
@@ -3106,6 +3134,17 @@ def build_run_turn(
                 pr = store.record_pr(task_id=task.task_id, branch=branch,
                                      head=workspace.branch_head(branch),
                                      dev_member=str(member.get("id", "")))
+                # F159: persist the OBSERVED touched-files at PR-open (not only at
+                # merge), so hot-file ownership can be detected while the PR is still
+                # open — the merge-scoped hold needs the owner's real paths, and dev
+                # tasks rarely declare `target_files` or name the file in prose.
+                try:
+                    _opened_changed = [f for f in workspace.changed_paths(branch)
+                                       if f != ".gitignore"]
+                    if _opened_changed:
+                        store.update_pr(pr["pr_id"], changed_paths=_opened_changed)
+                except Exception:  # noqa: BLE001 — best-effort observability signal
+                    pass
                 store.update_task(task.task_id, state="done")
                 store.add_task(title=f"review PR: {task.title}", role=REVIEWER,
                                pr_id=pr["pr_id"], depends_on=[task.task_id])

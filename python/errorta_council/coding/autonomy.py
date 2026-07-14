@@ -200,6 +200,12 @@ def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
     hot_set = set(hot)
     owned: set[str] = set()
     live_pr_tasks: set[str] = set()
+    # F159: the OBSERVED files each live PR actually changed, keyed by task. This is
+    # the reliable ownership signal where prose/`target_files` are silent — a dev
+    # task titled "Add real-time activity indicators" that appends to a hot file
+    # names it nowhere, so without this its open PR would own nothing and the
+    # merge-scoped hold would never engage (the mockData.ts thrash).
+    observed_by_task: dict[str, set[str]] = {}
     list_prs = getattr(ledger, "list_prs", None)
     if callable(list_prs):
         for pr in list_prs():
@@ -207,10 +213,14 @@ def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
                 tid = pr.get("task_id")
                 if tid:
                     live_pr_tasks.add(str(tid))
+                    changed = {_paths.normalize_path(str(p))
+                               for p in (pr.get("changed_paths") or []) if p}
+                    if changed:
+                        observed_by_task.setdefault(str(tid), set()).update(changed)
     for task in ledger.list_tasks(role=DEV):
         if task.state != "doing" and task.task_id not in live_pr_tasks:
             continue
-        tp = _paths.task_touched_paths(task)
+        tp = _paths.task_touched_paths(task) | observed_by_task.get(task.task_id, set())
         for hp in hot_set:
             if _paths.paths_intersect(tp, {hp}):
                 owned.add(hp)

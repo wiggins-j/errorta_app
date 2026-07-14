@@ -387,9 +387,24 @@ def plan_next_batch(
             # already held this tick waits — its member gets a non-colliding task
             # instead. Prevents the parallel-writers-to-one-file conflict churn.
             tp = _paths.task_touched_paths(task)
-            if frozen_set and task.task_id != frozen_owner_task_id \
-                    and _paths.paths_intersect(tp, frozen_set):
-                continue
+            if frozen_set and task.task_id != frozen_owner_task_id:
+                if _paths.paths_intersect(tp, frozen_set):
+                    continue
+                # F159 teeth: a freeze only bites tasks whose touched paths are
+                # KNOWN to hit a frozen file — but real dev tasks that thrash a hot
+                # file ("Add real-time activity…") declare no `target_files` and name
+                # it nowhere, so `tp` is empty and the freeze was inert (the
+                # mockData.ts non-convergence). While a freeze is active we cannot
+                # prove such a writer won't touch the frozen file, so hold prose-
+                # silent DEV writers until the centralize owner lands. This is the
+                # escalated, bounded state — force-lifted by
+                # `hot_file_freeze_stall_limit` if the owner never merges — so it
+                # can't wedge the run. Non-writer roles (reviewer/tester, so the
+                # owner's PR can still be reviewed + merged) and DEV tasks with a
+                # KNOWN non-colliding path set are unaffected; with no freeze,
+                # dispatch is byte-identical to before.
+                if role == DEV and not tp:
+                    continue
             if blocked and _paths.paths_intersect(tp, blocked):
                 continue
             # F127: assign each task to an eligible (non-excluded) idle member,
