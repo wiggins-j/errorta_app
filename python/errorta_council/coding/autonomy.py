@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from . import paths as _paths
 from .ledger import Task
 from .topology import (
     DEV,
@@ -100,6 +101,15 @@ class CodingAutonomyPolicy:
     # keeps failing delivery review loops to budget_exhausted instead of stopping
     # truthfully. A passing review resets the count.
     delivery_review_round_limit: int = 3
+    # F159: hot-file serialization. A path that appears in >= this many PRs'
+    # `conflicts` is "hot" — parallel edits to it are serialized (one owner until
+    # its PR merges). If it keeps conflicting past the escalation threshold, the
+    # engine centralizes it (reuses the F139 WS-D2 contract-owner task) and freezes
+    # direct parallel edits until that task merges; the freeze force-lifts (with an
+    # alert) after the stall limit so a never-merging owner can't starve the file.
+    hot_file_threshold: int = 2
+    hot_file_escalation_threshold: int = 4
+    hot_file_freeze_stall_limit: int = 15
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -117,6 +127,9 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "foundation_stall_limit": p.foundation_stall_limit,
         "convergence_stall_limit": p.convergence_stall_limit,
         "delivery_review_round_limit": p.delivery_review_round_limit,
+        "hot_file_threshold": p.hot_file_threshold,
+        "hot_file_escalation_threshold": p.hot_file_escalation_threshold,
+        "hot_file_freeze_stall_limit": p.hot_file_freeze_stall_limit,
     }
 
 
@@ -148,7 +161,70 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             1, int(d.get("convergence_stall_limit", base.convergence_stall_limit))),
         delivery_review_round_limit=max(
             1, int(d.get("delivery_review_round_limit", base.delivery_review_round_limit))),
+        hot_file_threshold=max(
+            1, int(d.get("hot_file_threshold", base.hot_file_threshold))),
+        hot_file_escalation_threshold=max(
+            1, int(d.get("hot_file_escalation_threshold", base.hot_file_escalation_threshold))),
+        hot_file_freeze_stall_limit=max(
+            1, int(d.get("hot_file_freeze_stall_limit", base.hot_file_freeze_stall_limit))),
     )
+
+
+# --- F159: hot-file serialization ------------------------------------------ #
+
+def hot_files(ledger: Any, *, threshold: int) -> dict[str, int]:
+    """Map ``path -> conflict_count`` over the PR history, keeping only paths that
+    have conflicted at least ``threshold`` times (the "hot" files). Built from the
+    durable per-PR ``conflicts`` lists (git repo-relative paths). Cheap enough to
+    compute ONCE per iteration — never per dispatch candidate (``list_prs`` re-reads
+    prs.json)."""
+    list_prs = getattr(ledger, "list_prs", None)
+    if not callable(list_prs):
+        return {}
+    counts: dict[str, int] = {}
+    for pr in list_prs():
+        for raw in (pr.get("conflicts") or []):
+            p = _paths.normalize_path(str(raw))
+            if p:
+                counts[p] = counts.get(p, 0) + 1
+    return {p: n for p, n in counts.items() if n >= max(1, threshold)}
+
+
+def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
+    """The subset of hot paths currently held by an active DEV task — one that is
+    ``doing`` or has an open (un-merged) PR. A hot path with a live owner must not
+    be handed to a second task until that owner's PR merges (the conflict surfaces
+    at merge, so the hold is merge-scoped, not turn-scoped)."""
+    if not hot:
+        return set()
+    hot_set = set(hot)
+    owned: set[str] = set()
+    live_pr_tasks: set[str] = set()
+    list_prs = getattr(ledger, "list_prs", None)
+    if callable(list_prs):
+        for pr in list_prs():
+            if pr.get("status") not in ("merged", "superseded", "abandoned", "closed"):
+                tid = pr.get("task_id")
+                if tid:
+                    live_pr_tasks.add(str(tid))
+    for task in ledger.list_tasks(role=DEV):
+        if task.state not in ("todo", "doing") and task.task_id not in live_pr_tasks:
+            continue
+        tp = _paths.task_touched_paths(task)
+        for hp in hot_set:
+            if _paths.paths_intersect(tp, {hp}):
+                owned.add(hp)
+    return owned
+
+
+def frozen_paths(ledger: Any) -> set[str]:
+    """Paths under a F159 centralize-freeze (only the contract-owner task may touch
+    them until it merges). Stored on ``run_state.frozen_paths``."""
+    try:
+        raw = ledger.get_run_state().get("frozen_paths") or []
+    except Exception:  # noqa: BLE001
+        return set()
+    return {_paths.normalize_path(str(p)) for p in raw if p}
 
 
 def effective_parallelism(policy: CodingAutonomyPolicy,
@@ -321,6 +397,10 @@ class LoopCounters:
     # raised once (the run continues, clamped). Reset when the foundation merges.
     foundation_stall: int = 0
     foundation_alerted: bool = False
+    # F159: consecutive iterations spent with a hot-file freeze active. At
+    # hot_file_freeze_stall_limit the freeze is force-lifted (the centralize owner
+    # isn't landing) so the file's work can resume. Reset when no freeze is active.
+    hot_freeze_stall: int = 0
     # F139 WS-E: convergence tracking. `last_progress_fp` is the last-seen
     # `_progress_fingerprint`; `last_progress_iter` is the iteration count when it
     # last changed. When `iterations - last_progress_iter` reaches
@@ -486,6 +566,41 @@ def _account_foundation_stall(ledger: Any, c: LoopCounters,
             pass
         _maybe_raise_monitor(ledger, "foundation_not_converging",
                              "foundation has not merged to master")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _account_hot_file_freeze(ledger: Any, c: LoopCounters,
+                             policy: CodingAutonomyPolicy) -> None:
+    """F159 never-lift guard: a hot-file freeze normally lifts when the centralize
+    owner's PR merges (runner). If that PR never lands, the file would stay frozen
+    forever — so count iterations under an active freeze and force-lift at
+    ``hot_file_freeze_stall_limit`` (with a decision + monitor), so the file's work
+    resumes and a human is told. Best-effort — never breaks the loop."""
+    try:
+        if not frozen_paths(ledger):
+            c.hot_freeze_stall = 0
+            return
+        c.hot_freeze_stall += 1
+        if c.hot_freeze_stall < max(1, policy.hot_file_freeze_stall_limit):
+            return
+        c.hot_freeze_stall = 0
+        try:
+            ledger.set_run_state(frozen_paths=[])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ledger.record_decision(
+                title="hot-file freeze force-lifted",
+                context="hot_file", choice="hot_file_freeze_stalled",
+                rationale=("the shared-contract owner did not merge within "
+                           f"{policy.hot_file_freeze_stall_limit} iterations; lifting "
+                           "the freeze so the file's work can resume — a human may "
+                           "need to look"))
+        except Exception:  # noqa: BLE001
+            pass
+        _maybe_raise_monitor(ledger, "hot_file_freeze_stalled",
+                             "a hot-file centralize task did not merge in time")
     except Exception:  # noqa: BLE001
         pass
 
@@ -912,6 +1027,7 @@ def _run_sequential_loop(
         # F139 WS-A/WS-E: surface a stuck foundation, and stop a run where nothing
         # is moving anywhere (distinct from NO_PROGRESS, which is a PM-idle stop).
         _account_foundation_stall(ledger, c, policy)
+        _account_hot_file_freeze(ledger, c, policy)
         conv_stop = _account_convergence(ledger, c, policy)
         if conv_stop is not None:
             return conv_stop
@@ -1026,9 +1142,25 @@ def _run_concurrent_loop(
             # --- dispatch phase: fill idle worker slots ---------------------
             dispatched_now = 0
             if pending_stop is None:
+                # F159: compute the hot-file picture ONCE per iteration (list_prs is
+                # a file read). `_hot` empty (the no-contention common case) makes
+                # every gate below a no-op → dispatch is identical to pre-F159.
+                _hot = hot_files(ledger, threshold=policy.hot_file_threshold)
+                _hot_paths = set(_hot)
+                _hot_blocked = hot_owned_paths(ledger, _hot)
+                _frozen = frozen_paths(ledger)
+                _frozen_owner = None
+                if _frozen:
+                    try:
+                        _frozen_owner = str(
+                            ledger.get_run_state().get("contract_owner_task_id", "") or "") or None
+                    except Exception:  # noqa: BLE001
+                        _frozen_owner = None
                 while model_in_flight < cap:
                     batch = plan_next_batch(
-                        ledger, _idle_members(members, busy), member_tiers)
+                        ledger, _idle_members(members, busy), member_tiers,
+                        hot_paths=_hot_paths, hot_blocked=_hot_blocked,
+                        frozen=_frozen, frozen_owner_task_id=_frozen_owner)
                     if not batch:
                         break
                     if len(batch) == 1 and isinstance(batch[0], Complete):
@@ -1068,6 +1200,11 @@ def _run_concurrent_loop(
                         break  # leave model budget for in-flight; stop adding
                     if isinstance(action, Assign):
                         rec.assign(action)  # ledger-locked: never double-assign
+                        # F159: the just-assigned task now holds its hot paths for
+                        # the rest of this tick (it's `doing`); recompute so the
+                        # next plan_next_batch call won't hand a colliding task out.
+                        if _hot:
+                            _hot_blocked = hot_owned_paths(ledger, _hot)
                     fut = pool.submit(
                         _safe_run_turn, run_turn, action, ledger,
                         0 if is_mechanical else 1)
@@ -1179,6 +1316,7 @@ def _run_concurrent_loop(
                 # checked at this quiescent (in-flight empty) point so a resume
                 # continues cleanly.
                 _account_foundation_stall(ledger, c, policy)
+                _account_hot_file_freeze(ledger, c, policy)
                 conv_stop = _account_convergence(ledger, c, policy)
                 if conv_stop is not None:
                     return conv_stop

@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
+from . import paths as _paths
 from .ledger import Task
 
 # Coding roles (distinct from F031 CouncilMember.role answerer/critic/judge).
@@ -289,6 +290,11 @@ def plan_next_batch(
     ledger: QueryLedger,
     members: list[tuple[str, str]],  # the IDLE (member_id, coding_role) this tick
     member_tiers: dict[str, int] | None = None,  # F127: member_id -> tier rank
+    *,
+    hot_paths: set[str] | None = None,        # F159: paths that are "hot"
+    hot_blocked: set[str] | None = None,      # F159: hot paths already held this tick
+    frozen: set[str] | None = None,           # F159: centralize-frozen paths
+    frozen_owner_task_id: str | None = None,  # F159: the only task allowed to touch frozen
 ) -> list[CodingAction]:
     """F087 Slice 1 — the concurrent planner: return ALL runnable actions for the
     idle members this tick (vs ``decide_next``'s single action). READ-ONLY.
@@ -358,15 +364,34 @@ def plan_next_batch(
         return [Complete(reason="worker_unproductive")]
 
     # Workers: fan out distinct ready tasks across all idle same-role members.
+    # F159: `blocked` accumulates hot paths that are unavailable this tick — seeded
+    # with the ones already held by a live (doing / open-PR) task, then extended as
+    # we assign, so two tasks in one batch never claim the same hot file.
+    hot = set(hot_paths or ())
+    blocked = set(hot_blocked or ())
+    frozen_set = set(frozen or ())
     worker_assigned = False
     for role in _WORKER_PRIORITY:
         ids = [m for m in by_role.get(role, []) if m not in used_members]
         if not ids:
             continue
         # Over-fetch so we can still place tasks even when some members are barred
-        # from the first-ready ones (F127 reassignment).
-        tasks = ledger.next_tasks(role, len(ids), exclude=chosen_tasks)
+        # from the first-ready ones (F127 reassignment). F159: when the hot/frozen
+        # gate is active, fetch extra headroom so a gated task doesn't starve an
+        # idle member of the non-colliding work behind it.
+        want = len(ids) + (32 if (hot or frozen_set) else 0)
+        tasks = ledger.next_tasks(role, want, exclude=chosen_tasks)
         for task in tasks:
+            # F159: serialize hot-file / frozen-file contention. A task that would
+            # touch a frozen path (unless it IS the centralize owner) or a hot path
+            # already held this tick waits — its member gets a non-colliding task
+            # instead. Prevents the parallel-writers-to-one-file conflict churn.
+            tp = _paths.task_touched_paths(task)
+            if frozen_set and task.task_id != frozen_owner_task_id \
+                    and _paths.paths_intersect(tp, frozen_set):
+                continue
+            if blocked and _paths.paths_intersect(tp, blocked):
+                continue
             # F127: assign each task to an eligible (non-excluded) idle member,
             # preferring the highest tier. A task barred for every free member is
             # skipped this tick (it waits / the loop escalates).
@@ -381,6 +406,10 @@ def plan_next_batch(
             used_members.add(member_id)
             chosen_tasks.add(task.task_id)
             worker_assigned = True
+            # F159: claim this task's hot paths so a later candidate in the SAME
+            # batch touching them waits (cross-tick holds come in via hot_blocked).
+            if hot:
+                blocked |= {hp for hp in hot if _paths.paths_intersect(tp, {hp})}
 
     # PM plans only when the worker pipeline was dry this tick (and not merging).
     if pm_ids and not worker_assigned:
