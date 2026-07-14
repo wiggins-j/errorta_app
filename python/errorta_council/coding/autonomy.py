@@ -208,7 +208,7 @@ def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
                 if tid:
                     live_pr_tasks.add(str(tid))
     for task in ledger.list_tasks(role=DEV):
-        if task.state not in ("todo", "doing") and task.task_id not in live_pr_tasks:
+        if task.state != "doing" and task.task_id not in live_pr_tasks:
             continue
         tp = _paths.task_touched_paths(task)
         for hp in hot_set:

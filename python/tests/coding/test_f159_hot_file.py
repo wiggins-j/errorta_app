@@ -125,6 +125,28 @@ def test_hot_file_owned_by_open_pr_blocks_second_toucher(tmp_path: Path):
     assert other.task_id in ids            # non-colliding work still dispatched
 
 
+def test_hot_file_without_active_owner_dispatches_one_toucher(tmp_path: Path):
+    s = _store(tmp_path)
+    # The file is hot from history, but no current task or open PR owns it.
+    for i in range(2):
+        h = s.add_task(title=f"hist{i}", role=DEV)
+        _conflicted_pr(s, h.task_id, f"br-hist{i}", ["src/mockData.ts"])
+        s.update_task(h.task_id, state="done")
+        pr = next(p for p in s.list_prs() if p["task_id"] == h.task_id)
+        s.update_pr(pr["pr_id"], status="merged")
+    first = s.add_task(title="first", role=DEV, target_files=["src/mockData.ts"])
+    second = s.add_task(title="second", role=DEV, target_files=["src/mockData.ts"])
+
+    hot = hot_files(s, threshold=2)
+    assert hot_owned_paths(s, hot) == set()
+
+    assigns = _assigns(plan_next_batch(
+        s, [("m-dev1", DEV), ("m-dev2", DEV)], hot_paths=set(hot),
+        hot_blocked=hot_owned_paths(s, hot)))
+    ids = {a.task_id for a in assigns}
+    assert len(ids & {first.task_id, second.task_id}) == 1
+
+
 def test_frozen_path_only_owner_may_touch(tmp_path: Path):
     s = _store(tmp_path)
     owner = s.add_task(title="centralize", role=DEV, target_files=["src/mockData.ts"])
