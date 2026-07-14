@@ -320,18 +320,21 @@ def apply_actions(store: Any, actions: list[dict[str, Any]], *,
 
 def create_task(
     store: Any, *, title: str, detail: str = "", role: str = "dev",
-    surface: str = "pop",
+    surface: str = "pop", target_files: list[str] | None = None,
 ) -> pm_changes.PmChange:
     """Add a task to the backlog (state ``todo``). Reversible: declining the PM
     Change drops the task off the board. A missing title is refused; an unknown
-    role falls back to ``dev`` (grounded, never invents a role)."""
+    role falls back to ``dev`` (grounded, never invents a role). F159: an optional
+    ``target_files`` list lets the PM declare which files the task will touch, so
+    the hot-file serializer doesn't have to infer them from prose."""
     title = str(title or "").strip()
     if not title:
         raise ControlActionError("task_title_required", "a task needs a title")
     role = str(role or "dev").strip().lower()
     if role not in _TASK_ROLES:
         role = "dev"
-    task = store.add_task(title=title, role=role, detail=str(detail or ""))
+    task = store.add_task(title=title, role=role, detail=str(detail or ""),
+                          target_files=target_files)
     return pm_changes.record_change(
         store, summary=f"Created task: {title}",
         details=[{"field": "task", "before": None, "after": task.task_id}],
@@ -354,10 +357,14 @@ def apply_action(store: Any, action: dict[str, Any], *,
     if kind == "set_governance":
         return set_governance(store, dict(action.get("fields") or {}), surface=surface)
     if kind == "create_task":
+        raw_files = action.get("target_files")
+        target_files = ([str(p) for p in raw_files if p]
+                        if isinstance(raw_files, (list, tuple)) else None)
         return create_task(
             store, title=str(action.get("title") or ""),
             detail=str(action.get("detail") or action.get("description") or ""),
-            role=str(action.get("role") or "dev"), surface=surface)
+            role=str(action.get("role") or "dev"), surface=surface,
+            target_files=target_files)
     if kind == "start_run":
         # Route-handled — must never reach the config-mutation seam.
         raise ControlActionError(

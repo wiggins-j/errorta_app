@@ -690,10 +690,16 @@ class LedgerStore:
                  preferred_member_id: str = "",
                  preferred_route_id: str = "",
                  assignment_rationale: str = "",
-                 model_assignment: dict[str, Any] | None = None) -> Task:
+                 model_assignment: dict[str, Any] | None = None,
+                 target_files: list[str] | None = None) -> Task:
         if role not in _VALID_ROLES:
             raise LedgerError(f"invalid role: {role!r}")
         ts = _now()
+        # F159: an optional declared touched-files list rides in _extras (no schema
+        # migration; round-trips via to_dict/_split_unknown). The hot-file gate
+        # prefers it over prose inference.
+        extras = {"target_files": [str(p) for p in target_files if p]} \
+            if target_files else {}
         t = Task(
             task_id=f"t-{uuid.uuid4().hex[:12]}", title=title, role=role,
             detail=detail, state="todo", assignee_member_id=assignee_member_id,
@@ -708,7 +714,7 @@ class LedgerStore:
             preferred_route_id=preferred_route_id,
             assignment_rationale=assignment_rationale,
             model_assignment=dict(model_assignment) if model_assignment else None,
-            created_at=ts, updated_at=ts,
+            created_at=ts, updated_at=ts, _extras=extras,
         )
         # F087-14 WS-2: backlog mutations take the per-project lock so a
         # concurrent compaction (which rewrites the file) can't lose an append.

@@ -127,7 +127,20 @@ burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
 "done" guard), `foundation_stall_limit` (12) / `convergence_stall_limit` (20, F139
 — stop when nothing is converging), `delivery_review_round_limit` (3, F155 — stop
 `delivery_review_stalled` when the delivery review keeps rejecting the integrated
-result instead of looping to budget).
+result instead of looping to budget), `hot_file_threshold` (2) /
+`hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
+F159 hot-file serializer.
+
+**F159 — hot files.** A file that appears in `hot_file_threshold` PRs' merge
+conflicts is "hot": parallel edits to it are serialized (only one task holds it
+until that task's PR merges), so parallel devs stop thrashing on a shared file.
+Declare a task's files with the `create_task` action's optional `target_files`
+list so the serializer doesn't have to infer them from the title/detail. If a
+hot file keeps conflicting past `hot_file_escalation_threshold`, the engine
+centralizes it (the same `contract_owner_task_id` task as WS-D2) and freezes
+direct parallel edits until that owner merges (surfaced as a `hot_file_escalated`
+decision); the freeze force-lifts (`hot_file_freeze_stalled`) after
+`hot_file_freeze_stall_limit` iterations if the owner never lands.
 
 **Presets:** **CAREFUL** (checkpoints per-milestone, `max_parallel_workers=1`,
 tight caps, block-on-problems on) vs **AUTONOMOUS** (checkpoints `off`,
@@ -304,6 +317,9 @@ and FastAPI routers. Update the prose and this contract together.
     "convergence_stall_limit": 20,
     "delivery_review_round_limit": 3,
     "foundation_stall_limit": 12,
+    "hot_file_escalation_threshold": 4,
+    "hot_file_freeze_stall_limit": 15,
+    "hot_file_threshold": 2,
     "max_iterations": 200,
     "max_model_calls": null,
     "max_parallel_workers": null,

@@ -28,6 +28,7 @@ import re
 import threading
 from typing import Any, Callable, NamedTuple, Optional
 
+from . import paths as _paths
 from .autonomy import (
     CodingAutonomyPolicy,
     LoopResult,
@@ -478,10 +479,9 @@ def _detail_from_findings(findings: list[dict[str, Any]], *, cap: int = 6) -> st
 
 # F104 S6 — conflict re-dispatch
 _CONFLICT_RESOLVE_RETRY_CAP = 2
-_TARGET_PATH_RE = re.compile(
-    r"(?<![\w./-])([\w./-]+\.(?:py|pyi|ts|tsx|js|jsx|rs|go|java|md|json|toml|"
-    r"yaml|yml|css|html|sql|sh))(?![\w./-])"
-)
+# F159: the filename regex + path extraction moved to `paths.py` (so topology can
+# share them without a cycle); kept as aliases for the existing call sites here.
+_TARGET_PATH_RE = _paths.TARGET_PATH_RE
 # F104 S4 — bounded corrective retry on a malformed intent turn
 _INTENT_CORRECTIVE_RETRIES = 1
 # F127 D3: workers (dev/reviewer/tester) get one extra corrective attempt — the
@@ -784,22 +784,28 @@ def _fail_closed_demote(store: LedgerStore, p: dict[str, Any], branch: str,
             p.get("pr_id"), reason)
 
 
-def _declared_target_paths(*parts: str) -> set[str]:
-    out: set[str] = set()
-    for part in parts:
-        for match in _TARGET_PATH_RE.findall(str(part or "")):
-            cleaned = match.strip("`'\"(),;:")
-            if cleaned and not cleaned.startswith(("/", "../")) and ".." not in cleaned.split("/"):
-                out.add(cleaned)
-    return out
+_declared_target_paths = _paths.declared_target_paths
 
 
 def _active_dev_path_owners(store: LedgerStore) -> dict[str, str]:
+    """F159: path -> owning DEV task, over tasks that hold the path RIGHT NOW —
+    ``todo``/``doing`` (plan-time serialization) OR a task whose PR is open and
+    not yet merged (the merge-scoped hold: the conflict surfaces at merge, so the
+    file stays owned until the PR lands). Uses declared ``target_files`` when the
+    task carries them, else the title/detail prose."""
     owners: dict[str, str] = {}
+    live_pr_tasks: set[str] = set()
+    list_prs = getattr(store, "list_prs", None)
+    if callable(list_prs):
+        for pr in list_prs():
+            if pr.get("status") not in ("merged", "superseded", "abandoned", "closed"):
+                tid = pr.get("task_id")
+                if tid:
+                    live_pr_tasks.add(str(tid))
     for task in store.list_tasks(role=DEV):
-        if task.state not in ("todo", "doing"):
+        if task.state not in ("todo", "doing") and task.task_id not in live_pr_tasks:
             continue
-        for path in _declared_target_paths(task.title, task.detail):
+        for path in _paths.task_touched_paths(task):
             owners.setdefault(path, task.task_id)
     return owners
 
@@ -891,6 +897,8 @@ def _redispatch_conflict_pr(
         related_task_ids=[task_id, task.task_id],
         extra={"conflicts": conflict_paths, "resolve_task_id": task.task_id},
     )
+    # F159: a file that keeps conflicting gets escalated to a centralize+freeze.
+    _maybe_escalate_hot_files(store, conflict_paths)
     return True
 
 
@@ -2106,49 +2114,97 @@ def _findings_show_contract_mismatch(findings: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _ensure_contract_owner(store: LedgerStore, *, detail: str) -> Optional[str]:
+    """Return the single (deduped, created-on-demand) contract-owner task_id.
+
+    Dedup is keyed on a stable ``run_state.contract_owner_task_id``, NOT on the
+    task's state: a dev task flips to ``done`` the instant it opens a PR (even a
+    later-rejected one), so a state-based dedup would spawn a duplicate owner on the
+    next trigger. We reuse the recorded owner unless it was dropped. Shared by the
+    reviewer-finding path (WS-D2) and the F159 conflict-count path so they never
+    spawn two competing owners."""
+    owner = None
+    try:
+        existing_id = str(store.get_run_state().get("contract_owner_task_id", "") or "")
+    except Exception:  # noqa: BLE001
+        existing_id = ""
+    if existing_id:
+        owner = next((t for t in store.list_tasks()
+                      if t.task_id == existing_id and t.state != "dropped"), None)
+    if owner is None:
+        owner = store.add_task(title=_CONTRACT_OWNER_TITLE, role=DEV, detail=detail)
+        try:
+            store.set_run_state(contract_owner_task_id=owner.task_id)
+        except Exception:  # noqa: BLE001
+            pass
+    return owner.task_id
+
+
 def _contract_owner_for(store: LedgerStore, pr: dict[str, Any],
                         findings: list[dict[str, Any]]) -> Optional[str]:
     """F139 WS-D2: if ``findings`` show a cross-cutting contract mismatch, return
     the task_id of a single (deduped, created-on-demand) contract-owner task the
     caller should make the revise depend on; else None. Best-effort — never raises
-    into the turn.
-
-    Dedup is keyed on a stable ``run_state.contract_owner_task_id``, NOT on the
-    task's state: a dev task flips to ``done`` the instant it opens a PR (even a
-    later-rejected one), so a state-based dedup would spawn a duplicate owner on the
-    next mismatch. We reuse the recorded owner unless it was dropped."""
+    into the turn."""
     try:
         if not _findings_show_contract_mismatch(findings):
             return None
-        owner = None
-        try:
-            existing_id = str(store.get_run_state().get("contract_owner_task_id", "") or "")
-        except Exception:  # noqa: BLE001
-            existing_id = ""
-        if existing_id:
-            owner = next((t for t in store.list_tasks()
-                          if t.task_id == existing_id and t.state != "dropped"), None)
-        if owner is None:
-            owner = store.add_task(
-                title=_CONTRACT_OWNER_TITLE, role=DEV,
-                detail=("Reviewers rejected work for a cross-cutting contract "
-                        "mismatch. Define the shared types / mock data / component "
-                        "APIs in ONE place and merge them, so dependent slices "
-                        "conform instead of re-inventing them."))
-            try:
-                store.set_run_state(contract_owner_task_id=owner.task_id)
-            except Exception:  # noqa: BLE001
-                pass
+        owner_id = _ensure_contract_owner(store, detail=(
+            "Reviewers rejected work for a cross-cutting contract mismatch. Define "
+            "the shared types / mock data / component APIs in ONE place and merge "
+            "them, so dependent slices conform instead of re-inventing them."))
         store.record_decision(
             title="contract mismatch -> centralize",
             context=f"pr {pr.get('pr_id')}",
             choice="contract_centralized",
             rationale=("reviewer flagged a cross-cutting contract mismatch; the "
                        "revise now depends on a single shared-contract owner task"),
-            related_task_ids=[owner.task_id, pr.get("task_id", "")])
-        return owner.task_id
+            related_task_ids=[owner_id, pr.get("task_id", "")])
+        return owner_id
     except Exception:  # noqa: BLE001
         return None
+
+
+def _maybe_escalate_hot_files(store: LedgerStore, conflict_paths: list[str]) -> None:
+    """F159: when a file crosses the conflict-count escalation threshold, centralize
+    it (reuse the WS-D2 contract owner) and FREEZE parallel edits to it — only the
+    owner task may touch it until it merges. Best-effort; never raises into a turn."""
+    try:
+        try:
+            from .autonomy import load_policy
+            esc = max(1, int(load_policy(store).hot_file_escalation_threshold))
+        except Exception:  # noqa: BLE001
+            esc = 4
+        counts: dict[str, int] = {}
+        for pr in store.list_prs():
+            for raw in (pr.get("conflicts") or []):
+                p = _paths.normalize_path(str(raw))
+                if p:
+                    counts[p] = counts.get(p, 0) + 1
+        rs = store.get_run_state()
+        frozen = {_paths.normalize_path(str(p)) for p in (rs.get("frozen_paths") or []) if p}
+        newly = sorted(
+            p for cp in conflict_paths
+            if (p := _paths.normalize_path(str(cp))) and p not in frozen
+            and counts.get(p, 0) >= esc
+        )
+        if not newly:
+            return
+        owner_id = _ensure_contract_owner(store, detail=(
+            "Parallel edits keep colliding on: " + ", ".join(newly) + ". Define the "
+            "canonical module (shared types / mock data / component APIs) in ONE "
+            "place and merge it; every other task must import from it, not edit "
+            "these files directly."))
+        store.set_run_state(frozen_paths=sorted(frozen | set(newly)))
+        store.record_decision(
+            title="hot file escalated -> centralize + freeze",
+            context="hot_file", choice="hot_file_escalated",
+            rationale=("files kept conflicting under parallel edits (" + ", ".join(newly)
+                       + "); centralizing them and freezing parallel edits until the "
+                       "shared owner merges"),
+            related_task_ids=[owner_id])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def build_run_turn(
@@ -2799,10 +2855,18 @@ def build_run_turn(
                     governance_required=True,
                 )
                 return TurnOutcome(kind="pr_skipped", model_calls=0)
+            # F159: capture the branch's changed files BEFORE the merge (after it,
+            # the branch no longer diffs against master) so the PR record carries
+            # ground-truth of what this task touched — used to weight hot files.
+            try:
+                _changed = workspace.changed_paths(pr["branch"]) if workspace else []
+            except Exception:  # noqa: BLE001 — never fail a merge over bookkeeping
+                _changed = []
             res = workspace.merge_pr(pr["branch"])
             if res.get("merged"):
                 store.update_pr(action.pr_id, status="merged",
-                                head=res.get("head", pr["head"]))
+                                head=res.get("head", pr["head"]),
+                                changed_paths=list(_changed))
                 store.record_decision(
                     title=f"merged PR {pr['branch']}", context=f"pr {action.pr_id}",
                     choice="pr_merged", rationale="PM merged into master",
@@ -2826,6 +2890,15 @@ def build_run_turn(
                 # (build manifest + source entrypoint) is now on master so the loop
                 # lifts the concurrency clamp exactly when the scaffold lands.
                 refresh_foundation_status(store, workspace)
+                # F159: the shared-contract owner landed → lift the hot-file freeze
+                # (the canonical module is now on master; parallel edits are safe).
+                try:
+                    _rs = store.get_run_state()
+                    if _rs.get("frozen_paths") and str(
+                            _rs.get("contract_owner_task_id", "") or "") == str(pr["task_id"]):
+                        store.set_run_state(frozen_paths=[])
+                except Exception:  # noqa: BLE001
+                    pass
                 # F087-18 #6: reclaim space — delete the merged branch and prune any
                 # other branches whose PR is now terminal (merged/abandoned).
                 _prune_dead_branches(store, workspace, just_merged=pr["branch"])
