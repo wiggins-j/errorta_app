@@ -1010,6 +1010,12 @@ class LedgerStore:
                 "pm_reviewed_head": None, "pm_reviewer_approved": None,
                 "tested_head": None, "tests_passed": None,
                 "conflicts": [],
+                # F159: the git repo-relative files this branch actually touched vs
+                # base, persisted at PR-open (refreshed at merge). The OBSERVED
+                # touched-files signal — reliable where prose/`target_files` are
+                # silent — that hot-file ownership keys off. Seeded so every PR
+                # record is shape-complete from birth.
+                "changed_paths": [],
                 # F091: when a revise PR merges, the PR(s) it superseded get
                 # status="superseded" + this back-pointer to the merged PR. Seeded
                 # here so every PR record is shape-complete from birth.
