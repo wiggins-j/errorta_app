@@ -123,8 +123,9 @@ def test_watch_uses_post_subcommand_poll_interval(monkeypatch, tmp_path) -> None
     )
 
     class _Client:
-        def __init__(self, base_url: str) -> None:
+        def __init__(self, base_url: str, token: str | None = None) -> None:
             self.base_url = base_url
+            self.token = token
 
         def __enter__(self):
             return self
@@ -174,8 +175,9 @@ def test_run_watch_streams_and_preserves_exit_code(monkeypatch, tmp_path) -> Non
     )
 
     class _Client:
-        def __init__(self, base_url: str) -> None:
+        def __init__(self, base_url: str, token: str | None = None) -> None:
             self.base_url = base_url
+            self.token = token
 
         def __enter__(self):
             return self
