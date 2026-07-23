@@ -89,6 +89,16 @@ def sidecar_lock_path(home: Path) -> Path:
     return home / "sidecar.lock"
 
 
+def sidecar_token_path(home: Path) -> Path:
+    """R3 — the per-sidecar bearer token (0600).
+
+    Kept in a SEPARATE file from ``sidecar.json`` (which is world-readable 0644)
+    so the mutation-auth secret is never exposed to a stray local reader. Minted
+    at ``sidecar.spawn()`` and read by the client to attach ``Authorization:
+    Bearer`` on mutating requests."""
+    return home / "sidecar-token"
+
+
 def build_commit() -> str | None:
     """Best-effort build commit of *this* CLI, for the sidecar compat check.
 

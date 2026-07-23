@@ -241,7 +241,7 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
         if decision.note:
             typer.echo(decision.note, err=True)
         if decision.handled:
-            with SidecarClient(handle.base_url) as client:
+            with SidecarClient(handle.base_url, token=handle.token) as client:
                 try:
                     _watch.run_watch(name, client, ctx, raw_args)
                 except KeyboardInterrupt:
@@ -251,7 +251,7 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
                     _fail(exc)
             return
 
-    with SidecarClient(handle.base_url) as client:
+    with SidecarClient(handle.base_url, token=handle.token) as client:
         try:
             payload, text = registry.dispatch(
                 name, client, ctx, raw_args, json_mode=json_mode
@@ -395,7 +395,7 @@ def _maybe_onboard(
     # (and skips setup commands like `connect`).
     if opted or json_mode or not interactive:
         return
-    with SidecarClient(handle.base_url) as client:
+    with SidecarClient(handle.base_url, token=handle.token) as client:
         text = onboarding.evaluate(
             client,
             interactive=interactive,
@@ -431,7 +431,7 @@ def _launch_repl() -> None:
     ctx.handle = handle
     _maybe_onboard(handle, json_mode=_G.json, no_onboarding=_G.no_onboarding,
                    command_name=None)
-    with SidecarClient(handle.base_url) as client:
+    with SidecarClient(handle.base_url, token=handle.token) as client:
         repl.run_repl(ctx, client, cwd=Path.cwd())
 
 

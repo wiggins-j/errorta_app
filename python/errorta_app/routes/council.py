@@ -161,9 +161,15 @@ def _tool_gateway():
 
 
 def _require_tauri_origin(request: Request) -> None:
+    # tauri-ui ONLY (stricter than the shared cli+tauri-ui guard). R3:
+    # additionally validate the per-sidecar bearer token (origin policy
+    # unchanged; token auth layered on).
     origin = request.headers.get("x-errorta-origin", "").lower()
     if origin != "tauri-ui":
         raise HTTPException(status_code=403, detail="origin_not_authorized")
+    from errorta_app.origin import validate_sidecar_token
+
+    validate_sidecar_token(request)
 
 
 def _pending_decision_store(runs: RunStore) -> PendingDecisionStore:
