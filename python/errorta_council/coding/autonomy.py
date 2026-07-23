@@ -353,6 +353,38 @@ def save_policy(store: Any, policy: CodingAutonomyPolicy) -> CodingAutonomyPolic
     return policy
 
 
+# The run caps operators set (and that Spec 01 makes observable). A cap ABSENT
+# from autonomy.json is served from the dataclass default — indistinguishable at
+# runtime from an explicitly-persisted equal value without this provenance read.
+CAP_KEYS = (
+    "max_iterations",
+    "max_model_calls",
+    "max_parallel_workers",
+    "delivery_review_round_limit",
+)
+
+
+def policy_with_provenance(store: Any) -> tuple[dict[str, Any], list[str]]:
+    """Return ``(policy_to_dict(load_policy(store)), defaulted_keys)`` where
+    ``defaulted_keys`` lists the :data:`CAP_KEYS` that are ABSENT from the raw
+    ``autonomy.json`` on disk (so their effective value came from the dataclass
+    default). A missing or unreadable file → all cap keys are defaulted. This is
+    the read side of Spec 01: it lets ``errorta status`` mark a silent
+    fallback-to-default that ``load_policy`` alone cannot detect."""
+    import json
+
+    path = store.dir / "autonomy.json"
+    raw_keys: set[str] = set()
+    try:
+        raw = json.loads(path.read_text("utf-8"))
+        if isinstance(raw, dict):
+            raw_keys = set(raw.keys())
+    except (FileNotFoundError, ValueError, OSError):
+        raw_keys = set()
+    defaulted = [k for k in CAP_KEYS if k not in raw_keys]
+    return policy_to_dict(load_policy(store)), defaulted
+
+
 @dataclass
 class TurnOutcome:
     """What a member turn did — drives the reconciler + counters."""

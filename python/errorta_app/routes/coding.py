@@ -22,6 +22,7 @@ from errorta_council.coding.autonomy import (
     load_policy,
     policy_from_dict,
     policy_to_dict,
+    policy_with_provenance,
     save_policy,
 )
 from errorta_council.coding.governance import (
@@ -2700,9 +2701,20 @@ def run_status(project_id: str) -> dict[str, Any]:
     store = LedgerStore(project_id)
     state = _reconcile_run_state(project_id, store)
     running = state.get("status") == "running" and _thread_alive(project_id)
+    # Spec 01: surface the effective run caps + which of them fell back to the
+    # default (absent from autonomy.json) so `errorta status` can show them and a
+    # silent fallback is detectable. Additive — existing keys are unchanged.
+    policy, defaulted = policy_with_provenance(store)
+    caps = {
+        "max_iterations": policy["max_iterations"],
+        "max_model_calls": policy["max_model_calls"],
+        "max_parallel_workers": policy["max_parallel_workers"],
+        "delivery_review_round_limit": policy["delivery_review_round_limit"],
+        "defaulted": defaulted,
+    }
     return {"running": running, "result": _run_result_from_state(state),
             "state": state, "recoverable": bool(state.get("recoverable")),
-            "can_resume": bool(state.get("can_resume"))}
+            "can_resume": bool(state.get("can_resume")), "caps": caps}
 
 
 @router.post("/projects/{project_id}/run/cancel")

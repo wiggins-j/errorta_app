@@ -72,6 +72,33 @@ def render_status(payload: Any, verbosity: Any) -> str:
     if state.get("last_error"):
         lines.append(Text(f"error:   {state.get('last_error')}", style="cli.bad"))
 
+    # Spec 01: effective run caps + a (default) marker for any cap that fell back
+    # to the built-in default (absent from autonomy.json). Additive/backward
+    # compatible: an older server omits `caps`, so nothing is printed.
+    caps = run.get("caps") or {}
+    if caps:
+        defaulted = set(caps.get("defaulted") or [])
+
+        def _cap(key: str, value: Any) -> str:
+            if key == "max_model_calls" and value is None:
+                shown = "∞"          # unlimited
+            elif key == "max_parallel_workers" and value is None:
+                shown = "auto"            # AUTO — bounded by worker count
+            else:
+                shown = str(value)
+            return f"{shown} (default)" if key in defaulted else shown
+
+        lines.append(muted(
+            "caps: iterations {i}  model_calls {m}  parallel {p}"
+            "  delivery_rounds {d}".format(
+                i=_cap("max_iterations", caps.get("max_iterations")),
+                m=_cap("max_model_calls", caps.get("max_model_calls")),
+                p=_cap("max_parallel_workers", caps.get("max_parallel_workers")),
+                d=_cap("delivery_review_round_limit",
+                       caps.get("delivery_review_round_limit")),
+            )
+        ))
+
     counters = state.get("counters") or {}
     if counters:
         table = Table(show_edge=False, pad_edge=False, box=None, show_header=False)
