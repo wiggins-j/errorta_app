@@ -139,6 +139,11 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
             print("bye")
             return
         name, raw_args = registry.split_slash(line)
+        # Spec 06: `/watch` is the live dashboard — loop by default (unless `--once`).
+        if registry.get(name) is not None:
+            from . import watch as _watch
+
+            raw_args = _watch.arm_dashboard(name, raw_args, ctx)
         # `/log --watch` (etc.) tails on the poll loop until Ctrl-C, then returns
         # to the prompt. Only registry commands watch; builtins render once.
         if "--watch" in raw_args and registry.get(name) is not None:

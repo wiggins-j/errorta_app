@@ -106,7 +106,7 @@ COMMAND_ARGS = {
     "status": [], "log": [], "decisions": [], "tasks": [], "board": [],
     "prs": [], "pr": ["pr-1"], "tokens": [], "turns": [], "turn": ["t1", "tn-1"],
     "attention": [], "runtime": ["--session", "s"], "team": [], "models": [],
-    "governance": [], "pm": ["chat"], "gate": [],
+    "governance": [], "pm": ["chat"], "gate": [], "watch": [],
 }
 
 
