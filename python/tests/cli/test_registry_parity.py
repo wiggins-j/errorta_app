@@ -7,6 +7,7 @@ construction, verified here.
 from __future__ import annotations
 
 from errorta_cli import registry
+from errorta_cli.errors import CliError
 
 from .conftest import RecordingClient
 
@@ -16,6 +17,125 @@ def test_split_slash_strips_leading_slash_and_splits() -> None:
     assert registry.split_slash("status --json") == ("status", ["--json"])
     assert registry.split_slash("/log --role dev") == ("log", ["--role", "dev"])
     assert registry.split_slash("   ") == ("", [])
+
+
+# --- R2: quote-aware REPL tokenization (shlex) --------------------------------
+
+def test_split_slash_keeps_a_double_quoted_argument_as_one_token() -> None:
+    assert registry.split_slash('/pm ask "fix the login bug"') == (
+        "pm", ["ask", "fix the login bug"])
+
+
+def test_split_slash_keeps_a_single_quoted_argument_as_one_token() -> None:
+    assert registry.split_slash("/pm ask 'fix the login bug'") == (
+        "pm", ["ask", "fix the login bug"])
+
+
+def test_split_slash_handles_escaped_quotes_inside_a_token() -> None:
+    name, args = registry.split_slash(r'/log --grep "a \"q\" word"')
+    assert name == "log"
+    assert args == ["--grep", 'a "q" word']
+
+
+def test_split_slash_unbalanced_quote_falls_back_to_whitespace_split() -> None:
+    # A mistyped quote must degrade to today's behavior, never raise.
+    name, args = registry.split_slash('/pm ask "fix the login bug')
+    assert name == "pm"
+    assert args == ["ask", '"fix', "the", "login", "bug"]
+
+
+def test_split_slash_bare_and_empty_unchanged() -> None:
+    assert registry.split_slash("/status") == ("status", [])
+    assert registry.split_slash("status") == ("status", [])
+    assert registry.split_slash("   ") == ("", [])
+
+
+# --- R1: resolve_args enforces the value-option contract ----------------------
+
+def test_value_option_without_a_value_errors_not_true() -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    log = registry.get("log")
+    with pytest.raises(CliError, match="needs a value"):
+        registry.resolve_args(log, ["--grep"])
+
+
+def test_value_option_with_a_value_still_binds() -> None:
+    log = registry.get("log")
+    assert registry.resolve_args(log, ["--grep", "pygame"])["grep"] == "pygame"
+
+
+def test_named_value_option_fills_its_positional_slot() -> None:
+    command = registry.get("new")
+    args = registry.resolve_args(command, ["--id", "project", "/tmp/parent"])
+    assert args["id"] == "project"
+    assert args["location"] == "/tmp/parent"
+
+
+def test_dispatch_preserves_json_when_it_is_a_value_option_value(make_ctx) -> None:
+    from .conftest import RouteClient
+
+    payload, _text = registry.dispatch(
+        "log",
+        RouteClient(default={"entries": []}),
+        make_ctx(project_id="p"),
+        ["--grep", "--json"],
+    )
+    assert payload["_filters"]["grep"] == "--json"
+
+
+# --- R1: unconsumed _extra is surfaced on a closed-arg command ----------------
+
+def test_unconsumed_extra_on_closed_command_is_rejected(make_ctx) -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    from .conftest import RouteClient
+
+    with pytest.raises(CliError, match="unexpected argument"):
+        registry.dispatch("status", RouteClient(), make_ctx(), ["--bogus"])
+
+
+def test_allow_extra_command_tolerates_free_form_tokens(make_ctx) -> None:
+    # `pm` opts out (allow_extra=True): tokens past its positional slots land in
+    # _extra and must NOT trip the closed-arg reject (a closed command would).
+    from .conftest import RouteClient
+
+    args = registry.resolve_args(registry.get("pm"), ["changes", "x", "y", "z"])
+    assert args["_extra"] == ["z"]
+    registry.dispatch("pm", RouteClient(), make_ctx(project_id="p"),
+                      ["changes", "x", "y", "z"])  # no CliError
+
+
+def test_reject_helper_exempts_the_framework_watch_token() -> None:
+    # `--watch` reaches resolve_args unmatched on commands without a watch param;
+    # it is owned by the watch layer, so it is never an "unexpected argument".
+    status = registry.get("status")
+    registry.reject_unconsumed_extra(status, {"_extra": ["--watch"]})  # no raise
+
+
+def test_reject_helper_flags_a_real_stray_even_alongside_watch() -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    status = registry.get("status")
+    with pytest.raises(CliError, match="--bogus"):
+        registry.reject_unconsumed_extra(status, {"_extra": ["--watch", "--bogus"]})
+
+
+def test_missing_required_positional_is_rejected_by_parser(make_ctx) -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    from .conftest import RouteClient
+
+    with pytest.raises(CliError, match="missing required argument.*id"):
+        registry.dispatch("open", RouteClient(), make_ctx(), [])
 
 
 def test_slash_name_resolves_to_same_command_object() -> None:
@@ -30,12 +150,23 @@ def test_every_command_hits_identical_route_via_argv_and_slash(make_ctx) -> None
         client_slash = RecordingClient(response={"health": {}, "run": {}})
 
         # argv surface: (name, raw_args) straight from the Typer handler.
-        registry.dispatch(cmd.name, client_argv, make_ctx(), [])
+        try:
+            registry.dispatch(cmd.name, client_argv, make_ctx(), [])
+        except CliError as argv_error:
+            argv_message = argv_error.message
+        else:
+            argv_message = None
 
         # slash surface: parse "/name" then dispatch the same way.
         name_s, raw_s = registry.split_slash("/" + cmd.name)
-        registry.dispatch(name_s, client_slash, make_ctx(), raw_s)
+        try:
+            registry.dispatch(name_s, client_slash, make_ctx(), raw_s)
+        except CliError as slash_error:
+            slash_message = slash_error.message
+        else:
+            slash_message = None
 
+        assert argv_message == slash_message, cmd.name
         assert client_argv.calls == client_slash.calls, cmd.name
 
 

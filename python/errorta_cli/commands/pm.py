@@ -359,6 +359,9 @@ register(
              "`pm \"<q>\"`), or steer (control / accept / decline).",
         call=_call,
         render=_render,
+        # `pm` reads `-i` (and stray sub-tokens) out of `_extra`, so it opts out of
+        # the closed-arg reject (R1) — free-form tokens are expected here.
+        allow_extra=True,
         params=(
             Param("sub", "chat | changes | ask | control | accept | decline | "
                   "<question>", default="chat"),

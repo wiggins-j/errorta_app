@@ -527,12 +527,18 @@ def test_watch_on_steering_subcommand_refused(make_ctx, name, args) -> None:
 # 8. No-project short-circuit: no route call on any S6 command when unbound.
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("name", ["interject", "pm", "task", "governance",
-                                  "attention", "files", "edit", "diff", "accept"])
-def test_no_project_short_circuits_before_any_route(make_ctx, name) -> None:
+# `--yes` only where the command declares it — `files`/`diff` are reads with no
+# `yes` param, so passing it would now (R1) be rejected as an unexpected argument
+# before the no-project short-circuit could fire. The invariant under test is the
+# short-circuit, so each command gets args it actually accepts.
+@pytest.mark.parametrize("name, args", [
+    ("interject", ["--yes"]), ("pm", ["--yes"]), ("task", ["--yes"]),
+    ("governance", ["--yes"]), ("attention", ["--yes"]), ("files", []),
+    ("edit", ["--yes"]), ("diff", []), ("accept", ["--yes"]),
+])
+def test_no_project_short_circuits_before_any_route(make_ctx, name, args) -> None:
     client = RouteClient()
-    payload, _ = registry.dispatch(name, client, make_ctx(project_id=None),
-                                   ["--yes"])
+    payload, _ = registry.dispatch(name, client, make_ctx(project_id=None), args)
     assert client.calls == []
     from errorta_cli.render import is_no_project
     assert is_no_project(payload)

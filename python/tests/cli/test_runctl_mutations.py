@@ -294,10 +294,14 @@ def test_error_maps_to_exit_code(make_ctx, name, status, detail, exc, exit_code)
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, json={"detail": detail})
 
+    # `--detach` is a `run`-only flag (keeps it from streaming); resume/continue
+    # don't declare it, so (R1) it would now be rejected as an unexpected argument.
+    args = ["--room", "t", "--yes"]
+    if name == "run":
+        args.append("--detach")
     with _mock_client(handler) as client:
         with pytest.raises(exc) as ei:
-            registry.dispatch(name, client, make_ctx(project_id=PID),
-                              ["--room", "t", "--yes", "--detach"])
+            registry.dispatch(name, client, make_ctx(project_id=PID), args)
     assert ei.value.exit_code == exit_code
 
 
