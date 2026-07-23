@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 from . import paths as _paths
-from .ledger import Task
+from .ledger import _DEP_SATISFIED_STATES, Task
 
 # Coding roles (distinct from F031 CouncilMember.role answerer/critic/judge).
 PM = "pm"
@@ -183,7 +183,12 @@ def _pick_member(
 def _pending_pm_assist_task(ledger: QueryLedger) -> Optional[Task]:
     """First ready worker task that exhausted same-role reassignment."""
     try:
-        done_ids = {t.task_id for t in ledger.list_tasks(state="done")}
+        # Spec 09 §1: same satisfied-dep rule as `next_task` — a `dropped` dep can
+        # never complete, so a pm-assist-pending task must not wait on it forever.
+        done_ids = {
+            t.task_id for t in ledger.list_tasks()
+            if t.state in _DEP_SATISFIED_STATES
+        }
         tasks = ledger.list_tasks(state="todo")
     except Exception:
         return None

@@ -1233,6 +1233,52 @@ def _requeue_crashed(ledger: Any, action: Any, outcome: TurnOutcome) -> None:
         pass
 
 
+def _requeue_stranded(ledger: Any, action: Any, outcome: TurnOutcome) -> bool:
+    """Spec 09 §3 — stale-``doing`` reaper.
+
+    ``CodingReconciler.assign`` marks a task ``doing`` BEFORE the turn runs. When
+    the turn comes back ``noop`` (or any kind the reconciler does not recognise)
+    nothing moves the task again, so it is stranded ``doing`` forever: invisible
+    to ``next_task`` (which only dispatches ``todo``) yet not ``done``, so every
+    dependent blocks on it permanently. Put it back on the queue instead.
+
+    Liveness, not state: this only ever runs for the action whose turn JUST
+    finished — the sequential loop calls it after ``run_turn`` returned, the
+    concurrent loop after ``fut.result()`` with the action already popped out of
+    ``in_flight`` — so it can never touch a task with a live future. The
+    assignee check is the second belt: if the ledger says somebody else now owns
+    the row, leave it alone."""
+    if not isinstance(action, Assign):
+        return False
+    task_id = str(getattr(action, "task_id", "") or "")
+    if not task_id:
+        return False
+    try:
+        task = next(
+            (t for t in ledger.list_tasks() if t.task_id == task_id), None)
+        if task is None or task.state != "doing":
+            return False  # the turn already moved it (done/blocked/dropped/todo)
+        member_id = str(getattr(action, "member_id", "") or "")
+        assignee = str(getattr(task, "assignee_member_id", "") or "")
+        if assignee and member_id and assignee != member_id:
+            return False  # reassigned out from under us — not ours to reap
+        ledger.update_task(task_id, state="todo", assignee_member_id=None)
+        if not outcome.unproductive:
+            # F127's ladder records its own decision for unproductive turns —
+            # don't double-log every one of them.
+            ledger.record_decision(
+                title="stranded task requeued", context=f"task {task_id}",
+                choice="stale_doing_requeued",
+                rationale=(
+                    f"turn returned '{outcome.kind}' "
+                    f"({outcome.reason or 'no change'}); returning the task to "
+                    "todo so it cannot block its dependents forever"),
+                related_task_ids=[task_id])
+        return True
+    except Exception:  # noqa: BLE001 — never let cleanup crash the loop
+        return False
+
+
 def _idle_members(members: list[tuple[str, str]],
                   busy: set[str]) -> list[tuple[str, str]]:
     return [m for m in members if m[0] not in busy]
@@ -1581,5 +1627,9 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
         c.pm_idle = 0
         return milestone
 
-    # noop / unknown
+    # noop / unknown — no reconciler transition fired, so an assigned task is
+    # still sitting in `doing` from `rec.assign`. Spec 09 §3: return it to the
+    # queue rather than stranding it (a stranded `doing` task is invisible to
+    # `next_task` AND blocks every dependent forever).
+    _requeue_stranded(ledger, action, outcome)
     return milestone

@@ -1352,8 +1352,18 @@ def _materialize_pm_tasks(
             assignment_rationale=planned.assignment_rationale,
         )
         title_to_id[planned.title] = task.task_id
+        # Spec 09 §4 — bound the path-owner chaining amplifier. This used to be
+        # `path_owners[path] = task.task_id`, which OVERWRITES the owner, so
+        # sibling 2 inherited from sibling 1, sibling 3 from sibling 2, ... —
+        # a serial LINE through the whole batch. One wedged head then held the
+        # entire backlog hostage (the observed 130-task deadlock). `setdefault`
+        # caps the inherited path-dep depth at 1: every toucher of a path hangs
+        # off the SINGLE oldest live owner (a pre-existing task when there is
+        # one, else the first sibling in this batch to claim it), never off
+        # another inheritor. Same rule `_active_dev_path_owners` already applies
+        # across batches, so within-batch and cross-batch now agree.
         for path in paths:
-            path_owners[path] = task.task_id
+            path_owners.setdefault(path, task.task_id)
         created.append(
             (task, inherited_deps + list(planned.depends_on) + path_deps)
         )
@@ -1366,6 +1376,69 @@ def _materialize_pm_tasks(
         if resolved:
             store.update_task(task.task_id, depends_on=resolved)
     return [task for task, _dependencies in created]
+
+
+def _dep_graph(store: LedgerStore) -> dict[str, list[str]]:
+    return {t.task_id: list(t.depends_on or []) for t in store.list_tasks()}
+
+
+def _reaches(graph: dict[str, list[str]], start: str, target: str) -> bool:
+    """True if ``target`` is reachable from ``start`` along ``depends_on`` edges."""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node == target:
+            return True
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(graph.get(node, ()))
+    return False
+
+
+def _repoint_dropped_dependents(
+    store: LedgerStore, dropped_task_id: str, replacement_ids: list[str],
+) -> list[str]:
+    """Spec 09 §2 — rewrite dependents when ``dropped_task_id`` is dropped.
+
+    Every task whose ``depends_on`` names the dropped id has that id replaced by
+    the superseding ids (or simply removed when the drop created no
+    replacements). Without this the dependents point at a task that can never
+    reach ``done`` — the dependency deadlock. (`_DEP_SATISFIED_STATES` already
+    unblocks dispatch; this keeps the recorded graph honest so the ordering the
+    PM intended still holds against the replacement work.)
+
+    Never introduces a cycle: a replacement is skipped when the dependent is
+    already reachable FROM it (self-dependency included) — the replacement can
+    inherit a path/parent dep on the very task being re-pointed. Returns the ids
+    of the tasks that were rewritten."""
+    graph = _dep_graph(store)
+    touched: list[str] = []
+    for task in store.list_tasks():
+        if task.task_id == dropped_task_id:
+            continue
+        deps = list(task.depends_on or [])
+        if dropped_task_id not in deps:
+            continue
+        rewritten: list[str] = []
+        for dep in deps:
+            if dep != dropped_task_id:
+                if dep not in rewritten:
+                    rewritten.append(dep)
+                continue
+            for replacement in replacement_ids:
+                if not replacement or replacement in rewritten:
+                    continue
+                if _reaches(graph, replacement, task.task_id):
+                    continue  # would close a cycle — drop the edge instead
+                rewritten.append(replacement)
+        if rewritten == deps:
+            continue
+        store.update_task(task.task_id, depends_on=rewritten)
+        graph[task.task_id] = rewritten
+        touched.append(task.task_id)
+    return touched
 
 
 def _dev_prompt(task: Task, store: LedgerStore, readback: str = "") -> str:
@@ -2774,14 +2847,19 @@ def build_run_turn(
             replacements = _materialize_pm_tasks(
                 store, parsed.intent, parent_task=task
             )
+            replacement_ids = [replacement.task_id for replacement in replacements]
             store.update_task(
                 task.task_id,
                 state="dropped",
                 assignee_member_id=None,
                 pm_assist_pending=False,
                 pm_assist_attempts=attempts,
-                superseded_by_task_ids=[replacement.task_id for replacement in replacements],
+                superseded_by_task_ids=replacement_ids,
             )
+            # Spec 09 §2: the dropped task can never reach `done`, so anything
+            # still depending on it is dead. Re-point those edges onto the
+            # superseding tasks (or drop them when there are none).
+            _repoint_dropped_dependents(store, task.task_id, replacement_ids)
             store.record_decision(
                 title=f"PM re-scoped task: {task.title}",
                 context=f"task {task.task_id}",
