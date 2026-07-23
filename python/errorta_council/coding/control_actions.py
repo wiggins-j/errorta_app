@@ -25,7 +25,8 @@ import re
 from typing import Any, Callable
 
 from ..validation import PM_MODEL_MODES
-from . import pm_changes
+from . import paths as paths_mod
+from . import pm_changes, task_dedupe
 from .topology import coding_role_of
 
 # CodingAutonomyPolicy knobs a control-action may set (the real levers).
@@ -318,6 +319,25 @@ def apply_actions(store: Any, actions: list[dict[str, Any]], *,
     return applied, refusals
 
 
+def _duplicate_of_open_task(
+    store: Any, *, title: str, detail: str, role: str,
+    target_files: list[str] | None,
+) -> task_dedupe.DuplicateMatch | None:
+    """Spec 08 dedupe against the live backlog, defensively: ``store`` is ``Any``
+    here (the chat surface passes several shapes), so a store without
+    ``list_tasks`` simply skips the gate rather than breaking task creation."""
+    list_tasks = getattr(store, "list_tasks", None)
+    if not callable(list_tasks):
+        return None
+    try:
+        index = task_dedupe.build_open_index(list_tasks())
+    except Exception:  # noqa: BLE001 — never block a create on a read failure
+        return None
+    paths = set(task_dedupe.normalized_target_paths(target_files))
+    paths |= paths_mod.declared_target_paths(title, detail)
+    return task_dedupe.find_duplicate(index, title=title, role=role, paths=paths)
+
+
 def create_task(
     store: Any, *, title: str, detail: str = "", role: str = "dev",
     surface: str = "pop", target_files: list[str] | None = None,
@@ -333,7 +353,23 @@ def create_task(
     role = str(role or "dev").strip().lower()
     if role not in _TASK_ROLES:
         role = "dev"
-    task = store.add_task(title=title, role=role, detail=str(detail or ""),
+    detail = str(detail or "")
+    # Spec 08: the second task-creation choke point gets the same dedupe gate as
+    # the PM plan path. A silent no-op would be worse than the duplicate — the
+    # operator would never learn why the task didn't appear — so this refuses
+    # with the matched task id and the rule that fired.
+    duplicate = _duplicate_of_open_task(store, title=title, detail=detail,
+                                        role=role, target_files=target_files)
+    if duplicate is not None:
+        raise ControlActionError(
+            "duplicate_task",
+            f"already open as {duplicate.task_id}: {duplicate.title!r} — "
+            "execute or re-scope that task instead of creating another",
+            matched_task_id=duplicate.task_id,
+            matched_title=duplicate.title,
+            rule=duplicate.rule,
+        )
+    task = store.add_task(title=title, role=role, detail=detail,
                           target_files=target_files)
     return pm_changes.record_change(
         store, summary=f"Created task: {title}",

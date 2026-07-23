@@ -29,6 +29,7 @@ import threading
 from typing import Any, Callable, NamedTuple, Optional
 
 from . import paths as _paths
+from . import task_dedupe
 from .autonomy import (
     CodingAutonomyPolicy,
     LoopResult,
@@ -1160,6 +1161,43 @@ def _model_assignment_prompt(store: LedgerStore) -> str:
         return ""
 
 
+_DUPLICATE_NOTE_CAP = 10
+
+
+def _duplicate_rejection_note(store: LedgerStore) -> str:
+    """Spec 08 — the honest report of what the dedupe gate threw away.
+
+    Reads the ``duplicate_task_rejected`` decisions and keeps only those whose
+    matched task is STILL open, so the note clears itself once the real task is
+    executed or dropped (instead of nagging about settled history)."""
+    try:
+        decisions = store.list_decisions()
+        open_ids = {
+            task.task_id for task in store.list_tasks()
+            if task.state in task_dedupe.OPEN_STATES
+        }
+    except Exception:  # noqa: BLE001 — prompt assembly must never fail the turn
+        return ""
+    rejected: dict[str, str] = {}
+    for record in decisions:
+        if record.get("choice") != "duplicate_task_rejected":
+            continue
+        matched = str(record.get("matched_task_id") or "")
+        planned = str(record.get("planned_title") or "")
+        if matched and planned and matched in open_ids:
+            rejected[planned] = matched
+    if not rejected:
+        return ""
+    titles = list(rejected)[-_DUPLICATE_NOTE_CAP:]
+    ids = sorted({rejected[title] for title in titles})
+    return (
+        f"{len(rejected)} of your earlier proposed tasks were rejected as "
+        f"duplicates of open tasks {', '.join(ids)} (e.g. "
+        f"{'; '.join(repr(t) for t in titles[:3])}). Do NOT re-propose them — "
+        "execute or re-scope the existing ones instead.\n"
+    )
+
+
 def _pm_prompt(store: LedgerStore) -> str:
     pending = store.list_unconsumed_interjections()
     pin = ""
@@ -1219,6 +1257,9 @@ def _pm_prompt(store: LedgerStore) -> str:
             "blocked task or a conflicted PR — cannot be auto-closed; leave it and "
             "the run will surface it for the human.\n"
         )
+    # Spec 08: tell the PM its proposals were rejected as duplicates. Without
+    # this it re-proposes the same job forever — it cannot see the gate.
+    done_gate = f"{done_gate}{_duplicate_rejection_note(store)}"
     return _register_pending_composition(
         _pm_prompt_segments(store, pin=pin, done_gate=done_gate))
 
@@ -1303,9 +1344,24 @@ def _materialize_pm_tasks(
     store: LedgerStore, intent: Any, *, parent_task: Task | None = None
 ) -> list[Task]:
     """Create a PM plan batch and resolve title/path dependencies."""
-    existing_title_to_id = {task.title: task.task_id for task in store.list_tasks()}
+    all_tasks = store.list_tasks()
+    existing_title_to_id = {task.title: task.task_id for task in all_tasks}
     created: list[tuple[Task, list[str]]] = []
     title_to_id = dict(existing_title_to_id)
+    # Spec 08 — the dedupe gate. `existing_title_to_id` above maps EVERY task
+    # (it must: `depends_on` may name a finished prerequisite by title), but the
+    # duplicate test may only consider OPEN work — re-doing a `done`/`dropped`
+    # task is legitimate. Hence a second, open-only index.
+    #
+    # The re-scope (PMAssist) path excludes its own parent, exactly as
+    # `path_owners` does below: the parent is still open right now but is
+    # dropped moments later, and its replacements are *supposed* to restate its
+    # job in smaller pieces. Deduping against it would reject the re-scope and
+    # wedge the stuck task permanently.
+    open_index = [
+        entry for entry in task_dedupe.build_open_index(all_tasks)
+        if parent_task is None or entry.task_id != parent_task.task_id
+    ]
     path_owners = _active_dev_path_owners(store)
     if parent_task is not None:
         path_owners = {
@@ -1321,6 +1377,32 @@ def _materialize_pm_tasks(
                 (path, path_owners[path]) for path in paths if path in path_owners
             )
         ]
+        # Spec 08: reject a planned task that is materially the same job as an
+        # already-open one. The rejection is recorded as a decision (auditable +
+        # renderable), the title still resolves — onto the MATCHED id — so a
+        # sibling's `depends_on` keeps working, and crucially the task never
+        # enters `created`, so `made_progress` goes False when the whole batch
+        # was duplicates. That re-arms the pm_idle / NO_PROGRESS detector
+        # instead of letting a churning PM look productive.
+        duplicate = task_dedupe.find_duplicate(
+            open_index, title=planned.title, role=DEV, paths=paths)
+        if duplicate is not None:
+            title_to_id[planned.title] = duplicate.task_id
+            store.record_decision(
+                title=f"duplicate task rejected: {planned.title}",
+                context="task_dedupe",
+                choice="duplicate_task_rejected",
+                rationale=duplicate.rationale(planned.title),
+                related_task_ids=[duplicate.task_id],
+                extra={
+                    "planned_title": planned.title,
+                    "matched_task_id": duplicate.task_id,
+                    "matched_title": duplicate.title,
+                    "rule": duplicate.rule,
+                    "similarity": round(duplicate.similarity, 3),
+                },
+            )
+            continue
         task = store.add_task(
             title=planned.title,
             # F087-18: PM plans DEV work only. Review/test/merge are auto-driven
@@ -1352,6 +1434,9 @@ def _materialize_pm_tasks(
             assignment_rationale=planned.assignment_rationale,
         )
         title_to_id[planned.title] = task.task_id
+        # A second identical proposal in the SAME batch must be caught too.
+        open_index.append(task_dedupe.index_entry(
+            task_id=task.task_id, title=planned.title, role=DEV, paths=paths))
         # Spec 09 §4 — bound the path-owner chaining amplifier. This used to be
         # `path_owners[path] = task.task_id`, which OVERWRITES the owner, so
         # sibling 2 inherited from sibling 1, sibling 3 from sibling 2, ... —
