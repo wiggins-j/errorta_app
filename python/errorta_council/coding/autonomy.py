@@ -568,12 +568,15 @@ class LoopCounters:
     # At delivery_review_round_limit the loop stops `delivery_review_stalled`.
     # Reset to 0 on a PASSING delivery review.
     delivery_review_rounds: int = 0
-    # Spec 07: consecutive PM plan / governance-progress turns with ZERO
-    # interleaved worker turns. Incremented in `_apply_outcome`'s
-    # {"planned","governance_progress"} branch; reset to 0 by every branch a
-    # WORKER turn reaches (task_done / review_done / task_blocked / the PR
-    # branches — i.e. exactly where pm_idle is reset). At plan_streak_limit the
-    # run stops `planning_churn`.
+    # Spec 07: consecutive PM `planned` turns with ZERO interleaved worker turns.
+    # Incremented in `_apply_outcome` ONLY on a `planned` outcome (the PM planning
+    # churn pathology); reset to 0 by every branch a WORKER turn reaches (task_done
+    # / review_done / task_blocked / the PR branches — i.e. exactly where pm_idle is
+    # reset) AND by `governance_progress` (FIX 1: governance advancing is bounded
+    # progress toward implementation, guarded by max_review_rounds, and its design
+    # phase has no worker turn to reset the streak — so counting it would false-fire
+    # planning_churn before implementation tasks ever exist). At plan_streak_limit
+    # the run stops `planning_churn`.
     plan_streak: int = 0
     # Spec 10: consecutive iterations observed WEDGED — a `wedge_min_tasks`+ todo
     # backlog with no dispatchable worker head. Incremented in
@@ -869,10 +872,11 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
     acceptance-gate signal, which only worker turns produce. Both structurally
     assume workers are running; this one covers the case where they are not.
 
-    ``c.plan_streak`` is maintained in ``_apply_outcome`` — incremented on a
-    plan/governance-progress turn, reset by every branch a worker turn reaches — so
-    a legitimate up-front decomposition burst that actually dispatches work never
-    trips. ``plan_streak_limit == 0`` disables the detector."""
+    ``c.plan_streak`` is maintained in ``_apply_outcome`` — incremented ONLY on a
+    PM `planned` turn, reset by every branch a worker turn reaches and by
+    `governance_progress` (FIX 1) — so a legitimate up-front decomposition burst
+    that actually dispatches work, and a governance design phase, never trip.
+    ``plan_streak_limit == 0`` disables the detector."""
     if policy.plan_streak_limit <= 0:
         return None
     if c.plan_streak < policy.plan_streak_limit:
@@ -1778,10 +1782,22 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
             c.pm_idle = 0
         else:
             c.pm_idle += 1
-        # Spec 07: a PM-only turn. The streak counts PRODUCTIVE plan turns too —
-        # the observed pathology is a PM that keeps creating dispatchable-looking
-        # tasks while no worker ever runs, so `made_progress` must not exempt it.
-        c.plan_streak += 1
+        # Spec 07: plan-streak accounting. ONLY a `planned` (PM planning) turn is
+        # the churn pathology — a PM that keeps creating dispatchable-looking tasks
+        # while no worker ever runs. `made_progress` must not exempt it.
+        #
+        # `governance_progress` is NOT counted: governance turns (GovernancePlan /
+        # Review / Materialize) all return `governance_progress` during the design
+        # phase, when NO worker turn exists to reset the streak — so counting them
+        # would trip `planning_churn` on a legitimate light/strict governance run
+        # before implementation tasks are ever created. Governance advancing is
+        # legitimate bounded progress toward implementation (independently guarded
+        # by max_review_rounds / governance_review_not_converging), so it RESETS
+        # the streak instead.
+        if outcome.kind == "planned":
+            c.plan_streak += 1
+        else:  # governance_progress
+            c.plan_streak = 0
         return milestone
 
     if outcome.kind == "project_done":

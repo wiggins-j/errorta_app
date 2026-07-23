@@ -203,6 +203,45 @@ def test_repoint_removes_the_edge_when_there_is_no_replacement(tmp_path: Path) -
     assert _reload(s, dependent.task_id).depends_on == [other.task_id]
 
 
+def test_all_deduped_rescope_keeps_the_parent_and_its_dependency_edge(
+    tmp_path: Path,
+) -> None:
+    """FIX 4: a re-scope whose proposed tasks ALL dedupe against the open backlog
+    yields no replacements. Dropping the parent then would strip the dependent's
+    only edge (`dropped` is satisfied + repoint-with-[] removes it) and dispatch it
+    prematurely. So with zero replacements the parent must NOT be dropped, and its
+    dependent must keep waiting on it."""
+    s = _store(tmp_path)
+    # An existing open task the re-scope proposal will collide with.
+    s.add_task(title="Build the settings page", role=DEV)
+    stuck = s.add_task(title="impl X", role=DEV, detail="Change src/x.py")
+    dependent = s.add_task(title="ship X", role=DEV, depends_on=[stuck.task_id])
+    _arm_pm_assist(s, stuck.task_id)
+
+    def caller(_member, _prompt):
+        # Byte-identical to the existing open task → deduped → no replacement.
+        return _pm_env([
+            {"title": "Build the settings page", "role": "dev",
+             "detail": "Acceptance: settings shown.", "depends_on": []},
+        ])
+
+    run_turn = build_run_turn(s, None, members_by_coding_role(MEMBER_DICTS),
+                              caller, guardrail_enabled=True)
+    outcome = run_turn(PMAssist("m-pm", stuck.task_id), s)
+
+    assert outcome.kind == "planned"
+    assert outcome.made_progress is False
+    # No replacement children were created.
+    assert [t for t in s.list_tasks() if t.parent_task_id == stuck.task_id] == []
+    # The parent survives (NOT dropped) so its dependent keeps waiting.
+    assert _reload(s, stuck.task_id).state != "dropped"
+    assert _reload(s, dependent.task_id).depends_on == [stuck.task_id]
+    # pm_assist flag cleared so the ladder does not spin on it.
+    reloaded = _reload(s, stuck.task_id)
+    extras = getattr(reloaded, "_extras", {}) or {}
+    assert extras.get("pm_assist_pending") in (False, None)
+
+
 # --- 3. stale-`doing` reaper -------------------------------------------------
 
 def test_sequential_loop_returns_a_noop_task_to_todo(tmp_path: Path) -> None:

@@ -41,15 +41,21 @@ _PUNCT_RE = re.compile(r"[^\w\s]+")
 # collapsing "Add X to the parser" / "Add Y to the parser".
 TITLE_SIMILARITY_THRESHOLD = 0.8
 
-# Rule (b) — identical target paths — corroborates a *weaker* title match rather
-# than standing alone. Standing alone it is a false-positive machine: "update
+# Rule (b) — identical target paths — corroborates the title match rather than
+# standing alone. Standing alone it is a false-positive machine: "update
 # pricing" / "cover pricing" / "document pricing" all name ``pricing.py`` and are
 # all role dev, yet they are three genuinely different jobs (the existing
-# Spec 09 hot-file tests plan exactly that batch). Requiring a majority token
-# overlap keeps rule (b) useful — it catches a reworded restatement of the same
-# job at a bar rule (a) would miss — without collapsing distinct work on a
-# shared file. See the module docstring: under-dedupe beats over-dedupe.
-PATH_RULE_TITLE_FLOOR = 0.6
+# Spec 09 hot-file tests plan exactly that batch).
+#
+# FIX 2: this floor was 0.6, which collapsed genuinely distinct jobs sharing a
+# file — "Add pagination to the users endpoint" / "Add sorting to the users
+# endpoint" (Jaccard 0.667), "Add unit tests for parser" / "Add integration tests
+# for parser" (0.60). A shared file is NOT evidence of a duplicate; the title
+# still has to match strongly. So rule (b) now requires the SAME strong title
+# similarity as rule (a) — identical paths only remove the different-file veto,
+# they do not lower the title bar. See the module docstring: under-dedupe (a
+# tolerated duplicate) beats over-dedupe (dropped real work).
+PATH_RULE_TITLE_FLOOR = 0.8
 
 RULE_TITLE = "normalized_title"
 RULE_PATHS = "target_paths"
@@ -150,6 +156,21 @@ def _paths_disagree(a: frozenset[str], b: frozenset[str]) -> bool:
     return bool(a) and bool(b) and a != b
 
 
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _numeric_distinguisher(a: frozenset[str], b: frozenset[str]) -> bool:
+    """FIX 2: True when the two token sets differ by a token that CONTAINS A DIGIT.
+
+    A number that appears in one title's significant tokens but not the other's
+    (the symmetric difference) is a load-bearing distinguisher — a level ("Fix
+    combat at level 50" vs "level 60"), a version ("Update parser for python 3.11"
+    vs "3.12"), a count, or "v2". Such a pair is NOT a duplicate no matter how high
+    the surrounding-token Jaccard is, so this acts as a final veto over BOTH dedupe
+    rules."""
+    return any(_HAS_DIGIT_RE.search(tok) for tok in (a ^ b))
+
+
 def find_duplicate(index: Iterable[OpenTask], *, title: str, role: str,
                    paths: Iterable[str]) -> DuplicateMatch | None:
     """The first open task the planned one materially duplicates, else ``None``.
@@ -159,13 +180,22 @@ def find_duplicate(index: Iterable[OpenTask], *, title: str, role: str,
     path sets.
 
     Rule (b) target paths: identical NON-EMPTY path sets, the same role, and a
-    majority title overlap (:data:`PATH_RULE_TITLE_FLOOR`) — see that constant
+    strong title overlap (:data:`PATH_RULE_TITLE_FLOOR`) — see that constant
     for why identical paths alone are not sufficient evidence.
+
+    Numeric veto (FIX 2): a token containing a digit that appears in one title but
+    not the other (a level / version / count / "v2") is a load-bearing
+    distinguisher, so such a pair is never a duplicate — this vetoes BOTH rules.
     """
     planned_tokens = normalized_tokens(title)
     planned_paths = frozenset(paths)
     planned_role = str(role or "")
     for entry in index:
+        # FIX 2: a digit-bearing token in the symmetric difference (e.g. 50/60,
+        # 3.11/3.12, v2) means the two titles name different jobs — final veto over
+        # both rules, checked before either can match.
+        if _numeric_distinguisher(planned_tokens, entry.tokens):
+            continue
         similarity = title_similarity(planned_tokens, entry.tokens)
         same_target = (bool(planned_paths) and planned_paths == entry.paths
                        and planned_role == entry.role)

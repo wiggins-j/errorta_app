@@ -113,10 +113,38 @@ def test_plan_streak_increments_even_when_the_plan_turn_made_progress() -> None:
     assert c.plan_streak == 3 and c.pm_idle == 0
 
 
-def test_governance_progress_also_counts_as_a_planning_turn() -> None:
+def test_governance_progress_does_not_increment_and_resets_plan_streak() -> None:
+    """FIX 1: governance turns (GovernancePlan/Review/Materialize) all emit
+    ``governance_progress`` during the design phase when NO worker turn exists to
+    reset the streak. Counting them tripped ``planning_churn`` on a legitimate
+    light/strict governance run before implementation tasks were ever created.
+    Governance advancing is bounded progress toward implementation (guarded by
+    max_review_rounds), so it must NOT increment plan_streak, and it RESETS it."""
     c = LoopCounters()
     _apply(TurnOutcome(kind="governance_progress", made_progress=True), c)
-    assert c.plan_streak == 1
+    assert c.plan_streak == 0
+
+    # And it actively resets an in-progress plan streak.
+    c = LoopCounters()
+    for _ in range(4):
+        _apply(_planned(), c)
+    assert c.plan_streak == 4
+    _apply(TurnOutcome(kind="governance_progress", made_progress=True), c)
+    assert c.plan_streak == 0
+
+
+def test_sustained_governance_progress_never_trips_planning_churn() -> None:
+    """8+ consecutive governance_progress turns (a strict governance design phase
+    with no worker turns yet) must NOT trip planning_churn — governance is bounded
+    by its own review-round guard, not by plan_streak."""
+    policy = CodingAutonomyPolicy(plan_streak_limit=6)
+    led = FakeLedger()
+    c = LoopCounters()
+    for _ in range(8):
+        _apply(TurnOutcome(kind="governance_progress", made_progress=True), c,
+               ledger=led)
+        assert _account_planning_churn(led, c, policy) is None
+    assert c.plan_streak == 0
 
 
 def test_task_done_resets_plan_streak() -> None:

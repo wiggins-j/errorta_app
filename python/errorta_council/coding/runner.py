@@ -2933,28 +2933,55 @@ def build_run_turn(
                 store, parsed.intent, parent_task=task
             )
             replacement_ids = [replacement.task_id for replacement in replacements]
+            if replacement_ids:
+                # FIX 3 (race): re-point dependents onto the replacements BEFORE
+                # dropping the parent. `dropped` counts as a satisfied dep (Spec 09),
+                # so there is a window where a dependent reads as ready between the
+                # drop and the repoint — the concurrent loop re-enters dispatch
+                # whenever any in-flight future completes. While the parent is still
+                # non-satisfied its dependents keep waiting; repointing first
+                # transfers that wait to the replacements with no ready-window.
+                _repoint_dropped_dependents(store, task.task_id, replacement_ids)
+                store.update_task(
+                    task.task_id,
+                    state="dropped",
+                    assignee_member_id=None,
+                    pm_assist_pending=False,
+                    pm_assist_attempts=attempts,
+                    superseded_by_task_ids=replacement_ids,
+                )
+                store.record_decision(
+                    title=f"PM re-scoped task: {task.title}",
+                    context=f"task {task.task_id}",
+                    choice="pm_assist_completed",
+                    rationale=f"Created {len(replacements)} smaller replacement task(s).",
+                    related_task_ids=[task.task_id] + replacement_ids,
+                )
+                return TurnOutcome(kind="planned", made_progress=True)
+            # FIX 4 (edge): the re-scope produced NO replacement tasks (all deduped
+            # against the open backlog, or an empty intent). Dropping the parent
+            # here would strip its dependents' only dependency edge — since
+            # `dropped` is satisfied and `_repoint_dropped_dependents(..., [])`
+            # removes the edge entirely, the dependents would dispatch prematurely
+            # against work that was never actually re-scoped. Keep the parent
+            # (non-satisfied) so its dependents keep waiting; only clear the
+            # pm_assist flag so the ladder does not spin on it.
             store.update_task(
                 task.task_id,
-                state="dropped",
-                assignee_member_id=None,
                 pm_assist_pending=False,
                 pm_assist_attempts=attempts,
-                superseded_by_task_ids=replacement_ids,
             )
-            # Spec 09 §2: the dropped task can never reach `done`, so anything
-            # still depending on it is dead. Re-point those edges onto the
-            # superseding tasks (or drop them when there are none).
-            _repoint_dropped_dependents(store, task.task_id, replacement_ids)
             store.record_decision(
-                title=f"PM re-scoped task: {task.title}",
+                title=f"PM re-scope produced no new tasks: {task.title}",
                 context=f"task {task.task_id}",
-                choice="pm_assist_completed",
-                rationale=f"Created {len(replacements)} smaller replacement task(s).",
-                related_task_ids=[task.task_id] + [
-                    replacement.task_id for replacement in replacements
-                ],
+                choice="pm_assist_no_replacements",
+                rationale=(
+                    "Re-scope yielded no replacement tasks (all deduped or empty); "
+                    "kept the parent so its dependents keep waiting."
+                ),
+                related_task_ids=[task.task_id],
             )
-            return TurnOutcome(kind="planned", made_progress=bool(replacements))
+            return TurnOutcome(kind="planned", made_progress=False)
 
         if isinstance(action, Plan):
             if _redispatch_conflicted_prs(store, workspace):

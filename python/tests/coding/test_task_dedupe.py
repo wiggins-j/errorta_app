@@ -100,24 +100,24 @@ def test_filler_verb_variant_is_rejected(tmp_path: Path) -> None:
     assert _skips(s)[0]["rule"] == task_dedupe.RULE_TITLE
 
 
-def test_reworded_title_on_the_same_file_is_rejected(tmp_path: Path) -> None:
-    """Rule (b): identical target paths corroborate a title match too weak for
-    rule (a) on its own."""
+def test_reworded_title_on_the_same_file_is_allowed(tmp_path: Path) -> None:
+    """FIX 2: rule (b)'s title floor is now 0.8 (was 0.6). A same-file pair whose
+    titles only reach Jaccard 0.67 is NOT strong enough to dedupe — a shared file
+    is not evidence of a duplicate. Per the module docstring, tolerating a possible
+    duplicate is acceptable; dropping real work is not. So this reworded same-file
+    pair is now allowed through as two tasks."""
     s = _store(tmp_path, "d2b")
-    existing = s.add_task(title="Fix the renderer init interface", role=DEV,
-                          detail="Edit src/renderer.ts")
+    s.add_task(title="Fix the renderer init interface", role=DEV,
+               detail="Edit src/renderer.ts")
 
     created = _plan(s, [
-        # title Jaccard 0.67 — under rule (a)'s 0.8 bar, so only the identical
-        # declared path set can carry this one.
+        # title Jaccard 0.67 — under the 0.8 bar rule (b) now shares with rule (a).
         {"title": "Repair the renderer init interface wiring", "role": "dev",
          "detail": "Acceptance: wiring done. Edit src/renderer.ts"},
     ])
 
-    assert created == []
-    skip = _skips(s)[0]
-    assert skip["rule"] == task_dedupe.RULE_PATHS
-    assert skip["matched_task_id"] == existing.task_id
+    assert len(created) == 1
+    assert _skips(s) == []
 
 
 # --- the false-positive guards (the real risk) --------------------------------
@@ -147,6 +147,62 @@ def test_distinct_jobs_on_one_shared_file_both_created(tmp_path: Path) -> None:
         {"title": "document pricing", "role": "dev", "detail": "Doc pricing.py"},
     ])
 
+    assert len(created) == 2
+    assert _skips(s) == []
+
+
+def test_pagination_vs_sorting_same_endpoint_both_created(tmp_path: Path) -> None:
+    """FIX 2 regression: two distinct jobs on users.py — title Jaccard 0.667, under
+    the raised 0.8 rule (b) floor. The old 0.6 floor wrongly collapsed them."""
+    s = _store(tmp_path, "fp1")
+    created = _plan(s, [
+        {"title": "Add pagination to the users endpoint", "role": "dev",
+         "detail": "Acceptance: paginated. In scope: src/users.py"},
+        {"title": "Add sorting to the users endpoint", "role": "dev",
+         "detail": "Acceptance: sorted. In scope: src/users.py"},
+    ])
+    assert len(created) == 2
+    assert _skips(s) == []
+
+
+def test_unit_vs_integration_tests_same_file_both_created(tmp_path: Path) -> None:
+    """FIX 2 regression: "unit tests" vs "integration tests" on parser.py — title
+    Jaccard 0.60, below the 0.8 floor. The old 0.6 floor wrongly collapsed them."""
+    s = _store(tmp_path, "fp2")
+    created = _plan(s, [
+        {"title": "Add unit tests for parser", "role": "dev",
+         "detail": "Acceptance: unit covered. In scope: src/parser.py"},
+        {"title": "Add integration tests for parser", "role": "dev",
+         "detail": "Acceptance: integration covered. In scope: src/parser.py"},
+    ])
+    assert len(created) == 2
+    assert _skips(s) == []
+
+
+def test_combat_level_50_vs_60_both_created(tmp_path: Path) -> None:
+    """FIX 2 numeric veto: a level number is a load-bearing distinguisher, so
+    "level 50" and "level 60" on combat.py are two jobs regardless of Jaccard."""
+    s = _store(tmp_path, "fp3")
+    created = _plan(s, [
+        {"title": "Fix combat at level 50", "role": "dev",
+         "detail": "Acceptance: lvl 50 ok. In scope: src/combat.py"},
+        {"title": "Fix combat at level 60", "role": "dev",
+         "detail": "Acceptance: lvl 60 ok. In scope: src/combat.py"},
+    ])
+    assert len(created) == 2
+    assert _skips(s) == []
+
+
+def test_parser_python_3_11_vs_3_12_both_created(tmp_path: Path) -> None:
+    """FIX 2 numeric veto: a version number distinguishes the jobs, so "python
+    3.11" and "python 3.12" on parser.py are two tasks, not one."""
+    s = _store(tmp_path, "fp4")
+    created = _plan(s, [
+        {"title": "Update parser for python 3.11", "role": "dev",
+         "detail": "Acceptance: 3.11 ok. In scope: src/parser.py"},
+        {"title": "Update parser for python 3.12", "role": "dev",
+         "detail": "Acceptance: 3.12 ok. In scope: src/parser.py"},
+    ])
     assert len(created) == 2
     assert _skips(s) == []
 
