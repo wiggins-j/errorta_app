@@ -232,27 +232,15 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     _maybe_onboard(handle, json_mode=json_mode, no_onboarding=no_onboarding,
                    command_name=name)
 
-    # Spec 06: `errorta watch` is the live run dashboard — loop by default (unless
-    # `--once`/`--json`), reusing the poll harness below.
+    # `--watch` on a read command re-renders on the poll loop (never in --json/CI).
     if not json_mode:
         from . import watch as _watch
 
-        raw_args = _watch.arm_dashboard(name, raw_args, ctx)
-
-    # `--watch` on a read command re-renders on the poll loop (never in --json/CI).
-    if "--watch" in raw_args and not json_mode:
-        from . import watch as _watch
-
-        if name in _watch.SELF_STREAMING:
-            # `run` already streams live to completion — --watch is redundant.
-            # Drop it and fall through to the normal dispatch (which streams AND
-            # sets the terminal exit code), with a gentle note.
-            typer.echo(
-                f"note: `{name}` already streams live; --watch has no extra effect.",
-                err=True,
-            )
-            raw_args = [a for a in raw_args if a != "--watch"]
-        else:
+        decision = _watch.maybe_run_watch(name, ctx, raw_args)
+        raw_args = decision.raw_args
+        if decision.note:
+            typer.echo(decision.note, err=True)
+        if decision.handled:
             with SidecarClient(handle.base_url) as client:
                 try:
                     _watch.run_watch(name, client, ctx, raw_args)

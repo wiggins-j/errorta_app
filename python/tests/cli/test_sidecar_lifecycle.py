@@ -54,6 +54,37 @@ def test_record_roundtrip(tmp_path: Path) -> None:
     assert sidecar.read_record(tmp_path) is None
 
 
+def test_home_lock_warns_once_when_fcntl_is_unavailable(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.setattr(sidecar, "_HAVE_FCNTL", False)
+    monkeypatch.setattr(sidecar, "_warned_lock_degraded", False)
+
+    with sidecar._home_lock(tmp_path):
+        pass
+    with sidecar._home_lock(tmp_path):
+        pass
+
+    err = capsys.readouterr().err
+    assert err.count("sidecar launch locking is unavailable") == 1
+
+
+def test_home_lock_uses_fcntl_without_warning(monkeypatch, tmp_path: Path, capsys) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(sidecar, "_HAVE_FCNTL", True)
+    monkeypatch.setattr(
+        sidecar.fcntl,
+        "flock",
+        lambda _fd, operation: calls.append(operation),
+    )
+
+    with sidecar._home_lock(tmp_path):
+        pass
+
+    assert calls == [sidecar.fcntl.LOCK_EX, sidecar.fcntl.LOCK_UN]
+    assert capsys.readouterr().err == ""
+
+
 # --------------------------------------------------------------------------- #
 # resolve(): adopt vs spawn.
 # --------------------------------------------------------------------------- #

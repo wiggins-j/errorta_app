@@ -78,6 +78,15 @@ def test_watch_uses_post_subcommand_poll_interval(monkeypatch, tmp_path) -> None
         seen["raw_args"] = raw_args
 
     monkeypatch.setattr(app_module, "SidecarClient", _Client)
+    from errorta_cli import watch
+
+    original_maybe_run_watch = watch.maybe_run_watch
+
+    def fake_maybe_run_watch(name, ctx, raw_args):
+        seen["helper_called"] = True
+        return original_maybe_run_watch(name, ctx, raw_args)
+
+    monkeypatch.setattr(watch, "maybe_run_watch", fake_maybe_run_watch)
     monkeypatch.setattr("errorta_cli.watch.run_watch", fake_run_watch)
 
     result = CliRunner().invoke(
@@ -89,6 +98,7 @@ def test_watch_uses_post_subcommand_poll_interval(monkeypatch, tmp_path) -> None
         "name": "tasks",
         "poll_interval": 0.25,
         "raw_args": ["--watch"],
+        "helper_called": True,
     }
 
 

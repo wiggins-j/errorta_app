@@ -139,22 +139,16 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
             print("bye")
             return
         name, raw_args = registry.split_slash(line)
-        # Spec 06: `/watch` is the live dashboard — loop by default (unless `--once`).
+        # Registry commands share dashboard arming and self-streaming handling
+        # with the argv front-end. Builtins always render once.
         if registry.get(name) is not None:
             from . import watch as _watch
 
-            raw_args = _watch.arm_dashboard(name, raw_args, ctx)
-        # `/log --watch` (etc.) tails on the poll loop until Ctrl-C, then returns
-        # to the prompt. Only registry commands watch; builtins render once.
-        if "--watch" in raw_args and registry.get(name) is not None:
-            from . import watch as _watch
-
-            if name in _watch.SELF_STREAMING:
-                # `/run --watch` — run already streams; note it and fall through
-                # to the normal one-shot dispatch below (`run` ignores the stray
-                # --watch, which lands in _extra).
-                print(f"note: `{name}` already streams live; --watch has no extra effect.")
-            else:
+            decision = _watch.maybe_run_watch(name, ctx, raw_args)
+            raw_args = decision.raw_args
+            if decision.note:
+                print(decision.note)
+            if decision.handled:
                 try:
                     _watch.run_watch(name, client, ctx, raw_args)
                 except KeyboardInterrupt:
@@ -162,6 +156,15 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
                 except CliError as exc:
                     # e.g. `/cancel --watch` — a mutating command rejects the loop.
                     print(f"error: {exc.message}")
+                continue
+            if decision.note:
+                try:
+                    _payload, text = registry.dispatch(name, client, ctx, raw_args)
+                except CliError as exc:
+                    print(f"error: {exc.message}")
+                else:
+                    if text:
+                        print(text)
                 continue
         text = handle_line(line, ctx, client)
         if text:
