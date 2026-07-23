@@ -63,11 +63,25 @@ def handle_line(line: str, ctx: Context, client: SidecarClient) -> str:
     if name in {"cd", "ls", "pwd"}:
         return ("the REPL stays in the directory it launched from — use /projects "
                 "then /open <id> to switch projects, or /quit and cd in your shell.")
+    return handle_registry(name, raw_args, ctx, client)
+
+
+def handle_registry(
+    name: str, raw_args: list[str], ctx: Context, client: SidecarClient
+) -> str:
+    """Dispatch one registry command from already-parsed ``(name, raw_args)``.
+
+    The SINGLE non-watch registry dispatch path, shared by :func:`handle_line`
+    (which owns builtins + the line split) and the REPL loop. Because it takes the
+    parsed args — not the raw line — the self-streaming ``/run --watch`` branch
+    (note printed, ``--watch`` already stripped by ``maybe_run_watch``) and a plain
+    ``/status`` run through identical code instead of two dispatch functions.
+    Never raises ``CliError``.
+    """
     # Bare `/pm` opens the interactive PM conversation (same path as
     # `pm --interactive` on the argv side); `/pm chat`, `/pm ask …` stay one-shot.
     if name == "pm" and not raw_args:
         raw_args = ["--interactive"]
-
     try:
         _payload, text = registry.dispatch(name, client, ctx, raw_args)
     except KeyError:
@@ -157,15 +171,13 @@ def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) ->
                     # e.g. `/cancel --watch` — a mutating command rejects the loop.
                     print(f"error: {exc.message}")
                 continue
-            if decision.note:
-                try:
-                    _payload, text = registry.dispatch(name, client, ctx, raw_args)
-                except CliError as exc:
-                    print(f"error: {exc.message}")
-                else:
-                    if text:
-                        print(text)
-                continue
+            # Non-watch registry dispatch — the self-streaming `/run --watch` case
+            # (note set, `--watch` stripped) and a plain `/status` share the ONE
+            # helper below; the note is the only thing that differs between them.
+            text = handle_registry(name, raw_args, ctx, client)
+            if text:
+                print(text)
+            continue
         text = handle_line(line, ctx, client)
         if text:
             print(text)
