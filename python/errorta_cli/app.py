@@ -284,17 +284,24 @@ def _extract_post_globals(
     of one of the subcommand's own value-options. Given ``command``, a value-option
     (``--name``) is passed through together with the token that follows it, so
     ``errorta log --grep --json`` keeps ``--json`` as the grep pattern instead of
-    letting it be eaten as the global ``--json``. (A bare positional cannot collide:
-    positionals never start with ``--``.) With ``command=None`` the old, schema-blind
-    behavior is preserved for direct callers.
+    letting it be eaten as the global ``--json``. A global-looking token is also
+    preserved when it fills a still-missing required positional. With
+    ``command=None`` the old, schema-blind behavior is preserved for direct callers.
     """
     value_opts = (
-        frozenset(f"--{p.name}" for p in command.params if not p.is_flag)
+        {f"--{p.name}": p for p in command.params if not p.is_flag}
         if command is not None
-        else frozenset()
+        else {}
+    )
+    positionals = (
+        [p for p in command.params if not p.is_flag]
+        if command is not None
+        else []
     )
     overrides: dict[str, object] = {}
     rest: list[str] = []
+    pos_i = 0
+    filled_positionals: set[str] = set()
     i = 0
     while i < len(raw_args):
         token = raw_args[i]
@@ -304,7 +311,22 @@ def _extract_post_globals(
             rest.append(token)
             if i + 1 < len(raw_args):
                 rest.append(raw_args[i + 1])
+                filled_positionals.add(value_opts[token].name)
                 i += 1
+            i += 1
+            continue
+        while (
+            pos_i < len(positionals)
+            and positionals[pos_i].name in filled_positionals
+        ):
+            pos_i += 1
+        required_positional = (
+            pos_i < len(positionals) and positionals[pos_i].required
+        )
+        if token.startswith("--") and required_positional:
+            rest.append(token)
+            filled_positionals.add(positionals[pos_i].name)
+            pos_i += 1
             i += 1
             continue
         if token == "--json":
@@ -332,6 +354,9 @@ def _extract_post_globals(
             i += 1
         else:
             rest.append(token)
+            if not token.startswith("--") and pos_i < len(positionals):
+                filled_positionals.add(positionals[pos_i].name)
+                pos_i += 1
         i += 1
     return overrides, rest
 

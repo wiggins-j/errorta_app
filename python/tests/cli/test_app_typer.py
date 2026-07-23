@@ -78,6 +78,26 @@ def test_global_is_harvested_when_command_has_no_such_value_option() -> None:
     assert rest == []
 
 
+def test_global_looking_required_positional_is_preserved() -> None:
+    from errorta_cli import registry
+
+    overrides, rest = app_module._extract_post_globals(
+        ["--json"], registry.get("open")
+    )
+    assert overrides == {}
+    assert rest == ["--json"]
+
+
+def test_global_after_required_positional_option_is_harvested() -> None:
+    from errorta_cli import registry
+
+    overrides, rest = app_module._extract_post_globals(
+        ["--id", "project", "--json"], registry.get("open")
+    )
+    assert overrides == {"json": True}
+    assert rest == ["--id", "project"]
+
+
 def test_post_globals_without_command_preserves_legacy_behavior() -> None:
     # command=None ⇒ schema-blind (direct callers / back-compat).
     overrides, rest = app_module._extract_post_globals(["--home", "/x", "--role", "dev"])

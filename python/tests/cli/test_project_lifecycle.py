@@ -106,10 +106,10 @@ def test_new_invokes_sole_owner_guard(make_ctx, monkeypatch) -> None:
     assert spy, "sole-owner guard not invoked on new"
 
 
-def test_new_without_id_is_usage_no_call(make_ctx) -> None:
+def test_new_without_id_is_parser_error_no_call(make_ctx) -> None:
     client = RouteClient()
-    _payload, text = registry.dispatch("new", client, make_ctx(), ["--yes"])
-    assert "usage" in text.lower()
+    with pytest.raises(CliError, match="missing required argument.*id"):
+        registry.dispatch("new", client, make_ctx(), ["--yes"])
     assert client.calls == []
 
 

@@ -143,11 +143,53 @@ def split_slash(line: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
-def extract_json_flag(raw_args: list[str]) -> tuple[bool, list[str]]:
-    """Strip a global ``--json`` from ``raw_args``; return ``(json_mode, rest)``."""
-    if "--json" in raw_args:
-        return True, [a for a in raw_args if a != "--json"]
-    return False, list(raw_args)
+def extract_json_flag(
+    raw_args: list[str], command: Command | None = None
+) -> tuple[bool, list[str]]:
+    """Strip a global ``--json`` without stealing a command-owned value."""
+    if command is None:
+        if "--json" in raw_args:
+            return True, [a for a in raw_args if a != "--json"]
+        return False, list(raw_args)
+
+    by_name = {f"--{p.name}": p for p in command.params}
+    positionals = [p for p in command.params if not p.is_flag]
+    filled_positionals: set[str] = set()
+    pos_i = 0
+    detected = False
+    rest: list[str] = []
+    i = 0
+    while i < len(raw_args):
+        token = raw_args[i]
+        while (
+            pos_i < len(positionals)
+            and positionals[pos_i].name in filled_positionals
+        ):
+            pos_i += 1
+        param = by_name.get(token)
+        if param is not None:
+            rest.append(token)
+            if not param.is_flag and i + 1 < len(raw_args):
+                rest.append(raw_args[i + 1])
+                filled_positionals.add(param.name)
+                i += 1
+        elif token == "--json":
+            required_positional = (
+                pos_i < len(positionals) and positionals[pos_i].required
+            )
+            if required_positional:
+                rest.append(token)
+                filled_positionals.add(positionals[pos_i].name)
+                pos_i += 1
+            else:
+                detected = True
+        else:
+            rest.append(token)
+            if not token.startswith("--") and pos_i < len(positionals):
+                filled_positionals.add(positionals[pos_i].name)
+                pos_i += 1
+        i += 1
+    return detected, rest
 
 
 def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
@@ -161,6 +203,7 @@ def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
     flag_names = {p.name for p in command.params if p.is_flag}
     args: dict[str, Any] = {p.name: p.default for p in command.params}
     positionals = [p for p in command.params if not p.is_flag]
+    filled_positionals: set[str] = set()
     extra: list[str] = []
 
     pos_i = 0
@@ -174,6 +217,7 @@ def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
             elif key in by_name:
                 if i + 1 < len(raw_args):
                     args[key] = raw_args[i + 1]
+                    filled_positionals.add(key)
                     i += 1
                 else:
                     # R1: a value-option given with no following value is a user
@@ -184,8 +228,14 @@ def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
             else:
                 extra.append(token)
         else:
+            while (
+                pos_i < len(positionals)
+                and positionals[pos_i].name in filled_positionals
+            ):
+                pos_i += 1
             if pos_i < len(positionals):
                 args[positionals[pos_i].name] = token
+                filled_positionals.add(positionals[pos_i].name)
                 pos_i += 1
             else:
                 extra.append(token)
@@ -193,6 +243,12 @@ def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
 
     if extra:
         args["_extra"] = extra
+    missing = [
+        p.name for p in command.params
+        if p.required and args.get(p.name) in (None, "")
+    ]
+    if missing:
+        raise CliError(f"missing required argument(s): {', '.join(missing)}")
     return args
 
 
@@ -247,7 +303,7 @@ def dispatch(
     command = get(name)
     if command is None:
         raise KeyError(name)
-    detected_json, rest = extract_json_flag(raw_args)
+    detected_json, rest = extract_json_flag(raw_args, command)
     effective_json = detected_json if json_mode is None else json_mode
     args = resolve_args(command, rest)
     # R1: enforce "nothing silently lost" for closed-arg commands (both front-ends
