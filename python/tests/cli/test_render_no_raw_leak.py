@@ -93,6 +93,11 @@ def _kitchen_sink() -> dict:
         "pending": [{"change_id": "c-1", "kind": "assign_models", "status": "pending",
                      "summary": "dev to sonnet", "detail": SECRET, "_secret": SECRET}],
         "recent": [],
+        # gate — /test-runs shape (SECRET planted in the hidden stdout preview).
+        "runs": [{"at": "2026-01-01T00:00:00", "passed": False, "head": "abc12345",
+                  "sandbox": "none", "command_ids": ["cmd-0"],
+                  "results": [{"command_id": "cmd-0", "status": "failed", "exit_code": 1,
+                               "passed": False, "stdout_preview": SECRET, "_secret": SECRET}]}],
     }
 
 
@@ -101,7 +106,7 @@ COMMAND_ARGS = {
     "status": [], "log": [], "decisions": [], "tasks": [], "board": [],
     "prs": [], "pr": ["pr-1"], "tokens": [], "turns": [], "turn": ["t1", "tn-1"],
     "attention": [], "runtime": ["--session", "s"], "team": [], "models": [],
-    "governance": [], "pm": ["chat"],
+    "governance": [], "pm": ["chat"], "gate": [],
 }
 
 
