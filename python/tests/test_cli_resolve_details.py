@@ -288,3 +288,21 @@ def _clean_overrides(monkeypatch) -> None:
         monkeypatch.delenv(var, raising=False)
     yield
     os.environ.pop("MY_ENV_VAR", None)
+
+
+# ---------------------------------------------------------------------------
+# R3 — the sidecar's mutation-auth secret must NOT leak into a spawned CLI env.
+# ---------------------------------------------------------------------------
+
+
+def test_clean_subprocess_env_scrubs_sidecar_token(monkeypatch) -> None:
+    """A spawned model-CLI subprocess env must NOT carry ERRORTA_SIDECAR_TOKEN
+    (or the enforce flag). Leaking the sidecar's own bearer to an external vendor
+    CLI would defeat the R3 token gate."""
+    monkeypatch.setenv("ERRORTA_SIDECAR_TOKEN", "super-secret-bearer")
+    monkeypatch.setenv("ERRORTA_SIDECAR_TOKEN_ENFORCE", "1")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    env = _cli_common._clean_subprocess_env()
+    assert "ERRORTA_SIDECAR_TOKEN" not in env
+    assert "ERRORTA_SIDECAR_TOKEN_ENFORCE" not in env
+    assert "super-secret-bearer" not in env.values()

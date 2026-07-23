@@ -113,6 +113,13 @@ def features() -> dict:
         # Whether the gate is actually ON is a build-time decision reported via
         # GET /alpha/status, not here.
         "alpha_delivery": True,
+        # R3: this sidecar validates a per-sidecar bearer token on mutations.
+        # ``true`` only when a token is actually configured for THIS process
+        # (env ``ERRORTA_SIDECAR_TOKEN`` set at spawn) — a desktop-spawned or
+        # pre-R3 sidecar reports ``false`` and runs origin-only. The CLI MAY use
+        # this to decide whether to send the bearer; grace mode handles compat
+        # regardless.
+        "sidecar_token": bool((os.environ.get("ERRORTA_SIDECAR_TOKEN") or "").strip()),
     }
     try:
         import errorta_project_grounding  # noqa: F401

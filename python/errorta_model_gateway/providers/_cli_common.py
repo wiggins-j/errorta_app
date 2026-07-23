@@ -60,6 +60,16 @@ _LOADER_ENV_VARS = (
     "LD_LIBRARY_PATH",
 )
 
+# R3 — the sidecar's own mutation-auth secrets. They exist so the sidecar can
+# validate its own inbound requests; a spawned vendor CLI has no business seeing
+# them, and leaking the bearer to an external process would defeat the token
+# gate. Scrubbed from every subprocess env built here. (String literals, not an
+# import, so this stdlib-only module keeps its no-errorta_app dependency.)
+_SIDECAR_AUTH_ENV_VARS = (
+    "ERRORTA_SIDECAR_TOKEN",
+    "ERRORTA_SIDECAR_TOKEN_ENFORCE",
+)
+
 
 def _clean_subprocess_env() -> dict[str, str]:
     """Environment for the spawned CLI: PyInstaller loader pollution removed,
@@ -72,6 +82,9 @@ def _clean_subprocess_env() -> dict[str, str]:
             env[var] = original
         else:
             env.pop(var, None)
+    # R3: never hand the sidecar's mutation-auth secret to a spawned vendor CLI.
+    for var in _SIDECAR_AUTH_ENV_VARS:
+        env.pop(var, None)
     extra = [
         "/opt/homebrew/bin",
         "/usr/local/bin",

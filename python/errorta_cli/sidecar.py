@@ -40,6 +40,7 @@ import atexit
 import contextlib
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -56,6 +57,12 @@ from .errors import ForeignSidecar, SidecarUnreachable
 # The desktop app's default sidecar port (server.py:_resolve_port). Used only to
 # *detect* a foreign app — the CLI never drives a foreign sidecar.
 APP_DEFAULT_PORT = 8770
+
+# R3 — env var carrying the per-sidecar bearer token to the spawned sidecar
+# process. Set at spawn() so the sidecar's mutation guard (errorta_app.origin)
+# can validate incoming `Authorization: Bearer` against it. Mirrors the on-disk
+# 0600 token file the client reads to attach the header.
+SIDECAR_TOKEN_ENV = "ERRORTA_SIDECAR_TOKEN"
 
 _HEALTHZ_PROBE_TIMEOUT = 1.0
 _SPAWN_READY_BUDGET = 15.0
@@ -82,6 +89,10 @@ class SidecarHandle:
     started_by: str
     adopted: bool
     commit_mismatch: bool = False
+    # R3 — the per-sidecar bearer token for this handle (minted on spawn, read
+    # from the 0600 file on adoption). ``None`` when no token file exists (an
+    # old sidecar predating R3) → the client sends origin-only (grace mode).
+    token: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -144,6 +155,59 @@ def write_record(home: Path, record: dict) -> None:
 def clear_record(home: Path) -> None:
     with contextlib.suppress(OSError):
         config.sidecar_record_path(home).unlink()
+    # R3: the bearer token is scoped to the sidecar this record described. Drop
+    # it alongside the record so a dead/stopped sidecar leaves no stale secret on
+    # disk (a respawn mints a fresh one; a live client would fail closed anyway).
+    with contextlib.suppress(OSError):
+        config.sidecar_token_path(home).unlink()
+
+
+# --------------------------------------------------------------------------- #
+# R3 — per-sidecar bearer token: mint / store 0600 / read.
+# --------------------------------------------------------------------------- #
+
+def mint_token() -> str:
+    """Mint a fresh, unguessable per-sidecar bearer token."""
+    return secrets.token_urlsafe(32)
+
+
+def write_token(home: Path, token: str) -> None:
+    """Persist the sidecar bearer token to a NEW 0600 file (never sidecar.json).
+
+    Written atomically with owner-only perms, mirroring
+    ``errorta_app.auth.store._write_atomic`` — the secret must not be
+    world-readable the way ``sidecar.json`` (0644) is. Overwrites any prior
+    token (a respawn rotates it)."""
+    path = config.sidecar_token_path(home)
+    tmp = path.with_suffix(".tmp")
+    # Create the temp file with 0600 from the start so the secret is never
+    # briefly world-readable between write and chmod.
+    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        if os.name == "posix":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def read_token(home: Path) -> str | None:
+    """Read the sidecar bearer token, or ``None`` if absent/unreadable/empty.
+
+    A missing file means "this sidecar predates R3 (or is desktop-spawned)"; the
+    caller then sends origin-only and the sidecar's grace mode still accepts it."""
+    path = config.sidecar_token_path(home)
+    try:
+        token = path.read_text("utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    return token or None
 
 
 # --------------------------------------------------------------------------- #
@@ -304,7 +368,19 @@ def _serve_argv() -> list[str]:
 def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
     """Spawn a fresh CLI-owned sidecar, wait for readiness, persist the record."""
     port = _free_port()
-    env = {**os.environ, "ERRORTA_SIDECAR_PORT": str(port), "ERRORTA_HOME": str(home)}
+    # R3: mint a fresh per-sidecar bearer token BEFORE launching so the child
+    # boots knowing its own token (via env) and the 0600 file is on disk for the
+    # client to read. A respawn mints anew + overwrites (rotation). We store the
+    # file before launch so no window exists where the sidecar is up but the
+    # token is unreadable by a client.
+    token = mint_token()
+    write_token(home, token)
+    env = {
+        **os.environ,
+        "ERRORTA_SIDECAR_PORT": str(port),
+        "ERRORTA_HOME": str(home),
+        SIDECAR_TOKEN_ENV: token,
+    }
     env.setdefault("ERRORTA_CLI_SIDECAR", "1")
     # F147 S9b: stamp who spawned it so its /healthz + sidecar.json advertisement
     # honestly report `started_by=cli` (the desktop app reads this when deciding
@@ -319,6 +395,10 @@ def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
         # invocation would find no record and spawn *another*, accumulating
         # orphan sidecars. Kill the child we launched before re-raising.
         _kill_child(proc)
+        # R3: the token we just minted/wrote is now for a dead child. Remove it
+        # so no stale 0600 secret lingers for a sidecar that never came up.
+        with contextlib.suppress(OSError):
+            config.sidecar_token_path(home).unlink()
         raise
     commit = _healthz_commit(body) or our_commit
     record = {
@@ -335,6 +415,7 @@ def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
         commit=commit,
         started_by="cli",
         adopted=False,
+        token=token,
     )
 
 
@@ -425,6 +506,10 @@ def resolve(
                         started_by=started,
                         adopted=True,
                         commit_mismatch=mismatch,
+                        # R3: adoption READS the running sidecar's token (does not
+                        # mint) so the adopting CLI presents the same bearer the
+                        # sidecar was booted with. None if the sidecar predates R3.
+                        token=read_token(home),
                     )
                     _register_client(home)
                     return handle

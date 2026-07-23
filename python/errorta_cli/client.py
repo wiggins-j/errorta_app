@@ -1,14 +1,22 @@
 """Thin ``httpx`` client over the Errorta sidecar (F147 spec §4.1).
 
 The load-bearing invariant: **every** request carries the static origin header
-``x-errorta-origin: cli``. That header is the *only* guard on coding / gateway
-mutations (``coding.py:_require_tauri_origin`` → 403 if absent); there is no token
-and no crypto. The sidecar's origin allowlist trusts both ``tauri-ui`` (the
-desktop webview) and ``cli`` equally (F147 S9a ``errorta_app.origin``) — both are
-loopback-only, so this is not a privilege change; sending ``cli`` simply makes a
-CLI-initiated mutation *distinguishable in audit/logs* from a GUI one now that a
-GUI and the CLI can co-drive one shared sidecar (S9b). Reads don't need the
-header, but sending it universally is simplest and harmless.
+``x-errorta-origin: cli``. The sidecar's origin allowlist trusts both
+``tauri-ui`` (the desktop webview) and ``cli`` equally (F147 S9a
+``errorta_app.origin``) — both are loopback-only, so this is not a privilege
+change; sending ``cli`` simply makes a CLI-initiated mutation *distinguishable in
+audit/logs* from a GUI one now that a GUI and the CLI can co-drive one shared
+sidecar (S9b). Reads don't need the header, but sending it universally is
+simplest and harmless.
+
+R3: the origin header is no longer sufficient on its own for a mutation (any
+local process can spoof it). Every request additionally carries
+``Authorization: Bearer <token>`` when a per-sidecar token is available (read
+from the 0600 ``sidecar-token`` file at handle-resolution time). The sidecar
+runs a grace mode during alpha: a valid bearer OR a trusted origin with no
+bearer is accepted; a *present but invalid* bearer is rejected 403. So an old
+CLI (no token) still works against a new sidecar, and a new CLI still works
+against an old sidecar (which ignores the header).
 
 HTTP status + known sidecar error bodies are mapped to the typed exceptions in
 ``errors.py`` so the command layer never sees a raw ``httpx`` response and CI
@@ -37,7 +45,23 @@ from .errors import (
 ORIGIN_HEADER = "x-errorta-origin"
 ORIGIN_VALUE = "cli"
 
+# R3 — the per-sidecar bearer token. The origin header alone no longer proves a
+# mutation came from a trusted local front-end (any process can spoof it); the
+# CLI additionally presents ``Authorization: Bearer <token>`` read from the 0600
+# ``sidecar-token`` file. Omitted when no token is available (an old sidecar / a
+# desktop-spawned one), and the sidecar's grace mode still accepts origin-only.
+AUTH_HEADER = "authorization"
+
 _DEFAULT_TIMEOUT = 30.0
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    """The per-request auth headers: always the origin, plus the bearer token
+    when one is available."""
+    headers = {ORIGIN_HEADER: ORIGIN_VALUE}
+    if token:
+        headers[AUTH_HEADER] = f"Bearer {token}"
+    return headers
 
 
 class SidecarClient:
@@ -52,17 +76,21 @@ class SidecarClient:
         self,
         base_url: str,
         *,
+        token: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # R3: the per-sidecar bearer token (read from the 0600 token file by the
+        # caller). None → origin-only (grace-mode compatible with old sidecars).
+        self._token = token
         # A dedicated httpx.Client so callers can close it; ``transport`` lets
         # tests inject httpx.MockTransport without a real socket.
         self._http = httpx.Client(
             base_url=self.base_url,
             timeout=timeout,
             transport=transport,
-            headers={ORIGIN_HEADER: ORIGIN_VALUE},
+            headers=_auth_headers(token),
         )
 
     # -- context management --------------------------------------------------
@@ -102,7 +130,7 @@ class SidecarClient:
                 path,
                 json=json,
                 params=params,
-                headers={ORIGIN_HEADER: ORIGIN_VALUE},
+                headers=_auth_headers(self._token),
                 **extra,
             )
         except httpx.HTTPError as exc:
