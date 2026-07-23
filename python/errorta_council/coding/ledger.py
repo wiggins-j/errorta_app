@@ -46,6 +46,14 @@ class FocusTransitionError(LedgerError):
 
 _VALID_ROLES = ("pm", "dev", "reviewer", "tester")
 
+# Spec 09 §1: task states that SATISFY a `depends_on` edge. `done` is the happy
+# path; `dropped` is terminal-and-uncompletable (the PM re-scoped the task away),
+# so a dependent blocking on it would wait forever — that is the dependency
+# deadlock this set exists to kill. `blocked`/`doing` are intentionally excluded:
+# they are expected to progress, and admitting them would dispatch work before a
+# genuine prerequisite finished.
+_DEP_SATISFIED_STATES = frozenset({"done", "dropped"})
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -840,9 +848,20 @@ class LedgerStore:
             projected[task.task_id] = task
         return [projected[task_id] for task_id in order]
 
-    def next_task(self, role: str) -> Task | None:
+    def _dep_satisfied_ids(self) -> set[str]:
+        """Ids that count as a SATISFIED dependency (Spec 09 §1).
+
+        A dep is satisfied when it reached a state it can never leave on its own
+        way to ``done``: literally ``done``, or ``dropped`` (the PM re-scoped it
+        away — it can never complete, so waiting on it forever is strictly
+        wrong). ``blocked`` and ``doing`` are deliberately NOT here: both are
+        expected to progress, and treating them as satisfied would run a task
+        before a genuine prerequisite finished."""
         proj = self._projected_tasks()
-        done_ids = {tid for tid, t in proj.items() if t.state == "done"}
+        return {tid for tid, t in proj.items() if t.state in _DEP_SATISFIED_STATES}
+
+    def next_task(self, role: str) -> Task | None:
+        done_ids = self._dep_satisfied_ids()
         for t in self.list_tasks(role=role, state="todo"):
             if all(dep in done_ids for dep in t.depends_on):
                 return t
@@ -859,8 +878,7 @@ class LedgerStore:
         if n <= 0:
             return []
         skip = set(exclude or ())
-        proj = self._projected_tasks()
-        done_ids = {tid for tid, t in proj.items() if t.state == "done"}
+        done_ids = self._dep_satisfied_ids()
         out: list[Task] = []
         for t in self.list_tasks(role=role, state="todo"):
             if t.task_id in skip:

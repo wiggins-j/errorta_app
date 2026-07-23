@@ -326,9 +326,12 @@ and FastAPI routers. Update the prose and this contract together.
     "max_parallel_workers": null,
     "member_failure_limit": 3,
     "model_escalation_limit": 2,
+    "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
     "task_reassignment_limit": 2,
+    "wedge_min_tasks": 10,
+    "wedge_stall_limit": 5,
     "worker_unproductive_limit": 2
   },
   "checkpoint_cadences": ["every_n_tasks", "off", "on_merge_ready", "per_milestone"],

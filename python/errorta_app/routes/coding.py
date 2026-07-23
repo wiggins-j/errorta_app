@@ -2696,6 +2696,24 @@ def delivery_review_ondemand(project_id: str, request: Request) -> dict[str, Any
     return _run_delivery_review_ondemand(project_id)
 
 
+def _run_backlog_shape(store: Any) -> dict[str, int] | None:
+    """Spec 10 §4: ``{"todo": N, "dispatchable": M}`` over the backlog, or None on a
+    read error. ``dispatchable`` counts the distinct ready (deps-satisfied) todo
+    tasks a worker role could take right now — summed over ``_WORKER_PRIORITY`` with
+    a running exclude so a task claimable by two roles is not double-counted.
+    Best-effort: a ledger hiccup returns None (the caller omits the block)."""
+    from errorta_council.coding.topology import _WORKER_PRIORITY
+    try:
+        todo_n = len(store.list_tasks(state="todo"))
+        seen: set[str] = set()
+        for role in _WORKER_PRIORITY:
+            for task in store.next_tasks(role, todo_n or 1, exclude=seen):
+                seen.add(task.task_id)
+        return {"todo": todo_n, "dispatchable": len(seen)}
+    except Exception:  # noqa: BLE001 - a status read must never 500 the endpoint
+        return None
+
+
 @router.get("/projects/{project_id}/run")
 def run_status(project_id: str) -> dict[str, Any]:
     store = LedgerStore(project_id)
@@ -2712,9 +2730,18 @@ def run_status(project_id: str) -> dict[str, Any]:
         "delivery_review_round_limit": policy["delivery_review_round_limit"],
         "defaulted": defaulted,
     }
-    return {"running": running, "result": _run_result_from_state(state),
-            "state": state, "recoverable": bool(state.get("recoverable")),
-            "can_resume": bool(state.get("can_resume")), "caps": caps}
+    payload = {"running": running, "result": _run_result_from_state(state),
+               "state": state, "recoverable": bool(state.get("recoverable")),
+               "can_resume": bool(state.get("can_resume")), "caps": caps}
+    # Spec 10 §4: surface `todo: N (dispatchable: M)`. A large N with M == 0 is the
+    # wedged-graph signature — the single line that turns a manual backlog dig into
+    # an at-a-glance diagnosis. `dispatchable` = ready (deps-satisfied) todo tasks a
+    # worker role could take right now (the same readiness the wedge probe keys on).
+    # Additive + best-effort — a ledger hiccup omits the block, never 500s.
+    backlog = _run_backlog_shape(store)
+    if backlog is not None:
+        payload["backlog"] = backlog
+    return payload
 
 
 @router.post("/projects/{project_id}/run/cancel")

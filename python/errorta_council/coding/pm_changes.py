@@ -174,6 +174,13 @@ def _apply_restore(store: Any, target: str, value: dict[str, Any]) -> None:
         tid = str(value.get("task_id") or "").strip()
         if tid:
             store.update_task(tid, state="dropped")
+            # FIX 5: `dropped` now counts as a satisfied dep (Spec 09), so a
+            # restore-drop must also re-point any dependents off the dropped id or
+            # they would be stranded / dispatch prematurely against removed work.
+            # There are no replacement tasks for a restore, so the edge is simply
+            # removed. Lazy import — runner does not import pm_changes, so no cycle.
+            from .runner import _repoint_dropped_dependents
+            _repoint_dropped_dependents(store, tid, [])
     else:  # pragma: no cover - guarded at record time
         raise PmChangeError(f"unknown restore target: {target!r}")
 

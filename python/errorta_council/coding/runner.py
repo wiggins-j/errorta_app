@@ -29,6 +29,7 @@ import threading
 from typing import Any, Callable, NamedTuple, Optional
 
 from . import paths as _paths
+from . import task_dedupe
 from .autonomy import (
     CodingAutonomyPolicy,
     LoopResult,
@@ -1160,6 +1161,43 @@ def _model_assignment_prompt(store: LedgerStore) -> str:
         return ""
 
 
+_DUPLICATE_NOTE_CAP = 10
+
+
+def _duplicate_rejection_note(store: LedgerStore) -> str:
+    """Spec 08 — the honest report of what the dedupe gate threw away.
+
+    Reads the ``duplicate_task_rejected`` decisions and keeps only those whose
+    matched task is STILL open, so the note clears itself once the real task is
+    executed or dropped (instead of nagging about settled history)."""
+    try:
+        decisions = store.list_decisions()
+        open_ids = {
+            task.task_id for task in store.list_tasks()
+            if task.state in task_dedupe.OPEN_STATES
+        }
+    except Exception:  # noqa: BLE001 — prompt assembly must never fail the turn
+        return ""
+    rejected: dict[str, str] = {}
+    for record in decisions:
+        if record.get("choice") != "duplicate_task_rejected":
+            continue
+        matched = str(record.get("matched_task_id") or "")
+        planned = str(record.get("planned_title") or "")
+        if matched and planned and matched in open_ids:
+            rejected[planned] = matched
+    if not rejected:
+        return ""
+    titles = list(rejected)[-_DUPLICATE_NOTE_CAP:]
+    ids = sorted({rejected[title] for title in titles})
+    return (
+        f"{len(rejected)} of your earlier proposed tasks were rejected as "
+        f"duplicates of open tasks {', '.join(ids)} (e.g. "
+        f"{'; '.join(repr(t) for t in titles[:3])}). Do NOT re-propose them — "
+        "execute or re-scope the existing ones instead.\n"
+    )
+
+
 def _pm_prompt(store: LedgerStore) -> str:
     pending = store.list_unconsumed_interjections()
     pin = ""
@@ -1219,6 +1257,9 @@ def _pm_prompt(store: LedgerStore) -> str:
             "blocked task or a conflicted PR — cannot be auto-closed; leave it and "
             "the run will surface it for the human.\n"
         )
+    # Spec 08: tell the PM its proposals were rejected as duplicates. Without
+    # this it re-proposes the same job forever — it cannot see the gate.
+    done_gate = f"{done_gate}{_duplicate_rejection_note(store)}"
     return _register_pending_composition(
         _pm_prompt_segments(store, pin=pin, done_gate=done_gate))
 
@@ -1303,9 +1344,24 @@ def _materialize_pm_tasks(
     store: LedgerStore, intent: Any, *, parent_task: Task | None = None
 ) -> list[Task]:
     """Create a PM plan batch and resolve title/path dependencies."""
-    existing_title_to_id = {task.title: task.task_id for task in store.list_tasks()}
+    all_tasks = store.list_tasks()
+    existing_title_to_id = {task.title: task.task_id for task in all_tasks}
     created: list[tuple[Task, list[str]]] = []
     title_to_id = dict(existing_title_to_id)
+    # Spec 08 — the dedupe gate. `existing_title_to_id` above maps EVERY task
+    # (it must: `depends_on` may name a finished prerequisite by title), but the
+    # duplicate test may only consider OPEN work — re-doing a `done`/`dropped`
+    # task is legitimate. Hence a second, open-only index.
+    #
+    # The re-scope (PMAssist) path excludes its own parent, exactly as
+    # `path_owners` does below: the parent is still open right now but is
+    # dropped moments later, and its replacements are *supposed* to restate its
+    # job in smaller pieces. Deduping against it would reject the re-scope and
+    # wedge the stuck task permanently.
+    open_index = [
+        entry for entry in task_dedupe.build_open_index(all_tasks)
+        if parent_task is None or entry.task_id != parent_task.task_id
+    ]
     path_owners = _active_dev_path_owners(store)
     if parent_task is not None:
         path_owners = {
@@ -1321,6 +1377,32 @@ def _materialize_pm_tasks(
                 (path, path_owners[path]) for path in paths if path in path_owners
             )
         ]
+        # Spec 08: reject a planned task that is materially the same job as an
+        # already-open one. The rejection is recorded as a decision (auditable +
+        # renderable), the title still resolves — onto the MATCHED id — so a
+        # sibling's `depends_on` keeps working, and crucially the task never
+        # enters `created`, so `made_progress` goes False when the whole batch
+        # was duplicates. That re-arms the pm_idle / NO_PROGRESS detector
+        # instead of letting a churning PM look productive.
+        duplicate = task_dedupe.find_duplicate(
+            open_index, title=planned.title, role=DEV, paths=paths)
+        if duplicate is not None:
+            title_to_id[planned.title] = duplicate.task_id
+            store.record_decision(
+                title=f"duplicate task rejected: {planned.title}",
+                context="task_dedupe",
+                choice="duplicate_task_rejected",
+                rationale=duplicate.rationale(planned.title),
+                related_task_ids=[duplicate.task_id],
+                extra={
+                    "planned_title": planned.title,
+                    "matched_task_id": duplicate.task_id,
+                    "matched_title": duplicate.title,
+                    "rule": duplicate.rule,
+                    "similarity": round(duplicate.similarity, 3),
+                },
+            )
+            continue
         task = store.add_task(
             title=planned.title,
             # F087-18: PM plans DEV work only. Review/test/merge are auto-driven
@@ -1352,8 +1434,21 @@ def _materialize_pm_tasks(
             assignment_rationale=planned.assignment_rationale,
         )
         title_to_id[planned.title] = task.task_id
+        # A second identical proposal in the SAME batch must be caught too.
+        open_index.append(task_dedupe.index_entry(
+            task_id=task.task_id, title=planned.title, role=DEV, paths=paths))
+        # Spec 09 §4 — bound the path-owner chaining amplifier. This used to be
+        # `path_owners[path] = task.task_id`, which OVERWRITES the owner, so
+        # sibling 2 inherited from sibling 1, sibling 3 from sibling 2, ... —
+        # a serial LINE through the whole batch. One wedged head then held the
+        # entire backlog hostage (the observed 130-task deadlock). `setdefault`
+        # caps the inherited path-dep depth at 1: every toucher of a path hangs
+        # off the SINGLE oldest live owner (a pre-existing task when there is
+        # one, else the first sibling in this batch to claim it), never off
+        # another inheritor. Same rule `_active_dev_path_owners` already applies
+        # across batches, so within-batch and cross-batch now agree.
         for path in paths:
-            path_owners[path] = task.task_id
+            path_owners.setdefault(path, task.task_id)
         created.append(
             (task, inherited_deps + list(planned.depends_on) + path_deps)
         )
@@ -1366,6 +1461,69 @@ def _materialize_pm_tasks(
         if resolved:
             store.update_task(task.task_id, depends_on=resolved)
     return [task for task, _dependencies in created]
+
+
+def _dep_graph(store: LedgerStore) -> dict[str, list[str]]:
+    return {t.task_id: list(t.depends_on or []) for t in store.list_tasks()}
+
+
+def _reaches(graph: dict[str, list[str]], start: str, target: str) -> bool:
+    """True if ``target`` is reachable from ``start`` along ``depends_on`` edges."""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node == target:
+            return True
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(graph.get(node, ()))
+    return False
+
+
+def _repoint_dropped_dependents(
+    store: LedgerStore, dropped_task_id: str, replacement_ids: list[str],
+) -> list[str]:
+    """Spec 09 §2 — rewrite dependents when ``dropped_task_id`` is dropped.
+
+    Every task whose ``depends_on`` names the dropped id has that id replaced by
+    the superseding ids (or simply removed when the drop created no
+    replacements). Without this the dependents point at a task that can never
+    reach ``done`` — the dependency deadlock. (`_DEP_SATISFIED_STATES` already
+    unblocks dispatch; this keeps the recorded graph honest so the ordering the
+    PM intended still holds against the replacement work.)
+
+    Never introduces a cycle: a replacement is skipped when the dependent is
+    already reachable FROM it (self-dependency included) — the replacement can
+    inherit a path/parent dep on the very task being re-pointed. Returns the ids
+    of the tasks that were rewritten."""
+    graph = _dep_graph(store)
+    touched: list[str] = []
+    for task in store.list_tasks():
+        if task.task_id == dropped_task_id:
+            continue
+        deps = list(task.depends_on or [])
+        if dropped_task_id not in deps:
+            continue
+        rewritten: list[str] = []
+        for dep in deps:
+            if dep != dropped_task_id:
+                if dep not in rewritten:
+                    rewritten.append(dep)
+                continue
+            for replacement in replacement_ids:
+                if not replacement or replacement in rewritten:
+                    continue
+                if _reaches(graph, replacement, task.task_id):
+                    continue  # would close a cycle — drop the edge instead
+                rewritten.append(replacement)
+        if rewritten == deps:
+            continue
+        store.update_task(task.task_id, depends_on=rewritten)
+        graph[task.task_id] = rewritten
+        touched.append(task.task_id)
+    return touched
 
 
 def _dev_prompt(task: Task, store: LedgerStore, readback: str = "") -> str:
@@ -2774,24 +2932,56 @@ def build_run_turn(
             replacements = _materialize_pm_tasks(
                 store, parsed.intent, parent_task=task
             )
+            replacement_ids = [replacement.task_id for replacement in replacements]
+            if replacement_ids:
+                # FIX 3 (race): re-point dependents onto the replacements BEFORE
+                # dropping the parent. `dropped` counts as a satisfied dep (Spec 09),
+                # so there is a window where a dependent reads as ready between the
+                # drop and the repoint — the concurrent loop re-enters dispatch
+                # whenever any in-flight future completes. While the parent is still
+                # non-satisfied its dependents keep waiting; repointing first
+                # transfers that wait to the replacements with no ready-window.
+                _repoint_dropped_dependents(store, task.task_id, replacement_ids)
+                store.update_task(
+                    task.task_id,
+                    state="dropped",
+                    assignee_member_id=None,
+                    pm_assist_pending=False,
+                    pm_assist_attempts=attempts,
+                    superseded_by_task_ids=replacement_ids,
+                )
+                store.record_decision(
+                    title=f"PM re-scoped task: {task.title}",
+                    context=f"task {task.task_id}",
+                    choice="pm_assist_completed",
+                    rationale=f"Created {len(replacements)} smaller replacement task(s).",
+                    related_task_ids=[task.task_id] + replacement_ids,
+                )
+                return TurnOutcome(kind="planned", made_progress=True)
+            # FIX 4 (edge): the re-scope produced NO replacement tasks (all deduped
+            # against the open backlog, or an empty intent). Dropping the parent
+            # here would strip its dependents' only dependency edge — since
+            # `dropped` is satisfied and `_repoint_dropped_dependents(..., [])`
+            # removes the edge entirely, the dependents would dispatch prematurely
+            # against work that was never actually re-scoped. Keep the parent
+            # (non-satisfied) so its dependents keep waiting; only clear the
+            # pm_assist flag so the ladder does not spin on it.
             store.update_task(
                 task.task_id,
-                state="dropped",
-                assignee_member_id=None,
                 pm_assist_pending=False,
                 pm_assist_attempts=attempts,
-                superseded_by_task_ids=[replacement.task_id for replacement in replacements],
             )
             store.record_decision(
-                title=f"PM re-scoped task: {task.title}",
+                title=f"PM re-scope produced no new tasks: {task.title}",
                 context=f"task {task.task_id}",
-                choice="pm_assist_completed",
-                rationale=f"Created {len(replacements)} smaller replacement task(s).",
-                related_task_ids=[task.task_id] + [
-                    replacement.task_id for replacement in replacements
-                ],
+                choice="pm_assist_no_replacements",
+                rationale=(
+                    "Re-scope yielded no replacement tasks (all deduped or empty); "
+                    "kept the parent so its dependents keep waiting."
+                ),
+                related_task_ids=[task.task_id],
             )
-            return TurnOutcome(kind="planned", made_progress=bool(replacements))
+            return TurnOutcome(kind="planned", made_progress=False)
 
         if isinstance(action, Plan):
             if _redispatch_conflicted_prs(store, workspace):
