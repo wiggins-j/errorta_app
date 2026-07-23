@@ -10,7 +10,7 @@ from .models import AnswerResult, QueryResult, Retrieval, Verdict
 from .pipeline import Pipeline, StubPipeline, default_pipeline
 from .signature import normalize_prompt, prompt_signature
 
-__version__ = "0.1.0-alpha.6"
+__version__ = "0.1.0-alpha.7"
 
 __all__ = [
     "AnswerResult",
