@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from . import paths as _paths
+from . import task_dedupe
 from .ledger import Task
 from .topology import (
     DEV,
@@ -47,6 +48,7 @@ COMPLETION_BLOCKED = "completion_blocked"      # F128: PM claimed done, open wor
 NOT_CONVERGING = "not_converging"              # F139 WS-E: nothing moved for N iterations
 DELIVERY_REVIEW_STALLED = "delivery_review_stalled"  # F155: delivery review kept rejecting
 GATE_NOT_IMPROVING = "gate_not_improving"      # Spec 04: acceptance gate result stuck
+PLANNING_CHURN = "planning_churn"              # Spec 07: PM-only plan turns, no worker
 
 # --- checkpoint cadences ----------------------------------------------------
 CADENCE_OFF = "off"
@@ -118,6 +120,14 @@ class CodingAutonomyPolicy:
     # result (not the progress fingerprint), so a churning PR head does NOT reset
     # it. 0 disables the detector.
     gate_stall_limit: int = 8
+    # Spec 07: consecutive PM PLAN turns with ZERO interleaved worker turns before
+    # the run stops `planning_churn`. This is the PM-only pathology both other
+    # convergence detectors are structurally blind to: `not_converging` treats a
+    # newly-created task as motion BY DESIGN, and `gate_not_improving` needs a gate
+    # signal that only worker turns produce. Any worker turn (task_done /
+    # review_done / task_blocked / a PR transition) resets the streak, so a
+    # legitimate up-front decomposition burst is unaffected. 0 disables it.
+    plan_streak_limit: int = 6
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -139,6 +149,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "hot_file_escalation_threshold": p.hot_file_escalation_threshold,
         "hot_file_freeze_stall_limit": p.hot_file_freeze_stall_limit,
         "gate_stall_limit": p.gate_stall_limit,
+        "plan_streak_limit": p.plan_streak_limit,
     }
 
 
@@ -180,6 +191,10 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # the gate-stall detector entirely. Absent key -> dataclass default (8).
         gate_stall_limit=max(
             0, int(d.get("gate_stall_limit", base.gate_stall_limit))),
+        # Spec 07: `max(0, …)` — NOT max(1) — so 0 disables the planning-churn
+        # detector entirely. Absent key -> dataclass default (6).
+        plan_streak_limit=max(
+            0, int(d.get("plan_streak_limit", base.plan_streak_limit))),
     )
 
 
@@ -532,6 +547,13 @@ class LoopCounters:
     # At delivery_review_round_limit the loop stops `delivery_review_stalled`.
     # Reset to 0 on a PASSING delivery review.
     delivery_review_rounds: int = 0
+    # Spec 07: consecutive PM plan / governance-progress turns with ZERO
+    # interleaved worker turns. Incremented in `_apply_outcome`'s
+    # {"planned","governance_progress"} branch; reset to 0 by every branch a
+    # WORKER turn reaches (task_done / review_done / task_blocked / the PR
+    # branches — i.e. exactly where pm_idle is reset). At plan_streak_limit the
+    # run stops `planning_churn`.
+    plan_streak: int = 0
 
 
 @dataclass
@@ -782,6 +804,58 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
         f"acceptance gate has not improved for {policy.gate_stall_limit} "
         f"iterations (score={score})")
     return LoopResult(GATE_NOT_IMPROVING, c)
+
+
+def _open_backlog_shape(ledger: Any) -> tuple[int, int]:
+    """``(open_task_count, distinct_open_title_count)`` over the backlog.
+
+    The PAIR is the diagnosis: 130 open tasks across 35 distinct titles says
+    "the PM is restating the same handful of jobs", which a depth alone does not.
+    Best-effort — a ledger hiccup must never break the run loop."""
+    try:
+        tasks = list(ledger.list_tasks())
+    except Exception:  # noqa: BLE001 - diagnostics must never break the loop
+        return (0, 0)
+    open_tasks = [
+        t for t in tasks
+        if str(getattr(t, "state", "") or "") in task_dedupe.OPEN_STATES
+    ]
+    # Normalized (filler-verb-stripped) token sets, so "Fix the harness" and
+    # "Create the harness" collapse to ONE title — that is what makes a 130-vs-35
+    # split legible as restatement rather than as 130 distinct jobs.
+    titles = {
+        task_dedupe.normalized_tokens(str(getattr(t, "title", "") or ""))
+        for t in open_tasks
+    }
+    return (len(open_tasks), len(titles))
+
+
+def _account_planning_churn(ledger: Any, c: LoopCounters,
+                            policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+    """Spec 07: detect a run that has degenerated into PM-ONLY planning — N
+    consecutive plan turns with ZERO interleaved worker turns — and stop
+    `planning_churn`.
+
+    This case is invisible to both existing convergence detectors by construction:
+    `_account_convergence` treats a newly-created task as motion BY DESIGN (see the
+    caveat in ``_progress_fingerprint``), and `_account_gate_stall` needs an
+    acceptance-gate signal, which only worker turns produce. Both structurally
+    assume workers are running; this one covers the case where they are not.
+
+    ``c.plan_streak`` is maintained in ``_apply_outcome`` — incremented on a
+    plan/governance-progress turn, reset by every branch a worker turn reaches — so
+    a legitimate up-front decomposition burst that actually dispatches work never
+    trips. ``plan_streak_limit == 0`` disables the detector."""
+    if policy.plan_streak_limit <= 0:
+        return None
+    if c.plan_streak < policy.plan_streak_limit:
+        return None
+    depth, distinct = _open_backlog_shape(ledger)
+    _maybe_raise_monitor(
+        ledger, "planning_churn",
+        f"{c.plan_streak} consecutive planning turns with no worker turn "
+        f"(backlog {depth} open task(s) across {distinct} distinct title(s))")
+    return LoopResult(PLANNING_CHURN, c)
 
 
 def _maybe_raise_member_health(
@@ -1179,6 +1253,14 @@ def _run_sequential_loop(
             _maybe_raise_monitor(ledger, "no_progress", "PM made no progress")
             return LoopResult(NO_PROGRESS, c)
 
+        # Spec 07: the PM-only pathology — plan turn after plan turn with no worker
+        # ever running. Checked beside NO_PROGRESS because it is the same class of
+        # stop (the PM is the only thing moving), just the case where each plan turn
+        # looks productive so pm_idle never climbs.
+        churn_stop = _account_planning_churn(ledger, c, policy)
+        if churn_stop is not None:
+            return churn_stop
+
         # F139 WS-A/WS-E: surface a stuck foundation, and stop a run where nothing
         # is moving anywhere (distinct from NO_PROGRESS, which is a PM-idle stop).
         _account_foundation_stall(ledger, c, policy)
@@ -1519,6 +1601,11 @@ def _run_concurrent_loop(
                 if c.pm_idle >= policy.pm_idle_limit:
                     _maybe_raise_monitor(ledger, "no_progress", "PM made no progress")
                     return LoopResult(NO_PROGRESS, c)
+                # Spec 07: PM-only planning churn (mirrors the sequential loop),
+                # checked at this same quiescent point.
+                churn_stop = _account_planning_churn(ledger, c, policy)
+                if churn_stop is not None:
+                    return churn_stop
                 # F139 WS-A/WS-E: foundation-stall surfacing + convergence stop,
                 # checked at this quiescent (in-flight empty) point so a resume
                 # continues cleanly.
@@ -1553,6 +1640,10 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
             c.pm_idle = 0
         else:
             c.pm_idle += 1
+        # Spec 07: a PM-only turn. The streak counts PRODUCTIVE plan turns too —
+        # the observed pathology is a PM that keeps creating dispatchable-looking
+        # tasks while no worker ever runs, so `made_progress` must not exempt it.
+        c.plan_streak += 1
         return milestone
 
     if outcome.kind == "project_done":
@@ -1590,16 +1681,19 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
     if outcome.kind in ("pr_opened", "pr_reviewed", "pr_tested", "pr_conflict",
                         "pr_skipped"):
         c.pm_idle = 0
+        c.plan_streak = 0  # Spec 07: a worker turn — planning is not the only motion
         return False
     if outcome.kind == "pr_merged":
         c.tasks_done += 1
         c.since_checkpoint += 1
         c.pm_idle = 0
+        c.plan_streak = 0  # Spec 07
         return True
 
     if outcome.kind == "task_blocked" and outcome.task is not None:
         rec.block_task(outcome.task, reason=outcome.reason or "blocked")
         c.pm_idle = 0
+        c.plan_streak = 0  # Spec 07
         return milestone
 
     if outcome.kind == "review_done" and outcome.task is not None:
@@ -1611,6 +1705,7 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
         c.tasks_done += 1
         c.since_checkpoint += 1
         c.pm_idle = 0
+        c.plan_streak = 0  # Spec 07
         return milestone
 
     if outcome.kind == "task_done" and outcome.task is not None:
@@ -1625,6 +1720,7 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
         c.tasks_done += 1
         c.since_checkpoint += 1
         c.pm_idle = 0
+        c.plan_streak = 0  # Spec 07
         return milestone
 
     # noop / unknown — no reconciler transition fired, so an assigned task is

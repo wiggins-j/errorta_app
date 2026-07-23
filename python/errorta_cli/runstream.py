@@ -67,7 +67,7 @@ TERMINAL_STATUSES = frozenset({"stopped", "failed", "interrupted"})
 FAILURE_STOP_REASONS = frozenset({
     "budget_exhausted", "no_progress", "hard_blocker", "member_unhealthy",
     "worker_unproductive", "completion_blocked", "not_converging",
-    "delivery_review_stalled", "gate_not_improving",
+    "delivery_review_stalled", "gate_not_improving", "planning_churn",
 })
 
 # stop_reasons that are a clean finish / benign stop (exit 0).
@@ -92,6 +92,8 @@ STOP_REASON_GLOSS: dict[str, str] = {
                                 "result — stopped instead of burning budget"),
     "gate_not_improving": ("the acceptance gate stopped improving — stopped "
                            "instead of churning on the same failing result"),
+    "planning_churn": ("the PM kept re-planning without any work being done — "
+                       "stopped instead of growing the backlog forever"),
     "interrupted": "the run was interrupted (recoverable — resume it)",
     "failed": "the run failed with an unexpected error",
 }
