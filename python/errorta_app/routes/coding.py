@@ -22,6 +22,7 @@ from errorta_council.coding.autonomy import (
     load_policy,
     policy_from_dict,
     policy_to_dict,
+    policy_with_provenance,
     save_policy,
 )
 from errorta_council.coding.governance import (
@@ -1688,7 +1689,15 @@ def _apply_pm_control_actions(
             _start_run(project_id, {}, continue_=True)
             run_started = True
         except HTTPException as exc:
-            refusals.append({"code": "start_failed", "reason": str(exc.detail)})
+            # A run already in progress is NOT a failure: there is nothing to
+            # start and the directive is already threaded to the PM's next plan
+            # turn. Surfacing it as a refusal makes a successful mid-run interject
+            # look broken, so swallow the benign 409 and keep run_started False.
+            detail = str(exc.detail)
+            if exc.status_code == 409 and "already in progress" in detail:
+                pass
+            else:
+                refusals.append({"code": "start_failed", "reason": detail})
         except Exception as exc:  # noqa: BLE001 — a start failure is a refusal, not a 500
             refusals.append({"code": "start_failed", "reason": str(exc)})
     return [c.to_dict() for c in applied], refusals, run_started
@@ -2692,9 +2701,20 @@ def run_status(project_id: str) -> dict[str, Any]:
     store = LedgerStore(project_id)
     state = _reconcile_run_state(project_id, store)
     running = state.get("status") == "running" and _thread_alive(project_id)
+    # Spec 01: surface the effective run caps + which of them fell back to the
+    # default (absent from autonomy.json) so `errorta status` can show them and a
+    # silent fallback is detectable. Additive — existing keys are unchanged.
+    policy, defaulted = policy_with_provenance(store)
+    caps = {
+        "max_iterations": policy["max_iterations"],
+        "max_model_calls": policy["max_model_calls"],
+        "max_parallel_workers": policy["max_parallel_workers"],
+        "delivery_review_round_limit": policy["delivery_review_round_limit"],
+        "defaulted": defaulted,
+    }
     return {"running": running, "result": _run_result_from_state(state),
             "state": state, "recoverable": bool(state.get("recoverable")),
-            "can_resume": bool(state.get("can_resume"))}
+            "can_resume": bool(state.get("can_resume")), "caps": caps}
 
 
 @router.post("/projects/{project_id}/run/cancel")

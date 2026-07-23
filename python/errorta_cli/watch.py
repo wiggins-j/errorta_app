@@ -20,6 +20,45 @@ from .session import Context
 
 DEFAULT_INTERVAL = 2.5
 
+# Spec 06 — the `watch` command IS a live run dashboard: it loops by default
+# (`--once` renders a single snapshot). Both front-ends normalize a bare
+# `errorta watch` into a watched invocation via `arm_dashboard`, so the loop reuses
+# THIS harness (no new threading model).
+DASHBOARD = "watch"
+
+
+def _interval_arg(raw_args: list[str]) -> float | None:
+    """Parse ``--interval N`` (the dashboard tick) out of ``raw_args``; None if
+    absent or unparseable (so the caller keeps its existing default)."""
+    for i, token in enumerate(raw_args):
+        if token == "--interval" and i + 1 < len(raw_args):
+            try:
+                return float(raw_args[i + 1])
+            except ValueError:
+                return None
+    return None
+
+
+def arm_dashboard(name: str, raw_args: list[str], ctx: Context) -> list[str]:
+    """Make ``errorta watch`` loop by default.
+
+    Injects the ``--watch`` the poll harness keys on unless the caller asked for a
+    single ``--once`` snapshot (or ``--json``, which is always one-shot). ``--interval
+    N`` (default 2s) sets the tick via ``ctx.poll_interval``. Returns the possibly-
+    extended ``raw_args``; a no-op for every other command.
+    """
+    if name != DASHBOARD or "--once" in raw_args or "--json" in raw_args:
+        return raw_args
+    interval = _interval_arg(raw_args)
+    if interval is not None:
+        ctx.poll_interval = interval
+    elif ctx.poll_interval is None:
+        ctx.poll_interval = 2.0
+    if "--watch" not in raw_args:
+        raw_args = [*raw_args, "--watch"]
+    return raw_args
+
+
 # Mutations that STREAM their own live view to completion (`run`). For these,
 # `--watch` is redundant, not a re-firing hazard, so it's treated as a single
 # run rather than rejected. app.py / repl route these to the normal dispatch

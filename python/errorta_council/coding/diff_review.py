@@ -182,6 +182,7 @@ def evaluate_merge_gate(
     pm_reviewed_approved: Optional[bool] = None,
     require_pm_review: bool = False,
     tests_required: bool = True,
+    assembled_run_unverified: bool = False,
 ) -> MergeGate:
     """Compute the merge-back gate from explicit evidence.
 
@@ -289,6 +290,23 @@ def evaluate_merge_gate(
             MergeBlocker(
                 code="definition_of_done",
                 detail="definition of done not met",
+            )
+        )
+
+    # Spec 05 Phase A: close the vacuous-pass loophole. A web/app deliverable with
+    # NO runnable runtime profile and NO registered assembled/acceptance test
+    # command has nothing that verifies it actually runs — the old gate let it
+    # through vacuously (tests_passed=None + tests_required=False). When the
+    # ``assembled_run_required`` policy is on AND the deliverable looks like a
+    # web/app (computed in gather_merge_evidence), refuse instead of passing
+    # vacuously. Operator-overridable like every other blocker (allow_override).
+    if assembled_run_unverified:
+        blockers.append(
+            MergeBlocker(
+                code="assembled_run_unverified",
+                detail=("web/app deliverable has no runnable runtime and no "
+                        "assembled acceptance test — nothing verifies the app "
+                        "actually runs"),
             )
         )
 

@@ -122,7 +122,8 @@ _CLI_COMMAND_MODULES = [
     f"errorta_cli.commands.{_name}"
     for _name in (
         "status", "log", "decisions", "tasks", "prs", "tokens", "turns",
-        "attention", "runtime", "team", "models", "governance", "pm",
+        "attention", "runtime", "team", "models", "governance", "pm", "gate",
+        "watch",  # Spec 06 — live run dashboard
         "runctl", "connect", "wizard", "project", "focus",
         "interject", "task", "files", "publish", "grounding", "testcfg",
     )

@@ -240,7 +240,8 @@ import importlib as _importlib  # noqa: E402
 
 _COMMAND_MODULES = (
     "status", "log", "decisions", "tasks", "prs", "tokens", "turns",
-    "attention", "runtime", "team", "models", "governance", "pm",
+    "attention", "runtime", "team", "models", "governance", "pm", "gate",
+    "watch",  # Spec 06 — live run dashboard (composes existing reads; no new route)
     "runctl",  # S3 — setup / run / cancel / resume / continue (mutations)
     "connect", "wizard",  # S4 — provider onboarding + conversational setup
     "project", "focus",  # S5 — lifecycle (new/import/projects/open/switch/delete)

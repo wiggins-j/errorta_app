@@ -232,6 +232,13 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     _maybe_onboard(handle, json_mode=json_mode, no_onboarding=no_onboarding,
                    command_name=name)
 
+    # Spec 06: `errorta watch` is the live run dashboard — loop by default (unless
+    # `--once`/`--json`), reusing the poll harness below.
+    if not json_mode:
+        from . import watch as _watch
+
+        raw_args = _watch.arm_dashboard(name, raw_args, ctx)
+
     # `--watch` on a read command re-renders on the poll loop (never in --json/CI).
     if "--watch" in raw_args and not json_mode:
         from . import watch as _watch
