@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, TextIO
 
 from . import registry
@@ -65,6 +66,31 @@ def arm_dashboard(name: str, raw_args: list[str], ctx: Context) -> list[str]:
 # path (for exit-code handling + a note); this set is the shared source of truth
 # and run_watch also honors it as a safety net for direct callers.
 SELF_STREAMING = frozenset({"run"})
+
+
+@dataclass(frozen=True)
+class WatchDecision:
+    """Normalized watch arguments and whether the poll harness should run."""
+
+    handled: bool
+    raw_args: list[str]
+    note: str | None = None
+
+
+def maybe_run_watch(
+    name: str, ctx: Context, raw_args: list[str]
+) -> WatchDecision:
+    """Arm dashboard mode and choose the shared watch path for both front-ends."""
+    raw_args = arm_dashboard(name, raw_args, ctx)
+    if "--watch" not in raw_args:
+        return WatchDecision(False, raw_args)
+    if name in SELF_STREAMING:
+        return WatchDecision(
+            False,
+            [arg for arg in raw_args if arg != "--watch"],
+            f"note: `{name}` already streams live; --watch has no extra effect.",
+        )
+    return WatchDecision(True, raw_args)
 
 
 def run_watch(

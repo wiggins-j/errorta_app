@@ -6,7 +6,7 @@ unknown-command hint pointing at `/quit`.
 """
 from __future__ import annotations
 
-from errorta_cli import repl
+from errorta_cli import repl, watch
 
 from .conftest import RouteClient
 
@@ -34,3 +34,31 @@ def test_cd_is_redirected_to_project_verbs(make_ctx):
 def test_unknown_command_hint_mentions_quit(make_ctx):
     out = repl.handle_line("bogus", make_ctx(), RouteClient())
     assert out == "unknown command: /bogus (try /help, or /quit to leave)"
+
+
+def test_repl_routes_registry_commands_through_shared_watch_helper(
+    make_ctx, monkeypatch
+):
+    calls: list[tuple[str, list[str]]] = []
+    lines = iter(["/tasks"])
+
+    class _Session:
+        def __init__(self, **_kwargs):
+            pass
+
+        def prompt(self, _prompt):
+            try:
+                return next(lines)
+            except StopIteration as exc:
+                raise EOFError from exc
+
+    def fake_maybe_run_watch(name, ctx, raw_args):
+        calls.append((name, raw_args))
+        return watch.WatchDecision(False, raw_args)
+
+    monkeypatch.setattr("prompt_toolkit.PromptSession", _Session)
+    monkeypatch.setattr(watch, "maybe_run_watch", fake_maybe_run_watch)
+
+    repl.run_repl(make_ctx(project_id="p"), RouteClient(default={"tasks": []}))
+
+    assert calls == [("tasks", [])]

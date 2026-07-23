@@ -15,6 +15,20 @@ from errorta_cli.errors import CliError
 from .conftest import RouteClient
 
 
+def test_maybe_run_watch_arms_dashboard_and_normalizes_self_streaming(make_ctx):
+    ctx = make_ctx(project_id="p")
+
+    dashboard = watch.maybe_run_watch("watch", ctx, [])
+    assert dashboard.handled is True
+    assert dashboard.raw_args == ["--watch"]
+    assert ctx.poll_interval == 2.0
+
+    streaming = watch.maybe_run_watch("run", ctx, ["--watch", "--yes"])
+    assert streaming.handled is False
+    assert streaming.raw_args == ["--yes"]
+    assert streaming.note is not None
+
+
 def test_run_watch_redraws_bounded_by_iterations(make_ctx):
     client = RouteClient(default={"tasks": [
         {"task_id": "t1", "title": "do it", "role": "dev", "state": "doing"}]})

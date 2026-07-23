@@ -17,7 +17,7 @@ sidecar):
   exit-code contract can't silently drift: only the success allowlist
   (``definition_of_done`` / ``checkpoint`` / ``cancelled`` / ``no_actionable_work``)
   → ``EXIT_OK`` (0). A FAILURE-class ``stop_reason``, a ``failed`` /
-  ``interrupted`` state, **or an unknown/未-triaged terminal reason** →
+  ``interrupted`` state, **or an unknown/un-triaged terminal reason** →
   ``EXIT_RUN_FAILED`` (7). A future engine ``stop_reason`` the CLI hasn't
   classified therefore reads as CI failure (non-zero), never a false success.
   The stop-reason sets are grounded in ``autonomy.py:36`` (survey §2) and locked
@@ -132,7 +132,7 @@ def classify_exit(run_payload: Any) -> int:
 
     Allowlist + fail-closed: a ``failed`` / ``interrupted`` status is always a
     failure; otherwise ONLY a ``stop_reason`` in :data:`SUCCESS_STOP_REASONS` is
-    ``EXIT_OK``. A failure-class reason, an unknown/未-triaged reason, or a
+    ``EXIT_OK``. A failure-class reason, an unknown/un-triaged reason, or a
     missing reason all classify as :data:`EXIT_RUN_FAILED` — for a headless CI
     tool, an unrecognized terminal reason defaulting to "success" is the wrong
     direction, so we fail closed.

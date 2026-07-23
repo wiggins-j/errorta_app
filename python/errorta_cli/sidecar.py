@@ -68,6 +68,8 @@ try:  # POSIX cross-process file lock; absent on Windows (handled gracefully).
 except ImportError:  # pragma: no cover — Windows only
     _HAVE_FCNTL = False
 
+_warned_lock_degraded = False
+
 
 @dataclass
 class SidecarHandle:
@@ -200,6 +202,14 @@ def _home_lock(home: Path) -> Iterator[None]:
     degrades to a no-op — acceptable for v1 (the Windows port is later work).
     """
     if not _HAVE_FCNTL:
+        global _warned_lock_degraded
+        if not _warned_lock_degraded:
+            print(
+                "warning: sidecar launch locking is unavailable on this platform; "
+                "concurrent CLI launches may start duplicate sidecars.",
+                file=sys.stderr,
+            )
+            _warned_lock_degraded = True
         yield
         return
     lock_path = config.sidecar_lock_path(home)
