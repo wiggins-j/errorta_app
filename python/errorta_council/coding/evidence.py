@@ -62,6 +62,59 @@ def _has_runnable_runtime(store: LedgerStore) -> bool:
     return any(getattr(p, "start", None) for p in profiles)
 
 
+def _looks_like_web_app(store: LedgerStore, workspace: Any) -> bool:
+    """Spec 05 Phase A heuristic: does this deliverable look like a web/app?
+
+    ``Project`` carries no project-kind field (grep confirms: id/north_star/
+    status/target/... but nothing classifying web vs library vs cli), so there is
+    no clean signal to key an auto-on policy off of. We infer "web/app" from two
+    honest, available signals instead:
+
+    - an ``index.html`` anywhere in the MERGED project tree (the SPA/static
+      entrypoint — exactly the broken-green-square deliverable this closes), or
+    - a registered runtime profile whose ``kind`` is ``web``/``static``.
+
+    Fully guarded — any read error yields False so this can only relax (never
+    spuriously block). This is a heuristic, not a guarantee; it exists only to
+    scope the additive ``assembled_run_unverified`` blocker, which the operator
+    can override, so a rare false positive is low-risk."""
+    try:
+        files = workspace.list_files(scope="master")
+    except Exception:
+        files = []
+    for f in files or []:
+        if str(f).rsplit("/", 1)[-1].lower() == "index.html":
+            return True
+    try:
+        from .runtime import RuntimeProfileStore
+        profiles = RuntimeProfileStore.for_ledger(store).list_profiles()
+    except Exception:
+        profiles = []
+    return any(getattr(p, "kind", "") in ("web", "static") for p in profiles)
+
+
+def _assembled_run_unverified(store: LedgerStore, workspace: Any) -> bool:
+    """Spec 05 Phase A: the exact vacuous case. True only when the
+    ``assembled_run_required`` policy is on AND the deliverable looks like a
+    web/app AND there is NO runnable runtime profile AND NO registered assembled/
+    acceptance test command — i.e. something that should be run but nothing
+    verifies it runs. Reuses the same profile/test-command detection the rest of
+    this module uses. Fully guarded (policy read failure -> not blocked)."""
+    try:
+        required = store.get_assembled_run_required()
+    except Exception:
+        required = False
+    if not required:
+        return False
+    try:
+        has_tests = bool(store.get_test_commands())
+    except Exception:
+        has_tests = False
+    if has_tests or _has_runnable_runtime(store):
+        return False
+    return _looks_like_web_app(store, workspace)
+
+
 def _tests_required(store: LedgerStore) -> bool:
     """F146 Slice D: the delivery test/launch gate applies only when there is
     something to run — registered test commands OR a runnable runtime. A
@@ -193,6 +246,8 @@ def gather_merge_evidence(store: LedgerStore, workspace: Any) -> dict[str, Any]:
         "pm_reviewed_approved": _pm_reviewed_approved_for_head(store, current_head),
         # F146 Slice D: the tests gate applies only when there's something to run.
         "tests_required": _tests_required(store),
+        # Spec 05 Phase A: web/app deliverable with nothing verifying it runs.
+        "assembled_run_unverified": _assembled_run_unverified(store, workspace),
     }
 
 
@@ -258,6 +313,7 @@ def merge_review(store: LedgerStore, workspace: Any) -> dict[str, Any]:
         require_pm_review=ev.get("require_pm_review", False),
         pm_reviewed_approved=ev.get("pm_reviewed_approved"),
         tests_required=ev.get("tests_required", True),
+        assembled_run_unverified=ev.get("assembled_run_unverified", False),
     )
     gate = _apply_grounding_policy(store, gate, ev)  # F104 S5
     file_diffs = [file_diff_to_dict(fd) for fd in parse_unified_diff(ev["diff"])]

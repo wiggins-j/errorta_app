@@ -1300,6 +1300,24 @@ class LedgerStore:
             _atomic_write_json(self._settings_path, s)
         return bool(value)
 
+    def get_assembled_run_required(self) -> bool:
+        """Spec 05 Phase A: whether the merge gate refuses a web/app deliverable
+        that has NOTHING verifying it actually runs — no runnable runtime profile
+        and no registered assembled/acceptance test command (the "vacuous 12/12
+        PASS on a broken app" case). Off by default globally: ``Project`` carries
+        no project-kind field to auto-enable this from, so an operator opts in and
+        the ``assembled_run_unverified`` blocker is additionally scoped to a
+        web/app deliverable (index.html / web|static runtime profile) inside
+        ``gather_merge_evidence``. Mirrors ``get_require_sandbox``."""
+        return bool(self._settings().get("assembled_run_required", False))
+
+    def set_assembled_run_required(self, value: bool) -> bool:
+        with self.lock:
+            s = self._settings()
+            s["assembled_run_required"] = bool(value)
+            _atomic_write_json(self._settings_path, s)
+        return bool(value)
+
     # --- F104 S5: implementer grounding signal + spec-conformance policy ------
     _GROUNDING_POLICIES = ("off", "warn", "required_when_corpus_bound", "required")
 
