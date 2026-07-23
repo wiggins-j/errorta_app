@@ -343,9 +343,12 @@ def render_json(payload: Any) -> str:
     return _json.dumps(payload, indent=2, sort_keys=True, default=str)
 
 
-# Import the command modules for their registration side effects. Done at the
-# bottom (so the Command/registry symbols above are fully defined first) via
-# importlib so the imports can't be seen as "unused" and stripped by a linter.
+# Command modules register themselves as an IMPORT side effect (each calls
+# `register()` at its own import). R7: those imports are driven on an explicit,
+# idempotent `ensure_registered()` call — NOT at module-import time — so importing
+# `errorta_cli.registry` on its own has no side effects and the package can be
+# embedded/tested without import-order or shared-state hazards. Kept importlib-
+# based so a linter can't see the imports as "unused" and strip them.
 import importlib as _importlib  # noqa: E402
 
 _COMMAND_MODULES = (
@@ -358,9 +361,30 @@ _COMMAND_MODULES = (
                          #      + north-star / focus steering
     "interject", "task", "files",  # S6 — mid-run steering + file/worktree edit/accept
     "publish", "grounding", "testcfg",  # S7 — publish + grounding + test-command config
-    # NB: `runtime` (S2 read) is re-imported below; S7 rewrote it in place with the
+    # NB: `runtime` (S2 read) is listed once; S7 rewrote it in place with the
     # runtime-control sub-actions. It already appears in this tuple above.
 )
 
-for _name in _COMMAND_MODULES:
-    _importlib.import_module(f".commands.{_name}", __package__)
+# Guards `ensure_registered()` so repeated calls are a cheap no-op.
+_REGISTERED = False
+
+
+def ensure_registered() -> None:
+    """Populate the registry by importing every command module (idempotent).
+
+    Registration is an import side effect of each ``errorta_cli.commands.*`` module
+    (they call :func:`register` at import). R7 drives those imports on this explicit,
+    idempotent call instead of at module-import time, so importing
+    ``errorta_cli.registry`` alone leaves the registry empty until a front-end
+    (``app.main`` / ``repl.run_repl``) asks for it. Calling twice is a no-op — the
+    first call flips ``_REGISTERED`` and Python's import cache makes any redundant
+    ``import_module`` a lookup. Parity note: this imports the FULL
+    ``_COMMAND_MODULES`` set (kept in lockstep with ``cli.spec``'s bundled list), so
+    both the registry-parity and packaging-parity tests still see every command.
+    """
+    global _REGISTERED
+    if _REGISTERED:
+        return
+    for _name in _COMMAND_MODULES:
+        _importlib.import_module(f".commands.{_name}", __package__)
+    _REGISTERED = True

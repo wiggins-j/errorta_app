@@ -127,6 +127,10 @@ def _channel_op(ctx: Context, op: str, raw_args: list[str]) -> str:
 
 def run_repl(ctx: Context, client: SidecarClient, *, cwd: Path | None = None) -> None:
     """Run the interactive session until the user quits."""
+    # R7: registration is explicit, not an import side effect — ensure the shared
+    # registry is populated before we complete/dispatch against it (idempotent).
+    registry.ensure_registered()
+
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.history import InMemoryHistory

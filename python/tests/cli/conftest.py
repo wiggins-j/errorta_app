@@ -94,6 +94,22 @@ class RouteClient:
 
 
 @pytest.fixture(autouse=True)
+def _ensure_commands_registered():
+    """R7: registration is now explicit, not an import side effect.
+
+    Importing ``errorta_cli.registry`` / ``errorta_cli.app`` no longer populates
+    the registry or builds the Typer argv surface. Most tests dispatch straight
+    against the registry (or invoke the Typer ``app``) and expect the full command
+    set, so populate it once here. Idempotent, so this is a cheap no-op after the
+    first call. (The dedicated laziness assertions in ``test_import_hygiene_r7``
+    run in a *fresh* subprocess, immune to this in-process priming.)
+    """
+    from errorta_cli import app as _app
+
+    _app.ensure_registered()
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_sole_owner_guard(monkeypatch):
     """No CLI test may scan the host for a foreign Errorta app.
 

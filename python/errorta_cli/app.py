@@ -31,7 +31,13 @@ app = typer.Typer(
 
 @dataclass
 class _Globals:
-    """Global options captured on the root callback."""
+    """Per-invocation global options captured on the root callback.
+
+    R7: a FRESH instance is created per ``app()`` invocation and threaded through
+    the dispatch path via Click's per-invocation ``ctx.obj`` (see
+    :func:`ctx.ensure_object` below), rather than mutating a shared module-level
+    singleton. Two independent invocations therefore never share this state.
+    """
 
     home: Optional[str] = None
     verbosity: Optional[str] = None
@@ -40,9 +46,6 @@ class _Globals:
     poll_interval: Optional[float] = None
     no_onboarding: bool = False
     extra: dict[str, object] = field(default_factory=dict)
-
-
-_G = _Globals()
 
 
 # --------------------------------------------------------------------------- #
@@ -71,14 +74,18 @@ def _root(
         False, "--no-onboarding", help="Suppress the first-run welcome hint."
     ),
 ) -> None:
-    _G.home = home
-    _G.verbosity = verbosity
-    _G.no_spawn = no_spawn
-    _G.json = json_out
-    _G.poll_interval = poll_interval
-    _G.no_onboarding = no_onboarding
+    # Per-invocation state: Click hands each subcommand a child context that
+    # inherits `obj`, so setting it here threads a fresh `_Globals` down to the
+    # subcommand handlers without a shared module global (R7).
+    g = ctx.ensure_object(_Globals)
+    g.home = home
+    g.verbosity = verbosity
+    g.no_spawn = no_spawn
+    g.json = json_out
+    g.poll_interval = poll_interval
+    g.no_onboarding = no_onboarding
     if ctx.invoked_subcommand is None:
-        _launch_repl()
+        _launch_repl(g)
         raise typer.Exit()
 
 
@@ -101,10 +108,11 @@ app.add_typer(sidecar_app, name="sidecar")
 
 
 @sidecar_app.command("status")
-def _sidecar_status() -> None:
-    home = config.resolve_home(_G.home)
+def _sidecar_status(ctx: typer.Context) -> None:
+    g = ctx.ensure_object(_Globals)
+    home = config.resolve_home(g.home)
     info = sidecar.status(home)
-    if _G.json:
+    if g.json:
         typer.echo(_json.dumps(info, indent=2, default=str))
         return
     if not info["running"]:
@@ -118,21 +126,23 @@ def _sidecar_status() -> None:
 
 
 @sidecar_app.command("stop")
-def _sidecar_stop() -> None:
-    home = config.resolve_home(_G.home)
+def _sidecar_stop(ctx: typer.Context) -> None:
+    g = ctx.ensure_object(_Globals)
+    home = config.resolve_home(g.home)
     result = sidecar.stop(home)
-    typer.echo(_json.dumps(result, default=str) if _G.json else _stop_line(result))
+    typer.echo(_json.dumps(result, default=str) if g.json else _stop_line(result))
 
 
 @sidecar_app.command("restart")
-def _sidecar_restart() -> None:
-    home = config.resolve_home(_G.home)
+def _sidecar_restart(ctx: typer.Context) -> None:
+    g = ctx.ensure_object(_Globals)
+    home = config.resolve_home(g.home)
     try:
         handle = sidecar.restart(home, our_commit=config.build_commit())
     except CliError as exc:
         _fail(exc)
         return
-    if _G.json:
+    if g.json:
         typer.echo(_json.dumps({"port": handle.port, "pid": handle.pid}, default=str))
     else:
         typer.echo(f"sidecar: restarted on 127.0.0.1:{handle.port} (pid {handle.pid})")
@@ -174,7 +184,8 @@ def _add_argv_command(command: registry.Command) -> None:
     command_name = command.name
 
     def _handler(ctx: typer.Context) -> None:
-        _run_registry_command(command_name, list(ctx.args))
+        g = ctx.ensure_object(_Globals)
+        _run_registry_command(command_name, list(ctx.args), g)
 
     # F151: register the canonical name + each alias as its own Typer command
     # (Typer resolves subcommands by registered name), all dispatching under the
@@ -191,22 +202,26 @@ def _add_argv_command(command: registry.Command) -> None:
         )(_handler)
 
 
-def _run_registry_command(name: str, raw_args: list[str]) -> None:
-    """Resolve the sidecar, dispatch through the shared registry, print, exit."""
+def _run_registry_command(name: str, raw_args: list[str], g: _Globals) -> None:
+    """Resolve the sidecar, dispatch through the shared registry, print, exit.
+
+    ``g`` is this invocation's :class:`_Globals` (threaded from the root callback
+    via ``ctx.obj``), so no module-global state is read here (R7).
+    """
     # Global options work in either position: before the subcommand (parsed by
-    # the callback into `_G`) or after it (in `raw_args`). Reconcile both here so
+    # the callback into `g`) or after it (in `raw_args`). Reconcile both here so
     # `errorta status --no-spawn` behaves like `errorta --no-spawn status`.
     try:
         post, raw_args = _extract_post_globals(raw_args, registry.get(name))
     except CliError as exc:
         _fail(exc)
         return
-    home_override = post.get("home", _G.home)
-    verbosity_raw = post.get("verbosity", _G.verbosity)
-    no_spawn = _G.no_spawn or post.get("no_spawn", False)
-    json_mode = _G.json or post.get("json", False)
-    poll_interval = post.get("poll_interval", _G.poll_interval)
-    no_onboarding = _G.no_onboarding or post.get("no_onboarding", False)
+    home_override = post.get("home", g.home)
+    verbosity_raw = post.get("verbosity", g.verbosity)
+    no_spawn = g.no_spawn or post.get("no_spawn", False)
+    json_mode = g.json or post.get("json", False)
+    poll_interval = post.get("poll_interval", g.poll_interval)
+    no_onboarding = g.no_onboarding or post.get("no_onboarding", False)
 
     home = config.resolve_home(home_override)
     verbosity = Verbosity(level=resolve_level(verbosity_raw))
@@ -230,7 +245,7 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
             err=True,
         )
     _maybe_onboard(handle, json_mode=json_mode, no_onboarding=no_onboarding,
-                   command_name=name)
+                   command_name=name, g=g)
 
     # `--watch` on a read command re-renders on the poll loop (never in --json/CI).
     if not json_mode:
@@ -376,6 +391,7 @@ def _maybe_onboard(
     json_mode: bool,
     no_onboarding: bool,
     command_name: str | None,
+    g: _Globals,
 ) -> None:
     """Print the first-run welcome to stderr when the store is unconfigured.
 
@@ -402,7 +418,7 @@ def _maybe_onboard(
             json_mode=json_mode,
             opted=opted,
             command=command_name,
-            home=config.resolve_home(_G.home),
+            home=config.resolve_home(g.home),
         )
     if text:
         typer.echo(text, err=True)
@@ -412,31 +428,55 @@ def _maybe_onboard(
 # REPL launch.
 # --------------------------------------------------------------------------- #
 
-def _launch_repl() -> None:
+def _launch_repl(g: _Globals) -> None:
     from . import repl  # deferred: prompt_toolkit imported only when needed
 
-    home = config.resolve_home(_G.home)
-    verbosity = Verbosity(level=resolve_level(_G.verbosity))
+    home = config.resolve_home(g.home)
+    verbosity = Verbosity(level=resolve_level(g.verbosity))
     ctx = Context.build(
-        home_override=_G.home, verbosity=verbosity, poll_interval=_G.poll_interval,
+        home_override=g.home, verbosity=verbosity, poll_interval=g.poll_interval,
         cwd=Path.cwd(),
     )
     try:
         handle = sidecar.resolve(
-            home, allow_spawn=not _G.no_spawn, our_commit=config.build_commit()
+            home, allow_spawn=not g.no_spawn, our_commit=config.build_commit()
         )
     except CliError as exc:
         typer.echo(f"error: {exc.message}", err=True)
         raise typer.Exit(code=exc.exit_code)
     ctx.handle = handle
-    _maybe_onboard(handle, json_mode=_G.json, no_onboarding=_G.no_onboarding,
-                   command_name=None)
+    _maybe_onboard(handle, json_mode=g.json, no_onboarding=g.no_onboarding,
+                   command_name=None, g=g)
     with SidecarClient(handle.base_url, token=handle.token) as client:
         repl.run_repl(ctx, client, cwd=Path.cwd())
 
 
-# Register argv commands at import time so `errorta --help` lists them.
-_register_argv_commands()
+# --------------------------------------------------------------------------- #
+# Explicit, idempotent registration (R7).
+# --------------------------------------------------------------------------- #
+
+# Guards the one-time build of the argv (Typer) surface. Registry population is
+# guarded separately in `registry.ensure_registered()`.
+_ARGV_REGISTERED = False
+
+
+def ensure_registered() -> None:
+    """Populate the registry and materialize the argv commands (idempotent).
+
+    R7: registration is EXPLICIT — called from :func:`main` and (for the registry
+    half) the REPL entry — not an import side effect. Importing this module no
+    longer builds the Typer surface. Calling twice is safe: ``registry.
+    ensure_registered`` self-guards, and ``_ARGV_REGISTERED`` prevents re-adding
+    the argv subcommands (Typer would otherwise accumulate duplicate entries).
+    Registers the FULL registry set, so the registry-parity and packaging-parity
+    tests still see every command.
+    """
+    global _ARGV_REGISTERED
+    registry.ensure_registered()
+    if _ARGV_REGISTERED:
+        return
+    _register_argv_commands()
+    _ARGV_REGISTERED = True
 
 
 def main() -> None:
@@ -448,6 +488,7 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "__serve__":
         serve.run()
         return
+    ensure_registered()
     app()
 
 
