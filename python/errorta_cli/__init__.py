@@ -11,6 +11,6 @@ in-process sidecar launch. Everything else talks to the sidecar over HTTP.
 """
 from __future__ import annotations
 
-__version__ = "0.1.0-alpha.4"
+__version__ = "0.1.0-alpha.5"
 
 __all__ = ["__version__"]
