@@ -44,6 +44,13 @@ class QueryLedger(Protocol):
         role: Optional[str] = ...,
     ) -> list[Task]: ...
     def next_task(self, role: str) -> Optional[Task]: ...
+    def next_tasks(
+        self,
+        role: str,
+        n: int,
+        *,
+        exclude: Optional[set[str]] = ...,
+    ) -> list[Task]: ...
 
 
 @dataclass(frozen=True)
@@ -262,25 +269,31 @@ def decide_next(
         member_ids = by_role.get(role)
         if not member_ids:
             continue
-        task = ledger.next_task(role)
-        if task is None:
-            continue
-        # F127: skip members this task has barred (escalate-up reassignment);
-        # among the rest prefer the highest tier. If none are eligible right now,
-        # the task waits for a non-excluded member to free up (the loop raises an
-        # attention Problem if every member has been excluded).
-        eligible = [m for m in member_ids if m not in _excluded_member_ids(task)]
-        if not eligible:
-            continue
-        preferred = str(getattr(task, "preferred_member_id", "") or "")
-        selected = (
-            preferred if preferred in eligible else _pick_member(
-                eligible, member_tiers, escalate=bool(_excluded_member_ids(task))
+        # Spec 10 §A — head-of-line fix: iterate the READY tasks for this role, not
+        # just the single head. If the head task has every member of the role
+        # excluded (F127), advancing to the next TASK keeps the role alive instead
+        # of abandoning it — one poisoned head task no longer starves every dev.
+        # Mirrors ``plan_next_batch``'s over-fetch + per-task skip. We only need
+        # one placement here, but over-fetch so an all-excluded head is stepped
+        # past to the next dispatchable task.
+        candidates = ledger.next_tasks(role, len(member_ids) + 32)
+        for task in candidates:
+            # F127: skip members this task has barred (escalate-up reassignment);
+            # among the rest prefer the highest tier. If none are eligible right
+            # now, advance to the next task (the loop raises an attention Problem
+            # if a task has every member excluded).
+            eligible = [m for m in member_ids if m not in _excluded_member_ids(task)]
+            if not eligible:
+                continue
+            preferred = str(getattr(task, "preferred_member_id", "") or "")
+            selected = (
+                preferred if preferred in eligible else _pick_member(
+                    eligible, member_tiers, escalate=bool(_excluded_member_ids(task))
+                )
             )
-        )
-        return Assign(
-            member_id=selected,
-            task_id=task.task_id, role=role)
+            return Assign(
+                member_id=selected,
+                task_id=task.task_id, role=role)
 
     # 2) Workers idle -> let the PM plan / re-plan (if there is a PM).
     pm_ids = by_role.get(PM)

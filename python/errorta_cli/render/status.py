@@ -99,6 +99,21 @@ def render_status(payload: Any, verbosity: Any) -> str:
             )
         ))
 
+    # Spec 10 §4: `todo: N (dispatchable: M)`. When M == 0 and N is large the
+    # backlog is wedged — the one line that makes it diagnosable at a glance.
+    # Additive/backward compatible: an older server omits `backlog`, so nothing is
+    # printed. Rendered in the bad style when there is todo work but none of it is
+    # dispatchable (the wedge signature).
+    backlog = run.get("backlog") or {}
+    if backlog:
+        todo_n = backlog.get("todo")
+        dispatchable = backlog.get("dispatchable")
+        if todo_n is not None and dispatchable is not None:
+            wedged = int(todo_n) > 0 and int(dispatchable) == 0
+            style = "cli.bad" if wedged else "cli.muted"
+            lines.append(Text(
+                f"todo:    {todo_n} (dispatchable: {dispatchable})", style=style))
+
     counters = state.get("counters") or {}
     if counters:
         table = Table(show_edge=False, pad_edge=False, box=None, show_header=False)

@@ -20,6 +20,7 @@ from . import paths as _paths
 from . import task_dedupe
 from .ledger import Task
 from .topology import (
+    _WORKER_PRIORITY,
     DEV,
     PM,
     TESTER,
@@ -49,6 +50,7 @@ NOT_CONVERGING = "not_converging"              # F139 WS-E: nothing moved for N 
 DELIVERY_REVIEW_STALLED = "delivery_review_stalled"  # F155: delivery review kept rejecting
 GATE_NOT_IMPROVING = "gate_not_improving"      # Spec 04: acceptance gate result stuck
 PLANNING_CHURN = "planning_churn"              # Spec 07: PM-only plan turns, no worker
+DISPATCH_WEDGED = "dispatch_wedged"            # Spec 10: large todo backlog, nothing dispatchable
 
 # --- checkpoint cadences ----------------------------------------------------
 CADENCE_OFF = "off"
@@ -128,6 +130,17 @@ class CodingAutonomyPolicy:
     # review_done / task_blocked / a PR transition) resets the streak, so a
     # legitimate up-front decomposition burst is unaffected. 0 disables it.
     plan_streak_limit: int = 6
+    # Spec 10: wedged-graph probe. When at least `wedge_min_tasks` todo tasks exist
+    # but NO worker role has a dispatchable (deps-satisfied) head — sustained for
+    # `wedge_stall_limit` iterations — the run stops `dispatch_wedged` after naming
+    # the non-satisfiable dependency ids wedging the backlog. This is the pathology
+    # every other detector is blind to: a large backlog that presents as a
+    # legitimate PM plan turn because nothing is dispatchable. `wedge_min_tasks`
+    # guards a legitimately small/empty backlog from tripping; `wedge_stall_limit`
+    # requires the wedge to persist so a normal in-flight `doing` task doesn't
+    # false-fire. `wedge_stall_limit == 0` disables the detector.
+    wedge_min_tasks: int = 10
+    wedge_stall_limit: int = 5
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -150,6 +163,8 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "hot_file_freeze_stall_limit": p.hot_file_freeze_stall_limit,
         "gate_stall_limit": p.gate_stall_limit,
         "plan_streak_limit": p.plan_streak_limit,
+        "wedge_min_tasks": p.wedge_min_tasks,
+        "wedge_stall_limit": p.wedge_stall_limit,
     }
 
 
@@ -195,6 +210,12 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # detector entirely. Absent key -> dataclass default (6).
         plan_streak_limit=max(
             0, int(d.get("plan_streak_limit", base.plan_streak_limit))),
+        # Spec 10: `max(0, …)` clamps — a small/negative min is meaningless, and
+        # `wedge_stall_limit == 0` disables the wedged-graph probe entirely.
+        wedge_min_tasks=max(
+            0, int(d.get("wedge_min_tasks", base.wedge_min_tasks))),
+        wedge_stall_limit=max(
+            0, int(d.get("wedge_stall_limit", base.wedge_stall_limit))),
     )
 
 
@@ -554,6 +575,12 @@ class LoopCounters:
     # branches — i.e. exactly where pm_idle is reset). At plan_streak_limit the
     # run stops `planning_churn`.
     plan_streak: int = 0
+    # Spec 10: consecutive iterations observed WEDGED — a `wedge_min_tasks`+ todo
+    # backlog with no dispatchable worker head. Incremented in
+    # `_account_dispatch_wedge`; reset to 0 the moment any dispatchable work
+    # appears (or the backlog shrinks below the floor). At `wedge_stall_limit` the
+    # run stops `dispatch_wedged`.
+    wedge_streak: int = 0
 
 
 @dataclass
@@ -856,6 +883,108 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
         f"{c.plan_streak} consecutive planning turns with no worker turn "
         f"(backlog {depth} open task(s) across {distinct} distinct title(s))")
     return LoopResult(PLANNING_CHURN, c)
+
+
+def _dispatch_wedge_culprits(ledger: Any, todo: list[Task]) -> str:
+    """Spec 10 — NAME the culprit: walk the ``depends_on`` closure of the todo set
+    and report which dep ids sit in a non-satisfiable state and how many todo tasks
+    each (transitively) blocks.
+
+    A dep is a CULPRIT when it can no longer progress a waiter toward dispatch:
+    ``blocked`` (needs a human/PM), or a stranded ``doing`` (a task claimed but not
+    completing). ``done`` and ``dropped`` are SATISFIED deps (Spec 09) — NOT
+    culprits. A dep id present in no task record is reported as ``missing`` (a
+    dangling reference that can never satisfy). Best-effort: a diagnostic read must
+    never break the run loop."""
+    try:
+        by_id = {t.task_id: t for t in ledger.list_tasks()}
+    except Exception:  # noqa: BLE001 - diagnostics must never break the loop
+        by_id = {t.task_id: t for t in todo}
+
+    def _nonsatisfiable(dep_id: str) -> Optional[str]:
+        dep = by_id.get(dep_id)
+        if dep is None:
+            return "missing"
+        state = str(getattr(dep, "state", "") or "")
+        # done / dropped are satisfied (Spec 09). blocked + stranded doing wedge.
+        if state in ("blocked", "doing"):
+            return state
+        return None
+
+    blocks: dict[str, int] = {}
+    states: dict[str, str] = {}
+    for t in todo:
+        seen: set[str] = set()
+        stack = list(getattr(t, "depends_on", []) or [])
+        culprits: set[str] = set()
+        while stack:
+            dep_id = stack.pop()
+            if dep_id in seen:
+                continue
+            seen.add(dep_id)
+            bad = _nonsatisfiable(dep_id)
+            if bad is not None:
+                culprits.add(dep_id)
+                states[dep_id] = bad
+            dep = by_id.get(dep_id)
+            if dep is not None:
+                stack.extend(getattr(dep, "depends_on", []) or [])
+        for dep_id in culprits:
+            blocks[dep_id] = blocks.get(dep_id, 0) + 1
+
+    todo_n = len(todo)
+    if not blocks:
+        return (
+            f"{todo_n} todo task(s) but none dispatchable, and no non-satisfiable "
+            "dependency found — the backlog is role-invisible (no worker role can "
+            "take any todo task)")
+    ranked = sorted(blocks.items(), key=lambda kv: (-kv[1], kv[0]))
+    named = "; ".join(
+        f"{dep_id} ({states.get(dep_id, '?')}, blocks {n})"
+        for dep_id, n in ranked[:5]
+    )
+    return f"{todo_n} todo task(s), none dispatchable — wedged on: {named}"
+
+
+def _account_dispatch_wedge(ledger: Any, c: LoopCounters,
+                            policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+    """Spec 10 — detect a WEDGED graph and stop `dispatch_wedged` after naming the
+    culprit deps.
+
+    The observed pathology: 130 todo tasks, 6 healthy members, and ZERO worker
+    turns for 10+ iterations — because every worker head is blocked behind a
+    non-satisfiable dependency, so ``next_task`` returns None for every role and the
+    run silently converts to PM plan turns. Every other detector is structurally
+    blind to it: `not_converging` treats new tasks as motion, `gate_not_improving`
+    needs a gate signal only worker turns produce, and `planning_churn` fires only
+    when the PM keeps *planning* (here the backlog is already large and static).
+
+    Trigger (ALL, sustained for ``wedge_stall_limit`` iterations):
+    * ``len(list_tasks(state="todo")) >= wedge_min_tasks`` — a real backlog, so a
+      legitimately small/empty queue never trips.
+    * ``all(next_task(r) is None for r in _WORKER_PRIORITY)`` — nothing dispatchable.
+
+    The sustained window keeps a task blocked on a genuinely in-flight ``doing``
+    prerequisite from false-firing. ``wedge_stall_limit == 0`` disables the
+    detector. Best-effort read; a ledger hiccup resets the streak, never stops."""
+    if policy.wedge_stall_limit <= 0:
+        return None
+    try:
+        todo = ledger.list_tasks(state="todo")
+        dispatchable = any(
+            ledger.next_task(role) is not None for role in _WORKER_PRIORITY)
+    except Exception:  # noqa: BLE001 - detector must never break the run loop
+        c.wedge_streak = 0
+        return None
+    if len(todo) < policy.wedge_min_tasks or dispatchable:
+        c.wedge_streak = 0
+        return None
+    c.wedge_streak += 1
+    if c.wedge_streak < policy.wedge_stall_limit:
+        return None
+    summary = _dispatch_wedge_culprits(ledger, todo)
+    _maybe_raise_monitor(ledger, "dispatch_wedged", summary)
+    return LoopResult(DISPATCH_WEDGED, c, detail={"summary": summary})
 
 
 def _maybe_raise_member_health(
@@ -1274,6 +1403,11 @@ def _run_sequential_loop(
         gate_stop = _account_gate_stall(ledger, c, policy)
         if gate_stop is not None:
             return gate_stop
+        # Spec 10: a wedged graph — a large todo backlog with nothing dispatchable —
+        # named and stopped instead of silently converted into PM plan turns.
+        wedge_stop = _account_dispatch_wedge(ledger, c, policy)
+        if wedge_stop is not None:
+            return wedge_stop
 
         # Checkpoint AFTER making progress on a unit; resume continues cleanly.
         if _checkpoint_due(policy, c, milestone):
@@ -1618,6 +1752,10 @@ def _run_concurrent_loop(
                 gate_stop = _account_gate_stall(ledger, c, policy)
                 if gate_stop is not None:
                     return gate_stop
+                # Spec 10: wedged-graph probe (mirrors the sequential loop).
+                wedge_stop = _account_dispatch_wedge(ledger, c, policy)
+                if wedge_stop is not None:
+                    return wedge_stop
                 if _checkpoint_due(policy, c, milestone):
                     c.since_checkpoint = 0
                     return LoopResult(CHECKPOINT, c)
