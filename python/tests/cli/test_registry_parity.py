@@ -18,6 +18,108 @@ def test_split_slash_strips_leading_slash_and_splits() -> None:
     assert registry.split_slash("   ") == ("", [])
 
 
+# --- R2: quote-aware REPL tokenization (shlex) --------------------------------
+
+def test_split_slash_keeps_a_double_quoted_argument_as_one_token() -> None:
+    assert registry.split_slash('/pm ask "fix the login bug"') == (
+        "pm", ["ask", "fix the login bug"])
+
+
+def test_split_slash_keeps_a_single_quoted_argument_as_one_token() -> None:
+    assert registry.split_slash("/pm ask 'fix the login bug'") == (
+        "pm", ["ask", "fix the login bug"])
+
+
+def test_split_slash_handles_escaped_quotes_inside_a_token() -> None:
+    name, args = registry.split_slash(r'/log --grep "a \"q\" word"')
+    assert name == "log"
+    assert args == ["--grep", 'a "q" word']
+
+
+def test_split_slash_unbalanced_quote_falls_back_to_whitespace_split() -> None:
+    # A mistyped quote must degrade to today's behavior, never raise.
+    name, args = registry.split_slash('/pm ask "fix the login bug')
+    assert name == "pm"
+    assert args == ["ask", '"fix', "the", "login", "bug"]
+
+
+def test_split_slash_bare_and_empty_unchanged() -> None:
+    assert registry.split_slash("/status") == ("status", [])
+    assert registry.split_slash("status") == ("status", [])
+    assert registry.split_slash("   ") == ("", [])
+
+
+# --- R1: resolve_args enforces the value-option contract ----------------------
+
+def test_value_option_without_a_value_errors_not_true() -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    log = registry.get("log")
+    with pytest.raises(CliError, match="needs a value"):
+        registry.resolve_args(log, ["--grep"])
+
+
+def test_value_option_with_a_value_still_binds() -> None:
+    log = registry.get("log")
+    assert registry.resolve_args(log, ["--grep", "pygame"])["grep"] == "pygame"
+
+
+# --- R1: unconsumed _extra is surfaced on a closed-arg command ----------------
+
+def test_unconsumed_extra_on_closed_command_is_rejected(make_ctx) -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    from .conftest import RouteClient
+
+    with pytest.raises(CliError, match="unexpected argument"):
+        registry.dispatch("status", RouteClient(), make_ctx(), ["--bogus"])
+
+
+def test_allow_extra_command_tolerates_free_form_tokens(make_ctx) -> None:
+    # `pm` opts out (allow_extra=True): tokens past its positional slots land in
+    # _extra and must NOT trip the closed-arg reject (a closed command would).
+    from .conftest import RouteClient
+
+    args = registry.resolve_args(registry.get("pm"), ["changes", "x", "y", "z"])
+    assert args["_extra"] == ["z"]
+    registry.dispatch("pm", RouteClient(), make_ctx(project_id="p"),
+                      ["changes", "x", "y", "z"])  # no CliError
+
+
+def test_reject_helper_exempts_the_framework_watch_token() -> None:
+    # `--watch` reaches resolve_args unmatched on commands without a watch param;
+    # it is owned by the watch layer, so it is never an "unexpected argument".
+    status = registry.get("status")
+    registry.reject_unconsumed_extra(status, {"_extra": ["--watch"]})  # no raise
+
+
+def test_reject_helper_flags_a_real_stray_even_alongside_watch() -> None:
+    import pytest
+
+    from errorta_cli.errors import CliError
+
+    status = registry.get("status")
+    with pytest.raises(CliError, match="--bogus"):
+        registry.reject_unconsumed_extra(status, {"_extra": ["--watch", "--bogus"]})
+
+
+def test_missing_required_positional_stays_graceful_usage(make_ctx) -> None:
+    # R1 finding: required-param enforcement already lives at the command layer
+    # (a `_usage` sentinel, exit 0, zero route calls) and is locked here — the
+    # parser does NOT raise, so this graceful contract is preserved.
+    from .conftest import RouteClient
+
+    client = RouteClient()
+    payload, text = registry.dispatch("open", client, make_ctx(), [])
+    assert client.calls == []
+    assert payload.get("_usage")
+    assert "usage" in text.lower()
+
+
 def test_slash_name_resolves_to_same_command_object() -> None:
     for cmd in registry.all_commands():
         name_s, _ = registry.split_slash("/" + cmd.name)

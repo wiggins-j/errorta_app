@@ -15,10 +15,12 @@ short-circuit to JSON.
 from __future__ import annotations
 
 import json as _json
+import shlex
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .client import SidecarClient
+from .errors import CliError
 from .session import Context
 from .verbosity import Verbosity
 
@@ -53,6 +55,11 @@ class Command:
     mutating: bool = False
     # F151: extra names that resolve to this command (e.g. ``stop`` -> ``cancel``).
     aliases: tuple[str, ...] = ()
+    # R1: a closed-arg command REJECTS unmatched tokens (``_extra``) so nothing is
+    # silently lost (see :func:`reject_unconsumed_extra`). A command that
+    # legitimately consumes free-form tokens (e.g. ``pm`` reads ``-i`` out of
+    # ``_extra``) opts OUT of that check with ``allow_extra=True``.
+    allow_extra: bool = False
     # F151: how ``--watch`` renders. "snapshot" (default) = full re-render + clear
     # each tick (status/tasks/…); "stream" = tail (append only new events; log).
     watch_mode: str = "snapshot"
@@ -119,13 +126,18 @@ def names() -> tuple[str, ...]:
 def split_slash(line: str) -> tuple[str, list[str]]:
     """Parse a REPL line ``/name arg1 --flag`` into ``(name, raw_args)``.
 
-    A leading ``/`` is optional. Simple whitespace splitting is sufficient for
-    S1; quoted-argument handling is an S2 refinement.
+    A leading ``/`` is optional. Tokenization is quote-aware (:func:`shlex.split`)
+    so a multi-word argument stays one token — ``/pm ask "fix the login bug"`` ->
+    ``("pm", ["ask", "fix the login bug"])``. Unbalanced quotes (a typo) fall back
+    to plain whitespace splitting rather than crashing the REPL.
     """
     text = line.strip()
     if text.startswith("/"):
         text = text[1:]
-    parts = text.split()
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
     if not parts:
         return "", []
     return parts[0], parts[1:]
@@ -164,7 +176,11 @@ def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
                     args[key] = raw_args[i + 1]
                     i += 1
                 else:
-                    args[key] = True
+                    # R1: a value-option given with no following value is a user
+                    # error — surface it, don't silently coerce it to True (which
+                    # a command would then treat as a truthy string). Matches the
+                    # "needs a value" contract in `app._extract_post_globals`.
+                    raise CliError(f"--{key} needs a value")
             else:
                 extra.append(token)
         else:
@@ -178,6 +194,41 @@ def resolve_args(command: Command, raw_args: list[str]) -> dict[str, Any]:
     if extra:
         args["_extra"] = extra
     return args
+
+
+# ``Param`` carries no type declaration (only name/help/required/is_flag/default),
+# so there is no schema type to coerce a value to — value-options stay strings and
+# each command coerces its own (e.g. ``turns`` reads ``int(limit)``). Optional typed
+# coercion is intentionally NOT added here: inventing a type system on ``Param`` is
+# out of scope and would risk a false-reject on the one parser every command shares.
+
+
+def reject_unconsumed_extra(command: Command, args: dict[str, Any]) -> None:
+    """Surface tokens ``resolve_args`` could not map onto ``command.params``.
+
+    ``_extra`` collects tokens that matched no flag, no value-option, and no free
+    positional slot. For a command with a closed arg set (the default) an unmatched
+    token is a user error — a typo'd flag or a stray argument — so we raise instead
+    of dropping it: "nothing silently lost" becomes enforced, not conventional.
+
+    Opt-out: a command that legitimately consumes free-form tokens sets
+    ``allow_extra=True`` (e.g. ``pm`` reads ``-i`` out of ``_extra``).
+
+    ``--watch`` is exempt: it is a framework-level token owned by the watch layer
+    (``watch.arm_dashboard`` injects it; self-streaming ``run`` strips it) and it
+    reaches ``resolve_args`` unmatched only on commands without a ``watch`` param,
+    where it is a no-op — not a user error.
+    """
+    if command.allow_extra:
+        return
+    extra = args.get("_extra")
+    if not extra:
+        return
+    leftover = [token for token in extra if token != "--watch"]
+    if leftover:
+        raise CliError(
+            f"unexpected argument(s) for '{command.name}': {' '.join(leftover)}"
+        )
 
 
 def dispatch(
@@ -199,6 +250,9 @@ def dispatch(
     detected_json, rest = extract_json_flag(raw_args)
     effective_json = detected_json if json_mode is None else json_mode
     args = resolve_args(command, rest)
+    # R1: enforce "nothing silently lost" for closed-arg commands (both front-ends
+    # share this path, so the check is uniform across argv and slash).
+    reject_unconsumed_extra(command, args)
     # Surface the effective --json mode to the command's call (S3 run gating needs
     # it before the payload exists). Read-only for reads; mutations may branch.
     ctx.json_mode = effective_json

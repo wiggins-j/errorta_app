@@ -45,6 +45,46 @@ def test_trailing_value_global_without_value_errors() -> None:
             app_module._extract_post_globals([token])
 
 
+# --- R1: a global-named token that is a value-option VALUE is not eaten -------
+
+def test_value_option_value_matching_a_global_is_preserved() -> None:
+    from errorta_cli import registry
+
+    # `errorta log --grep --json`: `--json` is the grep pattern, not the global.
+    overrides, rest = app_module._extract_post_globals(
+        ["--grep", "--json"], registry.get("log"))
+    assert "json" not in overrides
+    assert rest == ["--grep", "--json"]
+    # …and resolve_args then binds it as the value (round-trip proof).
+    assert registry.resolve_args(registry.get("log"), rest)["grep"] == "--json"
+
+
+def test_global_after_a_value_options_real_value_is_still_harvested() -> None:
+    from errorta_cli import registry
+
+    overrides, rest = app_module._extract_post_globals(
+        ["--grep", "dev", "--json"], registry.get("log"))
+    assert overrides["json"] is True
+    assert rest == ["--grep", "dev"]
+
+
+def test_global_is_harvested_when_command_has_no_such_value_option() -> None:
+    from errorta_cli import registry
+
+    # `status` has no value-options, so a post-subcommand `--json` is the global.
+    overrides, rest = app_module._extract_post_globals(
+        ["--json"], registry.get("status"))
+    assert overrides["json"] is True
+    assert rest == []
+
+
+def test_post_globals_without_command_preserves_legacy_behavior() -> None:
+    # command=None ⇒ schema-blind (direct callers / back-compat).
+    overrides, rest = app_module._extract_post_globals(["--home", "/x", "--role", "dev"])
+    assert overrides["home"] == "/x"
+    assert rest == ["--role", "dev"]
+
+
 def test_watch_uses_post_subcommand_poll_interval(monkeypatch, tmp_path) -> None:
     seen: dict[str, object] = {}
 

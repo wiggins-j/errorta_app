@@ -197,7 +197,7 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
     # the callback into `_G`) or after it (in `raw_args`). Reconcile both here so
     # `errorta status --no-spawn` behaves like `errorta --no-spawn status`.
     try:
-        post, raw_args = _extract_post_globals(raw_args)
+        post, raw_args = _extract_post_globals(raw_args, registry.get(name))
     except CliError as exc:
         _fail(exc)
         return
@@ -270,19 +270,43 @@ def _run_registry_command(name: str, raw_args: list[str]) -> None:
         raise typer.Exit(code=code)
 
 
-def _extract_post_globals(raw_args: list[str]) -> tuple[dict[str, object], list[str]]:
+def _extract_post_globals(
+    raw_args: list[str], command: "registry.Command | None" = None
+) -> tuple[dict[str, object], list[str]]:
     """Pull global options that appear *after* the subcommand out of ``raw_args``.
 
     Returns ``(overrides, remaining_args)``. Recognizes ``--json``, ``--no-spawn``
     (flags), and ``--home VALUE`` / ``--verbosity|-V VALUE`` /
     ``--poll-interval VALUE`` (value options), so a global flag is honored
     whether it precedes or follows the subcommand.
+
+    R1 disambiguation: a global-looking token is NOT harvested when it is the VALUE
+    of one of the subcommand's own value-options. Given ``command``, a value-option
+    (``--name``) is passed through together with the token that follows it, so
+    ``errorta log --grep --json`` keeps ``--json`` as the grep pattern instead of
+    letting it be eaten as the global ``--json``. (A bare positional cannot collide:
+    positionals never start with ``--``.) With ``command=None`` the old, schema-blind
+    behavior is preserved for direct callers.
     """
+    value_opts = (
+        frozenset(f"--{p.name}" for p in command.params if not p.is_flag)
+        if command is not None
+        else frozenset()
+    )
     overrides: dict[str, object] = {}
     rest: list[str] = []
     i = 0
     while i < len(raw_args):
         token = raw_args[i]
+        if token in value_opts:
+            # A subcommand value-option owns the token that follows it; keep both so
+            # a global-named value (`--home`, `--json`, …) isn't misread as a global.
+            rest.append(token)
+            if i + 1 < len(raw_args):
+                rest.append(raw_args[i + 1])
+                i += 1
+            i += 1
+            continue
         if token == "--json":
             overrides["json"] = True
         elif token == "--no-spawn":
