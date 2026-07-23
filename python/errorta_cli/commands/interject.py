@@ -68,8 +68,13 @@ def _render(payload: Any, verbosity: Any, json_mode: bool) -> str:
         lines.append(render(muted(f"applied {len(applied)} change(s) from the directive")))
     for r in refusals:
         if isinstance(r, dict):
-            lines.append(render(muted(
-                f"refused: {r.get('code') or '?'} — {r.get('reason') or ''}")))
+            code = r.get("code") or "?"
+            reason = r.get("reason") or ""
+            # Compat guard for an older server: a start_run refused only because a
+            # run is already live is benign (the directive was still delivered).
+            if code == "start_failed" and "already in progress" in reason:
+                continue
+            lines.append(render(muted(f"refused: {code} — {reason}")))
     if run_started:
         lines.append(render("the directive started a run."))
     return "\n".join(lines)

@@ -1688,7 +1688,15 @@ def _apply_pm_control_actions(
             _start_run(project_id, {}, continue_=True)
             run_started = True
         except HTTPException as exc:
-            refusals.append({"code": "start_failed", "reason": str(exc.detail)})
+            # A run already in progress is NOT a failure: there is nothing to
+            # start and the directive is already threaded to the PM's next plan
+            # turn. Surfacing it as a refusal makes a successful mid-run interject
+            # look broken, so swallow the benign 409 and keep run_started False.
+            detail = str(exc.detail)
+            if exc.status_code == 409 and "already in progress" in detail:
+                pass
+            else:
+                refusals.append({"code": "start_failed", "reason": detail})
         except Exception as exc:  # noqa: BLE001 — a start failure is a refusal, not a 500
             refusals.append({"code": "start_failed", "reason": str(exc)})
     return [c.to_dict() for c in applied], refusals, run_started
