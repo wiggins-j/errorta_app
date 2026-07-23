@@ -317,6 +317,7 @@ and FastAPI routers. Update the prose and this contract together.
     "convergence_stall_limit": 20,
     "delivery_review_round_limit": 3,
     "foundation_stall_limit": 12,
+    "gate_stall_limit": 8,
     "hot_file_escalation_threshold": 4,
     "hot_file_freeze_stall_limit": 15,
     "hot_file_threshold": 2,

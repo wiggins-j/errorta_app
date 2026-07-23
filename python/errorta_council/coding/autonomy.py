@@ -46,6 +46,7 @@ WORKER_UNPRODUCTIVE = "worker_unproductive"    # F127: no member can do a task
 COMPLETION_BLOCKED = "completion_blocked"      # F128: PM claimed done, open work remains
 NOT_CONVERGING = "not_converging"              # F139 WS-E: nothing moved for N iterations
 DELIVERY_REVIEW_STALLED = "delivery_review_stalled"  # F155: delivery review kept rejecting
+GATE_NOT_IMPROVING = "gate_not_improving"      # Spec 04: acceptance gate result stuck
 
 # --- checkpoint cadences ----------------------------------------------------
 CADENCE_OFF = "off"
@@ -110,6 +111,13 @@ class CodingAutonomyPolicy:
     hot_file_threshold: int = 2
     hot_file_escalation_threshold: int = 4
     hot_file_freeze_stall_limit: int = 15
+    # Spec 04: if the ACCEPTANCE GATE RESULT (test-run pass count / delivery
+    # verdict) does not IMPROVE for this many iterations, stop `gate_not_improving`
+    # instead of churning the same failing solver->gate->same-result loop to
+    # budget_exhausted. Unlike `convergence_stall_limit`, this keys on the gate
+    # result (not the progress fingerprint), so a churning PR head does NOT reset
+    # it. 0 disables the detector.
+    gate_stall_limit: int = 8
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -130,6 +138,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "hot_file_threshold": p.hot_file_threshold,
         "hot_file_escalation_threshold": p.hot_file_escalation_threshold,
         "hot_file_freeze_stall_limit": p.hot_file_freeze_stall_limit,
+        "gate_stall_limit": p.gate_stall_limit,
     }
 
 
@@ -167,6 +176,10 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             1, int(d.get("hot_file_escalation_threshold", base.hot_file_escalation_threshold))),
         hot_file_freeze_stall_limit=max(
             1, int(d.get("hot_file_freeze_stall_limit", base.hot_file_freeze_stall_limit))),
+        # Spec 04: `max(0, …)` — NOT max(1) — so an operator can set 0 to disable
+        # the gate-stall detector entirely. Absent key -> dataclass default (8).
+        gate_stall_limit=max(
+            0, int(d.get("gate_stall_limit", base.gate_stall_limit))),
     )
 
 
@@ -338,6 +351,58 @@ def _progress_fingerprint(ledger: Any, c: "LoopCounters") -> tuple:
     return (pr_fp, task_fp, ladder, foundation)
 
 
+def _gate_fingerprint(ledger: Any) -> tuple[tuple, int]:
+    """Spec 04: a snapshot of the ACCEPTANCE GATE RESULT — the test-run pass set
+    and the delivery-review verdict — keyed on the RESULT, NOT the PR head.
+
+    Returns ``(fp, score)`` where ``fp`` identifies the current gate state and
+    ``score`` is a monotonic quality measure (higher = better): the count of
+    passing commands, with a passing delivery review dominating. ``_account_gate_stall``
+    treats a strict score increase as motion (reset) and an unchanged/lower score
+    as churn (a step toward the stall stop) — so a run stuck at 6/12 while the PR
+    head keeps changing finally trips.
+
+    Sentinel ``((), -1)`` means "no gate signal yet" (no test run and no delivery
+    verdict) — the detector never trips on it. All ledger access is guarded so a
+    ledger lacking these methods degrades to the sentinel rather than crashing the
+    loop."""
+    fp_parts: list = []
+    score = -1
+
+    list_test_runs = getattr(ledger, "list_test_runs", None)
+    if callable(list_test_runs):
+        try:
+            runs = list_test_runs()
+        except Exception:  # noqa: BLE001
+            runs = None
+        if runs:
+            latest = runs[-1]
+            results = latest.get("results") or []
+            if results:
+                fp_parts.append(tuple(sorted(
+                    (str(r.get("command_id")), r.get("exit_code")) for r in results)))
+                score = sum(1 for r in results if r.get("exit_code") == 0)
+            elif latest.get("passed") is not None:
+                passed = bool(latest.get("passed"))
+                fp_parts.append(("run_passed", passed))
+                score = 1 if passed else 0
+
+    get_run_state = getattr(ledger, "get_run_state", None)
+    if callable(get_run_state):
+        try:
+            state = get_run_state() or {}
+        except Exception:  # noqa: BLE001
+            state = {}
+        if state.get("delivery_review_passed") is True:
+            score = max(score if score >= 0 else 0, 10_000)
+            fp_parts.append(("delivery_review_passed", True,
+                             str(state.get("delivery_reviewed_head", ""))))
+
+    if score < 0:
+        return ((), -1)
+    return (tuple(fp_parts), score)
+
+
 def load_policy(store: Any) -> CodingAutonomyPolicy:
     """Read the per-project autonomy policy from the ledger (defaults if unset)."""
     path = store.dir / "autonomy.json"
@@ -451,6 +516,18 @@ class LoopCounters:
     # loops behave identically.
     last_progress_fp: tuple = ()
     last_progress_iter: int = 0
+    # Spec 04: gate-stall tracking, keyed on the ACCEPTANCE RESULT (test-run pass
+    # count / delivery verdict), NOT the progress fingerprint. `last_gate_fp` is
+    # the last-seen `_gate_fingerprint` fp; `last_gate_best` is the best (highest)
+    # score observed so far (-1 = never observed); `last_gate_iter` is the
+    # iteration count when the score last strictly improved. When
+    # `iterations - last_gate_iter >= gate_stall_limit` — the gate result has not
+    # improved for that many iterations — the run stops `gate_not_improving`. A
+    # changed fp with an equal/lower score is CHURN and does NOT reset (that's the
+    # 6/12-with-a-changing-head loop we must catch).
+    last_gate_fp: tuple = ()
+    last_gate_best: int = -1
+    last_gate_iter: int = 0
     # F155: consecutive delivery-review rejections (findings filed) in this run.
     # At delivery_review_round_limit the loop stops `delivery_review_stalled`.
     # Reset to 0 on a PASSING delivery review.
@@ -669,6 +746,42 @@ def _account_convergence(ledger: Any, c: LoopCounters,
         ledger, "not_converging",
         "no merged progress, PR transition, or ladder activity")
     return LoopResult(NOT_CONVERGING, c)
+
+
+def _account_gate_stall(ledger: Any, c: LoopCounters,
+                        policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+    """Spec 04: detect a run whose ACCEPTANCE GATE RESULT hasn't IMPROVED for
+    ``gate_stall_limit`` iterations, and stop `gate_not_improving`.
+
+    Clones ``_account_convergence`` but keys on ``_gate_fingerprint`` (test-run
+    pass count / delivery verdict) instead of the progress fingerprint — precisely
+    because a churning PR head keeps the progress fingerprint moving (so
+    `not_converging` never fires) while the gate result stays byte-identical.
+
+    Improvement = a STRICT score increase (more commands passing, or delivery
+    flips to passed); that resets the window. A changed fp with an equal or lower
+    score is CHURN and does NOT reset — that is the 6/12-with-a-changing-head loop
+    this detector exists to catch. ``gate_stall_limit == 0`` disables it; a
+    no-signal sentinel (score < 0) never trips."""
+    if policy.gate_stall_limit <= 0:
+        return None
+    fp, score = _gate_fingerprint(ledger)
+    if score < 0:
+        return None  # no gate signal yet — never trips
+    # First-ever observation, or a strict score improvement: motion — reset the
+    # window and remember this as the new best.
+    if c.last_gate_best == -1 or score > c.last_gate_best:
+        c.last_gate_fp = fp
+        c.last_gate_best = score
+        c.last_gate_iter = c.iterations
+        return None
+    if c.iterations - c.last_gate_iter < policy.gate_stall_limit:
+        return None
+    _maybe_raise_monitor(
+        ledger, "gate_not_improving",
+        f"acceptance gate has not improved for {policy.gate_stall_limit} "
+        f"iterations (score={score})")
+    return LoopResult(GATE_NOT_IMPROVING, c)
 
 
 def _maybe_raise_member_health(
@@ -1073,6 +1186,12 @@ def _run_sequential_loop(
         conv_stop = _account_convergence(ledger, c, policy)
         if conv_stop is not None:
             return conv_stop
+        # Spec 04: stop a run whose acceptance gate result keeps repeating without
+        # improving (the 6/12-with-a-churning-head loop). Keyed on the gate result,
+        # so it catches churn that `not_converging` (progress fingerprint) misses.
+        gate_stop = _account_gate_stall(ledger, c, policy)
+        if gate_stop is not None:
+            return gate_stop
 
         # Checkpoint AFTER making progress on a unit; resume continues cleanly.
         if _checkpoint_due(policy, c, milestone):
@@ -1362,6 +1481,10 @@ def _run_concurrent_loop(
                 conv_stop = _account_convergence(ledger, c, policy)
                 if conv_stop is not None:
                     return conv_stop
+                # Spec 04: gate-repeat stall stop, at this same quiescent point.
+                gate_stop = _account_gate_stall(ledger, c, policy)
+                if gate_stop is not None:
+                    return gate_stop
                 if _checkpoint_due(policy, c, milestone):
                     c.since_checkpoint = 0
                     return LoopResult(CHECKPOINT, c)
