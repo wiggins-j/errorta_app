@@ -304,6 +304,183 @@ async def test_nonexistent_worktree_root_fails_safe_to_tempdir(monkeypatch):
     assert "errorta-claude-cli-" in captured["kwargs"]["cwd"]
 
 
+# --------------------------------------------------------------------------- #
+# Spec 11 (P1a) fix — turn budget + strictly-additive retrieval fallback.
+#
+# A dev that spends every turn on Read/Grep calls never emits the coding_turn.v1
+# envelope, so the CLI's `result` comes back EMPTY. That used to raise
+# ``claude_cli_empty_result`` and (3x) trip ``member_unhealthy``, stopping the
+# run — retrieval turning a would-have-succeeded turn into a member failure.
+# Retrieval must be strictly ADDITIVE: on an empty retrieval result we retry
+# ONCE with the plain no-tools invocation, and only that second empty raises.
+# --------------------------------------------------------------------------- #
+
+def _empty_json():
+    """The failure shape from the production run: parseable result envelope,
+    is_error false, but no assistant text (budget spent on tool-use turns)."""
+    return json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": "", "num_turns": 16,
+        "usage": {"input_tokens": 100, "output_tokens": 0},
+    }).encode("utf-8")
+
+
+def _patch_exec_sequence(monkeypatch, procs):
+    """Patch create_subprocess_exec with a QUEUE of fake procs; record EVERY
+    invocation's argv+kwargs so we can assert how many attempts happened."""
+    calls = []
+    queue = list(procs)
+
+    async def fake_exec(*argv, **kwargs):
+        calls.append({"argv": list(argv), "kwargs": kwargs})
+        assert queue, f"unexpected extra CLI invocation #{len(calls)}: {list(argv)}"
+        return queue.pop(0)
+
+    import errorta_model_gateway.providers._cli_common as common
+    monkeypatch.setattr(common.asyncio, "create_subprocess_exec", fake_exec)
+    return calls
+
+
+def test_dev_repo_read_turn_budget_is_raised():
+    """The budget must cover several tool-use turns PLUS the final envelope
+    turn. 6 was too low in production (empty-result member failures)."""
+    import errorta_model_gateway.providers.async_claude_cli as mod
+    assert mod._DEV_REPO_READ_MAX_TURNS == 16
+
+
+@pytest.mark.asyncio
+async def test_retrieval_argv_carries_the_raised_budget(monkeypatch, tmp_path):
+    import errorta_model_gateway.providers.async_claude_cli as mod
+    calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=_ok_json())])
+    await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--max-turns") + 1] == str(mod._DEV_REPO_READ_MAX_TURNS) == "16"
+
+
+@pytest.mark.asyncio
+async def test_empty_retrieval_result_falls_back_to_plain_invocation(monkeypatch, tmp_path):
+    """THE BUG: retrieval burned its budget and emitted no envelope. Instead of
+    failing the member, retry ONCE with the plain path and return ITS content."""
+    calls = _patch_exec_sequence(monkeypatch, [
+        _FakeProc(stdout=_empty_json()),                      # retrieval: empty
+        _FakeProc(stdout=_ok_json(text="RECOVERED-ENVELOPE")),  # plain: good
+    ])
+
+    r = await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+
+    assert r.content == "RECOVERED-ENVELOPE"
+    assert len(calls) == 2, "exactly one fallback attempt"
+
+    # Attempt 1 = retrieval: read-only tools, raised budget, cwd = worktree.
+    first = calls[0]["argv"]
+    assert _tools_value(first) == "Read,Grep,Glob"
+    assert first[first.index("--max-turns") + 1] == "16"
+    assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
+
+    # Attempt 2 = the plain non-retrieval invocation, byte-for-byte the legacy
+    # argv: empty tools, --max-turns 1, isolated temp dir (cwd_override=None).
+    second = calls[1]["argv"]
+    assert _tools_value(second) == ""
+    assert second[second.index("--max-turns") + 1] == "1"
+    assert "errorta-claude-cli-" in calls[1]["kwargs"]["cwd"]
+    assert calls[1]["kwargs"]["cwd"] != str(tmp_path)
+    # Usage/tokens come from the attempt that actually produced the content.
+    assert r.input_tokens == 2139 and r.output_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_fallback_is_logged_for_the_operator(monkeypatch, tmp_path, caplog):
+    """The fallback must not be silent — an operator has to be able to see
+    'retrieval exhausted its budget, fell back' after the fact."""
+    _patch_exec_sequence(monkeypatch, [
+        _FakeProc(stdout=_empty_json()),
+        _FakeProc(stdout=_ok_json(text="ok")),
+    ])
+    with caplog.at_level("WARNING",
+                         logger="errorta_model_gateway.providers.async_claude_cli"):
+        await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("falling back" in m and "dev_repo_read" in m for m in messages), messages
+
+
+@pytest.mark.asyncio
+async def test_good_retrieval_envelope_makes_exactly_one_call(monkeypatch, tmp_path):
+    """No fallback when retrieval works — the retrieval result is returned and
+    the plain path is never invoked (it would throw away the retrieval)."""
+    envelope = json.dumps({"schema_version": "coding_turn.v1", "role": "dev"})
+    calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=_ok_json(text=envelope))])
+
+    r = await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+
+    assert r.content == envelope
+    assert len(calls) == 1
+    assert _tools_value(calls[0]["argv"]) == "Read,Grep,Glob"
+
+
+@pytest.mark.asyncio
+async def test_non_retrieval_empty_result_raises_without_retry(monkeypatch):
+    """Gate OFF: the legacy single-shot path is behaviorally unchanged — one
+    invocation, empty result is fatal, NO second attempt."""
+    calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=_empty_json())])
+    with pytest.raises(FatalError) as e:
+        await ClaudeCliHandler().call(_req(), api_key=None)
+    assert "empty_result" in str(e.value)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_both_attempts_empty_raises_empty_result(monkeypatch, tmp_path):
+    calls = _patch_exec_sequence(monkeypatch, [
+        _FakeProc(stdout=_empty_json()),  # retrieval
+        _FakeProc(stdout=_empty_json()),  # plain fallback
+    ])
+    with pytest.raises(FatalError) as e:
+        await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    assert "empty_result" in str(e.value)
+    assert len(calls) == 2, "one fallback, then give up (no third attempt)"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_rate_limit_does_not_fall_back(monkeypatch, tmp_path):
+    """A rate limit must still surface as RetryableError — masking it behind a
+    second subscription call would burn quota and hide the real state."""
+    err = json.dumps({"type": "result", "is_error": True,
+                      "result": "usage limit reached"}).encode()
+    calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=err)])
+    with pytest.raises(RetryableError):
+        await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieval_auth_failure_does_not_fall_back(monkeypatch, tmp_path):
+    calls = _patch_exec_sequence(monkeypatch, [
+        _FakeProc(stderr=b"Please log in to continue", returncode=1)])
+    with pytest.raises(FatalError) as e:
+        await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    assert "not_authenticated" in str(e.value)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieval_nonzero_exit_does_not_fall_back(monkeypatch, tmp_path):
+    calls = _patch_exec_sequence(monkeypatch, [
+        _FakeProc(stderr=b"boom", returncode=2)])
+    with pytest.raises(FatalError) as e:
+        await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    assert "claude_cli_failed: exit 2" in str(e.value)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieval_unparseable_output_does_not_fall_back(monkeypatch, tmp_path):
+    calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=b"not json at all")])
+    with pytest.raises(FatalError) as e:
+        await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    assert "unparseable" in str(e.value)
+    assert len(calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_not_installed(monkeypatch):
     _patch_exec(monkeypatch, raises=FileNotFoundError("claude"))

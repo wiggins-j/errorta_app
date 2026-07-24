@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,8 @@ from .async_base import (
     ValidationResult,
 )
 
+log = logging.getLogger(__name__)
+
 _BINARY = "claude"
 
 # Spec 11 (P1a) — read-only in-turn worktree retrieval for DEV turns.
@@ -77,10 +80,22 @@ _BINARY = "claude"
 # semantics such that this allowlist can no longer exclude writes/exec, this
 # branch MUST NOT ship — fall back to the empty-tools default.
 _DEV_REPO_READ_TOOLS = "Read,Grep,Glob"
-# Bounded turn budget so the model can do a few read/grep calls before its final
-# envelope, without rabbit-holing. The final assistant message (the envelope) is
-# still what the parser reads; preceding tool-use turns do not break parsing.
-_DEV_REPO_READ_MAX_TURNS = 6
+# Bounded turn budget so the model can do several read/grep calls before its
+# final envelope, without rabbit-holing. The final assistant message (the
+# envelope) is what the parser reads; preceding tool-use turns do not break
+# parsing.
+#
+# The budget MUST cover *every tool-use turn PLUS the final envelope turn*. Each
+# Read/Grep/Glob call consumes a turn, so a dev that does N retrieval calls needs
+# N+1. Set it too low and the CLI stops at the cap having spent the whole budget
+# on tool calls — it never emits the coding_turn.v1 envelope, the result field
+# comes back empty, and the turn dies as ``claude_cli_empty_result`` (three of
+# those trip ``member_unhealthy`` and stop the run). 6 was too low in production;
+# 16 leaves room for ~15 retrieval calls plus the envelope. The empty-result
+# fallback in ``ClaudeCliHandler.call`` is the second line of defence — raising
+# this value reduces how often that fallback (which throws away the retrieval)
+# has to fire.
+_DEV_REPO_READ_MAX_TURNS = 16
 
 # A GUI .app launched from Finder/Dock inherits a minimal PATH (/usr/bin:/bin:…)
 # that excludes the user-level dirs where `claude` is typically installed. So we
@@ -254,74 +269,112 @@ class ClaudeCliHandler:
         # single-shot default (fail safe).
         repo_read_root = _dev_repo_read_root(request)
 
+        # --tools "" is load-bearing: empty allowed-tools = no file/network side
+        # effects. --max-turns 1 is belt-and-suspenders. Prompt on stdin (shared
+        # runner) — never argv.
+        plain_argv = [
+            binary, "-p",
+            "--tools", "",
+            "--output-format", "json",
+            "--model", model,
+            "--max-turns", "1",
+        ]
+
+        # Attempt plan. Without retrieval this is exactly one plain attempt (the
+        # legacy path, unchanged). WITH retrieval the first attempt is the
+        # read-only worktree turn and the plain call is kept as a FALLBACK that
+        # only runs when retrieval yields an empty result (i.e. the model burned
+        # its whole turn budget on tool calls and never emitted the envelope).
+        # Retrieval must be strictly ADDITIVE: it may never turn a turn that
+        # would otherwise have succeeded into a member failure.
+        attempts: list[tuple[list[str], str | None]] = []
         if repo_read_root is not None:
             # Read-only retrieval turn: cwd = the worktree, tools = read-only
             # allowlist (Read/Grep/Glob — NO write/exec/network), raised turn
             # budget so the model can grep/read before its envelope.
-            argv = [
-                binary, "-p",
-                "--tools", _DEV_REPO_READ_TOOLS,
-                "--output-format", "json",
-                "--model", model,
-                "--max-turns", str(_DEV_REPO_READ_MAX_TURNS),
-            ]
-        else:
-            # --tools "" is load-bearing: empty allowed-tools = no file/network
-            # side effects. --max-turns 1 is belt-and-suspenders. Prompt on stdin
-            # (shared runner) — never argv.
-            argv = [
-                binary, "-p",
-                "--tools", "",
-                "--output-format", "json",
-                "--model", model,
-                "--max-turns", "1",
-            ]
+            attempts.append((
+                [
+                    binary, "-p",
+                    "--tools", _DEV_REPO_READ_TOOLS,
+                    "--output-format", "json",
+                    "--model", model,
+                    "--max-turns", str(_DEV_REPO_READ_MAX_TURNS),
+                ],
+                repo_read_root,
+            ))
+        attempts.append((plain_argv, None))
 
         start = time.monotonic()
-        stdout, stderr, returncode = await run_cli_subprocess(
-            argv=argv,
-            prompt=prompt,
-            timeout_seconds=request.timeout_seconds,
-            semaphore=_CLAUDE_SEMAPHORE,
-            error_prefix="claude_cli",
-            cwd_prefix="errorta-claude-cli-",
-            cwd_override=repo_read_root,
-        )
-        duration_ms = int((time.monotonic() - start) * 1000)
-
-        if returncode != 0:
-            # F120: a logged-out CLI can surface the auth error in stdout (the
-            # JSON is_error envelope or a 401 line), not only stderr — inspect
-            # BOTH so a logged-out Test never degrades to a bare
-            # `claude_cli_failed: exit 1:` with no actionable detail.
-            low = (stderr + "\n" + stdout).lower()
-            if any(t in low for t in (
-                "log in", "login", "/login", "not authenticated",
-                "authentication", "unauthorized", "401", "403",
-            )):
-                raise FatalError(
-                    "claude_cli_not_authenticated: run 'claude' and log in with your subscription"
-                )
-            if ("rate" in low and "limit" in low) or "usage limit" in low or "429" in low:
-                raise RetryableError("claude_cli_rate_limited")
-            raise FatalError(
-                f"claude_cli_failed: exit {returncode}: {stderr[:200]}"
+        # Both are always set before use: the loop either breaks with a non-empty
+        # ``content`` or raises on its last attempt.
+        content: str = ""
+        obj: dict[str, Any] = {}
+        for index, (argv, cwd_override) in enumerate(attempts):
+            is_last_attempt = index == len(attempts) - 1
+            stdout, stderr, returncode = await run_cli_subprocess(
+                argv=argv,
+                prompt=prompt,
+                timeout_seconds=request.timeout_seconds,
+                semaphore=_CLAUDE_SEMAPHORE,
+                error_prefix="claude_cli",
+                cwd_prefix="errorta-claude-cli-",
+                cwd_override=cwd_override,
             )
 
-        obj = _extract_result_json(stdout)
-        if obj is None:
-            raise FatalError("claude_cli_unparseable_output")
-        if obj.get("is_error"):
-            # CLI reported a structured error (e.g. usage limit reached).
-            msg = str(obj.get("result") or obj.get("error") or "claude_cli_error")
-            low = msg.lower()
-            if ("rate" in low and "limit" in low) or "usage limit" in low:
-                raise RetryableError(f"claude_cli_rate_limited: {msg[:160]}")
-            raise FatalError(f"claude_cli_error: {msg[:200]}")
+            if returncode != 0:
+                # F120: a logged-out CLI can surface the auth error in stdout (the
+                # JSON is_error envelope or a 401 line), not only stderr — inspect
+                # BOTH so a logged-out Test never degrades to a bare
+                # `claude_cli_failed: exit 1:` with no actionable detail.
+                #
+                # NOTE: these raise on the FIRST attempt too. Only the
+                # empty-result case falls back; auth / rate-limit / non-zero exit
+                # keep their exact previous semantics (a rate limit must still
+                # surface as RetryableError, never be masked by a second call).
+                low = (stderr + "\n" + stdout).lower()
+                if any(t in low for t in (
+                    "log in", "login", "/login", "not authenticated",
+                    "authentication", "unauthorized", "401", "403",
+                )):
+                    raise FatalError(
+                        "claude_cli_not_authenticated: run 'claude' and log in "
+                        "with your subscription"
+                    )
+                if ("rate" in low and "limit" in low) or "usage limit" in low or "429" in low:
+                    raise RetryableError("claude_cli_rate_limited")
+                raise FatalError(
+                    f"claude_cli_failed: exit {returncode}: {stderr[:200]}"
+                )
 
-        content = obj.get("result")
-        if not isinstance(content, str) or not content.strip():
-            raise FatalError("claude_cli_empty_result")
+            parsed = _extract_result_json(stdout)
+            if parsed is None:
+                raise FatalError("claude_cli_unparseable_output")
+            obj = parsed
+            if obj.get("is_error"):
+                # CLI reported a structured error (e.g. usage limit reached).
+                msg = str(obj.get("result") or obj.get("error") or "claude_cli_error")
+                low = msg.lower()
+                if ("rate" in low and "limit" in low) or "usage limit" in low:
+                    raise RetryableError(f"claude_cli_rate_limited: {msg[:160]}")
+                raise FatalError(f"claude_cli_error: {msg[:200]}")
+
+            candidate = obj.get("result")
+            if isinstance(candidate, str) and candidate.strip():
+                content = candidate
+                break
+            if is_last_attempt:
+                # Non-retrieval path, or the plain fallback also came back empty.
+                raise FatalError("claude_cli_empty_result")
+            # Retrieval attempt produced no envelope — almost always the turn
+            # budget exhausted by tool-use turns. Fall back ONCE to the plain
+            # single-shot call so the turn still produces work.
+            log.warning(
+                "claude_cli dev_repo_read retrieval returned an empty result "
+                "(num_turns=%s, max_turns=%s, cwd=%s); retrieval turn exhausted "
+                "its budget — falling back to the plain no-tools invocation",
+                obj.get("num_turns"), _DEV_REPO_READ_MAX_TURNS, cwd_override,
+            )
+        duration_ms = int((time.monotonic() - start) * 1000)
 
         usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
         input_tokens = (
