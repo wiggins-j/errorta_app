@@ -539,6 +539,76 @@ def _handle_review_rejection(
                 f"{pr['branch']} and open a new PR. The prior PR "
                 f"({pr['pr_id']}) is superseded when this lands."
                 + (f" Findings: {findings_detail}." if findings_detail else "")))
+    # Spec 13 (S2): if this rejection is of a foundation-UNLOCKING PR but is
+    # OFF-SCOPE for the foundation (no finding names a foundation file it adds),
+    # the clamp is being held at 1 for an unrelated reason — surface it so the run
+    # isn't silently serialized forever. Runs after the revise task above (the
+    # rework still proceeds); best-effort so escalation can never break the seam.
+    try:
+        _account_offscope_foundation_rejection(store, pr=pr, findings=findings)
+    except Exception:  # noqa: BLE001 — escalation is advisory, never load-bearing
+        pass
+
+
+def _account_offscope_foundation_rejection(
+    store: LedgerStore, *, pr: dict[str, Any], findings: list[dict[str, Any]],
+) -> None:
+    """Spec 13 (S2): classify a foundation-unlocking PR's rejection scope and, when
+    it is off-scope for the blocker, record it + escalate to the PM (deduped per PR
+    lineage) + raise a deduped alert at the second consecutive occurrence.
+
+    Scope is UNKNOWN unless at least one finding carries a ``path`` — reviewers
+    routinely emit path-less findings, and treating "no paths" as off-scope would
+    fire an escalation on every ordinary rejection. Only a rejection whose paths
+    are all present AND none intersects the foundation files the PR adds counts as
+    off-scope."""
+    if not pr.get("unlocks_foundation"):
+        return
+    finding_paths = [str(f.get("path") or "").strip()
+                     for f in findings if str(f.get("path") or "").strip()]
+    if not finding_paths:
+        return  # no path signal -> scope unknown, not off-scope
+    added_foundation = set(_foundation_files_in(
+        [str(p) for p in (pr.get("changed_paths") or [])]))
+    if not added_foundation:
+        return  # nothing to be off-scope OF
+    # Off-scope iff no finding path is one of the foundation files this PR adds.
+    if any(p in added_foundation for p in finding_paths):
+        return  # a finding targets the foundation itself -> genuinely in scope
+    store.record_decision(
+        title=f"off-scope rejection of foundation PR {pr['branch']}",
+        context=f"pr {pr['pr_id']}", choice="foundation_pr_rejected_offscope",
+        rationale=("a PR adding the foundation (" + ", ".join(sorted(added_foundation))
+                   + ") was rejected only on unrelated files (" +
+                   ", ".join(finding_paths) + "); the concurrency clamp stays at 1 "
+                   "until the foundation lands"),
+        related_task_ids=[pr.get("task_id", "")])
+    # Escalate to the PM once per PR lineage (dedup on an open PM task naming it).
+    esc_title = f"foundation blocked: {pr['branch']}"
+    if not any(t.role == PM and str(t.title or "") == esc_title
+               and t.state not in ("done", "dropped") for t in store.list_tasks()):
+        store.add_task(
+            title=esc_title, role=PM,
+            reason_summary="foundation PR rejected off-scope — clamp held at 1",
+            detail=(f"PR {pr['pr_id']} on branch {pr['branch']} adds the project "
+                    f"foundation but was rejected for reasons unrelated to it, so "
+                    f"worker concurrency stays clamped at 1. Re-scope or re-plan so "
+                    f"the foundation can land."))
+    # At the 2nd consecutive off-scope rejection, raise one deduped alert.
+    n_offscope = sum(
+        1 for d in store.list_decisions()
+        if d.get("choice") == "foundation_pr_rejected_offscope"
+        and d.get("context") == f"pr {pr['pr_id']}")
+    if n_offscope >= 2:
+        try:
+            from . import attention
+            attention.raise_foundation_deadlock_alert(
+                store.project_id,
+                summary=(f"PR on branch {pr['branch']} would lift the concurrency "
+                         "clamp but keeps being rejected off-scope."),
+                store=store)
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            pass
 
 
 def _detail_from_findings(findings: list[dict[str, Any]], *, cap: int = 6) -> str:
@@ -2263,6 +2333,146 @@ _SCRIPT_EXT = (".py", ".rb", ".php", ".pl", ".lua", ".sh")
 # source flips back to requiring a manifest via `refresh_foundation_status`.
 
 
+# Spec 13 (S2): "web-only" manifest-bound source — the subset of _MANIFEST_BOUND_EXT
+# a browser can resolve itself. A tree whose manifest-bound source is entirely in
+# this set MAY be a buildless web project (checked below); one carrying compiled
+# source (.go/.rs/.java/…) is never buildless and stays manifest-bound.
+_WEB_ONLY_EXT = (".js", ".mjs", ".cjs", ".css", ".html", ".htm")
+# Signals that a web tree needs a bundler after all — a bare-specifier import, a
+# CommonJS require, or JSX/TS syntax the browser cannot run as-is. The presence of
+# ANY re-clamps to "needs a manifest" (the reddit-look-a-like protection).
+_BUNDLER_REQUIRED_EXT = (".ts", ".tsx", ".jsx", ".vue", ".svelte")
+# `import x from "react"` / `import "react"` (bare) vs `import x from "./m.js"` or
+# `"/m.js"` (relative/absolute-path — browser-resolvable). The captured group is the
+# module specifier; a leading "." or "/" means path-resolved, anything else is a
+# bare specifier that only a bundler resolves.
+_JS_IMPORT_FROM_RE = re.compile(
+    r"""\bimport\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""")
+_JS_IMPORT_BARE_RE = re.compile(r"""\bimport\s*['"]([^'"]+)['"]""")
+_JS_REQUIRE_RE = re.compile(r"""\brequire\s*\(\s*['"][^'"]+['"]\s*\)""")
+# `<script src="…">` / `<link rel="stylesheet" href="…">` — captures the URL.
+_HTML_SCRIPT_SRC_RE = re.compile(
+    r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+_HTML_LINK_HREF_RE = re.compile(
+    r"""<link\b[^>]*\bhref\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+_BUILDLESS_READ_CAP = 200_000  # per-file read bound for the scan (fail closed if larger)
+
+
+def _is_relative_url(url: str) -> bool:
+    """A URL the browser resolves against the page's own origin (so it maps to a
+    file on master), as opposed to an external/CDN dependency. Absolute
+    (`//`, `http:`, `https:`, `data:`) and root-anchored protocol-relative URLs are
+    NOT self-contained for this gate's purpose (a CDN `<script src>` means the tree
+    depends on something not on master)."""
+    u = url.strip()
+    if not u:
+        return False
+    low = u.lower()
+    if low.startswith(("http://", "https://", "//", "data:", "blob:")):
+        return False
+    return True
+
+
+def _resolve_against(base_rel: str, url: str) -> str:
+    """Resolve a relative URL from an HTML/JS file at ``base_rel`` to a
+    master-relative path, normalized (``./``, ``../`` collapsed). A leading "/" is
+    treated as project-root-relative."""
+    href = url.split("?", 1)[0].split("#", 1)[0]
+    if href.startswith("/"):
+        joined = href.lstrip("/")
+    else:
+        base_dir = base_rel.rsplit("/", 1)[0] if "/" in base_rel else ""
+        joined = f"{base_dir}/{href}" if base_dir else href
+    parts: list[str] = []
+    for seg in joined.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
+def _buildless_web_ready(files: list[str], read: Any) -> bool:
+    """Spec 13 (S2): True iff master is a self-contained, no-build web project —
+    an ``index.html`` whose relative ``<script src>`` / ``<link href>`` graph
+    resolves entirely against files on master, with no bundler-required signal
+    anywhere.
+
+    This is the missing distinction in the F142 foundation gate: "web/JS" is not
+    one ecosystem. A bundled app (Next.js/Vite — bare-specifier imports, JSX)
+    genuinely needs ``package.json`` to resolve imports, and stays manifest-bound.
+    A buildless site (the gravity-golf North Star — ``index.html`` + relative
+    ``<script src>`` modules the browser resolves itself) never legitimately
+    produces a manifest, so requiring one clamps worker concurrency to 1 forever.
+
+    ``read(rel) -> str | None`` returns a master file's text (``None`` if absent /
+    binary / unreadable). Fail-closed: anything unreadable or ambiguous returns
+    ``False`` so the clamp stays on — this can only ever RELAX the manifest
+    requirement for a tree we can fully vouch for, never tighten it. Because
+    ``refresh_foundation_status`` re-derives from git each call, the classification
+    self-heals: the moment a bare import or a ``.tsx`` lands, the tree flips back to
+    manifest-bound.
+    """
+    fileset = set(files)
+    if "index.html" not in fileset:
+        return False
+    # (3) any bundler-required file anywhere on master disqualifies immediately —
+    # a .tsx/.vue/.svelte tree is a framework app, buildless or not.
+    if any(f.endswith(_BUNDLER_REQUIRED_EXT) for f in files):
+        return False
+
+    html = read("index.html")
+    if not isinstance(html, str) or len(html) > _BUILDLESS_READ_CAP:
+        return False
+
+    # (1)+(2)+(4): every relative script/style resolves on master, no external
+    # dependency, at least one script actually exists.
+    referenced_scripts: list[str] = []
+    for m in _HTML_SCRIPT_SRC_RE.finditer(html):
+        url = m.group(1)
+        if not _is_relative_url(url):
+            return False  # a CDN/external <script src> — not self-contained
+        target = _resolve_against("index.html", url)
+        if target not in fileset:
+            return False  # references a file not on master
+        referenced_scripts.append(target)
+    for m in _HTML_LINK_HREF_RE.finditer(html):
+        url = m.group(1)
+        # Only stylesheet links are load-bearing; a non-relative one (Google
+        # Fonts, a CDN reset) is an external dependency and disqualifies.
+        if not _is_relative_url(url):
+            # A <link> may be a preconnect/icon/manifest with an off-site href;
+            # only treat a stylesheet href as disqualifying.
+            if re.search(r"stylesheet", m.group(0), re.IGNORECASE):
+                return False
+            continue
+        target = _resolve_against("index.html", url)
+        if target not in fileset and target.endswith((".css",)):
+            return False
+
+    if not referenced_scripts:
+        return False  # index.html with no resolvable script is a stub, not a base
+
+    # (3) re-check inside every referenced script (one level deep): a bare-specifier
+    # import or a require() means a bundler is needed after all.
+    for rel in referenced_scripts:
+        body = read(rel)
+        if not isinstance(body, str) or len(body) > _BUILDLESS_READ_CAP:
+            return False  # unreadable/oversized referenced script -> fail closed
+        if _JS_REQUIRE_RE.search(body):
+            return False
+        for spec in _JS_IMPORT_FROM_RE.findall(body):
+            if not spec.startswith((".", "/")):
+                return False  # bare specifier -> needs a bundler
+        for spec in _JS_IMPORT_BARE_RE.findall(body):
+            if not spec.startswith((".", "/")):
+                return False
+    return True
+
+
 def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
     """True iff a `new` project's foundation has merged to master, read from git (so
     only MERGED work counts). An `existing` target imports a real repo, so its
@@ -2279,6 +2489,12 @@ def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
       count and directory nesting are irrelevant (non-source files and asset
       subdirs must not defeat the gate). Without this the clamp stays at 1 forever
       and `foundation_not_converging` false-fires.
+    - Buildless web projects (Spec 13): a web-only tree whose `index.html`
+      `<script src>`/`<link href>` graph resolves entirely against files on
+      master, with no bundler-required signal (bare imports / require / JSX),
+      is a complete foundation with no manifest — the gravity-golf North Star
+      that opens directly in a browser. A bundled app (bare imports, .tsx) stays
+      manifest-bound, so the reddit-look-a-like protection holds.
 
     DoD note (F139 WS-A): this is the entrypoint/manifest-existence half of the
     spec's DoD (git-derived, deterministic, F106-independent). The optional
@@ -2304,6 +2520,28 @@ def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
         # count and directory nesting are deliberately ignored so README/LICENSE
         # or an assets/ subdir cannot re-clamp the run (see the _SCRIPT_EXT note).
         return True
+    # Spec 13 (S2): a BUILDLESS web project is foundation-ready without a manifest.
+    # Only consider it when the manifest-bound source is entirely web-only
+    # (.js/.css/.html — a browser can resolve it) and there is no compiled source;
+    # a tree carrying .go/.rs/.java/… stays manifest-bound unconditionally. The
+    # predicate reads referenced files, so gate it on the cheap extension check
+    # first and only reach for the workspace reader for a genuine web-only tree.
+    if has_manifest_bound and not any(
+            f.endswith(_MANIFEST_BOUND_EXT) and not f.endswith(_WEB_ONLY_EXT)
+            for f in files):
+        try:
+            def _read(rel: str) -> str | None:
+                raw = workspace.read_master_file(rel)
+                if raw is None:
+                    return None
+                try:
+                    return raw.decode("utf-8")
+                except (UnicodeDecodeError, AttributeError):
+                    return None
+            if _buildless_web_ready(files, _read):
+                return True
+        except Exception:  # noqa: BLE001 — unsure -> fall through to the manifest rule
+            pass
     has_manifest = any(f.rsplit("/", 1)[-1] in _BUILD_MANIFESTS for f in files)
     has_entry = any(f.endswith(_SOURCE_EXT) for f in files)
     return has_manifest and has_entry
@@ -2335,6 +2573,33 @@ def refresh_foundation_status(store: LedgerStore, workspace: Any) -> str:
     # the North Star is complete, so the Current Focus panel stays hidden until
     # completion ("Building toward <North Star>" shows instead).
     return status
+
+
+def _foundation_files_in(paths: list[str]) -> list[str]:
+    """Spec 13 (S2): the subset of ``paths`` that are foundation elements — a build
+    manifest, or a source entrypoint. These are what a foundation-UNLOCKING PR
+    adds while the clamp is pending; a rejection whose findings don't touch any of
+    them is unrelated to the foundation."""
+    out: list[str] = []
+    for p in paths:
+        base = p.rsplit("/", 1)[-1]
+        if base in _BUILD_MANIFESTS or p.endswith(_SOURCE_EXT):
+            out.append(p)
+    return out
+
+
+def _pr_unlocks_foundation(store: LedgerStore, changed: list[str]) -> bool:
+    """Spec 13 (S2): whether an open PR touching ``changed`` adds a foundation
+    element while ``foundation_status`` is still pending. Best-effort — a read
+    failure yields False (no escalation), never raises into the dispatch path."""
+    if not changed:
+        return False
+    try:
+        if str(store.get_run_state().get("foundation_status", "")) != "pending":
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(_foundation_files_in(changed))
 
 
 # --- F139 WS-D2: reactive contract centralization ---------------------------- #
@@ -3434,6 +3699,11 @@ def build_run_turn(
                                        if f != ".gitignore"]
                     if _opened_changed:
                         store.update_pr(pr["pr_id"], changed_paths=_opened_changed)
+                    # Spec 13 (S2): flag a PR that adds a missing foundation element
+                    # while the clamp is pending, so an unrelated rejection of it
+                    # can be surfaced instead of silently holding concurrency at 1.
+                    if _pr_unlocks_foundation(store, _opened_changed):
+                        store.update_pr(pr["pr_id"], unlocks_foundation=True)
                 except Exception:  # noqa: BLE001 — best-effort observability signal
                     pass
                 store.update_task(task.task_id, state="done")
