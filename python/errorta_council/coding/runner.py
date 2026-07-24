@@ -487,6 +487,60 @@ def _reason_from_findings(findings: list[dict[str, Any]]) -> str:
     return f"{n} {label}s — '{title}'{loc} +{n - 1} more"
 
 
+def _handle_review_rejection(
+    store: LedgerStore, workspace: Any, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]], source: str,
+) -> None:
+    """Spec 12-18 prep (P0.1): the single seam every "a review said no" path runs
+    through — mark the PR ``changes_requested`` and queue the DEV rework.
+
+    Behaviour is byte-identical to the two inlined copies this replaces (the
+    reviewer arm and the strict-mode PM-review arm); ``source`` selects the two
+    strings that actually differed. It exists because FOUR specs in the
+    gravity-golf batch edit this logic across two parallel branches:
+
+    * Spec 13 + Spec 14 change what comes IN (foundation-scope classification of
+      the rejection, per-finding ``cited`` flags);
+    * Spec 15 + Spec 16 change what comes OUT (whether a ``revise:`` task is
+      spawned at all, and what replaces it when it is not).
+
+    Keeping one function with one writer per side is what lets those land
+    independently instead of conflicting on ~30 shared lines.
+
+    ``workspace`` is unused today and is threaded deliberately: the downstream
+    specs need it (re-queueing a review, resolving changed paths) and a stable
+    signature is the point of the seam.
+    """
+    store.update_pr(pr["pr_id"], status="changes_requested")
+    depends = [task.task_id]
+    if source == "reviewer":
+        # F139 WS-D2: a contract-mismatch rejection reactively spawns a single
+        # shared-contract owner task; the revise waits on it so the contract is
+        # centralized instead of re-invented per branch.
+        owner_id = _contract_owner_for(store, pr, findings)
+        if owner_id:
+            depends.append(owner_id)
+        reason = _reason_from_findings(findings)
+        whose = "reviewer findings"
+    else:
+        reason = _reason_from_findings(findings) or "PM requested changes"
+        whose = "PM review findings"
+    # F091: thread a back-link onto the revise task. pr_id on a DEV revise task
+    # means "the PR this revise supersedes" (vs a TESTER task's pr_id = "the PR
+    # under test"); depends_on chains it after the review; detail names the
+    # branch so the dev can read back the prior work. When the revise PR merges,
+    # _supersede_ancestors walks this back-link.
+    findings_detail = _detail_from_findings(findings)
+    store.add_task(
+        title=f"revise: {pr['branch']}", role=DEV,
+        pr_id=pr["pr_id"], depends_on=depends,
+        reason_summary=reason,
+        detail=(f"Address {whose} on branch "
+                f"{pr['branch']} and open a new PR. The prior PR "
+                f"({pr['pr_id']}) is superseded when this lands."
+                + (f" Findings: {findings_detail}." if findings_detail else "")))
+
+
 def _detail_from_findings(findings: list[dict[str, Any]], *, cap: int = 6) -> str:
     """F141 WS-D: a capped "title (path)" list for the rework task's detail view."""
     if not findings:
@@ -2431,7 +2485,9 @@ def build_run_turn(
     Spec 11 (P1a): ``dev_repo_read`` (the ``CodingAutonomyPolicy`` field) enables
     read-only in-turn worktree retrieval for DEV turns. Default False so the ~50
     direct test callers of this factory keep the legacy single-shot behavior; the
-    production ``CodingRunner.run`` passes ``policy.dev_repo_read`` (default True).
+    production ``CodingRunner.run`` passes ``policy.dev_repo_read`` (default OFF;
+    the dataclass field in ``autonomy.py`` is the single source of truth — see the
+    Spec 12-18 prep P0.3 note there).
     """
     import logging
     import time
@@ -3457,30 +3513,9 @@ def build_run_turn(
                         store.add_task(title=f"review PR: {task.title}", role=PM,
                                        pr_id=pr["pr_id"], depends_on=[task.task_id])
                 else:
-                    store.update_pr(pr["pr_id"], status="changes_requested")
-                    # F139 WS-D2: a contract-mismatch rejection reactively spawns a
-                    # single shared-contract owner task; the revise waits on it so
-                    # the contract is centralized instead of re-invented per branch.
-                    owner_id = _contract_owner_for(store, pr, review_findings)
-                    revise_depends = [task.task_id]
-                    if owner_id:
-                        revise_depends.append(owner_id)
-                    # F091: thread a back-link onto the revise task. pr_id on a
-                    # DEV revise task means "the PR this revise supersedes" (vs a
-                    # TESTER task's pr_id = "the PR under test"); depends_on chains
-                    # it after the review; detail names the branch so the dev can
-                    # read back the prior work. When the revise PR merges,
-                    # _supersede_ancestors walks this back-link.
-                    findings_detail = _detail_from_findings(review_findings)
-                    store.add_task(
-                        title=f"revise: {pr['branch']}", role=DEV,
-                        pr_id=pr["pr_id"], depends_on=revise_depends,
-                        reason_summary=_reason_from_findings(review_findings),
-                        detail=(f"Address reviewer findings on branch "
-                                f"{pr['branch']} and open a new PR. The prior PR "
-                                f"({pr['pr_id']}) is superseded when this lands."
-                                + (f" Findings: {findings_detail}."
-                                   if findings_detail else "")))
+                    _handle_review_rejection(
+                        store, workspace, pr=pr, task=task,
+                        findings=review_findings, source="reviewer")
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_reviewed", task=task)
 
@@ -3639,17 +3674,9 @@ def build_run_turn(
                     extra={"reviewed_head": pr["head"], "pr_id": pr["pr_id"]})
                 store.update_task(task.task_id, state="done")
                 if not approved:
-                    store.update_pr(pr["pr_id"], status="changes_requested")
-                    pm_reason = _reason_from_findings(pm_findings) or "PM requested changes"
-                    pm_detail = _detail_from_findings(pm_findings)
-                    store.add_task(
-                        title=f"revise: {pr['branch']}", role=DEV,
-                        pr_id=pr["pr_id"], depends_on=[task.task_id],
-                        reason_summary=pm_reason,
-                        detail=(f"Address PM review findings on branch "
-                                f"{pr['branch']} and open a new PR. The prior PR "
-                                f"({pr['pr_id']}) is superseded when this lands."
-                                + (f" Findings: {pm_detail}." if pm_detail else "")))
+                    _handle_review_rejection(
+                        store, workspace, pr=pr, task=task,
+                        findings=pm_findings, source="pm_review")
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_reviewed", task=task)
 
