@@ -1,6 +1,6 @@
 [project]
 name = "errorta-app"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 description = "Errorta Python sidecar: thin web layer over AIAR."
 requires-python = ">=3.10"
 authors = [{ name = "The Errorta Authors" }]
