@@ -294,6 +294,45 @@ Then present a single **"PM Changes: create this project"** review (North Star,
 DoD, modality, team+models, autonomy). On Accept, create — and start the run if
 the user asked you to just build it.
 
+### What counts as a "foundation" (the concurrency clamp)
+
+A greenfield (`new`) run is **clamped to one worker until its foundation merges to
+master** — the team must scaffold a coherent base before fanning out. What
+qualifies is ecosystem-aware, so the foundation task you plan first should match
+the modality:
+
+| Modality | Foundation-ready when master has |
+|---|---|
+| node / bundled web / compiled (go, rust, java, …) | a **build manifest** (`package.json`, `Cargo.toml`, …) **+** a source entrypoint |
+| script (python, ruby, …) | **one script entrypoint** (`game.py`) — no manifest needed |
+| **buildless web** (Spec 13) | an **`index.html`** whose relative `<script src>` / `<link>` graph resolves entirely against files on master, with **no bare-specifier imports / `require` / JSX** — no manifest needed |
+
+The buildless-web row is the gravity-golf case: a game that "opens directly in a
+browser with no build step" is complete on `index.html` + its relative script
+modules, and must not be made to add a `package.json` it never needs. A bundled
+app (bare imports, `.tsx`) still requires the manifest. If a foundation-unlocking
+PR is rejected for reasons **unrelated** to the foundation it adds, the run
+records a `foundation_pr_rejected_offscope` decision and escalates to you — the
+clamp is held at 1, so re-scope or re-plan so the foundation can land.
+
+### The acceptance gate (Spec 12)
+
+A greenfield run **acquires a gate automatically** (`gate_bootstrap`, default on):
+it detects and registers runtime profiles, and — when the team has authored a
+runnable test on master that a one-shot **smoke run proves can execute** —
+registers an `acceptance`-scoped test command. A candidate that cannot run (a
+missing interpreter/dependency) is *refused* (`gate_bootstrap_refused`), because a
+gate that is red forever is a wedge, not a gate. You do not need to configure test
+commands for the team to have something to run.
+
+Scope matters: an **`acceptance`** command runs on the **integrated master tree**
+(the in-loop gate, dispatched between merges — `gate_min_merge_interval`, default
+3 — and the delivery gate) and **never blocks a per-PR merge**; a **`unit`**
+command (the default when none is declared) gates each PR as before. The latest
+gate output is fed **verbatim** into subsequent dev/reviewer/tester prompts, so
+"iterate until the gate passes" has a real feedback signal, and `done` requires a
+green delivery gate at the delivered head.
+
 ---
 
 ## 12. What you are NOT allowed to do

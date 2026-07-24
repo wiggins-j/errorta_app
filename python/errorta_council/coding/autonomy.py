@@ -27,6 +27,7 @@ from .topology import (
     Assign,
     CodingReconciler,
     Complete,
+    GateRun,
     GovernanceMaterialize,
     Merge,
     Plan,
@@ -815,10 +816,20 @@ def _account_foundation_stall(ledger: Any, c: LoopCounters,
                 context="foundation_gate",
                 choice="foundation_not_converging",
                 rationale=(
-                    "no build manifest + source entrypoint has merged to master "
-                    f"after {c.foundation_stall} clamped iterations; worker "
-                    "concurrency stays at 1 until the scaffold lands — a human may "
-                    "need to guide the PM"),
+                    # Spec 13 (S2): don't assert a manifest is required — a
+                    # buildless web project (index.html + relative <script src>
+                    # modules the browser resolves) is foundation-ready with NO
+                    # manifest, so the old "needs a build manifest" wording sent
+                    # the PM to add one that never should exist. State both valid
+                    # foundations.
+                    "no runnable foundation has merged to master after "
+                    f"{c.foundation_stall} clamped iterations — worker concurrency "
+                    "stays at 1 until it lands. A foundation is: a build manifest "
+                    "+ source entrypoint (node/compiled); a script entrypoint "
+                    "(python/etc.); or, for a no-build web target, an index.html "
+                    "whose <script src>/<link> graph resolves entirely against "
+                    "files on master (no bare-specifier imports / JSX). A human "
+                    "may need to guide the PM."),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1688,7 +1699,11 @@ def _run_concurrent_loop(
                         None)
                     if action is None:
                         break
-                    is_mechanical = isinstance(action, (Merge, GovernanceMaterialize))
+                    # Spec 12 (S1): a GateRun is mechanical (0 model calls) like a
+                    # Merge, but does NOT mutate master, so it needs no serial-merge
+                    # treatment — it runs against the master checkout while workers
+                    # write their own worktrees.
+                    is_mechanical = isinstance(action, (Merge, GovernanceMaterialize, GateRun))
                     is_merge = isinstance(action, Merge)
                     flight = in_flight.values()
                     if is_merge:
@@ -1745,7 +1760,7 @@ def _run_concurrent_loop(
                 action = in_flight.pop(fut)
                 busy.discard(getattr(action, "member_id", None))
                 outcome = fut.result()  # _safe_run_turn never raises
-                if not isinstance(action, (Merge, GovernanceMaterialize)):
+                if not isinstance(action, (Merge, GovernanceMaterialize, GateRun)):
                     model_in_flight -= 1
                 c.iterations += 1
                 c.model_calls += max(0, int(outcome.model_calls))

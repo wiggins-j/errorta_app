@@ -32,7 +32,11 @@ def test_registry_roundtrips(tmp_path: Path) -> None:
     cmds = {"unit": {"argv": ["python", "-c", "pass"], "cwd": ".",
                      "timeout_seconds": 30, "label": "unit"}}
     s.set_test_commands(cmds)
-    assert LedgerStore("proj-rt", root=tmp_path).get_test_commands() == cmds
+    # Spec 12 (S1): the stored shape gains a `scope`, defaulting to "unit" for a
+    # command that didn't declare one — so pre-Spec-12 registries keep their exact
+    # merge-gate meaning.
+    expected = {"unit": {**cmds["unit"], "scope": "unit"}}
+    assert LedgerStore("proj-rt", root=tmp_path).get_test_commands() == expected
 
 
 @pytest.mark.parametrize("bad", [

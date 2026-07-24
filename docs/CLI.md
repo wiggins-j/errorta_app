@@ -347,7 +347,12 @@ errorta team apply --yes
   that provider's routes. Discover routes with `errorta models`.
 - A coding team has exactly one PM, so `team add --pm --count N` with `N > 1` is
   rejected. "N devs" is *capacity*: parallel dev work ramps as the project's
-  foundation lands and the PM splits the backlog.
+  foundation lands and the PM splits the backlog. A **buildless web** project
+  (Spec 13) counts an `index.html` whose relative `<script src>`/`<link>` graph
+  resolves against files on master as a complete foundation — it needs no build
+  manifest, so the clamp lifts without a `package.json`. When a foundation PR is
+  held up by an off-scope rejection, `errorta attention` surfaces a
+  `foundation_deadlock` alert naming it.
 
 The lower-level `set <role> <route>` (one per role), `pool <role> <r,r,…>`,
 `mode`, `enable\|disable`, and `room <room_id>` (Council-room backing) still work.
@@ -428,9 +433,9 @@ Everything here works while a run is live.
 | Command | What it does | Key flags |
 |---|---|---|
 | `runtime [(profiles)\|detect\|setup\|start\|stop\|run\|run-cli\|logs\|health\|test\|repair\|profile\|evidence]` ‡ | Run the delivered program: read profiles, or detect / set up / launch / probe it. `profile set <id> --profile <json>` overrides a run profile; `evidence` reads a session's captured evidence. | `--p1`, `--p2`, `--session`, `--kind`, `--args`, `--timeout`, `--go`, `--reduced-isolation`, `--open`, `--no-open`, `--profile`, `--watch`, `--yes` |
-| `test-commands [show\|set]` ‡ | Show or set the project's merge-gate test commands. | `--commands`, `--yes` |
+| `test-commands [show\|set]` ‡ | Show or set the project's test commands. A command's `scope` is `unit` (default — gates each PR merge) or `acceptance` (Spec 12 — runs on the integrated tree, never blocks a per-PR merge). | `--commands`, `--yes` |
 | `test-settings [show\|set]` ‡ | Show or set project test settings (`require_sandbox`). | `--require-sandbox`, `--yes` |
-| `test-runs` | List the recorded test-command runs. | |
+| `test-runs` | List the recorded test-command runs — including the in-loop **acceptance gate** runs (Spec 12), which execute automatically on the integrated tree during a run, not only at delivery. | |
 
 `runtime run` produces a **preview** by default; add `--go` to actually launch the
 program. When the delivered program is a **web/API server**, `run --go` prints the
