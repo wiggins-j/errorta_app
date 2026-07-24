@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from errorta_council.coding.gate_state import latest_gate_text
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
     _composition_from_segments,
@@ -40,6 +41,27 @@ from errorta_council.coding.runner import (
 )
 from errorta_council.coding.topology import DEV, PM, REVIEWER, TESTER
 from errorta_council.coding.turn_controller import tool_catalog_text
+
+# --------------------------------------------------------------------------- #
+# Spec 12-18 prep (P0.5) — segment-ownership seam.
+#
+# Two engineers add prompt segments to these same four prompts in parallel
+# branches, and this file byte-locks all of them. To keep their edits on
+# different lines, the reference builders below CALL the two renderers instead of
+# inlining their strings, at the positions the batch plan fixes:
+#
+#   dev:      … repo_snapshot, gate_output(Spec 12), tool_guidance(Spec 17), …
+#   reviewer: … pr_diff, gate_output(Spec 12), trunc_note, tool_guidance(Spec 17), …
+#   tester:   … project_context, gate_output(Spec 12), tool_guidance(Spec 17), …
+#
+# `latest_gate_text` returns "" for every fixture here (none records a test run),
+# so placing it now is a NO-OP that pre-books Spec 12's insertion point. Spec 17
+# likewise only widens the existing `tool_catalog_text` call.
+#
+# The empty-string behaviour is itself the contract: a gate-less project's
+# prompts must stay byte-identical to today, which is why the renderer returns
+# "" rather than an empty labelled block.
+# --------------------------------------------------------------------------- #
 
 
 def _project(pid: str, *, north: str = "build a game",
@@ -175,6 +197,7 @@ def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
         f"{_grounding_packet_text('dev', store, task=task)}"
         f"{_latest_context_response_text(store, task.task_id)}"
         f"{existing}"
+        f"{latest_gate_text(store)}"          # Spec 12 inserts here
         f"{tool_catalog_text(DEV)} Do not request merge-back.\n"
         "Implement the task via tool-backed writes; preserve all prior functions. "
         "If you write a web server, read its listen port from the PORT environment "
@@ -219,6 +242,7 @@ def _old_test_prompt(task, store: LedgerStore) -> str:
         f"{task.title}.\n"
         f"Context: {_orientation_text(store)}\n"
         f"{_grounding_packet_text('tester', store, task=task)}"
+        f"{latest_gate_text(store)}"          # Spec 12 inserts here
         f"{avail} You CANNOT declare pass or fail — the verdict comes from the "
         "REAL exit code of the commands actually run.\n"
         "This PR implements ONE scoped task, not the whole product. If NO "
@@ -246,6 +270,14 @@ def test_test_prompt_segments_byte_identical(tmp_errorta_home: Path) -> None:
 
 
 # --- _review_pr_prompt ---------------------------------------------------------
+
+def _gate_text_for_review() -> str:
+    """The reviewer reference builder has no ``store`` in scope (the real prompt
+    takes its project context pre-rendered), so the Spec 12 seam is a named stub
+    here. It becomes ``latest_gate_text(store)`` when Spec 12 threads the store
+    through — until then both sides are "", so the golden holds either way."""
+    return ""
+
 
 def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> str:
     from errorta_council.coding.runner import (
@@ -315,6 +347,7 @@ def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> s
         "part of THIS task's scope' (block) from 'missing another task's work' "
         "(fine). The North Star / Definition of Done are directional context only.\n"
         f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"
+        f"{_gate_text_for_review()}"          # Spec 12 inserts here
         f"{trunc_note}"
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
         '"reviewed_head".\n'

@@ -311,6 +311,15 @@ the user asked you to just build it.
 The canary test parses this block and compares it with the real Python schemas
 and FastAPI routers. Update the prose and this contract together.
 
+> **Spec 12-18 batch, prep PR.** Seven `autonomy_defaults` keys below are landed
+> ahead of their features and have **no consumers yet** — setting them changes
+> nothing until the matching spec merges: `gate_bootstrap` /
+> `gate_min_merge_interval` (Spec 12), `reviewer_repo_read` /
+> `review_min_latency_ms` / `review_screenshot` (Spec 14), `revise_chain_limit` /
+> `revise_livelock_limit` (Spec 16). They ship early so two engineers can build
+> the batch in parallel without both editing `CodingAutonomyPolicy`. Each spec
+> documents its own knob when it lands.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -328,6 +337,8 @@ and FastAPI routers. Update the prose and this contract together.
     "delivery_review_round_limit": 3,
     "dev_repo_read": false,
     "foundation_stall_limit": 12,
+    "gate_bootstrap": true,
+    "gate_min_merge_interval": 3,
     "gate_stall_limit": 8,
     "hot_file_escalation_threshold": 4,
     "hot_file_freeze_stall_limit": 15,
@@ -340,6 +351,11 @@ and FastAPI routers. Update the prose and this contract together.
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
+    "review_min_latency_ms": 0,
+    "review_screenshot": false,
+    "reviewer_repo_read": false,
+    "revise_chain_limit": 3,
+    "revise_livelock_limit": 5,
     "task_reassignment_limit": 2,
     "wedge_min_tasks": 10,
     "wedge_stall_limit": 5,

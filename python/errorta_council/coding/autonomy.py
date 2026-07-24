@@ -147,11 +147,54 @@ class CodingAutonomyPolicy:
     # reasoning from a pre-baked half-context. The model's actual edits still
     # flow through the coding_turn.v1 envelope + execute_dev_turn, never a Write
     # tool. Only the claude_cli vendor honors this today (the all-Opus team's
-    # critical vendor); codex/cursor are a documented follow-up. Default ON: the
-    # read-only allowlist is enforced at the CLI tool-availability layer and
-    # envelope parsing is robust across the preceding tool-use turns. Set False
-    # to restore the single-shot empty-temp-dir behavior for dev turns.
+    # critical vendor); codex/cursor are a documented follow-up.
+    #
+    # Spec 12-18 prep (P0.3) — DEFAULT OFF, stated in exactly one place: here.
+    # Three other sites (this field's own comment, policy_from_dict's comment,
+    # and build_run_turn's docstring) each asserted the opposite default; the
+    # field has been False since Spec 11 P1a introduced it and was never flipped,
+    # so the prose was wrong, not the value. A project opts in by persisting
+    # `dev_repo_read: true` in autonomy.json. Turning it on by default is a live
+    # behaviour change for every dev turn and belongs in its own PR.
+    # `test_spec12_18_prep.py` locks the field and the prose together.
     dev_repo_read: bool = False
+    # Spec 14: the same in-turn read-only retrieval for REVIEWER (and strict-mode
+    # PM PR-review) turns, so a verdict can be grounded in the tree it judges
+    # instead of a diff excerpt. Defaults to `dev_repo_read` deliberately — the
+    # two are one capability decision, and letting them drift lands it half-on.
+    reviewer_repo_read: bool = False
+    # Spec 14: wall-time floor (ms) under which an EMPTY reviewer approval is
+    # treated as unparsed and retried once. The primary ungrounded-verdict signal
+    # is the provider's retrieval turn count; this is the fallback for vendors
+    # that do not report one. 0 (the default) disables it: a blanket floor would
+    # retry most approvals — fake providers, cached CLI responses, small diffs —
+    # doubling review cost and adding a retry loop to the very path this batch
+    # exists to de-loop.
+    review_min_latency_ms: int = 0
+    # Spec 14 (P2): attach a headless screenshot of the running merged head to
+    # review prompts for a visual Definition of Done. Off by default — it is the
+    # one part of the batch that introduces a browser dependency.
+    review_screenshot: bool = False
+    # Spec 12: auto-acquire a gate for a greenfield project (detect + persist
+    # runtime profiles; register an acceptance-scoped test command that is proven
+    # to execute on master). Without this the test-command registry is only ever
+    # written by the app UI, so an autonomous headless run never has a gate to
+    # run and every gate is vacuously satisfied.
+    gate_bootstrap: bool = True
+    # Spec 12: minimum gate-relevant merges between in-loop gate runs. The gate
+    # runs on the MERGED tree at a quiescent point, never inside the merge turn
+    # (integration is already serial, so running a suite there would stall the
+    # whole team and cancel Spec 13's fan-out). >1 coalesces a burst of merges.
+    gate_min_merge_interval: int = 3
+    # Spec 16: consecutive same-class rejections on ONE revise lineage before the
+    # breaker stops spawning `revise:` tasks and escalates to a PM re-plan. A
+    # DIFFERENT finding class resets the streak, so a lineage working through
+    # successive distinct defects is never broken. 0 disables the breaker.
+    revise_chain_limit: int = 3
+    # Spec 16: iterations a broken lineage may sit without producing a merge
+    # (i.e. the PM's re-plan did not unstick it either) before the run stops
+    # `revise_livelock`. 0 disables the detector.
+    revise_livelock_limit: int = 5
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -177,6 +220,15 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "wedge_min_tasks": p.wedge_min_tasks,
         "wedge_stall_limit": p.wedge_stall_limit,
         "dev_repo_read": p.dev_repo_read,
+        # Spec 12-18 batch (landed by the prep PR with no consumers, so neither
+        # feature branch has to edit this function).
+        "reviewer_repo_read": p.reviewer_repo_read,
+        "review_min_latency_ms": p.review_min_latency_ms,
+        "review_screenshot": p.review_screenshot,
+        "gate_bootstrap": p.gate_bootstrap,
+        "gate_min_merge_interval": p.gate_min_merge_interval,
+        "revise_chain_limit": p.revise_chain_limit,
+        "revise_livelock_limit": p.revise_livelock_limit,
     }
 
 
@@ -229,8 +281,28 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         wedge_stall_limit=max(
             0, int(d.get("wedge_stall_limit", base.wedge_stall_limit))),
         # Spec 11: a plain bool gate for in-turn read-only worktree retrieval on
-        # dev turns. Absent key -> dataclass default (True).
+        # dev turns. Absent key -> the dataclass default (see the field: OFF).
         dev_repo_read=bool(d.get("dev_repo_read", base.dev_repo_read)),
+        # --- Spec 12-18 batch (prep PR P0.2) --------------------------------- #
+        # Spec 14: reviewer-side retrieval + ungrounded-verdict handling.
+        reviewer_repo_read=bool(
+            d.get("reviewer_repo_read", base.reviewer_repo_read)),
+        # `max(0, …)` — 0 disables the latency fallback entirely (the default).
+        review_min_latency_ms=max(
+            0, int(d.get("review_min_latency_ms", base.review_min_latency_ms))),
+        review_screenshot=bool(d.get("review_screenshot", base.review_screenshot)),
+        # Spec 12: gate bootstrap + in-loop cadence. `max(1, …)` on the interval —
+        # 0 merges between runs is meaningless, so it clamps up rather than
+        # disabling; `gate_bootstrap` is the on/off switch.
+        gate_bootstrap=bool(d.get("gate_bootstrap", base.gate_bootstrap)),
+        gate_min_merge_interval=max(
+            1, int(d.get("gate_min_merge_interval", base.gate_min_merge_interval))),
+        # Spec 16: `max(0, …)` — 0 disables the breaker / the livelock detector,
+        # matching the Spec 04 / Spec 07 / Spec 10 convention above.
+        revise_chain_limit=max(
+            0, int(d.get("revise_chain_limit", base.revise_chain_limit))),
+        revise_livelock_limit=max(
+            0, int(d.get("revise_livelock_limit", base.revise_livelock_limit))),
     )
 
 
