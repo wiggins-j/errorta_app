@@ -141,6 +141,17 @@ class CodingAutonomyPolicy:
     # false-fire. `wedge_stall_limit == 0` disables the detector.
     wedge_min_tasks: int = 10
     wedge_stall_limit: int = 5
+    # Spec 11 (P1a): let a DEV turn READ its task worktree in-turn (read-only:
+    # Read/Grep/Glob only — no write, no exec, no network), so it can grep the
+    # rest of the repo and see BOTH sides of a cross-file contract instead of
+    # reasoning from a pre-baked half-context. The model's actual edits still
+    # flow through the coding_turn.v1 envelope + execute_dev_turn, never a Write
+    # tool. Only the claude_cli vendor honors this today (the all-Opus team's
+    # critical vendor); codex/cursor are a documented follow-up. Default ON: the
+    # read-only allowlist is enforced at the CLI tool-availability layer and
+    # envelope parsing is robust across the preceding tool-use turns. Set False
+    # to restore the single-shot empty-temp-dir behavior for dev turns.
+    dev_repo_read: bool = False
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -165,6 +176,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "plan_streak_limit": p.plan_streak_limit,
         "wedge_min_tasks": p.wedge_min_tasks,
         "wedge_stall_limit": p.wedge_stall_limit,
+        "dev_repo_read": p.dev_repo_read,
     }
 
 
@@ -216,6 +228,9 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             0, int(d.get("wedge_min_tasks", base.wedge_min_tasks))),
         wedge_stall_limit=max(
             0, int(d.get("wedge_stall_limit", base.wedge_stall_limit))),
+        # Spec 11: a plain bool gate for in-turn read-only worktree retrieval on
+        # dev turns. Absent key -> dataclass default (True).
+        dev_repo_read=bool(d.get("dev_repo_read", base.dev_repo_read)),
     )
 
 

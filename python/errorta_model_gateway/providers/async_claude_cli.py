@@ -58,6 +58,30 @@ from .async_base import (
 
 _BINARY = "claude"
 
+# Spec 11 (P1a) — read-only in-turn worktree retrieval for DEV turns.
+#
+# The default deliberation call is single-shot with NO tools (`--tools ""`) in an
+# empty temp dir. When the runner threads a task worktree root through
+# ``request.extra["metadata"]["dev_repo_read_root"]`` (only the DEV-turn dispatch
+# does this, and only when the ``dev_repo_read`` policy is on), we instead run the
+# CLI with cwd = that worktree and a READ-ONLY tool allowlist so the model can
+# grep/read the rest of the repo before emitting its coding_turn.v1 envelope.
+#
+# ``--tools`` restricts the AVAILABLE built-in tools (verified against
+# ``claude`` CLI 2.0.55: `--tools "Read,Grep,Glob"` exposes EXACTLY
+# ``{Read,Grep,Glob}`` in the session-init event — Write/Edit/MultiEdit/Bash/
+# NotebookEdit/WebFetch/WebSearch/Task are absent, not merely permission-gated).
+# So no write, no exec, and no network tool exists for the model to call; the
+# model's real edits still flow only through the coding_turn.v1 envelope +
+# execute_dev_turn, never a Write tool. If a future CLI changes ``--tools``
+# semantics such that this allowlist can no longer exclude writes/exec, this
+# branch MUST NOT ship — fall back to the empty-tools default.
+_DEV_REPO_READ_TOOLS = "Read,Grep,Glob"
+# Bounded turn budget so the model can do a few read/grep calls before its final
+# envelope, without rabbit-holing. The final assistant message (the envelope) is
+# still what the parser reads; preceding tool-use turns do not break parsing.
+_DEV_REPO_READ_MAX_TURNS = 6
+
 # A GUI .app launched from Finder/Dock inherits a minimal PATH (/usr/bin:/bin:…)
 # that excludes the user-level dirs where `claude` is typically installed. So we
 # resolve PATH first, then probe the common install locations directly — same
@@ -138,6 +162,33 @@ _DEFAULT_ROUTES = [
 ]
 
 
+def _dev_repo_read_root(request: AsyncProviderRequest) -> str | None:
+    """Spec 11 (P1a): the task worktree root a DEV turn asked us to read, or None.
+
+    Threaded as ``request.extra["metadata"]["dev_repo_read_root"]`` by the runner
+    (``gateway_member_caller``), which only sets it on the DEV path when the
+    ``dev_repo_read`` policy is on. Returns the path only when it is a non-empty
+    string naming an existing directory; every other shape (missing, wrong type,
+    empty, nonexistent) yields None so the caller falls back to the single-shot
+    empty-temp-dir default — fail safe, never point cwd at a bad/relative path.
+    """
+    extra = getattr(request, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    meta = extra.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    root = meta.get("dev_repo_read_root")
+    if not isinstance(root, str) or not root.strip():
+        return None
+    root = root.strip()
+    import os
+
+    if not os.path.isdir(root):
+        return None
+    return root
+
+
 def _extract_result_json(stdout: str) -> dict[str, Any] | None:
     """Find the CLI's terminal ``type=="result"`` JSON object.
 
@@ -196,16 +247,35 @@ class ClaudeCliHandler:
             )
 
         prompt = flatten_messages(request.messages)
-        # --tools "" is load-bearing: empty allowed-tools = no file/network side
-        # effects. --max-turns 1 is belt-and-suspenders. Prompt on stdin (shared
-        # runner) — never argv.
-        argv = [
-            binary, "-p",
-            "--tools", "",
-            "--output-format", "json",
-            "--model", model,
-            "--max-turns", "1",
-        ]
+
+        # Spec 11 (P1a): a DEV turn may carry a task worktree root in metadata,
+        # requesting read-only in-turn retrieval. Only honor a non-empty string
+        # pointing at an existing directory; anything else falls back to the
+        # single-shot default (fail safe).
+        repo_read_root = _dev_repo_read_root(request)
+
+        if repo_read_root is not None:
+            # Read-only retrieval turn: cwd = the worktree, tools = read-only
+            # allowlist (Read/Grep/Glob — NO write/exec/network), raised turn
+            # budget so the model can grep/read before its envelope.
+            argv = [
+                binary, "-p",
+                "--tools", _DEV_REPO_READ_TOOLS,
+                "--output-format", "json",
+                "--model", model,
+                "--max-turns", str(_DEV_REPO_READ_MAX_TURNS),
+            ]
+        else:
+            # --tools "" is load-bearing: empty allowed-tools = no file/network
+            # side effects. --max-turns 1 is belt-and-suspenders. Prompt on stdin
+            # (shared runner) — never argv.
+            argv = [
+                binary, "-p",
+                "--tools", "",
+                "--output-format", "json",
+                "--model", model,
+                "--max-turns", "1",
+            ]
 
         start = time.monotonic()
         stdout, stderr, returncode = await run_cli_subprocess(
@@ -215,6 +285,7 @@ class ClaudeCliHandler:
             semaphore=_CLAUDE_SEMAPHORE,
             error_prefix="claude_cli",
             cwd_prefix="errorta-claude-cli-",
+            cwd_override=repo_read_root,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
 
