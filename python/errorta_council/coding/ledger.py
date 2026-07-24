@@ -1268,13 +1268,33 @@ class LedgerStore:
             cwd = str(spec.get("cwd", "."))
             if cwd.startswith("/") or cwd.startswith("\\") or ".." in Path(cwd).parts:
                 raise LedgerError(f"command {cmd_id!r} cwd must be worktree-relative")
+            # Spec 12 (S1): `scope` distinguishes a merge-blocking UNIT command
+            # from an ACCEPTANCE command that runs on the integrated master tree
+            # (in-loop gate + delivery) but must NOT gate a single-module PR — a
+            # whole-project acceptance script fails by construction on a partial
+            # branch. Absent -> "unit", so every existing registry keeps today's
+            # exact merge-gate meaning.
+            scope = str(spec.get("scope", "unit"))
+            if scope not in ("unit", "acceptance"):
+                raise LedgerError(
+                    f"command {cmd_id!r} scope must be 'unit' or 'acceptance'")
             clean[str(cmd_id)] = {
                 "argv": [str(a) for a in argv], "cwd": cwd,
                 "timeout_seconds": int(timeout),
                 "label": str(spec.get("label", cmd_id)),
+                "scope": scope,
             }
         _atomic_write_json(self._test_commands_path, clean)
         return clean
+
+    def get_unit_test_commands(self) -> dict[str, Any]:
+        """Spec 12 (S1): only the UNIT-scoped commands — the ones that gate a
+        per-PR merge. Acceptance-scoped commands run on the integrated tree
+        (in-loop gate + delivery) and are excluded here so registering one never
+        arms the per-branch merge gate. A command with no `scope` is unit
+        (backward-compatible: pre-Spec-12 registries gate exactly as before)."""
+        return {cid: spec for cid, spec in self.get_test_commands().items()
+                if str(spec.get("scope", "unit")) == "unit"}
 
     def record_test_run(self, session: Any, *, task_id: str,
                         head: str = "") -> dict[str, Any]:

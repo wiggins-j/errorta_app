@@ -28,6 +28,7 @@ import re
 import threading
 from typing import Any, Callable, NamedTuple, Optional
 
+from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
 from .autonomy import (
@@ -48,6 +49,7 @@ from .topology import (
     REVIEWER,
     TESTER,
     Assign,
+    GateRun,
     GovernanceMaterialize,
     GovernancePlan,
     GovernanceReview,
@@ -1729,6 +1731,11 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
                       _latest_context_response_text(store, task.task_id)),
         # The current worktree snapshot the dev extends.
         PromptSegment("repo_snapshot", existing),
+        # Spec 12 (S1): the latest acceptance-gate output (verbatim), so "iterate
+        # until green" has a feedback signal — the dev sees WHY the gate failed
+        # instead of re-reasoning from a half-context. Empty (absent) when no gate
+        # has run, so a gate-less project's prompt is byte-identical to before.
+        PromptSegment("gate_output", _gate_state.latest_gate_text(store)),
         # Tool catalog / how-to-emit-tool-calls guidance.
         PromptSegment("tool_guidance",
                       f"{tool_catalog_text(DEV)} Do not request merge-back.\n"),
@@ -1780,7 +1787,8 @@ def _task_is_governance_sourced(task: Task) -> bool:
 
 
 def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
-                      project_context: str, scope_task: Task | None = None) -> str:
+                      project_context: str, scope_task: Task | None = None,
+                      *, gate_text: str = "") -> str:
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
@@ -1831,13 +1839,14 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     })
     return _register_pending_composition(_review_pr_prompt_segments(
         task, pr, project_context, task_scope=task_scope, bar=bar, cap=cap,
-        trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example))
+        trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example,
+        gate_text=gate_text))
 
 
 def _review_pr_prompt_segments(
         task: Task, pr: dict[str, Any], project_context: str, *,
         task_scope: str, bar: str, cap: str, trunc: str, trunc_note: str,
-        verdict_example: str) -> list[PromptSegment]:
+        verdict_example: str, gate_text: str = "") -> list[PromptSegment]:
     """F143-01 Slice F: the reviewer prompt as ordered labeled segments. Joined
     verbatim this equals the pre-refactor ``_review_pr_prompt`` string byte-for-byte
     (golden-locked). The branchy truncation/scope logic stays in ``_review_pr_prompt``;
@@ -1884,6 +1893,11 @@ def _review_pr_prompt_segments(
         PromptSegment("role_instructions", review_rules),
         # The PR diff under review (+ optional truncation flag).
         PromptSegment("pr_diff", f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"),
+        # Spec 12 (S1): the latest acceptance-gate output (verbatim). A reviewer
+        # that sees the gate is red on the integrated tree can hold the PR to it;
+        # empty (absent) when no gate has run, so the prompt is unchanged for a
+        # gate-less project.
+        PromptSegment("gate_output", gate_text),
         # Truncation caveat (empty when the diff fit).
         PromptSegment("role_instructions", trunc_note),
         # reviewed_head echo instruction + verdict envelope schema.
@@ -2187,7 +2201,9 @@ def _review_project_context(store: LedgerStore, workspace: Any,
 
 
 def _test_prompt(task: Task, store: LedgerStore) -> str:
-    registry = store.get_test_commands()
+    # Spec 12 (S1): the tester runs on the PR BRANCH, so it may only choose from
+    # unit-scoped commands; acceptance commands run on the integrated tree.
+    registry = store.get_unit_test_commands()
     if registry:
         ids = ", ".join(sorted(registry.keys()))
         avail = (f"Available test command_ids (you MUST choose from these): {ids}.")
@@ -2234,6 +2250,10 @@ def _test_prompt_segments(task: Task, store: LedgerStore, *,
         # Retrieved project grounding for the tester.
         PromptSegment("project_context",
                       _grounding_packet_text("tester", store, task=task)),
+        # Spec 12 (S1): the latest acceptance-gate output (verbatim), so the tester
+        # sees the last integrated result before choosing commands. Empty (absent)
+        # with no gate run -> byte-identical to before.
+        PromptSegment("gate_output", _gate_state.latest_gate_text(store)),
         # Standing test instructions (available commands + envelope schema).
         PromptSegment("role_instructions", instructions),
     ]
@@ -2575,6 +2595,100 @@ def refresh_foundation_status(store: LedgerStore, workspace: Any) -> str:
     return status
 
 
+def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
+              should_cancel: Optional[Callable[[], bool]] = None) -> Any:
+    """Spec 12 (S1): run EVERY registered command (unit + acceptance) against the
+    integrated master tree, bound to ``head``, and record the session. This is the
+    deterministic gate executor — no model command selection, so the verdict
+    cannot be gamed — factored out of ``delivery_review`` so the in-loop gate and
+    the delivery gate share one code path.
+
+    Returns the ``TestRunSession`` (its ``.passed`` is the verdict), or ``None``
+    when there are no commands to run. Runs against ``workspace.root()`` (the
+    merged tree) precisely because the interesting defects — a self-sabotaging
+    harness, a black-screen init race — are INTEGRATION defects invisible on a
+    single branch."""
+    registry = store.get_test_commands()
+    if not registry:
+        return None
+    command_ids = list(registry.keys())
+    session = run_test_commands(
+        workspace.root(), registry, command_ids,
+        should_cancel=should_cancel,
+        require_sandbox=store.get_require_sandbox())
+    store.record_test_run(session, task_id=task_id, head=head)
+    return session
+
+
+# Spec 12 (S1): a merge that touches ONLY these is not gate-relevant — running the
+# acceptance gate again would waste the suite's wall time with no chance of a
+# changed verdict. Everything else (source, web assets, test files, configs) is.
+_GATE_IRRELEVANT_EXT = (".md", ".markdown", ".rst", ".txt")
+_GATE_IRRELEVANT_NAMES = ("LICENSE", "LICENSE.md", "NOTICE", "AUTHORS", "CHANGELOG",
+                          "CHANGELOG.md", ".gitignore", ".gitattributes")
+
+
+def _merge_is_gate_relevant(changed: list[str]) -> bool:
+    """True unless every changed path is pure documentation/metadata. Conservative:
+    an unrecognized path counts as relevant (better a redundant gate run than a
+    missed regression)."""
+    real = [p for p in changed if p and p != ".gitignore"]
+    if not real:
+        return False
+    for p in real:
+        base = p.rsplit("/", 1)[-1]
+        if base in _GATE_IRRELEVANT_NAMES:
+            continue
+        if base.startswith("docs/") or p.startswith("docs/"):
+            continue
+        if any(p.endswith(ext) for ext in _GATE_IRRELEVANT_EXT):
+            continue
+        return True  # a non-doc path -> re-run the gate
+    return False
+
+
+def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
+                          changed: list[str], head: str) -> None:
+    """Spec 12 (S1): after a merge advances master, (1) acquire a gate if the
+    project has none, then (2) count a gate-relevant merge and arm ``gate_due``
+    once ``gate_min_merge_interval`` such merges have accumulated — so a later
+    mechanical GateRun executes the suite off this (merge) turn. Fully guarded:
+    a failure here never fails the merge that already landed."""
+    try:
+        from .autonomy import load_policy
+        policy = load_policy(store)
+    except Exception:  # noqa: BLE001
+        return
+    if not getattr(policy, "gate_bootstrap", True):
+        return
+    try:
+        from . import gate_bootstrap
+        gate_bootstrap.maybe_bootstrap(store, workspace, policy)
+    except Exception:  # noqa: BLE001 — bootstrap is best-effort
+        pass
+    # Only arm when there is actually something to run and the merge could have
+    # changed the verdict.
+    try:
+        from . import gate_state
+        if not gate_state.gate_available(store):
+            return
+    except Exception:  # noqa: BLE001
+        return
+    if not _merge_is_gate_relevant(changed):
+        return
+    try:
+        rs = store.get_run_state()
+        pending = int(rs.get("gate_pending_merges", 0) or 0) + 1
+        interval = max(1, int(getattr(policy, "gate_min_merge_interval", 3)))
+        if pending >= interval:
+            store.set_run_state(gate_due=True, gate_dirty_head=str(head),
+                                gate_pending_merges=0)
+        else:
+            store.set_run_state(gate_pending_merges=pending)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _foundation_files_in(paths: list[str]) -> list[str]:
     """Spec 13 (S2): the subset of ``paths`` that are foundation elements — a build
     manifest, or a source entrypoint. These are what a foundation-UNLOCKING PR
@@ -2907,8 +3021,11 @@ def build_run_turn(
         # forever in a revise loop. When test commands ARE configured the strict
         # reviewer-AND-tests gate is unchanged.
         p = store.get_pr(pr_id)
+        # Spec 12 (S1): only UNIT-scoped commands gate a merge. An acceptance
+        # command (in-loop gate / delivery) never blocks a per-PR merge, else
+        # bootstrapping one would wedge every merge on a partial branch.
         tests_ok = p is not None and (
-            p.get("tests_passed") is True or not store.get_test_commands())
+            p.get("tests_passed") is True or not store.get_unit_test_commands())
         # F100 PR-B: in strict governance mode a code PR needs the PM's review
         # too (reviewer AND PM). In off/light, PM review is not required, so this
         # gate is exactly today's reviewer-AND-tests behavior.
@@ -3395,6 +3512,46 @@ def build_run_turn(
             created = _materialize_pm_tasks(store, intent)
             return TurnOutcome(kind="planned", made_progress=len(created) > 0)
 
+        if isinstance(action, GateRun):
+            # Spec 12 (S1): run the acceptance gate on the integrated master tree,
+            # off the merge turn. Mechanical (0 model calls). Clears the armed flag
+            # whether the run succeeds, finds nothing to run, or raises — so a
+            # failure can never re-arm into a tight loop.
+            try:
+                rs = store.get_run_state()
+                head = str(rs.get("gate_dirty_head", "") or "")
+            except Exception:  # noqa: BLE001
+                head = ""
+            try:
+                if workspace is not None:
+                    if not head:
+                        head = workspace.head() or ""
+                    session = _run_gate(store, workspace, head=head,
+                                        task_id="in-loop-gate",
+                                        should_cancel=should_cancel)
+                    passed = None if session is None else bool(session.passed)
+                    store.record_decision(
+                        title="in-loop acceptance gate",
+                        context="in_loop_gate",
+                        choice=("gate_passed" if passed else
+                                "gate_no_commands" if passed is None else "gate_failed"),
+                        rationale=(f"ran the acceptance gate on master head {head[:12]}"
+                                   if session is not None
+                                   else "no registered commands to run"))
+            except Exception as exc:  # noqa: BLE001 — a gate error never breaks the loop
+                try:
+                    store.record_decision(
+                        title="in-loop gate could not run", context="in_loop_gate",
+                        choice="gate_error", rationale=str(exc))
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                try:
+                    store.set_run_state(gate_due=False)
+                except Exception:  # noqa: BLE001
+                    pass
+            return TurnOutcome(kind="gate_run", model_calls=0)
+
         if isinstance(action, Merge):
             # F087-17: the PM integrates a reviewer-approved + tests-green PR into
             # master (conflict-aware). master accumulates; conflicts bounce back
@@ -3459,6 +3616,14 @@ def build_run_turn(
                 # (build manifest + source entrypoint) is now on master so the loop
                 # lifts the concurrency clamp exactly when the scaffold lands.
                 refresh_foundation_status(store, workspace)
+                # Spec 12 (S1): master advanced — acquire a gate if the project has
+                # none yet (detect runtime profiles + register a smoke-proven
+                # acceptance command), then ARM an in-loop gate run when this merge
+                # is gate-relevant and the min-merge interval has elapsed. The gate
+                # itself runs off THIS turn (a later GateRun), so the suite never
+                # serializes the merge critical section.
+                _arm_gate_after_merge(store, workspace, changed=list(_changed),
+                                      head=res.get("head", pr["head"]))
                 # F159: the shared-contract owner landed → lift the hot-file freeze
                 # (the canonical module is now on master; parallel edits are safe).
                 try:
@@ -3726,7 +3891,8 @@ def build_run_turn(
                     REVIEWER, task.task_id, member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or ""))),
+                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        gate_text=_gate_state.latest_gate_text(store)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 # F126: persist the reviewer's findings on the PR so the task
                 # detail can show WHY a PR got "changes requested", not just that
@@ -3771,7 +3937,7 @@ def build_run_turn(
                     # registered test commands the PR is already mergeable on
                     # approval (see _set_mergeable_if_ready) — spawning a tester
                     # task would just starve in the backlog forever.
-                    if store.get_test_commands():
+                    if store.get_unit_test_commands():
                         store.add_task(title=f"test PR: {pr['branch']}", role=TESTER,
                                        pr_id=pr["pr_id"], depends_on=[task.task_id])
                     # F100 PR-B: strict mode is a DUAL review — the PM must review
@@ -3802,7 +3968,9 @@ def build_run_turn(
                     context=f"task {task.task_id}",
                     related_task_ids=[task.task_id],
                 )
-                registry = store.get_test_commands()
+                # Spec 12 (S1): the tester validates its BRANCH against unit
+                # commands only (acceptance commands are integration-scoped).
+                registry = store.get_unit_test_commands()
 
                 def _changes_requested(reason: str, choice: str) -> TurnOutcome:
                     store.record_decision(
@@ -3908,7 +4076,8 @@ def build_run_turn(
                     REVIEWER, task.task_id, member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or ""))),
+                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        gate_text=_gate_state.latest_gate_text(store)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 pm_findings: list[dict[str, Any]] = []
                 if isinstance(parsed, TurnParseError):
@@ -4287,11 +4456,11 @@ def build_run_turn(
         if registry:
             command_ids = list(registry.keys())
             try:
-                session = run_test_commands(
-                    workspace.root(), registry, command_ids,
-                    should_cancel=should_cancel,
-                    require_sandbox=store.get_require_sandbox())
-                store.record_test_run(session, task_id=_DELIVERY_TASK_ID, head=head)
+                # Spec 12 (S1): shared deterministic executor (also the in-loop
+                # gate). Runs all commands against the merged head, records the run.
+                session = _run_gate(store, workspace, head=head,
+                                    task_id=_DELIVERY_TASK_ID,
+                                    should_cancel=should_cancel)
                 tests_passed = bool(session.passed)
                 if not tests_passed:
                     tests_failed_detail = "; ".join(

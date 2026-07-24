@@ -27,6 +27,7 @@ from .topology import (
     Assign,
     CodingReconciler,
     Complete,
+    GateRun,
     GovernanceMaterialize,
     Merge,
     Plan,
@@ -1698,7 +1699,11 @@ def _run_concurrent_loop(
                         None)
                     if action is None:
                         break
-                    is_mechanical = isinstance(action, (Merge, GovernanceMaterialize))
+                    # Spec 12 (S1): a GateRun is mechanical (0 model calls) like a
+                    # Merge, but does NOT mutate master, so it needs no serial-merge
+                    # treatment — it runs against the master checkout while workers
+                    # write their own worktrees.
+                    is_mechanical = isinstance(action, (Merge, GovernanceMaterialize, GateRun))
                     is_merge = isinstance(action, Merge)
                     flight = in_flight.values()
                     if is_merge:
@@ -1755,7 +1760,7 @@ def _run_concurrent_loop(
                 action = in_flight.pop(fut)
                 busy.discard(getattr(action, "member_id", None))
                 outcome = fut.result()  # _safe_run_turn never raises
-                if not isinstance(action, (Merge, GovernanceMaterialize)):
+                if not isinstance(action, (Merge, GovernanceMaterialize, GateRun)):
                     model_in_flight -= 1
                 c.iterations += 1
                 c.model_calls += max(0, int(outcome.model_calls))

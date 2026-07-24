@@ -315,6 +315,24 @@ PR is rejected for reasons **unrelated** to the foundation it adds, the run
 records a `foundation_pr_rejected_offscope` decision and escalates to you — the
 clamp is held at 1, so re-scope or re-plan so the foundation can land.
 
+### The acceptance gate (Spec 12)
+
+A greenfield run **acquires a gate automatically** (`gate_bootstrap`, default on):
+it detects and registers runtime profiles, and — when the team has authored a
+runnable test on master that a one-shot **smoke run proves can execute** —
+registers an `acceptance`-scoped test command. A candidate that cannot run (a
+missing interpreter/dependency) is *refused* (`gate_bootstrap_refused`), because a
+gate that is red forever is a wedge, not a gate. You do not need to configure test
+commands for the team to have something to run.
+
+Scope matters: an **`acceptance`** command runs on the **integrated master tree**
+(the in-loop gate, dispatched between merges — `gate_min_merge_interval`, default
+3 — and the delivery gate) and **never blocks a per-PR merge**; a **`unit`**
+command (the default when none is declared) gates each PR as before. The latest
+gate output is fed **verbatim** into subsequent dev/reviewer/tester prompts, so
+"iterate until the gate passes" has a real feedback signal, and `done` requires a
+green delivery gate at the delivered head.
+
 ---
 
 ## 12. What you are NOT allowed to do

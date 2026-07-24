@@ -433,9 +433,9 @@ Everything here works while a run is live.
 | Command | What it does | Key flags |
 |---|---|---|
 | `runtime [(profiles)\|detect\|setup\|start\|stop\|run\|run-cli\|logs\|health\|test\|repair\|profile\|evidence]` ‡ | Run the delivered program: read profiles, or detect / set up / launch / probe it. `profile set <id> --profile <json>` overrides a run profile; `evidence` reads a session's captured evidence. | `--p1`, `--p2`, `--session`, `--kind`, `--args`, `--timeout`, `--go`, `--reduced-isolation`, `--open`, `--no-open`, `--profile`, `--watch`, `--yes` |
-| `test-commands [show\|set]` ‡ | Show or set the project's merge-gate test commands. | `--commands`, `--yes` |
+| `test-commands [show\|set]` ‡ | Show or set the project's test commands. A command's `scope` is `unit` (default — gates each PR merge) or `acceptance` (Spec 12 — runs on the integrated tree, never blocks a per-PR merge). | `--commands`, `--yes` |
 | `test-settings [show\|set]` ‡ | Show or set project test settings (`require_sandbox`). | `--require-sandbox`, `--yes` |
-| `test-runs` | List the recorded test-command runs. | |
+| `test-runs` | List the recorded test-command runs — including the in-loop **acceptance gate** runs (Spec 12), which execute automatically on the integrated tree during a run, not only at delivery. | |
 
 `runtime run` produces a **preview** by default; add `--go` to actually launch the
 program. When the delivered program is a **web/API server**, `run --go` prints the
