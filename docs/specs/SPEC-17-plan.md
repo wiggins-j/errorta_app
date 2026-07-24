@@ -31,10 +31,24 @@ Branch off the merged prep PR; commit the spec + this plan.
 1. Widen `tool_catalog_text` (`turn_controller.py:69-71`):
 
    ```
-   tool_catalog_text(role, *, repo_read: bool = False, gate: bool = False) -> str
+   tool_catalog_text(role, *, repo_read: bool, gate: bool) -> str
    ```
 
-   Defaults preserve today's string exactly, so an un-updated caller is a no-op.
+   **Δ2 — required keyword args; today's string is NOT preserved.** An earlier
+   draft of this plan asked for `= False` defaults *and* a byte-identical
+   default rendering *and* a negative sentence in every variant. Those cannot all
+   hold: Python cannot distinguish an omitted default from an explicit `False`,
+   so any mandatory sentence changes the default rendering too. The lock was also
+   guarding nothing — there is exactly one production caller (`runner.py:1664`)
+   plus two test references — and locking the output of the spec whose purpose is
+   to change that output is self-defeating. Required args make it impossible for
+   a call site to render a catalog that does not match the member's real
+   invocation, which is the bug class this spec exists to kill.
+
+   The invariant to hold instead: **the errorta-tool list in any rendering equals
+   `", ".join(allowed_tools_for_role(role)) or "none"` exactly** (the F087-14
+   WS-3 discipline). Everything else may change, and the goldens move with it.
+
    It renders: the executed errorta tools (source of truth stays
    `allowed_tools_for_role`, `:35`); **when `repo_read`** the CLI-native read
    tools **by name** — `Read`, `Grep`, `Glob` — stated as available in the cwd,
@@ -48,9 +62,15 @@ Branch off the merged prep PR; commit the spec + this plan.
    untouched — this extends that discipline, it does not amend it.
 
 **Tests** (`test_spec17_tool_catalog.py`, new — table-driven): role ×
-`repo_read` × `gate`; every variant contains the no-execute-tool sentence; the
-errorta-tool list is exactly `allowed_tools_for_role(role)`; the default-args
-rendering is byte-identical to `main`'s string.
+`repo_read` × `gate`; every variant contains the no-execute-tool sentence; **the
+errorta-tool list in every variant is exactly
+`", ".join(allowed_tools_for_role(role)) or "none"`**; omitting a keyword
+argument raises `TypeError`; adding a tool to `_ROLE_TOOLS` changes every
+rendering with no edit to the function.
+
+`test_turn_controller.py:33` calls `tool_catalog_text("dev")` and must be updated
+to pass the new arguments — that call site being forced to become explicit is the
+feature, not friction.
 
 ## Phase 2 — wire it into all four prompts
 
@@ -123,6 +143,7 @@ If P0.3 already landed the reconciliation, this phase is just the test.
 
 ## Definition of done
 
-Full coding suite + `ruff` green. Default-args `tool_catalog_text` is
-byte-identical to `main`. The carry-forward asserted **on the composed prompt**,
-not on the decision record. No `gate_output` segment touched.
+Full coding suite + `ruff` green. The prompt goldens **move** (deliberately) and
+the errorta-tool-list invariant holds in every rendering. The Phase-3
+carry-forward asserted **on the composed prompt**, not on the decision record. No
+`gate_output` segment touched.

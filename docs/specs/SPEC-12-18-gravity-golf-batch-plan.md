@@ -145,9 +145,25 @@ add keys to the same dict literal and would otherwise conflict inside A's own
 branch. B's Spec 16 uses explicit `add_task` kwargs (`ledger.py:686-730`), not
 `_extras` mutation, so it touches a different function.
 
-**`errorta_cli/render/status.py`.** Both of B's Specs 16 and 18 touch it
-(`_TERMINAL_BAD` at `:26-30`, the unbound early return at `:54-57`). Land 16
-before 18 within B's sequence.
+**`errorta_cli/render/status.py`.** Both of B's Specs 16 and 18 touch it, but in
+**different lines and either order** (Δ2 — an earlier revision of this plan said
+"land 16 before 18", which contradicted the recommended sequence and created a
+circular constraint):
+
+- **Spec 18 owns `_TERMINAL_BAD`** (`:26-30`) — including backfilling
+  `gate_not_improving` / `planning_churn` / `dispatch_wedged`, which Specs
+  04/07/10 added without updating the set. Its only consumer is the stop-reason
+  styling at `:68`, which is Spec 18's own surface.
+- **Spec 16 appends one line** to that set for `revise_livelock`.
+- Spec 18 also owns the unbound early return (`:54-57`).
+
+**`tool_catalog_text` signature.** Spec 17 makes `repo_read` / `gate` **required**
+keyword arguments and the rendering deliberately changes (Δ2 — an earlier
+revision asked for defaults *and* a byte-identical default rendering *and* a
+mandatory sentence in every variant, which is unsatisfiable: Python cannot
+distinguish an omitted default from an explicit `False`). The invariant that
+replaces the byte-identical lock: the errorta-tool list in any rendering equals
+`", ".join(allowed_tools_for_role(role)) or "none"`.
 
 ---
 
@@ -216,9 +232,15 @@ a one-shot Claude Code session for anything single-session-sized.
   `autonomy.py:218-231`), `max(1, …)` otherwise.
 - **Stop-reason contract.** Only Spec 16 adds one (`revise_livelock`), needing
   **four** edits: the constant (`autonomy.py:51-53`), `FAILURE_STOP_REASONS`
-  (`errorta_cli/runstream.py:66-72`), `STOP_REASON_GLOSS` (`:80-102`), and
-  `_TERMINAL_BAD` (`render/status.py:26-30`). No `classify_exit` change —
-  `runstream.py:130-146` already fails closed on unknown reasons.
+  (`errorta_cli/runstream.py:66-72`), `STOP_REASON_GLOSS` (`:80-102`), and one
+  line in `_TERMINAL_BAD` (`render/status.py:26-30`, whose pre-existing gaps are
+  Spec 18's to backfill). No `classify_exit` change — `runstream.py:130-146`
+  already fails closed on unknown reasons.
+- **Prompt-text locks.** Do not "lock" a string a spec exists to change. Specs
+  12 and 17 both rewrite prompt segments; the goldens move with them. What stays
+  locked is narrower and real: a **gate-less** project's prompts stay
+  byte-identical (Spec 12), and the errorta-tool list inside any catalog
+  rendering equals `allowed_tools_for_role` (Spec 17).
 - **Import direction.** New modules (`gate_bootstrap.py`, `gate_state.py`,
   `capabilities.py`) must not import `runner`; `runner` imports
   `.topology`/`.schemas` at `runner.py:43-45`. Same discipline as

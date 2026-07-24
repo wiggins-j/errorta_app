@@ -77,8 +77,28 @@ says *"Absent key -> dataclass default (True)"* (`autonomy.py:230-233`), and
 live capability picture rather than only `_ROLE_TOOLS`:
 
 ```
-tool_catalog_text(role, *, repo_read: bool = False, gate: bool = False) -> str
+tool_catalog_text(role, *, repo_read: bool, gate: bool) -> str
 ```
+
+**Δ2 — the parameters are REQUIRED, and the default rendering deliberately
+changes.** An earlier draft gave them `= False` defaults and claimed the
+default-args rendering stayed byte-identical to today's string. That is
+self-contradictory: the negative sentence below must appear in *every* variant,
+so any rendering — defaults included — necessarily differs from today. Since a
+Python function cannot tell an omitted default from an explicitly-passed `False`,
+there is no signature that satisfies both.
+
+The lock was also protecting nothing. `tool_catalog_text` has exactly **one**
+production caller (`runner.py:1664`) plus two test references
+(`test_prompt_segments_golden.py:201`, `test_turn_controller.py:33`) — there is
+no un-updated third-party caller to keep compatible. And a byte-identical lock on
+the primary output of a spec whose *whole purpose* is to change that output is
+self-defeating.
+
+Required keyword args are strictly better than defaults here: they make it
+impossible for a call site to silently render a catalog that does not match the
+member's real invocation, which is the exact class of bug this spec exists to
+kill. The real invariant is stated in Item 1's acceptance below.
 
 It renders, in one block:
 
@@ -104,8 +124,16 @@ the same object. Until then, the two booleans are threaded from the policy.
 
 **Acceptance.** With repo-read on, the dev's `tool_guidance` names Read/Grep/Glob
 and says they are used directly, not emitted as tool calls; with it off, it names
-`context_request` instead. Every rendering states that no execute tool exists.
-`_ROLE_TOOLS` remains the single source for the errorta-tool list.
+`context_request` instead. **Every** rendering states that no execute tool
+exists.
+
+The invariant that replaces the (impossible) byte-identical lock:
+**the errorta-tool list embedded in any rendering equals
+`", ".join(allowed_tools_for_role(role)) or "none"` exactly** — the F087-14 WS-3
+discipline that nothing is advertised which is not executed. Everything else in
+the string is allowed, and expected, to change; the prompt goldens move with it
+in the same commit. Omitting either keyword argument is a `TypeError`, not a
+quietly wrong catalog.
 
 ## Item 2 — Reconcile the `dev_repo_read` default
 
@@ -181,11 +209,11 @@ unproductive when nothing was written).
 - **`autonomy.py`** — reconcile the field default and **both** prose statements
   (`:144-154` and `:230-233`).
 - **Golden tests** — `test_prompt_segments_golden.py` byte-locks all four
-  prompts (confirmed); the updates are deliberate and the goldens change with
-  them. Keep the *off* rendering as close to today's string as the content allows
-  so the diff is legible. Cheap de-conflicting measure: make the `_old_*`
-  reference builders **call** `tool_catalog_text` instead of inlining its string,
-  so a later gate-segment change touches a different line.
+  prompts (confirmed), and its reference builders already **call**
+  `tool_catalog_text` (the prep PR's P0.5), so widening the signature updates the
+  reference and the real prompt together and the golden diff stays small. The
+  goldens *do* move — that is the point of the spec (Δ2), not a regression.
+  `test_turn_controller.py:33` also calls it and must pass the new arguments.
 
 ## Edge cases
 
@@ -212,8 +240,11 @@ unproductive when nothing was written).
 
 - **Item 1**: rendered catalog for dev/reviewer/tester × repo-read on/off ×
   gate on/off (table-driven); every variant contains the no-execute-tool
-  sentence; the errorta-tool list is exactly `allowed_tools_for_role`; prompt
-  goldens updated.
+  sentence; **the errorta-tool list in every variant is exactly
+  `", ".join(allowed_tools_for_role(role)) or "none"`** — the invariant that
+  replaces the impossible byte-identical lock (Δ2); omitting a keyword argument
+  raises `TypeError`; adding a tool to `_ROLE_TOOLS` changes every rendering with
+  no edit to this function; prompt goldens updated deliberately.
 - **Item 2**: field default == documented default (the drift lock);
   `policy_from_dict({})` yields it.
 - **Item 3**: an unknown tool records an error naming the allowed tools; **the

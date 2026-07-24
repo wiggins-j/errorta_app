@@ -4,18 +4,30 @@ Spec: [SPEC-18-cli-status-unbound-directory.md](SPEC-18-cli-status-unbound-direc
 
 **Owner:** Engineer B · **Branch:** `feat/spec-18-status-unbound`
 **Base:** `chore/spec-12-18-prep` (merged) · **PR into:** `main`
-**Land after** [Spec 16](SPEC-16-plan.md) — both edit
-`errorta_cli/render/status.py` (16 touches `_TERMINAL_BAD` at `:26-30`, this
-spec the unbound early return at `:54-57`). Otherwise fully independent: CLI
-only, no engine change, no route change, no dependency on Engineer A.
+**Fully independent** — CLI only, no engine change, no route change, no
+dependency on Engineer A, and (Δ2) **no ordering constraint against
+[Spec 16](SPEC-16-plan.md)**: this spec now owns `_TERMINAL_BAD`'s backfill
+(Phase 0 below) and Spec 16 only appends its own reason, so the two touch
+different lines.
 
 The smallest spec in the batch. It exists because observing the gravity-golf run
 required reading ledger files by hand while `errorta status` printed
 `project: (none bound to this directory)`.
 
-## Phase 0 — spec + plan (no code)
+## Phase 0 — spec + plan, and fix `_TERMINAL_BAD` (Δ2)
 
 Branch off the merged prep PR; commit the spec + this plan.
+
+Then correct `_TERMINAL_BAD` (`errorta_cli/render/status.py:26-30`), which is
+missing three stop reasons Specs 04/07/10 added without updating it:
+`gate_not_improving`, `planning_churn`, `dispatch_wedged`. Its only consumer is
+the stop-reason styling at `render/status.py:68` — this spec's own surface — so
+the fix belongs here, and doing it up front means Phase 2's failure-style test is
+meaningful. (This also removes what was a circular ordering constraint with
+[Spec 16](SPEC-16-plan.md), which now only appends its own reason.)
+
+**Tests.** Each of the three previously-missing reasons renders in the failure
+style rather than muted; the existing entries are unchanged.
 
 ## Phase 1 — fetch the project list when nothing is bound
 

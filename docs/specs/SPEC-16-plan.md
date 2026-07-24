@@ -5,8 +5,10 @@ Spec: [SPEC-16-revise-chain-circuit-breaker.md](SPEC-16-revise-chain-circuit-bre
 **Owner:** Engineer B · **Branch:** `feat/spec-16-revise-breaker`
 **Base:** `chore/spec-12-18-prep` (merged) · **PR into:** `main`
 **Land last of Engineer B's four** — Phase 2 shares the rejection seam with
-[Spec 15](SPEC-15-plan.md), and Phase 4 touches `render/status.py`, which
-[Spec 18](SPEC-18-plan.md) also edits. No dependency on Engineer A.
+[Spec 15](SPEC-15-plan.md). No dependency on Engineer A, and (Δ2) **no ordering
+constraint against [Spec 18](SPEC-18-plan.md)** now that Spec 18 owns
+`_TERMINAL_BAD`'s backfill: this spec only appends its own reason, so the two
+touch different lines of `render/status.py`.
 
 The spec's **Δ review** notes that shape this plan:
 
@@ -105,18 +107,17 @@ loop, not only the sequential one** (the dead-code lock).
 2. `FAILURE_STOP_REASONS` (`errorta_cli/runstream.py:66-72`);
 3. `STOP_REASON_GLOSS` (`runstream.py:80-102`) — without a gloss the stream ends
    on a bare reason;
-4. `_TERMINAL_BAD` (`errorta_cli/render/status.py:26-30`) — **and fold in
-   `gate_not_improving`, `planning_churn`, `dispatch_wedged`, which Specs 04/07/10
-   never added**, so the set ends correct rather than newly inconsistent.
+4. `_TERMINAL_BAD` (`errorta_cli/render/status.py:26-30`) — **one line, your
+   reason only.** Δ2: the set's three pre-existing gaps (`gate_not_improving`,
+   `planning_churn`, `dispatch_wedged`) are [Spec 18](SPEC-18-plan.md)'s to
+   backfill, since `_TERMINAL_BAD`'s only consumer is the stop-reason styling at
+   `render/status.py:68` — Spec 18's own surface. That is what removes the
+   circular ordering constraint between these two specs.
 
 No `classify_exit` change: `runstream.py:130-146` is a fail-closed allowlist, so
 an unknown reason is already `EXIT_RUN_FAILED`.
 
-**Coordinate with [Spec 18](SPEC-18-plan.md)** — both touch `render/status.py`.
-Land 16 first.
-
-**Tests.** All four sites carry the new reason; the three previously-missing
-reasons render in the failure style; `classify_exit` is unchanged.
+**Tests.** All four sites carry the new reason; `classify_exit` is unchanged.
 
 ## Phase 5 — the repro + docs
 

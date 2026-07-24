@@ -168,10 +168,18 @@ that does not exist):
 
 **No exit-code map change:** `classify_exit` (`runstream.py:130-146`) is a
 fail-closed allowlist — anything not in `SUCCESS_STOP_REASONS`
-(`runstream.py:75-78`) is already `EXIT_RUN_FAILED`. And note `_TERMINAL_BAD`
-is currently **missing** `gate_not_improving`, `planning_churn`, and
-`dispatch_wedged` — Specs 04/07/10 skipped it. Fold those three in with this
-change so the set is finally correct rather than newly inconsistent.
+(`runstream.py:75-78`) is already `EXIT_RUN_FAILED`.
+
+**Δ2 — `_TERMINAL_BAD`'s missing entries are
+[Spec 18](SPEC-18-cli-status-unbound-directory.md)'s, not this spec's.** The set
+is also missing `gate_not_improving`, `planning_churn`, and `dispatch_wedged`
+(Specs 04/07/10 skipped it). An earlier draft backfilled them here, which created
+a circular ordering constraint: this spec wanted to land *after* Spec 15 (shared
+rejection seam) while Spec 18 wanted to land *after* this one (shared file).
+`_TERMINAL_BAD` has exactly one consumer — the stop-reason styling at
+`render/status.py:68`, which is Spec 18's own surface — so the backfill belongs
+there. This spec appends **one** line to an already-corrected set, and the
+ordering constraint disappears entirely.
 
 **Acceptance.** A run with one broken lineage and no subsequent merge for 5
 iterations stops `revise_livelock` with a summary naming the lineage; a run whose
@@ -199,10 +207,10 @@ in the failure style.
   `revise_chain_limit` (3) / `revise_livelock_limit` (5) land in the shared prep
   PR with the `max(0, …)` disable convention.
 - **`errorta_cli`** — `FAILURE_STOP_REASONS` + `STOP_REASON_GLOSS`
-  (`runstream.py:66-72`, `:80-102`); `_TERMINAL_BAD` (`render/status.py:26-30`),
-  folding in the three missing existing reasons. **Sequence this before
-  [Spec 18](SPEC-18-cli-status-unbound-directory.md)** — both touch
-  `render/status.py`.
+  (`runstream.py:66-72`, `:80-102`); one line added to `_TERMINAL_BAD`
+  (`render/status.py:26-30`). No ordering constraint against
+  [Spec 18](SPEC-18-cli-status-unbound-directory.md) — it owns that set's
+  backfill (Δ2), so the two touch different lines and can land in either order.
 - **`attention.py`** — reuse `raise_review_alert` (`:703`) for the breaker alert.
 
 ## Edge cases
@@ -244,8 +252,7 @@ in the failure style.
   `REVISE_LIVELOCK` with a summary; a merge resets; `0` disables. **Assert the
   detector fires on the concurrent loop, not only the sequential one** — that is
   the dead-code lock. `FAILURE_STOP_REASONS`, `STOP_REASON_GLOSS` and
-  `_TERMINAL_BAD` all carry the new reason (and the three previously-missing
-  ones).
+  `_TERMINAL_BAD` all carry the new reason.
 - **The repro**: a scripted run where the reviewer rejects with an identical
   finding forever terminates in escalation → stop, instead of looping to the
   iteration cap. Under today's code the same fixture loops; that is the

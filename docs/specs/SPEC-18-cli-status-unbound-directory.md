@@ -97,6 +97,13 @@ as `NO_PROJECT_MSG`, `render/__init__.py:56-60`, which already names `new` /
 
 Style follows the existing conventions: `_STATUS_STYLE` (`render/status.py:17-23`)
 for run states and `_TERMINAL_BAD` (`:26-30`) for genuinely bad stop reasons, so
+   — **and fix that set while here (Δ review):** it is missing
+   `gate_not_improving`, `planning_churn` and `dispatch_wedged`, which Specs
+   04/07/10 added without updating it. Its only consumer is the stop-reason
+   styling at `:68`, this spec's own surface, so the correction belongs here
+   rather than in [Spec 16](SPEC-16-revise-chain-circuit-breaker.md) — which then
+   merely appends its own reason and carries no ordering constraint against this
+   spec. Continuing:
 a failed run reads as failed here too. `--json` returns the raw payload
 unchanged (`make_render`, `commands/_base.py`), so scripts get the full list.
 
@@ -145,6 +152,7 @@ bound rendering is byte-identical to today.
 - **Item 2**: rendering with (a) no projects → existing message only, (b) one
   running + two idle → running first, hints present, (c) 8 projects → 5 rows +
   `+3 more`, (d) a project with a `_TERMINAL_BAD` stop reason → bad style,
+  including each of the three reasons this spec backfills,
   (e) bound payload → byte-identical to the current golden.
 - `--json` returns the full list unfiltered.
 - CLI test suite + `ruff`.
