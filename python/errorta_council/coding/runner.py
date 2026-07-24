@@ -446,6 +446,29 @@ _grounding_log = logging.getLogger("errorta.grounding")
 _CORRECTIVE_PREFIXES = ("fix tests:", "revise:", "resolve conflict:")
 
 
+_FIX_TASK_STDERR_CAP = 2000
+
+
+def _failed_stderr_appendix(results: list[Any]) -> str:
+    """Spec 11 (P1b): the failing commands' verbatim ``stderr_preview``, capped.
+
+    The fix-task detail historically carried only ``cmd=status/exit_code`` — the
+    raw error (``TestRunResult.stderr_preview``, already captured by the tester)
+    was dropped, so the fixing dev never saw WHY the test failed. Reassemble the
+    non-passing results' stderr previews into a bounded block to append to the
+    fix-task detail. Empty when nothing failed or no stderr was captured."""
+    parts: list[str] = []
+    for r in results or []:
+        if getattr(r, "passed", True):
+            continue
+        preview = str(getattr(r, "stderr_preview", "") or "").strip()
+        if preview:
+            parts.append(f"[{getattr(r, 'command_id', '?')}] {preview}")
+    if not parts:
+        return ""
+    return "\n".join(parts)[:_FIX_TASK_STDERR_CAP]
+
+
 def _reason_from_findings(findings: list[dict[str, Any]]) -> str:
     """F141 WS-D: a one-line "why this was sent back" from reviewer findings.
     Prefers blocking findings; names the first + its file + the remaining count."""
@@ -2401,8 +2424,15 @@ def build_run_turn(
     *,
     guardrail_enabled: bool,
     should_cancel: Optional[Callable[[], bool]] = None,
+    dev_repo_read: bool = False,
 ) -> Callable[[Any, Any], TurnOutcome]:
-    """Construct the ``run_turn`` the autonomy loop drives."""
+    """Construct the ``run_turn`` the autonomy loop drives.
+
+    Spec 11 (P1a): ``dev_repo_read`` (the ``CodingAutonomyPolicy`` field) enables
+    read-only in-turn worktree retrieval for DEV turns. Default False so the ~50
+    direct test callers of this factory keep the legacy single-shot behavior; the
+    production ``CodingRunner.run`` passes ``policy.dev_repo_read`` (default True).
+    """
     import logging
     import time
 
@@ -3215,8 +3245,23 @@ def build_run_turn(
                 if workspace is not None:
                     branch = workspace.start_task_branch(task.task_id)
                     readback = workspace.read_back(task_id=task.task_id)
+                # Spec 11 (P1a): when the dev_repo_read policy is on, tag a
+                # per-turn COPY of the member with the task worktree root so the
+                # gateway can run a claude_cli DEV turn read-only in-turn (cwd =
+                # worktree, Read/Grep/Glob only) — the dev can grep the rest of
+                # the repo and see both sides of a cross-file contract. A shallow
+                # copy so the shared member config is never mutated. Best-effort:
+                # any failure to resolve the root falls back to the unchanged
+                # member (single-shot empty-temp-dir path).
+                dev_member = member
+                if dev_repo_read and workspace is not None and branch is not None:
+                    try:
+                        repo_root = workspace.task_root(task.task_id, branch=branch)
+                        dev_member = {**member, "dev_repo_read_root": str(repo_root)}
+                    except Exception:  # noqa: BLE001 — retrieval is best-effort
+                        dev_member = member
                 parsed = _parse_member_turn(
-                    DEV, task.task_id, member, _dev_prompt(task, store, readback),
+                    DEV, task.task_id, dev_member, _dev_prompt(task, store, readback),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 if isinstance(parsed, TurnParseError):
                     store.record_decision(
@@ -3531,8 +3576,14 @@ def build_run_turn(
                 store.update_task(task.task_id, state="done")
                 if not session.passed:
                     store.update_pr(pr["pr_id"], status="changes_requested")
+                    # Spec 11 (P1b): carry the raw failing stderr into the
+                    # fix-task detail, not just cmd=status/exit_code.
+                    fix_detail = f"Tests failed: {exits}"
+                    appendix = _failed_stderr_appendix(session.results)
+                    if appendix:
+                        fix_detail += f"\n\nFailing test output:\n{appendix}"
                     store.add_task(title=f"fix tests: {pr['branch']}", role=DEV,
-                                   detail=f"Tests failed: {exits}")
+                                   detail=fix_detail)
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_tested", task=task)
 
@@ -3949,6 +4000,13 @@ def build_run_turn(
                     tests_failed_detail = "; ".join(
                         f"{r.command_id}={r.status}/{r.exit_code}"
                         for r in session.results)
+                    # Spec 11 (P1b): append the failing commands' raw stderr so
+                    # the fix task (filed below at "fix delivery tests") carries
+                    # the real error, not just cmd=status/exit_code.
+                    _appendix = _failed_stderr_appendix(session.results)
+                    if _appendix:
+                        tests_failed_detail += (
+                            f"\n\nFailing test output:\n{_appendix}")
                 store.record_decision(
                     title="delivery tests", context="delivery_review",
                     choice="tested_pass" if tests_passed else "tested_fail",
@@ -4056,6 +4114,15 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
         from errorta_council.gateway_local import LocalCouncilModelRequest
         tl = member.get("turn_limits") or {}
         gen = member.get("generation") or {}
+        # Spec 11 (P1a): the DEV-turn dispatch tags the (per-turn copy of the)
+        # member with the task worktree root when the dev_repo_read policy is on.
+        # Forward it through the gateway metadata so a claude_cli DEV turn runs
+        # read-only in-turn retrieval (cwd=worktree, Read/Grep/Glob only). Absent
+        # for planning/review turns and when the policy is off -> unchanged path.
+        metadata: dict[str, Any] = {}
+        repo_read_root = member.get("dev_repo_read_root")
+        if isinstance(repo_read_root, str) and repo_read_root.strip():
+            metadata["dev_repo_read_root"] = repo_read_root.strip()
         req = LocalCouncilModelRequest(
             role=str(member.get("role", "answerer")),
             route_id=str(member.get("gateway_route_id", "")),
@@ -4064,6 +4131,7 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
             messages=[{"role": "user", "content": prompt}],
             max_output_tokens=int(tl.get("max_output_tokens", 2048) or 2048),
             temperature=float(gen.get("temperature", 0.3) or 0.3),
+            metadata=metadata,
             # CLI-backed members (claude_cli/codex_cli/cursor_cli) run a full agentic loop per
             # turn and routinely need minutes — a 180s cap timed turns out
             # constantly (each crash requeues the task, so the team spun without
@@ -4215,7 +4283,8 @@ class CodingRunner:
         run_turn = build_run_turn(
             self.store, self.workspace, by_role, self.caller,
             guardrail_enabled=self.guardrail_enabled,
-            should_cancel=should_cancel)
+            should_cancel=should_cancel,
+            dev_repo_read=bool(getattr(policy, "dev_repo_read", False)))
         try:
             res = run_coding_loop(self.store, member_pairs, policy,
                                   run_turn=run_turn, counters=counters,

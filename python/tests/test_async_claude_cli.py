@@ -12,9 +12,9 @@ import json
 
 import pytest
 
+from errorta_council.gateway_local import FatalError, RetryableError
 from errorta_model_gateway.providers.async_base import AsyncProviderRequest
 from errorta_model_gateway.providers.async_claude_cli import ClaudeCliHandler
-from errorta_council.gateway_local import FatalError, RetryableError
 
 
 class _FakeProc:
@@ -152,6 +152,158 @@ async def test_constrained_argv_and_prompt_on_stdin_not_argv(monkeypatch):
     assert captured["kwargs"].get("start_new_session") is True
 
 
+# --------------------------------------------------------------------------- #
+# Spec 11 (P1a) — read-only in-turn worktree retrieval for DEV turns.
+# --------------------------------------------------------------------------- #
+
+_READONLY_TOOLS = {"Read", "Grep", "Glob"}
+# Anything that could write files, run commands, or hit the network. NONE of
+# these may ever appear in the retrieval allowlist — that would bypass the
+# coding_turn.v1 review envelope.
+_FORBIDDEN_TOOLS = {
+    "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput",
+    "KillShell", "WebFetch", "WebSearch", "Task",
+}
+
+
+def _req_with_worktree(root, model="opus", prompt="fix the audio init"):
+    return AsyncProviderRequest(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_output_tokens=2048, timeout_seconds=30,
+        extra={"metadata": {"dev_repo_read_root": str(root)}},
+    )
+
+
+def _tools_value(argv):
+    """The single string handed to --tools (empty string when disabled)."""
+    return argv[argv.index("--tools") + 1]
+
+
+@pytest.mark.asyncio
+async def test_dev_repo_read_sets_worktree_cwd_and_readonly_tools(monkeypatch, tmp_path):
+    """GOLDEN (config half): a DEV turn carrying a worktree root runs with
+    cwd=worktree, a READ-ONLY tool allowlist, and a raised turn budget — and NO
+    write/exec/network tool is in the allowlist."""
+    (tmp_path / "src").mkdir()
+    proc = _FakeProc(stdout=_ok_json(text=json.dumps(
+        {"schema_version": "coding_turn.v1", "role": "dev"})))
+    captured = _patch_exec(monkeypatch, proc)
+
+    await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    argv = captured["argv"]
+
+    # cwd is the REAL worktree, not an isolated temp dir.
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    # Read-only allowlist — exactly the three read tools, nothing else.
+    tools = {t for t in _tools_value(argv).split(",") if t}
+    assert tools == _READONLY_TOOLS
+    assert not (tools & _FORBIDDEN_TOOLS)
+    # Raised turn budget (a few read/grep calls before the envelope).
+    assert int(argv[argv.index("--max-turns") + 1]) > 1
+
+
+@pytest.mark.asyncio
+async def test_dev_repo_read_lets_the_model_reach_the_other_file(monkeypatch, tmp_path):
+    """GOLDEN (access half): reconstruct the window.Audio / window.AudioModule
+    two-file mismatch. With cwd=worktree the CLI process can actually READ the
+    producer file (audio.js) that the pre-baked context omitted. The fake CLI
+    reads it FROM ITS cwd and reports the symbol — proving the dev can now reach
+    the definition it previously couldn't see."""
+    src = tmp_path / "src"
+    src.mkdir()
+    # fileA references symbolX; fileB defines it under a DIFFERENT name.
+    (src / "main.js").write_text("if (window.Audio) { window.Audio.init(); }\n")
+    (src / "audio.js").write_text("window.AudioModule = { init() {} };\n")
+
+    import re
+
+    async def fake_exec(*argv, **kwargs):
+        # Simulate the read-only agentic loop: read audio.js from the cwd the
+        # runner set (the worktree), extract the registered global, and emit the
+        # correct fix envelope. If cwd were an empty temp dir this OPEN fails.
+        import os
+        cwd = kwargs["cwd"]
+        body = open(os.path.join(cwd, "src", "audio.js")).read()  # noqa: SIM115
+        m = re.search(r"window\.(\w+)\s*=", body)
+        found = m.group(1) if m else "NONE"
+        envelope = json.dumps({
+            "schema_version": "coding_turn.v1", "role": "dev",
+            "intent": {"kind": "tool_plan", "task_type": "implementation",
+                       "tool_calls": [{"tool": "code_write", "args": {
+                           "path": "src/main.js",
+                           "content": f"if (window.{found}) {{ window.{found}.init(); }}\n"}}]}})
+        return _FakeProc(stdout=_ok_json(text=envelope, out=42))
+
+    import errorta_model_gateway.providers._cli_common as common
+    monkeypatch.setattr(common.asyncio, "create_subprocess_exec", fake_exec)
+
+    r = await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    # The dev reached audio.js and produced the PRODUCER-side name it never had.
+    assert "AudioModule" in r.content
+    assert "window.Audio " not in r.content  # the wrong consumer-only guess is gone
+
+
+@pytest.mark.asyncio
+async def test_envelope_parses_after_tool_use_turns(monkeypatch, tmp_path):
+    """CRITICAL: enabling tools must not break envelope parsing. The CLI's
+    terminal result JSON (num_turns>1, i.e. tool-use turns preceded it) still
+    carries the coding_turn.v1 envelope as its final text, and the real
+    parse_coding_turn accepts it."""
+    tmp_path.joinpath("src").mkdir()
+    envelope = json.dumps({
+        "schema_version": "coding_turn.v1", "role": "dev", "task_id": "t1",
+        "intent": {"kind": "tool_plan", "task_type": "implementation",
+                   "tool_calls": [{"tool": "code_write",
+                                   "args": {"path": "src/main.js",
+                                            "content": "// fixed\n"}}]}})
+    # num_turns=4 => several tool-use turns happened before the final message.
+    result_json = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": envelope, "num_turns": 4,
+        "usage": {"input_tokens": 10, "output_tokens": 30},
+    }).encode("utf-8")
+    _patch_exec(monkeypatch, _FakeProc(stdout=result_json))
+
+    r = await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+
+    from errorta_council.coding.schemas import TurnParseError, parse_coding_turn
+    parsed = parse_coding_turn("dev", "t1", r.content)
+    assert not isinstance(parsed, TurnParseError)
+    assert parsed.intent.tool_calls[0].tool == "code_write"
+
+
+@pytest.mark.asyncio
+async def test_gate_off_absent_metadata_uses_tempdir_and_no_tools(monkeypatch):
+    """Gate OFF (no worktree metadata) => the legacy single-shot path is byte-for-
+    byte unchanged: empty tools, --max-turns 1, isolated temp-dir cwd."""
+    proc = _FakeProc(stdout=_ok_json())
+    captured = _patch_exec(monkeypatch, proc)
+    await ClaudeCliHandler().call(_req(), api_key=None)  # plain request, no extra
+    argv = captured["argv"]
+    assert _tools_value(argv) == ""                       # empty allowlist
+    assert argv[argv.index("--max-turns") + 1] == "1"     # single-shot
+    # cwd is an isolated temp dir (errorta-claude-cli-*), never a real tree.
+    assert "errorta-claude-cli-" in captured["kwargs"]["cwd"]
+
+
+@pytest.mark.asyncio
+async def test_nonexistent_worktree_root_fails_safe_to_tempdir(monkeypatch):
+    """A worktree root that does not exist must NOT be used as cwd — fall back to
+    the isolated temp dir + empty tools (never point cwd at a bad path)."""
+    proc = _FakeProc(stdout=_ok_json())
+    captured = _patch_exec(monkeypatch, proc)
+    req = AsyncProviderRequest(
+        model="opus", messages=[{"role": "user", "content": "hi"}],
+        max_output_tokens=64, timeout_seconds=5,
+        extra={"metadata": {"dev_repo_read_root": "/no/such/worktree/xyz"}})
+    await ClaudeCliHandler().call(req, api_key=None)
+    argv = captured["argv"]
+    assert _tools_value(argv) == ""
+    assert argv[argv.index("--max-turns") + 1] == "1"
+    assert "errorta-claude-cli-" in captured["kwargs"]["cwd"]
+
+
 @pytest.mark.asyncio
 async def test_not_installed(monkeypatch):
     _patch_exec(monkeypatch, raises=FileNotFoundError("claude"))
@@ -214,8 +366,8 @@ def test_validate_route():
 def test_resolves_claude_outside_path(monkeypatch, tmp_path):
     """The bundled .app has a minimal PATH that excludes ~/.local/bin. The
     handler must still find claude in a known install location."""
-    import errorta_model_gateway.providers.async_claude_cli as mod
     import errorta_model_gateway.providers._cli_common as common
+    import errorta_model_gateway.providers.async_claude_cli as mod
 
     # Not on PATH, and home points at an empty tmp dir...
     monkeypatch.setattr(common.shutil, "which", lambda _name, path=None: None)

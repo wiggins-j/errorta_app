@@ -129,7 +129,17 @@ burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
 `delivery_review_stalled` when the delivery review keeps rejecting the integrated
 result instead of looping to budget), `hot_file_threshold` (2) /
 `hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
-F159 hot-file serializer.
+F159 hot-file serializer, `dev_repo_read` (`false`, Spec 11 — see below).
+
+**Spec 11 — `dev_repo_read`.** When `true` (opt-in; default `false`) a DEV turn can READ its task
+worktree in-turn: the `claude_cli` vendor runs with cwd set to the worktree and a
+read-only tool allowlist (`Read`/`Grep`/`Glob` only — no write, no exec, no
+network), and a raised turn budget, so the dev can grep the rest of the repo and
+see both sides of a cross-file contract instead of reasoning from a pre-baked
+half-context. The dev's actual edits still flow only through the `coding_turn.v1`
+envelope (`execute_dev_turn`), never a Write tool. Planning/review turns and
+non-`claude_cli` vendors are unaffected. Set `false` to restore the single-shot
+empty-temp-dir behavior for dev turns.
 
 **F159 — hot files.** A file that appears in `hot_file_threshold` PRs' merge
 conflicts is "hot": parallel edits to it are serialized (only one task holds it
@@ -316,6 +326,7 @@ and FastAPI routers. Update the prose and this contract together.
     "completion_refused_limit": 2,
     "convergence_stall_limit": 20,
     "delivery_review_round_limit": 3,
+    "dev_repo_read": false,
     "foundation_stall_limit": 12,
     "gate_stall_limit": 8,
     "hot_file_escalation_threshold": 4,

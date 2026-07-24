@@ -18,6 +18,7 @@ Guarantees:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import subprocess
@@ -363,15 +364,29 @@ async def run_cli_subprocess(
     cwd_prefix: str,
     max_bytes: int = _MAX_OUTPUT_BYTES,
     grace: float = _TERMINATE_GRACE_SECONDS,
+    cwd_override: str | None = None,
 ) -> tuple[str, str, int]:
     """Run one CLI invocation; return (stdout, stderr, returncode).
 
     Raises ``FatalError`` (binary missing) / ``RetryableError`` (timeout) from
     ``errorta_council.gateway_local`` (imported lazily to avoid a cycle).
+
+    Spec 11 (P1a): by default the subprocess runs in an **isolated empty temp
+    cwd** so the sidecar's project config can't contaminate the prompt. When
+    ``cwd_override`` names an existing directory (the caller-supplied task
+    worktree root, for a read-only in-turn retrieval turn) the subprocess runs
+    there instead — and, unlike the temp dir, it is NOT deleted on exit
+    (``nullcontext``): it is the real worktree, owned by the workspace. The
+    caller is responsible for ensuring the vendor's tool policy is read-only
+    when it points cwd at a real tree; this function only chooses the cwd.
     """
     from errorta_council.gateway_local import FatalError, RetryableError
 
-    with tempfile.TemporaryDirectory(prefix=cwd_prefix) as cwd:
+    if cwd_override and os.path.isdir(cwd_override):
+        cwd_ctx: Any = contextlib.nullcontext(cwd_override)
+    else:
+        cwd_ctx = tempfile.TemporaryDirectory(prefix=cwd_prefix)
+    with cwd_ctx as cwd:
         async with semaphore:
             try:
                 proc = await asyncio.create_subprocess_exec(
