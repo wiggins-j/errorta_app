@@ -141,6 +141,19 @@ envelope (`execute_dev_turn`), never a Write tool. Planning/review turns and
 non-`claude_cli` vendors are unaffected. Set `false` to restore the single-shot
 empty-temp-dir behavior for dev turns.
 
+**Spec 14 — `reviewer_repo_read`.** The same read-only in-worktree retrieval, for
+REVIEWER (and strict-mode PM PR-review) turns: the reviewer opens the files the
+diff only shows a hunk of, instead of judging a diff excerpt blind. It also
+enables two grounding checks: every **blocking finding must cite a file** (an
+uncited one is flagged advisory, not a merge blocker — it can never wedge a PR on
+a claim with no file behind it), and an **empty approval produced without reading
+the code** (the CLI's `num_turns` shows it ran no Read/Grep) is retried once and,
+if still ungrounded, accepted but surfaced as a `review_ungrounded` alert — never
+blocked. `review_min_latency_ms` (default `0`, off) is the latency fallback for
+vendors that don't report a turn count. `review_screenshot` (default off) is a P2
+follow-up (attach a headless screenshot of the running head to visual-DoD
+reviews) — **not yet implemented**.
+
 **F159 — hot files.** A file that appears in `hot_file_threshold` PRs' merge
 conflicts is "hot": parallel edits to it are serialized (only one task holds it
 until that task's PR merges), so parallel devs stop thrashing on a shared file.

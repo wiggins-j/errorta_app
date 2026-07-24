@@ -1044,6 +1044,12 @@ class LedgerStore:
                 # unrelated rejection of a foundation-UNLOCKING PR can be surfaced
                 # instead of silently holding the concurrency clamp at 1 forever.
                 "unlocks_foundation": False,
+                # Spec 14: review-grounding evidence, so a rubber-stamp approval is
+                # visible in `errorta prs` after the fact. review_grounded = the
+                # reviewer read the worktree (num_turns > 1); review_ungrounded = it
+                # approved empty without reading, twice (accepted but flagged).
+                "review_grounded": None, "review_num_turns": None,
+                "review_ungrounded": False,
                 "created_at": _now(), "updated_at": _now(),
             }
             prs[pr["pr_id"]] = pr

@@ -398,7 +398,7 @@ in place.
 | `turn` | One turn's transcript + Context Report. | `--task`, `--turn` |
 | `board` | Backlog as todo / doing / blocked / done columns. | `--watch` |
 | `tasks` | Backlog as a compact status table. | `--watch` |
-| `prs` | Pull requests (branch-per-task review / test / merge state). | `--watch` |
+| `prs` | Pull requests (branch-per-task review / test / merge state; incl. Spec 14 review-grounding evidence — whether the reviewer read the worktree). | `--watch` |
 | `pr` | One PR's detail + worktree diff (via `delta`/pager if present). | `--id` |
 | `tokens` | Token usage rollup (by role / route / member; measured vs. estimated). | `--watch` |
 | `attention [(read)\|resolve <signal>]` ‡ | Problems + alerts (read), or resolve a signal. | `--state`, `--action`, `--suggestion-id`, `--correction-file`, `--watch`, `--yes` |

@@ -79,7 +79,8 @@ _BINARY = "claude"
 # execute_dev_turn, never a Write tool. If a future CLI changes ``--tools``
 # semantics such that this allowlist can no longer exclude writes/exec, this
 # branch MUST NOT ship — fall back to the empty-tools default.
-_DEV_REPO_READ_TOOLS = "Read,Grep,Glob"
+_REPO_READ_TOOLS = "Read,Grep,Glob"
+_DEV_REPO_READ_TOOLS = _REPO_READ_TOOLS  # Spec 14: back-compat alias
 # Bounded turn budget so the model can do several read/grep calls before its
 # final envelope, without rabbit-holing. The final assistant message (the
 # envelope) is what the parser reads; preceding tool-use turns do not break
@@ -95,7 +96,8 @@ _DEV_REPO_READ_TOOLS = "Read,Grep,Glob"
 # fallback in ``ClaudeCliHandler.call`` is the second line of defence — raising
 # this value reduces how often that fallback (which throws away the retrieval)
 # has to fire.
-_DEV_REPO_READ_MAX_TURNS = 16
+_REPO_READ_MAX_TURNS = 16
+_DEV_REPO_READ_MAX_TURNS = _REPO_READ_MAX_TURNS  # Spec 14: back-compat alias
 
 # A GUI .app launched from Finder/Dock inherits a minimal PATH (/usr/bin:/bin:…)
 # that excludes the user-level dirs where `claude` is typically installed. So we
@@ -177,14 +179,18 @@ _DEFAULT_ROUTES = [
 ]
 
 
-def _dev_repo_read_root(request: AsyncProviderRequest) -> str | None:
-    """Spec 11 (P1a): the task worktree root a DEV turn asked us to read, or None.
+def _repo_read_root(request: AsyncProviderRequest) -> str | None:
+    """Spec 11 (P1a) / Spec 14: the task worktree root a turn asked us to read,
+    read-only, or None.
 
-    Threaded as ``request.extra["metadata"]["dev_repo_read_root"]`` by the runner
-    (``gateway_member_caller``), which only sets it on the DEV path when the
-    ``dev_repo_read`` policy is on. Returns the path only when it is a non-empty
-    string naming an existing directory; every other shape (missing, wrong type,
-    empty, nonexistent) yields None so the caller falls back to the single-shot
+    Threaded as ``request.extra["metadata"]["repo_read_root"]`` by the runner
+    (``gateway_member_caller``) on any turn granted in-worktree retrieval — the DEV
+    turn when ``dev_repo_read`` is on (Spec 11), and now the REVIEWER / PM-review
+    turn when ``reviewer_repo_read`` is on (Spec 14). The legacy
+    ``dev_repo_read_root`` key is still accepted so a mixed-version sidecar/gateway
+    pair keeps working. Returns the path only when it is a non-empty string naming
+    an existing directory; every other shape (missing, wrong type, empty,
+    nonexistent) yields None so the caller falls back to the single-shot
     empty-temp-dir default — fail safe, never point cwd at a bad/relative path.
     """
     extra = getattr(request, "extra", None)
@@ -193,7 +199,7 @@ def _dev_repo_read_root(request: AsyncProviderRequest) -> str | None:
     meta = extra.get("metadata")
     if not isinstance(meta, dict):
         return None
-    root = meta.get("dev_repo_read_root")
+    root = meta.get("repo_read_root") or meta.get("dev_repo_read_root")
     if not isinstance(root, str) or not root.strip():
         return None
     root = root.strip()
@@ -267,7 +273,7 @@ class ClaudeCliHandler:
         # requesting read-only in-turn retrieval. Only honor a non-empty string
         # pointing at an existing directory; anything else falls back to the
         # single-shot default (fail safe).
-        repo_read_root = _dev_repo_read_root(request)
+        repo_read_root = _repo_read_root(request)
 
         # --tools "" is load-bearing: empty allowed-tools = no file/network side
         # effects. --max-turns 1 is belt-and-suspenders. Prompt on stdin (shared
@@ -295,10 +301,10 @@ class ClaudeCliHandler:
             attempts.append((
                 [
                     binary, "-p",
-                    "--tools", _DEV_REPO_READ_TOOLS,
+                    "--tools", _REPO_READ_TOOLS,
                     "--output-format", "json",
                     "--model", model,
-                    "--max-turns", str(_DEV_REPO_READ_MAX_TURNS),
+                    "--max-turns", str(_REPO_READ_MAX_TURNS),
                 ],
                 repo_read_root,
             ))
@@ -372,7 +378,7 @@ class ClaudeCliHandler:
                 "claude_cli dev_repo_read retrieval returned an empty result "
                 "(num_turns=%s, max_turns=%s, cwd=%s); retrieval turn exhausted "
                 "its budget — falling back to the plain no-tools invocation",
-                obj.get("num_turns"), _DEV_REPO_READ_MAX_TURNS, cwd_override,
+                obj.get("num_turns"), _REPO_READ_MAX_TURNS, cwd_override,
             )
         duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -402,6 +408,9 @@ class ClaudeCliHandler:
             else None
         )
 
+        # Spec 14: surface the CLI's agentic turn count so a reviewer verdict can be
+        # told grounded (it ran Read/Grep before deciding) from a reflex.
+        _num_turns = obj.get("num_turns")
         return AsyncProviderResult(
             content=content,
             provider_class=self.provider_class,
@@ -412,6 +421,7 @@ class ClaudeCliHandler:
             raw_usage_available=(input_tokens is not None and output_tokens is not None),
             cache_read_input_tokens=cache_read_input_tokens,
             cache_write_input_tokens=cache_write_input_tokens,
+            num_turns=_num_turns if isinstance(_num_turns, int) else None,
         )
 
     def resolve_details(self, *, override_path: str | None = None) -> dict[str, Any]:

@@ -1870,6 +1870,17 @@ def _review_pr_prompt_segments(
         "out-of-scope future work, not a defect in this PR. Distinguish 'missing "
         "part of THIS task's scope' (block) from 'missing another task's work' "
         "(fine). The North Star / Definition of Done are directional context only.\n"
+        # Spec 14 (Item 3): a blocking finding must cite the file it is about, so a
+        # claim about the world with no file behind it can't wedge the PR.
+        "Every BLOCKING finding MUST name the file it concerns in \"path\" "
+        "(a file:line in the body is better) — an uncited blocking finding is "
+        "treated as advisory, not a merge blocker.\n"
+        # Spec 14 (Item 5 / Phase 6): if the acceptance-gate output shown above
+        # contradicts what this PR claims, that IS a blocking finding — cite the
+        # failing file.
+        "If acceptance-gate output is shown above and it contradicts this PR's "
+        "claim (e.g. the PR says a level is non-trivial but the gate solves it in "
+        "0 strokes), request changes with a blocking finding citing the file.\n"
     )
     envelope = (
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
@@ -2595,6 +2606,58 @@ def refresh_foundation_status(store: LedgerStore, workspace: Any) -> str:
     return status
 
 
+def _last_turn_grounding() -> tuple[Optional[int], Optional[int]]:
+    """Spec 14: (num_turns, duration_ms) of the most recent member call, from the
+    F143 thread-local usage sink. ``num_turns`` is the claude CLI's agentic turn
+    count (None for vendors that don't report it); ``duration_ms`` is the latency
+    fallback. Both None when unavailable."""
+    last = getattr(_usage_sink, "last", None)
+    if not isinstance(last, dict):
+        return None, None
+    nt = last.get("num_turns")
+    dur = last.get("duration_ms")
+    return (nt if isinstance(nt, int) else None,
+            dur if isinstance(dur, int) else None)
+
+
+def _is_empty_approval(parsed: Any, head: str) -> bool:
+    """Spec 14: a fresh-head approval that filed NO findings — the shape a reflex
+    rubber-stamp takes. A parse error, a stale head, or any findings disqualify."""
+    if isinstance(parsed, TurnParseError):
+        return False
+    intent = getattr(parsed, "intent", None)
+    if intent is None or getattr(intent, "reviewed_head", None) != head:
+        return False
+    return bool(getattr(intent, "approved", False)) and not getattr(
+        intent, "findings", None)
+
+
+def _mark_finding_citations(findings: list[dict[str, Any]], *, workspace: Any,
+                            pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """Spec 14 (Item 3): flag every BLOCKING finding whose ``path`` is empty or not
+    in the PR tree with ``cited: false``. Severity and the ``approved`` verdict are
+    UNTOUCHED — the PR still goes changes_requested; this is a quality signal
+    (consumed by Spec 15, which decides whether the rework task is spawned), not a
+    re-scoring. A well-formed finding that cites a changed/known file is
+    ``cited: true``. Non-blocking findings are left as-is."""
+    try:
+        in_tree = set(workspace.changed_paths(pr["branch"])) if workspace else set()
+    except Exception:  # noqa: BLE001
+        in_tree = set()
+    try:
+        in_tree |= set(workspace.list_files(scope="master")) if workspace else set()
+    except Exception:  # noqa: BLE001
+        pass
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        g = dict(f)
+        if g.get("blocking"):
+            path = str(g.get("path") or "").strip()
+            g["cited"] = bool(path) and (not in_tree or path in in_tree)
+        out.append(g)
+    return out
+
+
 def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
               should_cancel: Optional[Callable[[], bool]] = None) -> Any:
     """Spec 12 (S1): run EVERY registered command (unit + acceptance) against the
@@ -2858,6 +2921,8 @@ def build_run_turn(
     guardrail_enabled: bool,
     should_cancel: Optional[Callable[[], bool]] = None,
     dev_repo_read: bool = False,
+    reviewer_repo_read: bool = False,
+    review_min_latency_ms: int = 0,
 ) -> Callable[[Any, Any], TurnOutcome]:
     """Construct the ``run_turn`` the autonomy loop drives.
 
@@ -3743,7 +3808,8 @@ def build_run_turn(
                 if dev_repo_read and workspace is not None and branch is not None:
                     try:
                         repo_root = workspace.task_root(task.task_id, branch=branch)
-                        dev_member = {**member, "dev_repo_read_root": str(repo_root)}
+                        # Spec 14: canonical `repo_read_root` (was dev_repo_read_root).
+                        dev_member = {**member, "repo_read_root": str(repo_root)}
                     except Exception:  # noqa: BLE001 — retrieval is best-effort
                         dev_member = member
                 parsed = _parse_member_turn(
@@ -3887,13 +3953,77 @@ def build_run_turn(
                     return TurnOutcome(kind="noop")
                 diff = workspace.pr_diff(pr["branch"])
                 ctx = _review_project_context(store, workspace, pr)
-                parsed = _parse_member_turn(
-                    REVIEWER, task.task_id, member,
-                    _review_pr_prompt(
+                # Spec 14 (Item 2): mount the PR worktree read-only on a per-turn
+                # member copy when reviewer_repo_read is on, so the reviewer can open
+                # the files the diff only shows a hunk of. Shallow copy (shared config
+                # never mutated); best-effort (a resolution failure falls back to the
+                # plain single-shot path — retrieval must never fail a turn that would
+                # otherwise succeed).
+                review_member = member
+                review_root = None
+                if reviewer_repo_read:
+                    try:
+                        review_root = workspace.task_root(pr["task_id"],
+                                                          branch=pr["branch"])
+                        review_member = {**member, "repo_read_root": str(review_root)}
+                    except Exception:  # noqa: BLE001 — retrieval is best-effort
+                        review_member, review_root = member, None
+
+                def _review_once(extra: str = "") -> Any:
+                    prompt = _review_pr_prompt(
                         task, pr, diff, ctx,
                         scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
-                        gate_text=_gate_state.latest_gate_text(store)),
-                    context=f"task {task.task_id}", related_task_ids=[task.task_id])
+                        gate_text=_gate_state.latest_gate_text(store))
+                    return _parse_member_turn(
+                        REVIEWER, task.task_id, review_member, prompt + extra,
+                        context=f"task {task.task_id}",
+                        related_task_ids=[task.task_id])
+
+                parsed = _review_once()
+                # Spec 14 (Item 4/5): grounding check. `num_turns > 1` means the
+                # reviewer actually ran Read/Grep before deciding; `== 1` (or, for a
+                # vendor that doesn't report it, a sub-floor latency) on an EMPTY
+                # approval is a reflex — retry ONCE asking it to open the changed
+                # files. A second ungrounded verdict is ACCEPTED but surfaced, never
+                # blocked (blocking would be a new way to wedge a run).
+                num_turns, dur_ms = _last_turn_grounding()
+                retrieval = review_root is not None
+                review_ungrounded = False
+                if retrieval and _is_empty_approval(parsed, pr["head"]):
+                    reflex = (num_turns is not None and num_turns <= 1)
+                    if num_turns is None and review_min_latency_ms > 0:
+                        reflex = (dur_ms is not None and dur_ms < review_min_latency_ms)
+                    if reflex:
+                        parsed = _review_once(
+                            "\nBefore approving, OPEN the files this PR changes with "
+                            "Read/Grep and confirm they are correct — do not approve "
+                            "without having read them.\n")
+                        num_turns, dur_ms = _last_turn_grounding()
+                        still_reflex = (
+                            _is_empty_approval(parsed, pr["head"])
+                            and ((num_turns is not None and num_turns <= 1)
+                                 or (num_turns is None and review_min_latency_ms > 0
+                                     and dur_ms is not None
+                                     and dur_ms < review_min_latency_ms)))
+                        if still_reflex:
+                            review_ungrounded = True
+                            store.record_decision(
+                                title=f"ungrounded review verdict: {pr['branch']}",
+                                context=f"pr {pr['pr_id']}", choice="review_ungrounded",
+                                rationale=("the reviewer approved with no findings "
+                                           "without reading the worktree, twice; "
+                                           "verdict accepted but flagged"),
+                                related_task_ids=[task.task_id, pr["task_id"]])
+                            try:
+                                from . import attention
+                                attention.raise_review_alert(
+                                    store.project_id, stage="development",
+                                    title="reviewer approved without reading the code",
+                                    summary=(f"PR on branch {pr['branch']} was approved "
+                                             "with an empty, ungrounded verdict."),
+                                    store=store)
+                            except Exception:  # noqa: BLE001
+                                pass
                 # F126: persist the reviewer's findings on the PR so the task
                 # detail can show WHY a PR got "changes requested", not just that
                 # it did. (Parse-error / stale-head rejections have no structured
@@ -3916,14 +4046,17 @@ def build_run_turn(
                     approved = False
                 else:
                     approved = bool(parsed.intent.approved)
-                    review_findings = [
-                        {"severity": f.severity, "title": f.title, "body": f.body,
-                         "path": f.path, "blocking": f.severity == "blocking"}
-                        for f in parsed.intent.findings
-                    ]
+                    review_findings = _mark_finding_citations(
+                        [{"severity": f.severity, "title": f.title, "body": f.body,
+                          "path": f.path, "blocking": f.severity == "blocking"}
+                         for f in parsed.intent.findings],
+                        workspace=workspace, pr=pr)
                 store.update_pr(pr["pr_id"], reviewer_approved=approved,
                                 reviewed_head=pr["head"],
-                                review_findings=review_findings)
+                                review_findings=review_findings,
+                                review_grounded=bool(retrieval and (num_turns or 0) > 1),
+                                review_num_turns=num_turns,
+                                review_ungrounded=review_ungrounded)
                 store.record_decision(
                     title=f"review verdict: {pr['branch']}",
                     context=f"pr {pr['pr_id']}",
@@ -4072,8 +4205,18 @@ def build_run_turn(
                     return TurnOutcome(kind="noop")
                 diff = workspace.pr_diff(pr["branch"])
                 ctx = _review_project_context(store, workspace, pr)
+                # Spec 14 (Item 2): mount the PR worktree for the PM's review too —
+                # otherwise the second half of the strict-mode dual review stays
+                # blind. Best-effort, per-turn copy (shared config never mutated).
+                pm_review_member = member
+                if reviewer_repo_read:
+                    try:
+                        _pmr = workspace.task_root(pr["task_id"], branch=pr["branch"])
+                        pm_review_member = {**member, "repo_read_root": str(_pmr)}
+                    except Exception:  # noqa: BLE001
+                        pm_review_member = member
                 parsed = _parse_member_turn(
-                    REVIEWER, task.task_id, member,
+                    REVIEWER, task.task_id, pm_review_member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
                         scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
@@ -4097,11 +4240,11 @@ def build_run_turn(
                     approved = False
                 else:
                     approved = bool(parsed.intent.approved)
-                    pm_findings = [
-                        {"severity": f.severity, "title": f.title, "body": f.body,
-                         "path": f.path, "blocking": f.severity == "blocking"}
-                        for f in parsed.intent.findings
-                    ]
+                    pm_findings = _mark_finding_citations(
+                        [{"severity": f.severity, "title": f.title, "body": f.body,
+                          "path": f.path, "blocking": f.severity == "blocking"}
+                         for f in parsed.intent.findings],
+                        workspace=workspace, pr=pr)
                 store.update_pr(pr["pr_id"], pm_reviewer_approved=approved,
                                 pm_reviewed_head=pr["head"])
                 store.record_decision(
@@ -4580,15 +4723,19 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
         from errorta_council.gateway_local import LocalCouncilModelRequest
         tl = member.get("turn_limits") or {}
         gen = member.get("generation") or {}
-        # Spec 11 (P1a): the DEV-turn dispatch tags the (per-turn copy of the)
-        # member with the task worktree root when the dev_repo_read policy is on.
-        # Forward it through the gateway metadata so a claude_cli DEV turn runs
-        # read-only in-turn retrieval (cwd=worktree, Read/Grep/Glob only). Absent
-        # for planning/review turns and when the policy is off -> unchanged path.
+        # Spec 11 (P1a) / Spec 14: the DEV-turn dispatch (dev_repo_read) and the
+        # REVIEWER / PM-review dispatch (reviewer_repo_read) tag the per-turn copy
+        # of the member with the task worktree root. Forward it through the gateway
+        # metadata so a claude_cli turn runs read-only in-turn retrieval
+        # (cwd=worktree, Read/Grep/Glob only). Absent for planning turns and when
+        # the policy is off -> unchanged single-shot path. The provider accepts the
+        # generic `repo_read_root`; the legacy `dev_repo_read_root` key is still
+        # forwarded so a mixed-version pair keeps working.
         metadata: dict[str, Any] = {}
-        repo_read_root = member.get("dev_repo_read_root")
+        repo_read_root = (member.get("repo_read_root")
+                          or member.get("dev_repo_read_root"))
         if isinstance(repo_read_root, str) and repo_read_root.strip():
-            metadata["dev_repo_read_root"] = repo_read_root.strip()
+            metadata["repo_read_root"] = repo_read_root.strip()
         req = LocalCouncilModelRequest(
             role=str(member.get("role", "answerer")),
             route_id=str(member.get("gateway_route_id", "")),
@@ -4649,6 +4796,11 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
             "output_tokens": getattr(result, "output_tokens", None),
             "cache_read_input_tokens": getattr(result, "cache_read_input_tokens", None),
             "cache_write_input_tokens": getattr(result, "cache_write_input_tokens", None),
+            # Spec 14: agentic turn count (claude CLI) for the reviewer-grounding
+            # check; None for providers that don't report it. duration_ms is the
+            # latency fallback for vendors that don't report num_turns.
+            "num_turns": getattr(result, "num_turns", None),
+            "duration_ms": getattr(result, "duration_ms", None),
             "estimated_input": estimated_input,
             "estimated_output": estimated_output,
             # The RAW (uncalibrated) Layer-1 input estimate — "what Errorta actually
@@ -4750,7 +4902,9 @@ class CodingRunner:
             self.store, self.workspace, by_role, self.caller,
             guardrail_enabled=self.guardrail_enabled,
             should_cancel=should_cancel,
-            dev_repo_read=bool(getattr(policy, "dev_repo_read", False)))
+            dev_repo_read=bool(getattr(policy, "dev_repo_read", False)),
+            reviewer_repo_read=bool(getattr(policy, "reviewer_repo_read", False)),
+            review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)))
         try:
             res = run_coding_loop(self.store, member_pairs, policy,
                                   run_turn=run_turn, counters=counters,

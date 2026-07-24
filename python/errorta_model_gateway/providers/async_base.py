@@ -92,6 +92,11 @@ class AsyncProviderResult:
     """
     cache_read_input_tokens: int | None = None
     cache_write_input_tokens: int | None = None
+    num_turns: int | None = None
+    """Spec 14: agentic tool-use turn count for CLI providers that report it (the
+    ``claude`` CLI's ``num_turns``). ``None`` when the provider doesn't report one.
+    Used to tell a grounded reviewer verdict (it read the repo, num_turns > 1) from
+    an ungrounded reflex (num_turns == 1)."""
 
 
 @dataclass(frozen=True)

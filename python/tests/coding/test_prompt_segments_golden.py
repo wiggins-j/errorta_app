@@ -346,6 +346,13 @@ def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> s
         "out-of-scope future work, not a defect in this PR. Distinguish 'missing "
         "part of THIS task's scope' (block) from 'missing another task's work' "
         "(fine). The North Star / Definition of Done are directional context only.\n"
+        # Spec 14 (Item 3 + Phase 6): the citation rule + gate-contradiction clause.
+        "Every BLOCKING finding MUST name the file it concerns in \"path\" "
+        "(a file:line in the body is better) — an uncited blocking finding is "
+        "treated as advisory, not a merge blocker.\n"
+        "If acceptance-gate output is shown above and it contradicts this PR's "
+        "claim (e.g. the PR says a level is non-trivial but the gate solves it in "
+        "0 strokes), request changes with a blocking finding citing the file.\n"
         f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"
         f"{_gate_text_for_review()}"          # Spec 12 inserts here
         f"{trunc_note}"
