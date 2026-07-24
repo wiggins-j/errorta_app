@@ -347,7 +347,12 @@ errorta team apply --yes
   that provider's routes. Discover routes with `errorta models`.
 - A coding team has exactly one PM, so `team add --pm --count N` with `N > 1` is
   rejected. "N devs" is *capacity*: parallel dev work ramps as the project's
-  foundation lands and the PM splits the backlog.
+  foundation lands and the PM splits the backlog. A **buildless web** project
+  (Spec 13) counts an `index.html` whose relative `<script src>`/`<link>` graph
+  resolves against files on master as a complete foundation — it needs no build
+  manifest, so the clamp lifts without a `package.json`. When a foundation PR is
+  held up by an off-scope rejection, `errorta attention` surfaces a
+  `foundation_deadlock` alert naming it.
 
 The lower-level `set <role> <route>` (one per role), `pool <role> <r,r,…>`,
 `mode`, `enable\|disable`, and `room <room_id>` (Council-room backing) still work.

@@ -1038,6 +1038,12 @@ class LedgerStore:
                 # status="superseded" + this back-pointer to the merged PR. Seeded
                 # here so every PR record is shape-complete from birth.
                 "superseded_by_pr_id": None,
+                # Spec 13 (S2): set at PR-open when this branch adds a missing
+                # foundation element (a build manifest, or the first source
+                # entrypoint) while foundation_status is still pending — so an
+                # unrelated rejection of a foundation-UNLOCKING PR can be surfaced
+                # instead of silently holding the concurrency clamp at 1 forever.
+                "unlocks_foundation": False,
                 "created_at": _now(), "updated_at": _now(),
             }
             prs[pr["pr_id"]] = pr
