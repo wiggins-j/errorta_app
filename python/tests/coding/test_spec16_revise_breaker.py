@@ -106,3 +106,72 @@ def test_finding_class_spans_all_findings_not_just_the_first() -> None:
     one = _fc({"title": "a", "blocking": True})
     two = _fc({"title": "a", "blocking": True}, {"title": "b", "blocking": False})
     assert one != two
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 — the breaker.
+# --------------------------------------------------------------------------- #
+
+def _three_deep(s):
+    """Build a depth-3 revise lineage; r3 carries finding_class {gate, stale}."""
+    t0 = s.add_task(title="impl", role="dev")
+    p0 = s.record_pr(task_id=t0.task_id, branch="b0", head="h0", dev_member="m")
+    _r1, p1 = _revise(s, branch="b1", prev_pr=p0, depth=1)
+    _r2, p2 = _revise(s, branch="b2", prev_pr=p1, depth=2)
+    r3, p3 = _revise(s, branch="b3", prev_pr=p2, depth=3)
+    return r3, p3
+
+
+def test_three_same_class_rejections_break_the_chain(
+        tmp_errorta_home, tmp_path) -> None:
+    s = _store("b1", tmp_path)
+    r3, p3 = _three_deep(s)
+    # Reject the depth-3 PR with the SAME finding class r3 was created to address.
+    same = [{"blocking": True, "title": "stale gate", "body": ""}]
+    runner._handle_review_rejection(s, None, pr=p3, task=r3,
+                                    findings=same, source="reviewer")
+    revises = [t for t in s.list_tasks() if t.title.startswith("revise:")]
+    assert len(revises) == 3                       # r1,r2,r3 only — NO 4th revise
+    assert any(t.role == "pm" and t.title.startswith("revise chain broken")
+               for t in s.list_tasks())            # one PM re-plan task
+    assert any(d["choice"] == "revise_chain_broken" for d in s.list_decisions())
+    assert s.get_pr(p3["pr_id"])["status"] == "blocked"   # PR blocked (terminal)
+
+
+def test_different_class_at_the_cap_does_not_break(
+        tmp_errorta_home, tmp_path) -> None:
+    # The real-progress lock: a lineage working through DISTINCT defects is healthy
+    # and must not be broken, even at the depth cap.
+    s = _store("b2", tmp_path)
+    r3, p3 = _three_deep(s)
+    diff = [{"blocking": True, "title": "brand new defect in the solver", "body": ""}]
+    runner._handle_review_rejection(s, None, pr=p3, task=r3,
+                                    findings=diff, source="reviewer")
+    revises = [t for t in s.list_tasks() if t.title.startswith("revise:")]
+    assert len(revises) == 4                        # a 4th revise DID spawn
+    assert not any(d["choice"] == "revise_chain_broken" for d in s.list_decisions())
+    assert s.get_pr(p3["pr_id"])["status"] != "blocked"
+
+
+def test_blocked_pr_from_a_broken_chain_is_never_mergeable(
+        tmp_errorta_home, tmp_path) -> None:
+    s = _store("b3", tmp_path)
+    r3, p3 = _three_deep(s)
+    runner._handle_review_rejection(
+        s, None, pr=p3, task=r3,
+        findings=[{"blocking": True, "title": "stale gate"}], source="reviewer")
+    # blocked is in _set_mergeable_if_ready's terminal exclusion set.
+    assert s.get_pr(p3["pr_id"])["status"] == "blocked"
+
+
+def test_pm_review_arm_is_guarded_identically(tmp_errorta_home, tmp_path) -> None:
+    # Both the reviewer and strict-mode PM-review arms route through the one seam,
+    # so source="pm" breaks the chain exactly the same way.
+    s = _store("b4", tmp_path)
+    r3, p3 = _three_deep(s)
+    runner._handle_review_rejection(
+        s, None, pr=p3, task=r3,
+        findings=[{"blocking": True, "title": "stale gate"}], source="pm")
+    assert s.get_pr(p3["pr_id"])["status"] == "blocked"
+    revises = [t for t in s.list_tasks() if t.title.startswith("revise:")]
+    assert len(revises) == 3  # no 4th revise on the PM arm either
