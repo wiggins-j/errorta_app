@@ -250,6 +250,51 @@ def test_smoke_ran_cleanly_distinguishes_ran_from_unrunnable() -> None:
         _sess("completed", stderr="python: command not found"))[0] is False
 
 
+@pytest.mark.parametrize("stderr, stdout, expected_ran, note", [
+    # --- launch failures: the interpreter/entrypoint never ran a test → refuse.
+    ("node:internal/modules/cjs/loader ... code: 'ERR_MODULE_NOT_FOUND'", "",
+     False, "node loader failed before user code"),
+    ("ModuleNotFoundError: No module named 'pytest'", "",
+     False, "python import failed at collection (no test ran)"),
+    ("Error: Cannot find module 'jsdom'", "",
+     False, "node missing dependency, no test framework output"),
+    ("node acceptance.test.js: No such file or directory", "",
+     False, "entrypoint absent, no test framework output"),
+    ("/bin/sh: pytest: command not found", "",
+     False, "interpreter absent from PATH"),
+    # --- real tests that RAN and asserted on a missing file/module → register.
+    #     Each carries genuine test-framework output plus the ambiguous phrase.
+    ("AssertionError: expected level file to exist",
+     "1 passed, 1 failed in 0.03s\nE  FileNotFoundError: [Errno 2] "
+     "No such file or directory: 'levels/1.json'",
+     True, "pytest RAN, failed a file-I/O assertion"),
+    ("Error: Cannot find module '../levels/boss'",
+     "  gravity-golf\n    1 passing\n    1 failing\n"
+     "  ✗ loads the boss level",
+     True, "mocha RAN, failed a module-resolution assertion"),
+    ("",
+     "TAP version 13\nok 1 - boots\nnot ok 2 - opens save file: "
+     "ENOENT: no such file or directory",
+     True, "node:test/TAP RAN, failed on a missing file"),
+])
+def test_smoke_ran_cleanly_ambiguous_signatures_need_a_launch_signal(
+        stderr, stdout, expected_ran, note) -> None:
+    """The ambiguous phrases ("no such file or directory", "cannot find module",
+    "no module named") only refuse when NO test framework ran. A real test that
+    executed and asserted on a missing file/module is registered — the D1 signal
+    we want — while a genuine failed launch is still refused."""
+    from errorta_council.coding.testing import TestRunResult, TestRunSession
+
+    session = TestRunSession(
+        command_ids=["acc"], unknown_ids=[], passed=False,
+        results=[TestRunResult(
+            command_id="acc", argv_sha256="a" * 64, status="completed",
+            exit_code=1, passed=False, duration_ms=1, stdout_sha256="b" * 64,
+            stdout_preview=stdout, stderr_preview=stderr)])
+    ran, reason = gate_bootstrap._smoke_ran_cleanly(session)
+    assert ran is expected_ran, f"{note}: {reason}"
+
+
 def test_maybe_bootstrap_registers_a_runnable_command(
         tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
     """End-to-end command step with detection monkeypatched to a trivially-runnable
