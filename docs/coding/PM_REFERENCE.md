@@ -141,6 +141,19 @@ envelope (`execute_dev_turn`), never a Write tool. Planning/review turns and
 non-`claude_cli` vendors are unaffected. Set `false` to restore the single-shot
 empty-temp-dir behavior for dev turns.
 
+**Spec 14 — `reviewer_repo_read`.** The same read-only in-worktree retrieval, for
+REVIEWER (and strict-mode PM PR-review) turns: the reviewer opens the files the
+diff only shows a hunk of, instead of judging a diff excerpt blind. It also
+enables two grounding checks: every **blocking finding must cite a file** (an
+uncited one is flagged advisory, not a merge blocker — it can never wedge a PR on
+a claim with no file behind it), and an **empty approval produced without reading
+the code** (the CLI's `num_turns` shows it ran no Read/Grep) is retried once and,
+if still ungrounded, accepted but surfaced as a `review_ungrounded` alert — never
+blocked. `review_min_latency_ms` (default `0`, off) is the latency fallback for
+vendors that don't report a turn count. `review_screenshot` (default off) is a P2
+follow-up (attach a headless screenshot of the running head to visual-DoD
+reviews) — **not yet implemented**.
+
 **F159 — hot files.** A file that appears in `hot_file_threshold` PRs' merge
 conflicts is "hot": parallel edits to it are serialized (only one task holds it
 until that task's PR merges), so parallel devs stop thrashing on a shared file.
@@ -293,6 +306,45 @@ Before you may create the project, you must have — asked or reasonably assumed
 Then present a single **"PM Changes: create this project"** review (North Star,
 DoD, modality, team+models, autonomy). On Accept, create — and start the run if
 the user asked you to just build it.
+
+### What counts as a "foundation" (the concurrency clamp)
+
+A greenfield (`new`) run is **clamped to one worker until its foundation merges to
+master** — the team must scaffold a coherent base before fanning out. What
+qualifies is ecosystem-aware, so the foundation task you plan first should match
+the modality:
+
+| Modality | Foundation-ready when master has |
+|---|---|
+| node / bundled web / compiled (go, rust, java, …) | a **build manifest** (`package.json`, `Cargo.toml`, …) **+** a source entrypoint |
+| script (python, ruby, …) | **one script entrypoint** (`game.py`) — no manifest needed |
+| **buildless web** (Spec 13) | an **`index.html`** whose relative `<script src>` / `<link>` graph resolves entirely against files on master, with **no bare-specifier imports / `require` / JSX** — no manifest needed |
+
+The buildless-web row is the gravity-golf case: a game that "opens directly in a
+browser with no build step" is complete on `index.html` + its relative script
+modules, and must not be made to add a `package.json` it never needs. A bundled
+app (bare imports, `.tsx`) still requires the manifest. If a foundation-unlocking
+PR is rejected for reasons **unrelated** to the foundation it adds, the run
+records a `foundation_pr_rejected_offscope` decision and escalates to you — the
+clamp is held at 1, so re-scope or re-plan so the foundation can land.
+
+### The acceptance gate (Spec 12)
+
+A greenfield run **acquires a gate automatically** (`gate_bootstrap`, default on):
+it detects and registers runtime profiles, and — when the team has authored a
+runnable test on master that a one-shot **smoke run proves can execute** —
+registers an `acceptance`-scoped test command. A candidate that cannot run (a
+missing interpreter/dependency) is *refused* (`gate_bootstrap_refused`), because a
+gate that is red forever is a wedge, not a gate. You do not need to configure test
+commands for the team to have something to run.
+
+Scope matters: an **`acceptance`** command runs on the **integrated master tree**
+(the in-loop gate, dispatched between merges — `gate_min_merge_interval`, default
+3 — and the delivery gate) and **never blocks a per-PR merge**; a **`unit`**
+command (the default when none is declared) gates each PR as before. The latest
+gate output is fed **verbatim** into subsequent dev/reviewer/tester prompts, so
+"iterate until the gate passes" has a real feedback signal, and `done` requires a
+green delivery gate at the delivered head.
 
 ---
 

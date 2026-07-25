@@ -719,6 +719,30 @@ def raise_review_alert(
     )
 
 
+def raise_foundation_deadlock_alert(
+    project_id: str, *, summary: str, stage: str = "development",
+    store: LedgerStore | None = None,
+) -> AttentionSignal | None:
+    """Spec 13 (S2): a non-blocking Alert raised when a foundation-UNLOCKING PR
+    (one that would lift the concurrency clamp) keeps being rejected for reasons
+    unrelated to the foundation it adds. Deduped by (source=foundation_deadlock,
+    stage) to ONE open alert per run — the point is to tell the operator "the run
+    is pinned at one worker by an off-scope rejection", not to stack a signal per
+    round. Non-blocking: the run continues, clamped, so a human can step in."""
+    store = store or _store(project_id)
+    for s in list_open(project_id, store=store):
+        if s.kind == "alert" and s.source == "foundation_deadlock" and s.stage == stage:
+            return None
+    return raise_signal(
+        project_id, kind="alert", source="foundation_deadlock", stage=stage,
+        title="foundation PR held by an off-scope rejection",
+        summary=summary or ("a PR that would lift the concurrency clamp keeps "
+                            "being rejected for reasons unrelated to the "
+                            "foundation it adds"),
+        store=store,
+    )
+
+
 def raise_tests_skipped_alert(
     project_id: str, *, stage: str, summary: str,
     store: LedgerStore | None = None,

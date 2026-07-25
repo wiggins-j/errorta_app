@@ -56,7 +56,9 @@ def _dev_env(task_id: str) -> str:
 
 def test_dev_turn_threads_worktree_root_when_enabled(tmp_errorta_home: Path) -> None:
     """dev_repo_read=True => the member handed to the caller on a DEV turn carries
-    ``dev_repo_read_root`` = the task worktree root (not a temp dir)."""
+    ``repo_read_root`` = the task worktree root (not a temp dir).
+
+    Spec 14 renamed the member-tag key dev_repo_read_root -> repo_read_root."""
     store = LedgerStore("p1a_on")
     store.create_project(north_star="x", definition_of_done="d",
                          target="new", repo_path=None)
@@ -65,7 +67,7 @@ def test_dev_turn_threads_worktree_root_when_enabled(tmp_errorta_home: Path) -> 
     seen: dict[str, object] = {}
 
     def caller(member, prompt):
-        seen["root"] = member.get("dev_repo_read_root")
+        seen["root"] = member.get("repo_read_root")
         return _dev_env(task.task_id)
 
     rt = build_run_turn(store, ws, members_by_coding_role(MEMBERS), caller,
@@ -78,7 +80,7 @@ def test_dev_turn_threads_worktree_root_when_enabled(tmp_errorta_home: Path) -> 
     assert Path(root).is_dir()
     assert str(ws.task_root(task.task_id)) == root
     # The shared member config was NOT mutated (a per-turn shallow copy).
-    assert "dev_repo_read_root" not in MEMBERS[1]
+    assert "repo_read_root" not in MEMBERS[1]
 
 
 def test_dev_turn_not_tagged_when_disabled(tmp_errorta_home: Path) -> None:
@@ -92,7 +94,7 @@ def test_dev_turn_not_tagged_when_disabled(tmp_errorta_home: Path) -> None:
     seen: dict[str, object] = {"root": "UNSET"}
 
     def caller(member, prompt):
-        seen["root"] = member.get("dev_repo_read_root")
+        seen["root"] = member.get("repo_read_root")
         return _dev_env(task.task_id)
 
     # default dev_repo_read=False
@@ -124,15 +126,24 @@ def test_gateway_caller_forwards_root_to_request_metadata() -> None:
             return _R()
 
     caller = gateway_member_caller(_FakeGateway())
+    # Canonical key -> forwarded as repo_read_root.
     caller({"id": "m-dev", "gateway_route_id": "claude_cli.opus",
             "provider_kind": "claude_cli",
-            "dev_repo_read_root": "/tmp/wt-xyz"}, "hi")
-    assert captured["metadata"].get("dev_repo_read_root") == "/tmp/wt-xyz"
+            "repo_read_root": "/tmp/wt-xyz"}, "hi")
+    assert captured["metadata"].get("repo_read_root") == "/tmp/wt-xyz"
+
+    # Spec 14 back-compat: a legacy dev_repo_read_root INPUT still forwards
+    # (as the canonical key), so a mixed-version member config keeps working.
+    captured.clear()
+    caller({"id": "m-dev", "gateway_route_id": "claude_cli.opus",
+            "provider_kind": "claude_cli",
+            "dev_repo_read_root": "/tmp/legacy"}, "hi")
+    assert captured["metadata"].get("repo_read_root") == "/tmp/legacy"
 
     captured.clear()
     caller({"id": "m-dev", "gateway_route_id": "claude_cli.opus",
             "provider_kind": "claude_cli"}, "hi")
-    assert "dev_repo_read_root" not in captured["metadata"]
+    assert "repo_read_root" not in captured["metadata"]
 
 
 # --------------------------------------------------------------------------- #

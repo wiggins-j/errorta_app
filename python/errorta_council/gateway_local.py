@@ -72,6 +72,11 @@ class LocalCouncilModelResult:
     cache_read_input_tokens: int | None = None
     cache_write_input_tokens: int | None = None
     is_thinking_burn: bool = False
+    # Spec 14: agentic tool-use turn count for CLI providers that report it, carried
+    # from AsyncProviderResult so a reviewer verdict can be told grounded (read the
+    # repo) from ungrounded (reflex). Optional/additive — a boundary field on the
+    # Council-invariant result type; None when the provider doesn't report one.
+    num_turns: int | None = None
 
 
 # Legacy Phase-1 providers. F034 extends this dynamically via the
@@ -309,6 +314,7 @@ class LocalGateway:
             cache_read_input_tokens=async_result.cache_read_input_tokens,
             cache_write_input_tokens=async_result.cache_write_input_tokens,
             is_thinking_burn=async_result.content.startswith(THINKING_TRACE_MARKER),
+            num_turns=getattr(async_result, "num_turns", None),
         )
 
     async def _fake_dispatch(self, request: LocalCouncilModelRequest) -> LocalCouncilModelResult:

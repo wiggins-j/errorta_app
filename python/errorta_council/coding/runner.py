@@ -28,6 +28,7 @@ import re
 import threading
 from typing import Any, Callable, NamedTuple, Optional
 
+from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
 from .autonomy import (
@@ -48,6 +49,7 @@ from .topology import (
     REVIEWER,
     TESTER,
     Assign,
+    GateRun,
     GovernanceMaterialize,
     GovernancePlan,
     GovernanceReview,
@@ -539,6 +541,76 @@ def _handle_review_rejection(
                 f"{pr['branch']} and open a new PR. The prior PR "
                 f"({pr['pr_id']}) is superseded when this lands."
                 + (f" Findings: {findings_detail}." if findings_detail else "")))
+    # Spec 13 (S2): if this rejection is of a foundation-UNLOCKING PR but is
+    # OFF-SCOPE for the foundation (no finding names a foundation file it adds),
+    # the clamp is being held at 1 for an unrelated reason — surface it so the run
+    # isn't silently serialized forever. Runs after the revise task above (the
+    # rework still proceeds); best-effort so escalation can never break the seam.
+    try:
+        _account_offscope_foundation_rejection(store, pr=pr, findings=findings)
+    except Exception:  # noqa: BLE001 — escalation is advisory, never load-bearing
+        pass
+
+
+def _account_offscope_foundation_rejection(
+    store: LedgerStore, *, pr: dict[str, Any], findings: list[dict[str, Any]],
+) -> None:
+    """Spec 13 (S2): classify a foundation-unlocking PR's rejection scope and, when
+    it is off-scope for the blocker, record it + escalate to the PM (deduped per PR
+    lineage) + raise a deduped alert at the second consecutive occurrence.
+
+    Scope is UNKNOWN unless at least one finding carries a ``path`` — reviewers
+    routinely emit path-less findings, and treating "no paths" as off-scope would
+    fire an escalation on every ordinary rejection. Only a rejection whose paths
+    are all present AND none intersects the foundation files the PR adds counts as
+    off-scope."""
+    if not pr.get("unlocks_foundation"):
+        return
+    finding_paths = [str(f.get("path") or "").strip()
+                     for f in findings if str(f.get("path") or "").strip()]
+    if not finding_paths:
+        return  # no path signal -> scope unknown, not off-scope
+    added_foundation = set(_foundation_files_in(
+        [str(p) for p in (pr.get("changed_paths") or [])]))
+    if not added_foundation:
+        return  # nothing to be off-scope OF
+    # Off-scope iff no finding path is one of the foundation files this PR adds.
+    if any(p in added_foundation for p in finding_paths):
+        return  # a finding targets the foundation itself -> genuinely in scope
+    store.record_decision(
+        title=f"off-scope rejection of foundation PR {pr['branch']}",
+        context=f"pr {pr['pr_id']}", choice="foundation_pr_rejected_offscope",
+        rationale=("a PR adding the foundation (" + ", ".join(sorted(added_foundation))
+                   + ") was rejected only on unrelated files (" +
+                   ", ".join(finding_paths) + "); the concurrency clamp stays at 1 "
+                   "until the foundation lands"),
+        related_task_ids=[pr.get("task_id", "")])
+    # Escalate to the PM once per PR lineage (dedup on an open PM task naming it).
+    esc_title = f"foundation blocked: {pr['branch']}"
+    if not any(t.role == PM and str(t.title or "") == esc_title
+               and t.state not in ("done", "dropped") for t in store.list_tasks()):
+        store.add_task(
+            title=esc_title, role=PM,
+            reason_summary="foundation PR rejected off-scope — clamp held at 1",
+            detail=(f"PR {pr['pr_id']} on branch {pr['branch']} adds the project "
+                    f"foundation but was rejected for reasons unrelated to it, so "
+                    f"worker concurrency stays clamped at 1. Re-scope or re-plan so "
+                    f"the foundation can land."))
+    # At the 2nd consecutive off-scope rejection, raise one deduped alert.
+    n_offscope = sum(
+        1 for d in store.list_decisions()
+        if d.get("choice") == "foundation_pr_rejected_offscope"
+        and d.get("context") == f"pr {pr['pr_id']}")
+    if n_offscope >= 2:
+        try:
+            from . import attention
+            attention.raise_foundation_deadlock_alert(
+                store.project_id,
+                summary=(f"PR on branch {pr['branch']} would lift the concurrency "
+                         "clamp but keeps being rejected off-scope."),
+                store=store)
+        except Exception:  # noqa: BLE001 — observability is best-effort
+            pass
 
 
 def _detail_from_findings(findings: list[dict[str, Any]], *, cap: int = 6) -> str:
@@ -1659,6 +1731,11 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
                       _latest_context_response_text(store, task.task_id)),
         # The current worktree snapshot the dev extends.
         PromptSegment("repo_snapshot", existing),
+        # Spec 12 (S1): the latest acceptance-gate output (verbatim), so "iterate
+        # until green" has a feedback signal — the dev sees WHY the gate failed
+        # instead of re-reasoning from a half-context. Empty (absent) when no gate
+        # has run, so a gate-less project's prompt is byte-identical to before.
+        PromptSegment("gate_output", _gate_state.latest_gate_text(store)),
         # Tool catalog / how-to-emit-tool-calls guidance.
         PromptSegment("tool_guidance",
                       f"{tool_catalog_text(DEV)} Do not request merge-back.\n"),
@@ -1710,7 +1787,8 @@ def _task_is_governance_sourced(task: Task) -> bool:
 
 
 def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
-                      project_context: str, scope_task: Task | None = None) -> str:
+                      project_context: str, scope_task: Task | None = None,
+                      *, gate_text: str = "") -> str:
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
@@ -1761,13 +1839,14 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     })
     return _register_pending_composition(_review_pr_prompt_segments(
         task, pr, project_context, task_scope=task_scope, bar=bar, cap=cap,
-        trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example))
+        trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example,
+        gate_text=gate_text))
 
 
 def _review_pr_prompt_segments(
         task: Task, pr: dict[str, Any], project_context: str, *,
         task_scope: str, bar: str, cap: str, trunc: str, trunc_note: str,
-        verdict_example: str) -> list[PromptSegment]:
+        verdict_example: str, gate_text: str = "") -> list[PromptSegment]:
     """F143-01 Slice F: the reviewer prompt as ordered labeled segments. Joined
     verbatim this equals the pre-refactor ``_review_pr_prompt`` string byte-for-byte
     (golden-locked). The branchy truncation/scope logic stays in ``_review_pr_prompt``;
@@ -1791,6 +1870,17 @@ def _review_pr_prompt_segments(
         "out-of-scope future work, not a defect in this PR. Distinguish 'missing "
         "part of THIS task's scope' (block) from 'missing another task's work' "
         "(fine). The North Star / Definition of Done are directional context only.\n"
+        # Spec 14 (Item 3): a blocking finding must cite the file it is about, so a
+        # claim about the world with no file behind it can't wedge the PR.
+        "Every BLOCKING finding MUST name the file it concerns in \"path\" "
+        "(a file:line in the body is better) — an uncited blocking finding is "
+        "treated as advisory, not a merge blocker.\n"
+        # Spec 14 (Item 5 / Phase 6): if the acceptance-gate output shown above
+        # contradicts what this PR claims, that IS a blocking finding — cite the
+        # failing file.
+        "If acceptance-gate output is shown above and it contradicts this PR's "
+        "claim (e.g. the PR says a level is non-trivial but the gate solves it in "
+        "0 strokes), request changes with a blocking finding citing the file.\n"
     )
     envelope = (
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
@@ -1814,6 +1904,11 @@ def _review_pr_prompt_segments(
         PromptSegment("role_instructions", review_rules),
         # The PR diff under review (+ optional truncation flag).
         PromptSegment("pr_diff", f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"),
+        # Spec 12 (S1): the latest acceptance-gate output (verbatim). A reviewer
+        # that sees the gate is red on the integrated tree can hold the PR to it;
+        # empty (absent) when no gate has run, so the prompt is unchanged for a
+        # gate-less project.
+        PromptSegment("gate_output", gate_text),
         # Truncation caveat (empty when the diff fit).
         PromptSegment("role_instructions", trunc_note),
         # reviewed_head echo instruction + verdict envelope schema.
@@ -2117,7 +2212,9 @@ def _review_project_context(store: LedgerStore, workspace: Any,
 
 
 def _test_prompt(task: Task, store: LedgerStore) -> str:
-    registry = store.get_test_commands()
+    # Spec 12 (S1): the tester runs on the PR BRANCH, so it may only choose from
+    # unit-scoped commands; acceptance commands run on the integrated tree.
+    registry = store.get_unit_test_commands()
     if registry:
         ids = ", ".join(sorted(registry.keys()))
         avail = (f"Available test command_ids (you MUST choose from these): {ids}.")
@@ -2164,6 +2261,10 @@ def _test_prompt_segments(task: Task, store: LedgerStore, *,
         # Retrieved project grounding for the tester.
         PromptSegment("project_context",
                       _grounding_packet_text("tester", store, task=task)),
+        # Spec 12 (S1): the latest acceptance-gate output (verbatim), so the tester
+        # sees the last integrated result before choosing commands. Empty (absent)
+        # with no gate run -> byte-identical to before.
+        PromptSegment("gate_output", _gate_state.latest_gate_text(store)),
         # Standing test instructions (available commands + envelope schema).
         PromptSegment("role_instructions", instructions),
     ]
@@ -2263,6 +2364,146 @@ _SCRIPT_EXT = (".py", ".rb", ".php", ".pl", ".lua", ".sh")
 # source flips back to requiring a manifest via `refresh_foundation_status`.
 
 
+# Spec 13 (S2): "web-only" manifest-bound source — the subset of _MANIFEST_BOUND_EXT
+# a browser can resolve itself. A tree whose manifest-bound source is entirely in
+# this set MAY be a buildless web project (checked below); one carrying compiled
+# source (.go/.rs/.java/…) is never buildless and stays manifest-bound.
+_WEB_ONLY_EXT = (".js", ".mjs", ".cjs", ".css", ".html", ".htm")
+# Signals that a web tree needs a bundler after all — a bare-specifier import, a
+# CommonJS require, or JSX/TS syntax the browser cannot run as-is. The presence of
+# ANY re-clamps to "needs a manifest" (the reddit-look-a-like protection).
+_BUNDLER_REQUIRED_EXT = (".ts", ".tsx", ".jsx", ".vue", ".svelte")
+# `import x from "react"` / `import "react"` (bare) vs `import x from "./m.js"` or
+# `"/m.js"` (relative/absolute-path — browser-resolvable). The captured group is the
+# module specifier; a leading "." or "/" means path-resolved, anything else is a
+# bare specifier that only a bundler resolves.
+_JS_IMPORT_FROM_RE = re.compile(
+    r"""\bimport\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""")
+_JS_IMPORT_BARE_RE = re.compile(r"""\bimport\s*['"]([^'"]+)['"]""")
+_JS_REQUIRE_RE = re.compile(r"""\brequire\s*\(\s*['"][^'"]+['"]\s*\)""")
+# `<script src="…">` / `<link rel="stylesheet" href="…">` — captures the URL.
+_HTML_SCRIPT_SRC_RE = re.compile(
+    r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+_HTML_LINK_HREF_RE = re.compile(
+    r"""<link\b[^>]*\bhref\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+_BUILDLESS_READ_CAP = 200_000  # per-file read bound for the scan (fail closed if larger)
+
+
+def _is_relative_url(url: str) -> bool:
+    """A URL the browser resolves against the page's own origin (so it maps to a
+    file on master), as opposed to an external/CDN dependency. Absolute
+    (`//`, `http:`, `https:`, `data:`) and root-anchored protocol-relative URLs are
+    NOT self-contained for this gate's purpose (a CDN `<script src>` means the tree
+    depends on something not on master)."""
+    u = url.strip()
+    if not u:
+        return False
+    low = u.lower()
+    if low.startswith(("http://", "https://", "//", "data:", "blob:")):
+        return False
+    return True
+
+
+def _resolve_against(base_rel: str, url: str) -> str:
+    """Resolve a relative URL from an HTML/JS file at ``base_rel`` to a
+    master-relative path, normalized (``./``, ``../`` collapsed). A leading "/" is
+    treated as project-root-relative."""
+    href = url.split("?", 1)[0].split("#", 1)[0]
+    if href.startswith("/"):
+        joined = href.lstrip("/")
+    else:
+        base_dir = base_rel.rsplit("/", 1)[0] if "/" in base_rel else ""
+        joined = f"{base_dir}/{href}" if base_dir else href
+    parts: list[str] = []
+    for seg in joined.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
+def _buildless_web_ready(files: list[str], read: Any) -> bool:
+    """Spec 13 (S2): True iff master is a self-contained, no-build web project —
+    an ``index.html`` whose relative ``<script src>`` / ``<link href>`` graph
+    resolves entirely against files on master, with no bundler-required signal
+    anywhere.
+
+    This is the missing distinction in the F142 foundation gate: "web/JS" is not
+    one ecosystem. A bundled app (Next.js/Vite — bare-specifier imports, JSX)
+    genuinely needs ``package.json`` to resolve imports, and stays manifest-bound.
+    A buildless site (the gravity-golf North Star — ``index.html`` + relative
+    ``<script src>`` modules the browser resolves itself) never legitimately
+    produces a manifest, so requiring one clamps worker concurrency to 1 forever.
+
+    ``read(rel) -> str | None`` returns a master file's text (``None`` if absent /
+    binary / unreadable). Fail-closed: anything unreadable or ambiguous returns
+    ``False`` so the clamp stays on — this can only ever RELAX the manifest
+    requirement for a tree we can fully vouch for, never tighten it. Because
+    ``refresh_foundation_status`` re-derives from git each call, the classification
+    self-heals: the moment a bare import or a ``.tsx`` lands, the tree flips back to
+    manifest-bound.
+    """
+    fileset = set(files)
+    if "index.html" not in fileset:
+        return False
+    # (3) any bundler-required file anywhere on master disqualifies immediately —
+    # a .tsx/.vue/.svelte tree is a framework app, buildless or not.
+    if any(f.endswith(_BUNDLER_REQUIRED_EXT) for f in files):
+        return False
+
+    html = read("index.html")
+    if not isinstance(html, str) or len(html) > _BUILDLESS_READ_CAP:
+        return False
+
+    # (1)+(2)+(4): every relative script/style resolves on master, no external
+    # dependency, at least one script actually exists.
+    referenced_scripts: list[str] = []
+    for m in _HTML_SCRIPT_SRC_RE.finditer(html):
+        url = m.group(1)
+        if not _is_relative_url(url):
+            return False  # a CDN/external <script src> — not self-contained
+        target = _resolve_against("index.html", url)
+        if target not in fileset:
+            return False  # references a file not on master
+        referenced_scripts.append(target)
+    for m in _HTML_LINK_HREF_RE.finditer(html):
+        url = m.group(1)
+        # Only stylesheet links are load-bearing; a non-relative one (Google
+        # Fonts, a CDN reset) is an external dependency and disqualifies.
+        if not _is_relative_url(url):
+            # A <link> may be a preconnect/icon/manifest with an off-site href;
+            # only treat a stylesheet href as disqualifying.
+            if re.search(r"stylesheet", m.group(0), re.IGNORECASE):
+                return False
+            continue
+        target = _resolve_against("index.html", url)
+        if target not in fileset and target.endswith((".css",)):
+            return False
+
+    if not referenced_scripts:
+        return False  # index.html with no resolvable script is a stub, not a base
+
+    # (3) re-check inside every referenced script (one level deep): a bare-specifier
+    # import or a require() means a bundler is needed after all.
+    for rel in referenced_scripts:
+        body = read(rel)
+        if not isinstance(body, str) or len(body) > _BUILDLESS_READ_CAP:
+            return False  # unreadable/oversized referenced script -> fail closed
+        if _JS_REQUIRE_RE.search(body):
+            return False
+        for spec in _JS_IMPORT_FROM_RE.findall(body):
+            if not spec.startswith((".", "/")):
+                return False  # bare specifier -> needs a bundler
+        for spec in _JS_IMPORT_BARE_RE.findall(body):
+            if not spec.startswith((".", "/")):
+                return False
+    return True
+
+
 def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
     """True iff a `new` project's foundation has merged to master, read from git (so
     only MERGED work counts). An `existing` target imports a real repo, so its
@@ -2279,6 +2520,12 @@ def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
       count and directory nesting are irrelevant (non-source files and asset
       subdirs must not defeat the gate). Without this the clamp stays at 1 forever
       and `foundation_not_converging` false-fires.
+    - Buildless web projects (Spec 13): a web-only tree whose `index.html`
+      `<script src>`/`<link href>` graph resolves entirely against files on
+      master, with no bundler-required signal (bare imports / require / JSX),
+      is a complete foundation with no manifest — the gravity-golf North Star
+      that opens directly in a browser. A bundled app (bare imports, .tsx) stays
+      manifest-bound, so the reddit-look-a-like protection holds.
 
     DoD note (F139 WS-A): this is the entrypoint/manifest-existence half of the
     spec's DoD (git-derived, deterministic, F106-independent). The optional
@@ -2304,6 +2551,28 @@ def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
         # count and directory nesting are deliberately ignored so README/LICENSE
         # or an assets/ subdir cannot re-clamp the run (see the _SCRIPT_EXT note).
         return True
+    # Spec 13 (S2): a BUILDLESS web project is foundation-ready without a manifest.
+    # Only consider it when the manifest-bound source is entirely web-only
+    # (.js/.css/.html — a browser can resolve it) and there is no compiled source;
+    # a tree carrying .go/.rs/.java/… stays manifest-bound unconditionally. The
+    # predicate reads referenced files, so gate it on the cheap extension check
+    # first and only reach for the workspace reader for a genuine web-only tree.
+    if has_manifest_bound and not any(
+            f.endswith(_MANIFEST_BOUND_EXT) and not f.endswith(_WEB_ONLY_EXT)
+            for f in files):
+        try:
+            def _read(rel: str) -> str | None:
+                raw = workspace.read_master_file(rel)
+                if raw is None:
+                    return None
+                try:
+                    return raw.decode("utf-8")
+                except (UnicodeDecodeError, AttributeError):
+                    return None
+            if _buildless_web_ready(files, _read):
+                return True
+        except Exception:  # noqa: BLE001 — unsure -> fall through to the manifest rule
+            pass
     has_manifest = any(f.rsplit("/", 1)[-1] in _BUILD_MANIFESTS for f in files)
     has_entry = any(f.endswith(_SOURCE_EXT) for f in files)
     return has_manifest and has_entry
@@ -2335,6 +2604,182 @@ def refresh_foundation_status(store: LedgerStore, workspace: Any) -> str:
     # the North Star is complete, so the Current Focus panel stays hidden until
     # completion ("Building toward <North Star>" shows instead).
     return status
+
+
+def _last_turn_grounding() -> tuple[Optional[int], Optional[int]]:
+    """Spec 14: (num_turns, duration_ms) of the most recent member call, from the
+    F143 thread-local usage sink. ``num_turns`` is the claude CLI's agentic turn
+    count (None for vendors that don't report it); ``duration_ms`` is the latency
+    fallback. Both None when unavailable."""
+    last = getattr(_usage_sink, "last", None)
+    if not isinstance(last, dict):
+        return None, None
+    nt = last.get("num_turns")
+    dur = last.get("duration_ms")
+    return (nt if isinstance(nt, int) else None,
+            dur if isinstance(dur, int) else None)
+
+
+def _is_empty_approval(parsed: Any, head: str) -> bool:
+    """Spec 14: a fresh-head approval that filed NO findings — the shape a reflex
+    rubber-stamp takes. A parse error, a stale head, or any findings disqualify."""
+    if isinstance(parsed, TurnParseError):
+        return False
+    intent = getattr(parsed, "intent", None)
+    if intent is None or getattr(intent, "reviewed_head", None) != head:
+        return False
+    return bool(getattr(intent, "approved", False)) and not getattr(
+        intent, "findings", None)
+
+
+def _mark_finding_citations(findings: list[dict[str, Any]], *, workspace: Any,
+                            pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """Spec 14 (Item 3): flag every BLOCKING finding whose ``path`` is empty or not
+    in the PR tree with ``cited: false``. Severity and the ``approved`` verdict are
+    UNTOUCHED — the PR still goes changes_requested; this is a quality signal
+    (consumed by Spec 15, which decides whether the rework task is spawned), not a
+    re-scoring. A well-formed finding that cites a changed/known file is
+    ``cited: true``. Non-blocking findings are left as-is."""
+    try:
+        in_tree = set(workspace.changed_paths(pr["branch"])) if workspace else set()
+    except Exception:  # noqa: BLE001
+        in_tree = set()
+    try:
+        in_tree |= set(workspace.list_files(scope="master")) if workspace else set()
+    except Exception:  # noqa: BLE001
+        pass
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        g = dict(f)
+        if g.get("blocking"):
+            path = str(g.get("path") or "").strip()
+            g["cited"] = bool(path) and (not in_tree or path in in_tree)
+        out.append(g)
+    return out
+
+
+def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
+              should_cancel: Optional[Callable[[], bool]] = None) -> Any:
+    """Spec 12 (S1): run EVERY registered command (unit + acceptance) against the
+    integrated master tree, bound to ``head``, and record the session. This is the
+    deterministic gate executor — no model command selection, so the verdict
+    cannot be gamed — factored out of ``delivery_review`` so the in-loop gate and
+    the delivery gate share one code path.
+
+    Returns the ``TestRunSession`` (its ``.passed`` is the verdict), or ``None``
+    when there are no commands to run. Runs against ``workspace.root()`` (the
+    merged tree) precisely because the interesting defects — a self-sabotaging
+    harness, a black-screen init race — are INTEGRATION defects invisible on a
+    single branch."""
+    registry = store.get_test_commands()
+    if not registry:
+        return None
+    command_ids = list(registry.keys())
+    session = run_test_commands(
+        workspace.root(), registry, command_ids,
+        should_cancel=should_cancel,
+        require_sandbox=store.get_require_sandbox())
+    store.record_test_run(session, task_id=task_id, head=head)
+    return session
+
+
+# Spec 12 (S1): a merge that touches ONLY these is not gate-relevant — running the
+# acceptance gate again would waste the suite's wall time with no chance of a
+# changed verdict. Everything else (source, web assets, test files, configs) is.
+_GATE_IRRELEVANT_EXT = (".md", ".markdown", ".rst", ".txt")
+_GATE_IRRELEVANT_NAMES = ("LICENSE", "LICENSE.md", "NOTICE", "AUTHORS", "CHANGELOG",
+                          "CHANGELOG.md", ".gitignore", ".gitattributes")
+
+
+def _merge_is_gate_relevant(changed: list[str]) -> bool:
+    """True unless every changed path is pure documentation/metadata. Conservative:
+    an unrecognized path counts as relevant (better a redundant gate run than a
+    missed regression)."""
+    real = [p for p in changed if p and p != ".gitignore"]
+    if not real:
+        return False
+    for p in real:
+        base = p.rsplit("/", 1)[-1]
+        if base in _GATE_IRRELEVANT_NAMES:
+            continue
+        if base.startswith("docs/") or p.startswith("docs/"):
+            continue
+        if any(p.endswith(ext) for ext in _GATE_IRRELEVANT_EXT):
+            continue
+        return True  # a non-doc path -> re-run the gate
+    return False
+
+
+def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
+                          changed: list[str], head: str) -> None:
+    """Spec 12 (S1): after a merge advances master, (1) acquire a gate if the
+    project has none, then (2) count a gate-relevant merge and arm ``gate_due``
+    once ``gate_min_merge_interval`` such merges have accumulated — so a later
+    mechanical GateRun executes the suite off this (merge) turn. Fully guarded:
+    a failure here never fails the merge that already landed."""
+    try:
+        from .autonomy import load_policy
+        policy = load_policy(store)
+    except Exception:  # noqa: BLE001
+        return
+    if not getattr(policy, "gate_bootstrap", True):
+        return
+    try:
+        from . import gate_bootstrap
+        gate_bootstrap.maybe_bootstrap(store, workspace, policy)
+    except Exception:  # noqa: BLE001 — bootstrap is best-effort
+        pass
+    # Only arm when the GateRun will actually EXECUTE something. Until Spec 12
+    # Item 5 (the runtime-probe arm) lands, `_run_gate` runs registered COMMANDS
+    # only and returns None on an empty registry — so arming on a runtime-only
+    # project (no commands, a runnable profile) just churns a no-op GateRun and a
+    # `gate_no_commands` decision every interval. Gate on commands, not the broader
+    # `gate_available`. Expand this to include the runtime arm when Item 5 lands.
+    try:
+        if not store.get_test_commands():
+            return
+    except Exception:  # noqa: BLE001
+        return
+    if not _merge_is_gate_relevant(changed):
+        return
+    try:
+        rs = store.get_run_state()
+        pending = int(rs.get("gate_pending_merges", 0) or 0) + 1
+        interval = max(1, int(getattr(policy, "gate_min_merge_interval", 3)))
+        if pending >= interval:
+            store.set_run_state(gate_due=True, gate_dirty_head=str(head),
+                                gate_pending_merges=0)
+        else:
+            store.set_run_state(gate_pending_merges=pending)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _foundation_files_in(paths: list[str]) -> list[str]:
+    """Spec 13 (S2): the subset of ``paths`` that are foundation elements — a build
+    manifest, or a source entrypoint. These are what a foundation-UNLOCKING PR
+    adds while the clamp is pending; a rejection whose findings don't touch any of
+    them is unrelated to the foundation."""
+    out: list[str] = []
+    for p in paths:
+        base = p.rsplit("/", 1)[-1]
+        if base in _BUILD_MANIFESTS or p.endswith(_SOURCE_EXT):
+            out.append(p)
+    return out
+
+
+def _pr_unlocks_foundation(store: LedgerStore, changed: list[str]) -> bool:
+    """Spec 13 (S2): whether an open PR touching ``changed`` adds a foundation
+    element while ``foundation_status`` is still pending. Best-effort — a read
+    failure yields False (no escalation), never raises into the dispatch path."""
+    if not changed:
+        return False
+    try:
+        if str(store.get_run_state().get("foundation_status", "")) != "pending":
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(_foundation_files_in(changed))
 
 
 # --- F139 WS-D2: reactive contract centralization ---------------------------- #
@@ -2479,6 +2924,8 @@ def build_run_turn(
     guardrail_enabled: bool,
     should_cancel: Optional[Callable[[], bool]] = None,
     dev_repo_read: bool = False,
+    reviewer_repo_read: bool = False,
+    review_min_latency_ms: int = 0,
 ) -> Callable[[Any, Any], TurnOutcome]:
     """Construct the ``run_turn`` the autonomy loop drives.
 
@@ -2642,8 +3089,11 @@ def build_run_turn(
         # forever in a revise loop. When test commands ARE configured the strict
         # reviewer-AND-tests gate is unchanged.
         p = store.get_pr(pr_id)
+        # Spec 12 (S1): only UNIT-scoped commands gate a merge. An acceptance
+        # command (in-loop gate / delivery) never blocks a per-PR merge, else
+        # bootstrapping one would wedge every merge on a partial branch.
         tests_ok = p is not None and (
-            p.get("tests_passed") is True or not store.get_test_commands())
+            p.get("tests_passed") is True or not store.get_unit_test_commands())
         # F100 PR-B: in strict governance mode a code PR needs the PM's review
         # too (reviewer AND PM). In off/light, PM review is not required, so this
         # gate is exactly today's reviewer-AND-tests behavior.
@@ -3130,6 +3580,46 @@ def build_run_turn(
             created = _materialize_pm_tasks(store, intent)
             return TurnOutcome(kind="planned", made_progress=len(created) > 0)
 
+        if isinstance(action, GateRun):
+            # Spec 12 (S1): run the acceptance gate on the integrated master tree,
+            # off the merge turn. Mechanical (0 model calls). Clears the armed flag
+            # whether the run succeeds, finds nothing to run, or raises — so a
+            # failure can never re-arm into a tight loop.
+            try:
+                rs = store.get_run_state()
+                head = str(rs.get("gate_dirty_head", "") or "")
+            except Exception:  # noqa: BLE001
+                head = ""
+            try:
+                if workspace is not None:
+                    if not head:
+                        head = workspace.head() or ""
+                    session = _run_gate(store, workspace, head=head,
+                                        task_id="in-loop-gate",
+                                        should_cancel=should_cancel)
+                    passed = None if session is None else bool(session.passed)
+                    store.record_decision(
+                        title="in-loop acceptance gate",
+                        context="in_loop_gate",
+                        choice=("gate_passed" if passed else
+                                "gate_no_commands" if passed is None else "gate_failed"),
+                        rationale=(f"ran the acceptance gate on master head {head[:12]}"
+                                   if session is not None
+                                   else "no registered commands to run"))
+            except Exception as exc:  # noqa: BLE001 — a gate error never breaks the loop
+                try:
+                    store.record_decision(
+                        title="in-loop gate could not run", context="in_loop_gate",
+                        choice="gate_error", rationale=str(exc))
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                try:
+                    store.set_run_state(gate_due=False)
+                except Exception:  # noqa: BLE001
+                    pass
+            return TurnOutcome(kind="gate_run", model_calls=0)
+
         if isinstance(action, Merge):
             # F087-17: the PM integrates a reviewer-approved + tests-green PR into
             # master (conflict-aware). master accumulates; conflicts bounce back
@@ -3194,6 +3684,14 @@ def build_run_turn(
                 # (build manifest + source entrypoint) is now on master so the loop
                 # lifts the concurrency clamp exactly when the scaffold lands.
                 refresh_foundation_status(store, workspace)
+                # Spec 12 (S1): master advanced — acquire a gate if the project has
+                # none yet (detect runtime profiles + register a smoke-proven
+                # acceptance command), then ARM an in-loop gate run when this merge
+                # is gate-relevant and the min-merge interval has elapsed. The gate
+                # itself runs off THIS turn (a later GateRun), so the suite never
+                # serializes the merge critical section.
+                _arm_gate_after_merge(store, workspace, changed=list(_changed),
+                                      head=res.get("head", pr["head"]))
                 # F159: the shared-contract owner landed → lift the hot-file freeze
                 # (the canonical module is now on master; parallel edits are safe).
                 try:
@@ -3313,7 +3811,8 @@ def build_run_turn(
                 if dev_repo_read and workspace is not None and branch is not None:
                     try:
                         repo_root = workspace.task_root(task.task_id, branch=branch)
-                        dev_member = {**member, "dev_repo_read_root": str(repo_root)}
+                        # Spec 14: canonical `repo_read_root` (was dev_repo_read_root).
+                        dev_member = {**member, "repo_read_root": str(repo_root)}
                     except Exception:  # noqa: BLE001 — retrieval is best-effort
                         dev_member = member
                 parsed = _parse_member_turn(
@@ -3434,6 +3933,11 @@ def build_run_turn(
                                        if f != ".gitignore"]
                     if _opened_changed:
                         store.update_pr(pr["pr_id"], changed_paths=_opened_changed)
+                    # Spec 13 (S2): flag a PR that adds a missing foundation element
+                    # while the clamp is pending, so an unrelated rejection of it
+                    # can be surfaced instead of silently holding concurrency at 1.
+                    if _pr_unlocks_foundation(store, _opened_changed):
+                        store.update_pr(pr["pr_id"], unlocks_foundation=True)
                 except Exception:  # noqa: BLE001 — best-effort observability signal
                     pass
                 store.update_task(task.task_id, state="done")
@@ -3452,12 +3956,77 @@ def build_run_turn(
                     return TurnOutcome(kind="noop")
                 diff = workspace.pr_diff(pr["branch"])
                 ctx = _review_project_context(store, workspace, pr)
-                parsed = _parse_member_turn(
-                    REVIEWER, task.task_id, member,
-                    _review_pr_prompt(
+                # Spec 14 (Item 2): mount the PR worktree read-only on a per-turn
+                # member copy when reviewer_repo_read is on, so the reviewer can open
+                # the files the diff only shows a hunk of. Shallow copy (shared config
+                # never mutated); best-effort (a resolution failure falls back to the
+                # plain single-shot path — retrieval must never fail a turn that would
+                # otherwise succeed).
+                review_member = member
+                review_root = None
+                if reviewer_repo_read:
+                    try:
+                        review_root = workspace.task_root(pr["task_id"],
+                                                          branch=pr["branch"])
+                        review_member = {**member, "repo_read_root": str(review_root)}
+                    except Exception:  # noqa: BLE001 — retrieval is best-effort
+                        review_member, review_root = member, None
+
+                def _review_once(extra: str = "") -> Any:
+                    prompt = _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or ""))),
-                    context=f"task {task.task_id}", related_task_ids=[task.task_id])
+                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        gate_text=_gate_state.latest_gate_text(store))
+                    return _parse_member_turn(
+                        REVIEWER, task.task_id, review_member, prompt + extra,
+                        context=f"task {task.task_id}",
+                        related_task_ids=[task.task_id])
+
+                parsed = _review_once()
+                # Spec 14 (Item 4/5): grounding check. `num_turns > 1` means the
+                # reviewer actually ran Read/Grep before deciding; `== 1` (or, for a
+                # vendor that doesn't report it, a sub-floor latency) on an EMPTY
+                # approval is a reflex — retry ONCE asking it to open the changed
+                # files. A second ungrounded verdict is ACCEPTED but surfaced, never
+                # blocked (blocking would be a new way to wedge a run).
+                num_turns, dur_ms = _last_turn_grounding()
+                retrieval = review_root is not None
+                review_ungrounded = False
+                if retrieval and _is_empty_approval(parsed, pr["head"]):
+                    reflex = (num_turns is not None and num_turns <= 1)
+                    if num_turns is None and review_min_latency_ms > 0:
+                        reflex = (dur_ms is not None and dur_ms < review_min_latency_ms)
+                    if reflex:
+                        parsed = _review_once(
+                            "\nBefore approving, OPEN the files this PR changes with "
+                            "Read/Grep and confirm they are correct — do not approve "
+                            "without having read them.\n")
+                        num_turns, dur_ms = _last_turn_grounding()
+                        still_reflex = (
+                            _is_empty_approval(parsed, pr["head"])
+                            and ((num_turns is not None and num_turns <= 1)
+                                 or (num_turns is None and review_min_latency_ms > 0
+                                     and dur_ms is not None
+                                     and dur_ms < review_min_latency_ms)))
+                        if still_reflex:
+                            review_ungrounded = True
+                            store.record_decision(
+                                title=f"ungrounded review verdict: {pr['branch']}",
+                                context=f"pr {pr['pr_id']}", choice="review_ungrounded",
+                                rationale=("the reviewer approved with no findings "
+                                           "without reading the worktree, twice; "
+                                           "verdict accepted but flagged"),
+                                related_task_ids=[task.task_id, pr["task_id"]])
+                            try:
+                                from . import attention
+                                attention.raise_review_alert(
+                                    store.project_id, stage="development",
+                                    title="reviewer approved without reading the code",
+                                    summary=(f"PR on branch {pr['branch']} was approved "
+                                             "with an empty, ungrounded verdict."),
+                                    store=store)
+                            except Exception:  # noqa: BLE001
+                                pass
                 # F126: persist the reviewer's findings on the PR so the task
                 # detail can show WHY a PR got "changes requested", not just that
                 # it did. (Parse-error / stale-head rejections have no structured
@@ -3480,14 +4049,17 @@ def build_run_turn(
                     approved = False
                 else:
                     approved = bool(parsed.intent.approved)
-                    review_findings = [
-                        {"severity": f.severity, "title": f.title, "body": f.body,
-                         "path": f.path, "blocking": f.severity == "blocking"}
-                        for f in parsed.intent.findings
-                    ]
+                    review_findings = _mark_finding_citations(
+                        [{"severity": f.severity, "title": f.title, "body": f.body,
+                          "path": f.path, "blocking": f.severity == "blocking"}
+                         for f in parsed.intent.findings],
+                        workspace=workspace, pr=pr)
                 store.update_pr(pr["pr_id"], reviewer_approved=approved,
                                 reviewed_head=pr["head"],
-                                review_findings=review_findings)
+                                review_findings=review_findings,
+                                review_grounded=bool(retrieval and (num_turns or 0) > 1),
+                                review_num_turns=num_turns,
+                                review_ungrounded=review_ungrounded)
                 store.record_decision(
                     title=f"review verdict: {pr['branch']}",
                     context=f"pr {pr['pr_id']}",
@@ -3501,7 +4073,7 @@ def build_run_turn(
                     # registered test commands the PR is already mergeable on
                     # approval (see _set_mergeable_if_ready) — spawning a tester
                     # task would just starve in the backlog forever.
-                    if store.get_test_commands():
+                    if store.get_unit_test_commands():
                         store.add_task(title=f"test PR: {pr['branch']}", role=TESTER,
                                        pr_id=pr["pr_id"], depends_on=[task.task_id])
                     # F100 PR-B: strict mode is a DUAL review — the PM must review
@@ -3532,7 +4104,9 @@ def build_run_turn(
                     context=f"task {task.task_id}",
                     related_task_ids=[task.task_id],
                 )
-                registry = store.get_test_commands()
+                # Spec 12 (S1): the tester validates its BRANCH against unit
+                # commands only (acceptance commands are integration-scoped).
+                registry = store.get_unit_test_commands()
 
                 def _changes_requested(reason: str, choice: str) -> TurnOutcome:
                     store.record_decision(
@@ -3634,11 +4208,22 @@ def build_run_turn(
                     return TurnOutcome(kind="noop")
                 diff = workspace.pr_diff(pr["branch"])
                 ctx = _review_project_context(store, workspace, pr)
+                # Spec 14 (Item 2): mount the PR worktree for the PM's review too —
+                # otherwise the second half of the strict-mode dual review stays
+                # blind. Best-effort, per-turn copy (shared config never mutated).
+                pm_review_member = member
+                if reviewer_repo_read:
+                    try:
+                        _pmr = workspace.task_root(pr["task_id"], branch=pr["branch"])
+                        pm_review_member = {**member, "repo_read_root": str(_pmr)}
+                    except Exception:  # noqa: BLE001
+                        pm_review_member = member
                 parsed = _parse_member_turn(
-                    REVIEWER, task.task_id, member,
+                    REVIEWER, task.task_id, pm_review_member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or ""))),
+                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        gate_text=_gate_state.latest_gate_text(store)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 pm_findings: list[dict[str, Any]] = []
                 if isinstance(parsed, TurnParseError):
@@ -3658,11 +4243,11 @@ def build_run_turn(
                     approved = False
                 else:
                     approved = bool(parsed.intent.approved)
-                    pm_findings = [
-                        {"severity": f.severity, "title": f.title, "body": f.body,
-                         "path": f.path, "blocking": f.severity == "blocking"}
-                        for f in parsed.intent.findings
-                    ]
+                    pm_findings = _mark_finding_citations(
+                        [{"severity": f.severity, "title": f.title, "body": f.body,
+                          "path": f.path, "blocking": f.severity == "blocking"}
+                         for f in parsed.intent.findings],
+                        workspace=workspace, pr=pr)
                 store.update_pr(pr["pr_id"], pm_reviewer_approved=approved,
                                 pm_reviewed_head=pr["head"])
                 store.record_decision(
@@ -4017,11 +4602,11 @@ def build_run_turn(
         if registry:
             command_ids = list(registry.keys())
             try:
-                session = run_test_commands(
-                    workspace.root(), registry, command_ids,
-                    should_cancel=should_cancel,
-                    require_sandbox=store.get_require_sandbox())
-                store.record_test_run(session, task_id=_DELIVERY_TASK_ID, head=head)
+                # Spec 12 (S1): shared deterministic executor (also the in-loop
+                # gate). Runs all commands against the merged head, records the run.
+                session = _run_gate(store, workspace, head=head,
+                                    task_id=_DELIVERY_TASK_ID,
+                                    should_cancel=should_cancel)
                 tests_passed = bool(session.passed)
                 if not tests_passed:
                     tests_failed_detail = "; ".join(
@@ -4141,15 +4726,19 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
         from errorta_council.gateway_local import LocalCouncilModelRequest
         tl = member.get("turn_limits") or {}
         gen = member.get("generation") or {}
-        # Spec 11 (P1a): the DEV-turn dispatch tags the (per-turn copy of the)
-        # member with the task worktree root when the dev_repo_read policy is on.
-        # Forward it through the gateway metadata so a claude_cli DEV turn runs
-        # read-only in-turn retrieval (cwd=worktree, Read/Grep/Glob only). Absent
-        # for planning/review turns and when the policy is off -> unchanged path.
+        # Spec 11 (P1a) / Spec 14: the DEV-turn dispatch (dev_repo_read) and the
+        # REVIEWER / PM-review dispatch (reviewer_repo_read) tag the per-turn copy
+        # of the member with the task worktree root. Forward it through the gateway
+        # metadata so a claude_cli turn runs read-only in-turn retrieval
+        # (cwd=worktree, Read/Grep/Glob only). Absent for planning turns and when
+        # the policy is off -> unchanged single-shot path. The provider accepts the
+        # generic `repo_read_root`; the legacy `dev_repo_read_root` key is still
+        # forwarded so a mixed-version pair keeps working.
         metadata: dict[str, Any] = {}
-        repo_read_root = member.get("dev_repo_read_root")
+        repo_read_root = (member.get("repo_read_root")
+                          or member.get("dev_repo_read_root"))
         if isinstance(repo_read_root, str) and repo_read_root.strip():
-            metadata["dev_repo_read_root"] = repo_read_root.strip()
+            metadata["repo_read_root"] = repo_read_root.strip()
         req = LocalCouncilModelRequest(
             role=str(member.get("role", "answerer")),
             route_id=str(member.get("gateway_route_id", "")),
@@ -4210,6 +4799,11 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
             "output_tokens": getattr(result, "output_tokens", None),
             "cache_read_input_tokens": getattr(result, "cache_read_input_tokens", None),
             "cache_write_input_tokens": getattr(result, "cache_write_input_tokens", None),
+            # Spec 14: agentic turn count (claude CLI) for the reviewer-grounding
+            # check; None for providers that don't report it. duration_ms is the
+            # latency fallback for vendors that don't report num_turns.
+            "num_turns": getattr(result, "num_turns", None),
+            "duration_ms": getattr(result, "duration_ms", None),
             "estimated_input": estimated_input,
             "estimated_output": estimated_output,
             # The RAW (uncalibrated) Layer-1 input estimate — "what Errorta actually
@@ -4298,6 +4892,16 @@ class CodingRunner:
         # `new` project (empty master) is clamped to 1 worker from iteration 0 —
         # the team must scaffold a buildable base before fanning out.
         refresh_foundation_status(self.store, self.workspace)
+        # Spec 12 (S1) Item 1: acquire a gate at run start too, not only after a
+        # merge. An `existing`/imported target already carrying tests on master
+        # gets its gate — and its one-shot smoke run — here, off the loop and off
+        # any merge turn. Fully guarded internally; a hiccup never fails the run.
+        try:
+            from . import gate_bootstrap
+            if getattr(policy, "gate_bootstrap", True):
+                gate_bootstrap.maybe_bootstrap(self.store, self.workspace, policy)
+        except Exception:  # noqa: BLE001
+            pass
         by_role = members_by_coding_role(self.members)
         member_pairs = [(m["id"], coding_role_of(m)) for m in self.members
                         if m.get("enabled", True)]
@@ -4311,7 +4915,9 @@ class CodingRunner:
             self.store, self.workspace, by_role, self.caller,
             guardrail_enabled=self.guardrail_enabled,
             should_cancel=should_cancel,
-            dev_repo_read=bool(getattr(policy, "dev_repo_read", False)))
+            dev_repo_read=bool(getattr(policy, "dev_repo_read", False)),
+            reviewer_repo_read=bool(getattr(policy, "reviewer_repo_read", False)),
+            review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)))
         try:
             res = run_coding_loop(self.store, member_pairs, policy,
                                   run_turn=run_turn, counters=counters,

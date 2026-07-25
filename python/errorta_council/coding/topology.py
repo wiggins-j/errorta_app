@@ -82,6 +82,15 @@ class Merge:
 
 
 @dataclass(frozen=True)
+class GateRun:
+    """Spec 12 (S1): run the acceptance gate on the integrated master tree. A
+    MECHANICAL turn (0 model calls) dispatched at a quiescent point AFTER merges
+    drain — never inside a Merge, so running the suite can't serialize the team.
+    ``member_id`` is the PM (it owns the turn); the handler runs no member call."""
+    member_id: str
+
+
+@dataclass(frozen=True)
 class GovernancePlan:
     """Give the PM a governance artifact turn (brainstorm/spec/plan)."""
     member_id: str
@@ -113,11 +122,29 @@ CodingAction = (
     | Plan
     | PMAssist
     | Merge
+    | GateRun
     | GovernancePlan
     | GovernanceReview
     | GovernanceMaterialize
     | Complete
 )
+
+
+def _due_gate_run(ledger: Any, pm_id: str) -> Optional["GateRun"]:
+    """Spec 12 (S1): a GateRun is due when the merge handler has armed
+    ``run_state.gate_due`` (a gate-relevant merge crossed the min-merge interval).
+    Policy-free by design — runner owns the interval/bootstrap decision and encodes
+    it in the flag, so topology (which must not import autonomy) only reads it.
+    READ-ONLY + defensive."""
+    get_run_state = getattr(ledger, "get_run_state", None)
+    if not callable(get_run_state):
+        return None
+    try:
+        if bool(get_run_state().get("gate_due")):
+            return GateRun(member_id=pm_id)
+    except Exception:  # noqa: BLE001 — scheduling must never break on a read error
+        pass
+    return None
 
 
 def _has_pending_interjection(ledger: Any) -> bool:
@@ -243,6 +270,12 @@ def decide_next(
             for pr in list_prs():
                 if pr.get("status") == "mergeable":
                     return Merge(member_id=pm_ids[0], pr_id=pr["pr_id"])
+        # Spec 12 (S1): merges drain first (above); once none are mergeable, run a
+        # due acceptance gate on the integrated tree before more dev work — off the
+        # merge turn, so the suite never serializes a fan-out.
+        gate = _due_gate_run(ledger, pm_ids[0])
+        if gate is not None:
+            return gate
         # F100 PR-B: in strict mode the PM also reviews code PRs (the second of
         # the dual review). A ready PM PR-review task is dispatched before more
         # dev work so the merge gate can clear.
@@ -365,6 +398,11 @@ def plan_next_batch(
             for pr in list_prs():
                 if pr.get("status") == "mergeable":
                     return [Merge(member_id=pm_ids[0], pr_id=pr["pr_id"])]
+        # Spec 12 (S1): a due acceptance gate is an exclusive mechanical PM action
+        # this tick, like Merge — run it on the integrated tree once merges drain.
+        gate = _due_gate_run(ledger, pm_ids[0])
+        if gate is not None:
+            return [gate]
         # F100 PR-B: a ready PM PR-review (strict-mode dual review) is an
         # exclusive PM action this tick, like Merge — the PM has one turn.
         pm_review = _ready_pm_review_task(ledger)
