@@ -1711,8 +1711,14 @@ def _run_concurrent_loop(
                         # revalidates other PRs' worktrees, so it must not run
                         # while worker turns write in parallel. Defer it until the
                         # in-flight workers drain (we stop adding new work below,
-                        # so they will), then run the merge alone.
-                        if any(isinstance(a, Assign) for a in flight):
+                        # so they will), then run the merge alone. A GateRun reads
+                        # the master checkout (`workspace.root()`); a Merge mutating
+                        # master concurrently would leave the gate testing a mixed
+                        # tree and binding its verdict to a head it never cleanly
+                        # ran — so defer on an in-flight GateRun too. (The inverse —
+                        # a GateRun deferring on an in-flight Merge — is the `else`
+                        # branch below, so the two are mutually exclusive.)
+                        if any(isinstance(a, (Assign, GateRun)) for a in flight):
                             break
                     else:
                         # Don't start new work while a Merge is integrating (it's

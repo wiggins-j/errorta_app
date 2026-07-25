@@ -285,6 +285,41 @@ def test_maybe_bootstrap_refuses_an_unrunnable_command(
     assert any(d["choice"] == "gate_bootstrap_refused" for d in s.list_decisions())
 
 
+def test_a_refused_candidate_smoke_runs_at_most_once(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
+    """Regression lock: a refused candidate registers nothing, so without the
+    run-state memo the smoke `run_test_commands` would re-execute on every merge
+    (a repeated subprocess on the merge turn + a `gate_bootstrap_refused` each
+    time). Assert it runs exactly once across repeated bootstrap calls."""
+    from errorta_council.coding import testing as _testing
+    from errorta_council.coding.autonomy import CodingAutonomyPolicy
+
+    s = _store("bsmemo", tmp_path)
+    ws = _ws("bsmemo", s)
+    monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
+    monkeypatch.setattr(
+        gate_bootstrap, "_detect_acceptance_command",
+        lambda files: ("acceptance", {"argv": ["x"], "timeout_seconds": 5,
+                                      "cwd": ".", "scope": "acceptance",
+                                      "label": "acc"}))
+    calls = {"n": 0}
+
+    class _EmptySession:
+        results: list = []
+
+    def _fake_run(*_a, **_k):
+        calls["n"] += 1
+        return _EmptySession()  # no results -> _smoke_ran_cleanly refuses
+
+    monkeypatch.setattr(_testing, "run_test_commands", _fake_run)
+    for _ in range(3):
+        gate_bootstrap.maybe_bootstrap(s, ws, CodingAutonomyPolicy())
+
+    assert calls["n"] == 1  # memoized: smoke ran once, not once per merge
+    assert s.get_test_commands() == {}  # still refused, never registered
+    assert s.get_run_state().get("gate_cmd_bootstrap_resolved") is True
+
+
 def test_maybe_bootstrap_never_overwrites_an_operator_registry(
         tmp_errorta_home: Path, tmp_path: Path) -> None:
     from errorta_council.coding.autonomy import CodingAutonomyPolicy

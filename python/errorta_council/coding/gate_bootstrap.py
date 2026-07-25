@@ -162,6 +162,18 @@ def _bootstrap_acceptance_command(store: Any, workspace: Any) -> None:
 
     if store.get_test_commands():
         return  # already configured — never overwrite
+    # Memoize the ONE smoke attempt. A refused candidate registers nothing, so
+    # without this guard `maybe_bootstrap` would re-run the smoke `run_test_commands`
+    # on *every* subsequent merge — a repeated subprocess on the merge turn plus a
+    # `gate_bootstrap_refused` decision each time (the smoke's failure reason —
+    # missing jsdom, absent interpreter — is environmental and does not change
+    # mid-run). Set the flag only AFTER a real smoke attempt, never when no
+    # candidate exists yet: a later merge may add the test file.
+    try:
+        if store.get_run_state().get("gate_cmd_bootstrap_resolved"):
+            return
+    except Exception:  # noqa: BLE001
+        pass
     files = _list_master(workspace)
     proposed = _detect_acceptance_command(files)
     if proposed is None:
@@ -177,18 +189,30 @@ def _bootstrap_acceptance_command(store: Any, workspace: Any) -> None:
             require_sandbox=store.get_require_sandbox())
     except Exception as exc:  # noqa: BLE001
         _refuse(store, cmd_id, f"smoke run raised: {exc}")
+        _mark_cmd_resolved(store)
         return
     ran, reason = _smoke_ran_cleanly(session)
     if not ran:
         _refuse(store, cmd_id, reason)
+        _mark_cmd_resolved(store)
         return
     store.set_test_commands({cmd_id: spec})
+    _mark_cmd_resolved(store)
     try:
         store.record_decision(
             title="gate bootstrapped: acceptance command",
             context="gate_bootstrap", choice="gate_bootstrapped",
             rationale=(f"registered acceptance-scoped command {cmd_id!r} "
                        f"(argv={spec['argv']}); smoke run confirmed it executes"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _mark_cmd_resolved(store: Any) -> None:
+    """Record that the one-shot acceptance-command smoke has run (registered or
+    refused), so it is not re-attempted on every subsequent merge."""
+    try:
+        store.set_run_state(gate_cmd_bootstrap_resolved=True)
     except Exception:  # noqa: BLE001
         pass
 

@@ -301,3 +301,60 @@ def test_reviewer_without_policy_does_not_mount_or_retry(
     # the latency fallback), no ungrounded flag.
     assert calls["n"] == 1
     assert not any(d["choice"] == "review_ungrounded" for d in s.list_decisions())
+
+
+def _run_reviewer_no_num_turns(store, ws, monkeypatch, *, review_min_latency_ms):
+    """Drive a reviewer turn whose provider does NOT report num_turns (a non-CLI /
+    fake provider), returning a fast empty approval. Returns the caller call count."""
+    import json
+    import threading
+
+    from errorta_council.coding.topology import Assign
+
+    pr, review_task = _open_reviewed_pr(store, ws)
+    calls = {"n": 0}
+    sink = threading.local()
+
+    def caller(member, prompt):
+        calls["n"] += 1
+        # num_turns absent (vendor doesn't report it), fast wall time.
+        sink.last = {"num_turns": None, "duration_ms": 200}
+        return json.dumps({
+            "schema_version": "coding_turn.v1", "role": "reviewer",
+            "task_id": review_task.task_id,
+            "intent": {"kind": "review_verdict", "reviewed_head": pr["head"],
+                       "approved": True, "findings": []}})
+
+    monkeypatch.setattr(runner, "_usage_sink", sink)
+    rt = runner.build_run_turn(
+        store, ws, _reviewer_members(), caller, guardrail_enabled=False,
+        reviewer_repo_read=True, review_min_latency_ms=review_min_latency_ms)
+    rt(Assign(member_id="m-rev", task_id=review_task.task_id, role="reviewer"), store)
+    return calls["n"], pr
+
+
+def test_no_num_turns_fast_approval_not_retried_by_default(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
+    """Item 4 false-positive lock: with the default review_min_latency_ms == 0, a
+    fast empty approval from a provider that does not report num_turns is NEVER
+    retried on latency alone — the branch is dead by default."""
+    s = _store("gr4", tmp_path)
+    ws = _ws("gr4", s)
+    n, pr = _run_reviewer_no_num_turns(s, ws, monkeypatch, review_min_latency_ms=0)
+    assert n == 1  # no retry
+    assert not any(d["choice"] == "review_ungrounded" for d in s.list_decisions())
+    assert s.get_pr(pr["pr_id"])["reviewer_approved"] is True
+
+
+def test_no_num_turns_fast_approval_retried_when_latency_floor_set(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
+    """The other side of the lock: with a non-zero latency floor above the turn's
+    wall time, the same sub-floor empty approval IS retried once, then accepted +
+    flagged ungrounded (never wedged)."""
+    s = _store("gr5", tmp_path)
+    ws = _ws("gr5", s)
+    n, pr = _run_reviewer_no_num_turns(s, ws, monkeypatch, review_min_latency_ms=3000)
+    assert n == 2  # primary + one retry
+    assert any(d["choice"] == "review_ungrounded" for d in s.list_decisions())
+    assert s.get_pr(pr["pr_id"])["reviewer_approved"] is True
+    assert s.get_pr(pr["pr_id"])["review_ungrounded"] is True

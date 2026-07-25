@@ -2729,11 +2729,14 @@ def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
         gate_bootstrap.maybe_bootstrap(store, workspace, policy)
     except Exception:  # noqa: BLE001 — bootstrap is best-effort
         pass
-    # Only arm when there is actually something to run and the merge could have
-    # changed the verdict.
+    # Only arm when the GateRun will actually EXECUTE something. Until Spec 12
+    # Item 5 (the runtime-probe arm) lands, `_run_gate` runs registered COMMANDS
+    # only and returns None on an empty registry — so arming on a runtime-only
+    # project (no commands, a runnable profile) just churns a no-op GateRun and a
+    # `gate_no_commands` decision every interval. Gate on commands, not the broader
+    # `gate_available`. Expand this to include the runtime arm when Item 5 lands.
     try:
-        from . import gate_state
-        if not gate_state.gate_available(store):
+        if not store.get_test_commands():
             return
     except Exception:  # noqa: BLE001
         return
@@ -4889,6 +4892,16 @@ class CodingRunner:
         # `new` project (empty master) is clamped to 1 worker from iteration 0 —
         # the team must scaffold a buildable base before fanning out.
         refresh_foundation_status(self.store, self.workspace)
+        # Spec 12 (S1) Item 1: acquire a gate at run start too, not only after a
+        # merge. An `existing`/imported target already carrying tests on master
+        # gets its gate — and its one-shot smoke run — here, off the loop and off
+        # any merge turn. Fully guarded internally; a hiccup never fails the run.
+        try:
+            from . import gate_bootstrap
+            if getattr(policy, "gate_bootstrap", True):
+                gate_bootstrap.maybe_bootstrap(self.store, self.workspace, policy)
+        except Exception:  # noqa: BLE001
+            pass
         by_role = members_by_coding_role(self.members)
         member_pairs = [(m["id"], coding_role_of(m)) for m in self.members
                         if m.get("enabled", True)]
