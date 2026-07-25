@@ -260,3 +260,29 @@ def test_stop_reason_contract_carries_revise_livelock() -> None:
     # classify_exit is a fail-closed allowlist -> a failure reason is EXIT_RUN_FAILED.
     assert runstream.classify_exit(
         {"state": {"stop_reason": "revise_livelock"}}) == EXIT_RUN_FAILED
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5 — the repro: breaker fires -> livelock detector stops (end to end).
+# --------------------------------------------------------------------------- #
+
+def test_breaker_then_livelock_stops_the_run(tmp_errorta_home, tmp_path) -> None:
+    s = _store("e2e", tmp_path)
+    r3, p3 = _three_deep(s)
+    # Phase 2: the same finding at the cap breaks the chain (records the decision).
+    runner._handle_review_rejection(
+        s, None, pr=p3, task=r3,
+        findings=[{"blocking": True, "title": "stale gate"}], source="reviewer")
+    assert any(d["choice"] == "revise_chain_broken" for d in s.list_decisions())
+    assert s.get_pr(p3["pr_id"])["status"] == "blocked"
+    # Phase 3: the PM re-plan makes no merge progress -> the loop stops, instead of
+    # burning to the iteration cap the way it does on main (no breaker at all).
+    policy = CodingAutonomyPolicy()
+    c = LoopCounters()
+    result = None
+    for i in range(policy.revise_livelock_limit + 3):
+        c.iterations = i
+        result = _account_revise_livelock(s, c, policy)
+        if result is not None:
+            break
+    assert result is not None and result.stop_reason == REVISE_LIVELOCK

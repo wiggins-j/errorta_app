@@ -704,7 +704,11 @@ Exit codes are stable, so CI can branch on the failure class:
 
 Because `run` prints its terminal status *and* stamps a non-zero exit on a
 failure-class `stop_reason` (code 7), `errorta run --json --yes` is safe to gate a
-pipeline on.
+pipeline on. Failure-class reasons include `gate_not_improving`, `dispatch_wedged`,
+and `revise_livelock` (Spec 16 — a revise chain kept failing the same finding and
+the PM re-plan didn't recover; the run stops instead of looping to the iteration
+cap). The unknown-reason default is also a failure (fail-closed), so a new engine
+stop reason the CLI hasn't learned still gates CI correctly.
 
 ### One sidecar, one owner
 
