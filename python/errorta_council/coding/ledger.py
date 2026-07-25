@@ -1073,6 +1073,14 @@ class LedgerStore:
                 # approved empty without reading, twice (accepted but flagged).
                 "review_grounded": None, "review_num_turns": None,
                 "review_ungrounded": False,
+                # GL01 (Item 3): the web-probe verdict on the PR's head — console-
+                # error count, non-black liveness, screenshot ref, pass/fail, and
+                # the head it ran against. Seeded falsy so every PR record is
+                # shape-complete and a probe-less PR is byte-identical to today;
+                # stamped by web_probe._attach_verdict_to_prs once a probe runs.
+                "probe_passed": None, "probe_non_black": None,
+                "probe_console_errors": None, "probe_screenshot": "",
+                "probe_reason": "", "probe_head": "",
                 "created_at": _now(), "updated_at": _now(),
             }
             prs[pr["pr_id"]] = pr

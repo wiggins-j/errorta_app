@@ -3261,6 +3261,46 @@ def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
     return session
 
 
+def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
+                   should_cancel: Optional[Callable[[], bool]] = None) -> None:
+    """GL01 (Item 1 + Item 2): the sibling arm to ``_run_gate`` — the default web
+    probe (the black-canvas oracle) plus the anchor reconcile.
+
+    Registry-INDEPENDENCE is the load-bearing property. ``_run_gate`` returns
+    ``None`` on an empty registry, so a buildless web project that authored no test
+    gets no did-it-render signal from it. This arm runs REGARDLESS of the registry:
+    it stands the served web runtime up, drives the headless liveness probe, and
+    records a ``web:probe`` runtime-test bound to ``head`` (Item 1). It then
+    reconciles test anchors off that recorded run — promoting a green probe/command
+    to an anchor and recording an ``anchor_regressed`` decision + one deduped alert
+    when a previously-green anchor flips red at a new head (Item 2).
+
+    ON by default (``policy.web_probe``); fully fail-open: a non-web project, a
+    headless-browser inability, or any failure records NO evidence and never fails
+    the turn (mirrors ``_runtime_gate_probe``'s cannot-verify posture)."""
+    try:
+        from .autonomy import load_policy
+        policy = load_policy(store)
+    except Exception:  # noqa: BLE001
+        return
+    if not getattr(policy, "web_probe", True):
+        return
+    try:
+        from . import anchors, web_probe
+        run = web_probe.run_and_record(
+            store, workspace, head=head,
+            frames=int(getattr(policy, "web_probe_frames", 30)),
+            should_cancel=should_cancel)
+    except Exception:  # noqa: BLE001 — the probe never fails the turn
+        return
+    if not run:
+        return  # non-web project, or fail-open (no evidence recorded)
+    try:
+        anchors.reconcile(store, run, project_id=store.project_id)
+    except Exception:  # noqa: BLE001 — the anchor lock is best-effort
+        pass
+
+
 # Spec 12 (S1): a merge that touches ONLY these is not gate-relevant — running the
 # acceptance gate again would waste the suite's wall time with no chance of a
 # changed verdict. Everything else (source, web assets, test files, configs) is.
@@ -4185,6 +4225,26 @@ def build_run_turn(
                         rationale=(f"ran the acceptance gate on master head {head[:12]}"
                                    if session is not None
                                    else "no registered commands to run"))
+                    # GL01 (Item 2): reconcile anchors off the command gate too, so
+                    # a registered command that went green becomes an anchor and a
+                    # later red flips it — the gate's results already carry per-
+                    # command passed. The gate session isn't recorded with a head
+                    # dict, so synthesize the run shape the reconcile reads.
+                    if session is not None:
+                        try:
+                            from . import anchors as _anchors
+                            _anchors.reconcile(store, {
+                                "head": head,
+                                "results": [r.to_dict() for r in session.results],
+                            }, project_id=store.project_id)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    # GL01 (Item 1): the registry-INDEPENDENT web probe — the
+                    # black-canvas oracle — runs REGARDLESS of what `_run_gate` did
+                    # (it returns None on an empty registry; the probe must still
+                    # run). Sibling arm, off the same merge-armed GateRun turn.
+                    _web_probe_arm(store, workspace, head=head,
+                                   should_cancel=should_cancel)
             except Exception as exc:  # noqa: BLE001 — a gate error never breaks the loop
                 try:
                     store.record_decision(
@@ -5285,6 +5345,14 @@ def build_run_turn(
         launched_clean, launch_cannot_verify, launch_detail = \
             _delivery_launch_evidence(store, workspace, head,
                                       should_cancel=should_cancel)
+
+        # GL01 (Item 1): the web probe rides delivery too — a runnable web tree's
+        # delivered head gets a did-it-render liveness check (the black-canvas
+        # oracle) recorded as evidence alongside the launch probe, and its anchors
+        # reconciled. Best-effort / fail-open: it records a verdict the reviewer and
+        # `errorta prs` can see, but never blocks `done` here (a headless-browser
+        # inability must not fail delivery) — the GateRun arm is the in-loop gate.
+        _web_probe_arm(store, workspace, head=head, should_cancel=should_cancel)
 
         # `passed` requires a clean launch too. A launch cannot_verify leaves
         # launched_clean=False so it also fails `passed`.

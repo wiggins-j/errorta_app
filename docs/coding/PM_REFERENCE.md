@@ -442,6 +442,8 @@ and FastAPI routers. Update the prose and this contract together.
     "revise_chain_limit": 3,
     "revise_livelock_limit": 5,
     "task_reassignment_limit": 2,
+    "web_probe": true,
+    "web_probe_frames": 30,
     "wedge_min_tasks": 10,
     "wedge_stall_limit": 5,
     "worker_unproductive_limit": 2

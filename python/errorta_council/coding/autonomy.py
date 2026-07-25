@@ -197,6 +197,18 @@ class CodingAutonomyPolicy:
     # (i.e. the PM's re-plan did not unstick it either) before the run stops
     # `revise_livelock`. 0 disables the detector.
     revise_livelock_limit: int = 5
+    # GL01 (Item 1): the unconditional default web probe — the black-canvas
+    # oracle. ON by default (unlike Spec 14's default-OFF screenshot) because a
+    # liveness assertion is cheap and is the whole point: it runs REGARDLESS of
+    # the command registry, so a buildless web project that authored no test still
+    # gets a did-it-render signal. Fail-open — a headless-browser inability records
+    # no evidence, never a red gate. The on/off switch for the whole probe arm.
+    web_probe: bool = True
+    # GL01 (Item 1): rendered frames the probe waits before asserting non-black —
+    # a rendered-frame count (requestAnimationFrame), NOT a wall clock, so a
+    # slow-but-live canvas clears once it paints. 0 disables the frame wait (assert
+    # on the first paint).
+    web_probe_frames: int = 30
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -231,6 +243,8 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "gate_min_merge_interval": p.gate_min_merge_interval,
         "revise_chain_limit": p.revise_chain_limit,
         "revise_livelock_limit": p.revise_livelock_limit,
+        "web_probe": p.web_probe,
+        "web_probe_frames": p.web_probe_frames,
     }
 
 
@@ -305,6 +319,12 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             0, int(d.get("revise_chain_limit", base.revise_chain_limit))),
         revise_livelock_limit=max(
             0, int(d.get("revise_livelock_limit", base.revise_livelock_limit))),
+        # GL01 (Item 1): the web probe is a plain on/off bool (default ON). The
+        # frame count uses `max(0, …)` — 0 asserts on the first paint — matching
+        # the Spec 04 / Spec 07 / Spec 10 clamp convention.
+        web_probe=bool(d.get("web_probe", base.web_probe)),
+        web_probe_frames=max(
+            0, int(d.get("web_probe_frames", base.web_probe_frames))),
     )
 
 
