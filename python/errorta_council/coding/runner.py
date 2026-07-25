@@ -2711,7 +2711,24 @@ _BUNDLER_REQUIRED_EXT = (".ts", ".tsx", ".jsx", ".vue", ".svelte")
 _JS_IMPORT_FROM_RE = re.compile(
     r"""\bimport\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""")
 _JS_IMPORT_BARE_RE = re.compile(r"""\bimport\s*['"]([^'"]+)['"]""")
+# `export {x} from "react"` / `export * from "react"` — a bare RE-EXPORT. The
+# import regexes require `\bimport\b`, so a re-export whose specifier is bare
+# (needs a bundler) would otherwise slip through. Same specifier semantics as
+# the import case: a leading "." or "/" is browser-resolvable, anything else is
+# a bare specifier only a bundler resolves.
+_JS_EXPORT_FROM_RE = re.compile(
+    r"""\bexport\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""")
 _JS_REQUIRE_RE = re.compile(r"""\brequire\s*\(\s*['"][^'"]+['"]\s*\)""")
+# JSX inside a `.js` file — a transpiler/bundler signal (a browser can't run it
+# as-is). Conservative: match a real JSX element, never a bare `<` or an `a < b`
+# comparison. Three unambiguous shapes: a self-closing element `<Tag ... />`, a
+# closing tag `</Tag>`, or a tag returned from a render function
+# (`return <Tag` / `=> <Tag`). `a < b` never matches (a space or non-letter
+# follows `<`); `x >> 1` / generics never match (no tag/`/>`/`</` shape).
+_JSX_RE = re.compile(
+    r"""(?:\breturn\s*|=>\s*)<[A-Za-z]"""       # return <tag / => <tag
+    r"""|<[A-Za-z][\w.-]*(?:\s+[^<>]*?)?/>"""    # <Tag ... /> self-closing
+    r"""|</[A-Za-z][\w.-]*\s*>""")               # </Tag> closing
 # `<script src="…">` / `<link rel="stylesheet" href="…">` — captures the URL.
 _HTML_SCRIPT_SRC_RE = re.compile(
     r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
@@ -2826,13 +2843,71 @@ def _buildless_web_ready(files: list[str], read: Any) -> bool:
             return False  # unreadable/oversized referenced script -> fail closed
         if _JS_REQUIRE_RE.search(body):
             return False
+        if _JSX_RE.search(body):
+            return False  # JSX in a .js file -> needs a transpiler/bundler
         for spec in _JS_IMPORT_FROM_RE.findall(body):
             if not spec.startswith((".", "/")):
                 return False  # bare specifier -> needs a bundler
         for spec in _JS_IMPORT_BARE_RE.findall(body):
             if not spec.startswith((".", "/")):
                 return False
+        for spec in _JS_EXPORT_FROM_RE.findall(body):
+            if not spec.startswith((".", "/")):
+                return False  # bare re-export specifier -> needs a bundler
     return True
+
+
+def _buildless_stall_reason(files: list[str], read: Any) -> Optional[str]:
+    """Spec 13 (Item 2): for a WEB-ONLY tree that is not yet buildless-ready, name
+    the specific Item-1 condition that is failing — a cause the PM can act on
+    (e.g. "index.html references src/main.js, absent on master") instead of the
+    generic "a foundation is one of three shapes" sentence. Returns ``None`` when
+    the tree is already buildless-ready or nothing can be diagnosed (fall back to
+    the generic rationale). Mirrors ``_buildless_web_ready``'s condition order."""
+    fileset = set(files)
+    if "index.html" not in fileset:
+        return "no index.html has merged to master yet"
+    bundler = next((f for f in files if f.endswith(_BUNDLER_REQUIRED_EXT)), None)
+    if bundler is not None:
+        return f"{bundler} is a bundler-required file, so a manifest is needed"
+    html = read("index.html")
+    if not isinstance(html, str) or len(html) > _BUILDLESS_READ_CAP:
+        return "index.html on master could not be read"
+    referenced_scripts: list[str] = []
+    for m in _HTML_SCRIPT_SRC_RE.finditer(html):
+        url = m.group(1)
+        if not _is_relative_url(url):
+            return (f"index.html loads an external <script src> ({url}), so "
+                    "the tree is not self-contained")
+        target = _resolve_against("index.html", url)
+        if target not in fileset:
+            return f"index.html references {target}, absent on master"
+        referenced_scripts.append(target)
+    for m in _HTML_LINK_HREF_RE.finditer(html):
+        url = m.group(1)
+        if not _is_relative_url(url):
+            if re.search(r"stylesheet", m.group(0), re.IGNORECASE):
+                return (f"index.html links an external stylesheet ({url}), so "
+                        "the tree is not self-contained")
+            continue
+        target = _resolve_against("index.html", url)
+        if target not in fileset and target.endswith((".css",)):
+            return f"index.html references {target}, absent on master"
+    if not referenced_scripts:
+        return "index.html references no local <script src> yet"
+    for rel in referenced_scripts:
+        body = read(rel)
+        if not isinstance(body, str) or len(body) > _BUILDLESS_READ_CAP:
+            return f"referenced script {rel} could not be read"
+        if _JS_REQUIRE_RE.search(body) or _JSX_RE.search(body):
+            return (f"{rel} uses a bundler-required construct "
+                    "(require()/JSX), so a manifest is needed")
+        for spec in (*_JS_IMPORT_FROM_RE.findall(body),
+                     *_JS_IMPORT_BARE_RE.findall(body),
+                     *_JS_EXPORT_FROM_RE.findall(body)):
+            if not spec.startswith((".", "/")):
+                return f'{rel} imports the bare specifier "{spec}", so a bundler/manifest is needed'
+    return None
 
 
 def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
@@ -2924,8 +2999,33 @@ def refresh_foundation_status(store: LedgerStore, workspace: Any) -> str:
     except Exception:  # noqa: BLE001
         pass
     status = "merged" if foundation_ready(store, workspace) else "pending"
+    # Spec 13 (Item 2): while pending, persist a shape-aware stall reason for a
+    # WEB-ONLY tree so `_account_foundation_stall` (which sees only the ledger)
+    # can name the specific failing Item-1 condition instead of a generic list.
+    # Best-effort — cleared unless we can diagnose a web-only shape.
+    reason = ""
+    if status == "pending":
+        try:
+            files = [f for f in workspace.list_files(scope="master")
+                     if f != ".gitignore"]
+            web_only = any(f.endswith(_WEB_ONLY_EXT) for f in files) and not any(
+                f.endswith(_MANIFEST_BOUND_EXT) and not f.endswith(_WEB_ONLY_EXT)
+                for f in files)
+            if web_only:
+                def _read(rel: str) -> str | None:
+                    raw = workspace.read_master_file(rel)
+                    if raw is None:
+                        return None
+                    try:
+                        return raw.decode("utf-8")
+                    except (UnicodeDecodeError, AttributeError):
+                        return None
+                reason = _buildless_stall_reason(files, _read) or ""
+        except Exception:  # noqa: BLE001 — diagnosis is best-effort
+            reason = ""
     try:
-        store.set_run_state(foundation_status=status)
+        store.set_run_state(foundation_status=status,
+                            foundation_stall_reason=reason)
     except Exception:  # noqa: BLE001
         pass
     # F141 WS-I: a `new` project crosses into the steering phase (Current Focus
