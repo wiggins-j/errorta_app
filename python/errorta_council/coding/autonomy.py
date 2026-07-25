@@ -197,6 +197,57 @@ class CodingAutonomyPolicy:
     # (i.e. the PM's re-plan did not unstick it either) before the run stops
     # `revise_livelock`. 0 disables the detector.
     revise_livelock_limit: int = 5
+    # GL01 (Item 1): the unconditional default web probe — the black-canvas
+    # oracle. ON by default (unlike Spec 14's default-OFF screenshot) because a
+    # liveness assertion is cheap and is the whole point: it runs REGARDLESS of
+    # the command registry, so a buildless web project that authored no test still
+    # gets a did-it-render signal. Fail-open — a headless-browser inability records
+    # no evidence, never a red gate. The on/off switch for the whole probe arm.
+    web_probe: bool = True
+    # GL01 (Item 1): rendered frames the probe waits before asserting non-black —
+    # a rendered-frame count (requestAnimationFrame), NOT a wall clock, so a
+    # slow-but-live canvas clears once it paints. 0 disables the frame wait (assert
+    # on the first paint).
+    web_probe_frames: int = 30
+    # GL04 (GAP-4): the diff-level breaker — stasis + oscillation on a revise
+    # lineage, a THIRD trip condition on Spec 16's ONE breaker, checked BEFORE the
+    # depth+class cap. On/off switch (default ON); the two thresholds below tune it.
+    diff_deadlock: bool = True
+    # GL04 (GAP-4): stasis threshold — a new revise diff whose signed-hunk multiset
+    # is within this Jaccard distance of the IMMEDIATELY PRECEDING lineage member's
+    # is non-progressive (a resubmitted-essentially-the-same change). 0.0 => only a
+    # byte-identical diff trips; larger => looser near-identity.
+    diff_stasis_epsilon: float = 0.12
+    # GL04 (GAP-4): revert overlap — a new diff whose signed-hunk multiset reproduces
+    # >= this fraction of the SIGN-FLIP of ANY ancestor's multiset is an oscillation
+    # (A->B->A), even with a distinct finding class per hop. High by construction so
+    # a mostly-new diff grazing an old hunk does NOT trip (the real-progress lock).
+    revert_overlap: float = 0.7
+    # GL04 (GAP-5): run-level convergence clamp. Window of most-recent RESOLVED PRs
+    # (merged/superseded/blocked/abandoned) the churn metric reads. 0 disables the
+    # detector (the `max(0, …)` convention), restoring today's fan-out.
+    convergence_window: int = 20
+    # GL04 (GAP-5): TRIP band — clamp fan-out to serial when the windowed
+    # superseded-ratio >= this OR the merge-rate <= `convergence_clamp_merge_rate`.
+    # The run's 53/96-superseded, 30%-merge is the calibration point.
+    convergence_clamp_ratio: float = 0.5
+    convergence_clamp_merge_rate: float = 0.35
+    # GL04 (GAP-5): RELEASE band — un-clamp only once the window recovers past a
+    # SEPARATE, tighter band (superseded-ratio <= this AND merge-rate >=
+    # `convergence_release_merge_rate`). Distinct trip/release bands are the
+    # hysteresis that keeps the clamp from flapping on the boundary.
+    convergence_release_ratio: float = 0.35
+    convergence_release_merge_rate: float = 0.5
+    # GL05 (Item 2): the strict, a-priori file-ownership partition. F159's hot-file
+    # gate is REACTIVE — it serializes a path only after it has conflicted
+    # `hot_file_threshold` times. This holds a file from the FIRST tick a task owns
+    # it, so a fan-out can never hand two in-flight tasks the same DECLARED file
+    # (RQ6's "strictly partitioned file ownership" [13]). Fail-open on silence: a
+    # task that declares no paths is treated as UNKNOWN ownership, not universal, so
+    # it never collapses fan-out to serial (mirrors SPEC-13/F159). On by default — it
+    # is inert for the common prose-silent task and only bites declared colliders.
+    # At `cap == 1` (sequential loop) it is a no-op. On/off switch for the guardrail.
+    strict_file_partition: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -231,6 +282,17 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "gate_min_merge_interval": p.gate_min_merge_interval,
         "revise_chain_limit": p.revise_chain_limit,
         "revise_livelock_limit": p.revise_livelock_limit,
+        "web_probe": p.web_probe,
+        "web_probe_frames": p.web_probe_frames,
+        "diff_deadlock": p.diff_deadlock,
+        "diff_stasis_epsilon": p.diff_stasis_epsilon,
+        "revert_overlap": p.revert_overlap,
+        "convergence_window": p.convergence_window,
+        "convergence_clamp_ratio": p.convergence_clamp_ratio,
+        "convergence_clamp_merge_rate": p.convergence_clamp_merge_rate,
+        "convergence_release_ratio": p.convergence_release_ratio,
+        "convergence_release_merge_rate": p.convergence_release_merge_rate,
+        "strict_file_partition": p.strict_file_partition,
     }
 
 
@@ -305,6 +367,39 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             0, int(d.get("revise_chain_limit", base.revise_chain_limit))),
         revise_livelock_limit=max(
             0, int(d.get("revise_livelock_limit", base.revise_livelock_limit))),
+        # GL01 (Item 1): the web probe is a plain on/off bool (default ON). The
+        # frame count uses `max(0, …)` — 0 asserts on the first paint — matching
+        # the Spec 04 / Spec 07 / Spec 10 clamp convention.
+        web_probe=bool(d.get("web_probe", base.web_probe)),
+        web_probe_frames=max(
+            0, int(d.get("web_probe_frames", base.web_probe_frames))),
+        # GL04 (GAP-4): the diff-deadlock breaker is a plain on/off bool; the two
+        # thresholds clamp to [0, 1] (a distance / a fraction — a value outside the
+        # unit interval is meaningless).
+        diff_deadlock=bool(d.get("diff_deadlock", base.diff_deadlock)),
+        diff_stasis_epsilon=min(1.0, max(
+            0.0, float(d.get("diff_stasis_epsilon", base.diff_stasis_epsilon)))),
+        revert_overlap=min(1.0, max(
+            0.0, float(d.get("revert_overlap", base.revert_overlap)))),
+        # GL04 (GAP-5): `max(0, …)` on the window — 0 disables the clamp detector
+        # (matching the Spec 04/07/10/16 convention); the ratios clamp to [0, 1].
+        convergence_window=max(
+            0, int(d.get("convergence_window", base.convergence_window))),
+        convergence_clamp_ratio=min(1.0, max(
+            0.0, float(d.get("convergence_clamp_ratio", base.convergence_clamp_ratio)))),
+        convergence_clamp_merge_rate=min(1.0, max(
+            0.0, float(d.get("convergence_clamp_merge_rate",
+                             base.convergence_clamp_merge_rate)))),
+        convergence_release_ratio=min(1.0, max(
+            0.0, float(d.get("convergence_release_ratio",
+                             base.convergence_release_ratio)))),
+        convergence_release_merge_rate=min(1.0, max(
+            0.0, float(d.get("convergence_release_merge_rate",
+                             base.convergence_release_merge_rate)))),
+        # GL05 (Item 2): plain on/off bool (default ON) — the a-priori file
+        # partition. Absent key -> the dataclass default.
+        strict_file_partition=bool(
+            d.get("strict_file_partition", base.strict_file_partition)),
     )
 
 
@@ -362,6 +457,42 @@ def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
         for hp in hot_set:
             if _paths.paths_intersect(tp, {hp}):
                 owned.add(hp)
+    return owned
+
+
+def inflight_owned_paths(ledger: Any) -> set[str]:
+    """GL05 (Item 2): the STRICT a-priori file-ownership partition — the union of
+    DECLARED (``task_touched_paths``) and OBSERVED (open-PR ``changed_paths``) file
+    paths held by every in-flight DEV task (one that is ``doing`` or has an open,
+    un-merged PR).
+
+    Unlike ``hot_owned_paths`` this is NOT filtered to hot files: it holds a file
+    from the FIRST tick a task owns it, so two in-flight tasks never own the same
+    master file even before the first conflict (the reactive hot-file gate engages
+    only after ``hot_file_threshold`` conflicts). Mirrors ``hot_owned_paths``'s
+    observed-``changed_paths`` signal so a prose-silent writer whose open PR touched
+    a file still owns it. A task with no declared/observed paths contributes nothing
+    — an empty set is UNKNOWN ownership, not universal (mirrors SPEC-13/F159), so
+    this never collapses fan-out to serial on silence."""
+    owned: set[str] = set()
+    observed_by_task: dict[str, set[str]] = {}
+    live_pr_tasks: set[str] = set()
+    list_prs = getattr(ledger, "list_prs", None)
+    if callable(list_prs):
+        for pr in list_prs():
+            if pr.get("status") not in ("merged", "superseded", "abandoned", "closed"):
+                tid = pr.get("task_id")
+                if tid:
+                    live_pr_tasks.add(str(tid))
+                    changed = {_paths.normalize_path(str(p))
+                               for p in (pr.get("changed_paths") or []) if p}
+                    if changed:
+                        observed_by_task.setdefault(str(tid), set()).update(changed)
+    for task in ledger.list_tasks(role=DEV):
+        if task.state != "doing" and task.task_id not in live_pr_tasks:
+            continue
+        owned |= _paths.task_touched_paths(task) | observed_by_task.get(
+            task.task_id, set())
     return owned
 
 
@@ -423,9 +554,21 @@ def runtime_cap(policy: CodingAutonomyPolicy, members: list[tuple[str, str]],
     """
     base = effective_parallelism(policy, members)
     try:
-        fstatus = str(ledger.get_run_state().get("foundation_status", ""))
+        _state = ledger.get_run_state()
     except Exception:  # noqa: BLE001
-        fstatus = ""
+        _state = {}
+    # GL04 (GAP-5): the run-level convergence clamp forces serial integration —
+    # honored ABOVE the foundation gate/ramp (a churning wide fan-out is exactly the
+    # run this brake exists for) and independent of whether the foundation gate is
+    # engaged. `_account_convergence_clamp` sets/clears the flag with hysteresis; the
+    # release path restores this to the base cap, so the clamp can never wedge — it
+    # only ever narrows concurrency to 1, never makes a dispatchable task un-runnable.
+    # GL05 (Item 4): this superseded-ratio clamp IS the RQ6 "is parallelism paying
+    # off?" health brake — over threshold it freezes fan-out to serial; GL05 asserts
+    # the wiring rather than adding a second signal.
+    if _state.get("convergence_clamped"):
+        return 1
+    fstatus = str(_state.get("foundation_status", ""))
     if not fstatus:
         return base  # foundation gate not engaged for this run
     if fstatus == "pending":
@@ -960,6 +1103,115 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
         f"acceptance gate has not improved for {policy.gate_stall_limit} "
         f"iterations (score={score})")
     return LoopResult(GATE_NOT_IMPROVING, c)
+
+
+_CONVERGENCE_RESOLVED = ("merged", "superseded", "blocked", "abandoned")
+
+
+def _account_convergence_clamp(ledger: Any, c: LoopCounters,
+                               policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+    """GL04 (GAP-5): the run-level convergence health brake — one rung SOFTER than
+    Spec 16's lineage-scoped ``revise_livelock`` hard stop, wired BEFORE it in both
+    loops. Spec 16's detector is blind to aggregate churn: a run can be below the
+    per-lineage break threshold on EVERY chain and still be superseding half its PRs
+    across all of them (the observed 53/96-superseded, 30%-merge run).
+
+    Over the last ``convergence_window`` RESOLVED PRs (merged/superseded/blocked/
+    abandoned) it reads the superseded-ratio and merge-rate. On the TRIP band it sets
+    a ``convergence_clamped`` run-state flag that ``runtime_cap`` honors (-> serial,
+    no new fan-out), records a decision, and raises ONE deduped alert. It RELEASES —
+    clears the flag — only past a SEPARATE, tighter release band (hysteresis, so the
+    clamp never flaps on the boundary). It NEVER returns a stop: the clamp narrows the
+    run and buys it a chance to drain before Spec 16's stop lands underneath. It never
+    makes a dispatchable task non-dispatchable (a clamped run with one ready task
+    still dispatches, serially), so it can never itself wedge the run.
+
+    ``convergence_window == 0`` disables it (``max(0, …)`` convention), restoring
+    today's fan-out. Fully guarded — a ledger/run-state hiccup never clamps or stops
+    the run."""
+    if policy.convergence_window <= 0:
+        return None
+    try:
+        prs = ledger.list_prs()
+    except Exception:  # noqa: BLE001 — a churn metric must never break the loop
+        return None
+    resolved = [p for p in prs if p.get("status") in _CONVERGENCE_RESOLVED]
+    # Need a FULL window before judging: a metric off 2 resolved PRs is noise, and an
+    # early lone supersession clamping the whole run is exactly the flap to avoid.
+    if len(resolved) < policy.convergence_window:
+        return None
+    window = resolved[-policy.convergence_window:]
+    n = len(window)
+    superseded = sum(1 for p in window if p.get("status") == "superseded")
+    merged = sum(1 for p in window if p.get("status") == "merged")
+    ratio = superseded / n
+    merge_rate = merged / n
+    try:
+        clamped = bool(ledger.get_run_state().get("convergence_clamped"))
+    except Exception:  # noqa: BLE001
+        clamped = False
+    if not clamped:
+        if ratio >= policy.convergence_clamp_ratio \
+                or merge_rate <= policy.convergence_clamp_merge_rate:
+            _engage_convergence_clamp(ledger, ratio=ratio, merge_rate=merge_rate, n=n)
+    else:
+        if ratio <= policy.convergence_release_ratio \
+                and merge_rate >= policy.convergence_release_merge_rate:
+            _release_convergence_clamp(ledger, ratio=ratio, merge_rate=merge_rate, n=n)
+    return None
+
+
+def _engage_convergence_clamp(ledger: Any, *, ratio: float, merge_rate: float,
+                              n: int) -> None:
+    """GL04 (GAP-5): trip — set the flag ``runtime_cap`` reads, record the decision,
+    raise ONE deduped alert. Called only on the not-clamped -> clamped transition, so
+    the alert is keyed once per clamp EPISODE by construction (the flag blocks
+    re-entry until a release). Best-effort — never fails the loop."""
+    try:
+        ledger.set_run_state(convergence_clamped=True)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        ledger.record_decision(
+            title="run convergence clamp engaged", context="convergence",
+            choice="convergence_clamped",
+            rationale=(f"windowed superseded-ratio {ratio:.0%} / merge-rate "
+                       f"{merge_rate:.0%} over {n} resolved PRs crossed the clamp "
+                       "band; forced serial integration and froze new fan-out to let "
+                       "the run drain — soft, releasable, not a stop"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import attention
+        attention.raise_review_alert(
+            str(getattr(ledger, "project_id", "") or ""), stage="development",
+            title="run convergence clamp engaged",
+            summary=(f"the run is superseding {ratio:.0%} of its recent PRs "
+                     f"(merge-rate {merge_rate:.0%}); fan-out is clamped to serial "
+                     "until churn recovers."),
+            store=ledger)
+    except Exception:  # noqa: BLE001 — the alert is best-effort
+        pass
+
+
+def _release_convergence_clamp(ledger: Any, *, ratio: float, merge_rate: float,
+                               n: int) -> None:
+    """GL04 (GAP-5): release — clear the flag so ``runtime_cap`` restores the policy
+    cap and fan-out resumes. Only reached from the clamped branch past the tighter
+    release band. Best-effort — never fails the loop."""
+    try:
+        ledger.set_run_state(convergence_clamped=False)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        ledger.record_decision(
+            title="run convergence clamp released", context="convergence",
+            choice="convergence_released",
+            rationale=(f"windowed superseded-ratio {ratio:.0%} / merge-rate "
+                       f"{merge_rate:.0%} over {n} resolved PRs recovered past the "
+                       "release band; restored fan-out"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _account_revise_livelock(ledger: Any, c: LoopCounters,
@@ -1580,6 +1832,11 @@ def _run_sequential_loop(
         gate_stop = _account_gate_stall(ledger, c, policy)
         if gate_stop is not None:
             return gate_stop
+        # GL04 (GAP-5): the run-level convergence brake — SOFT (clamp fan-out to
+        # serial, releasable) and wired BEFORE Spec 16's hard livelock stop, so the
+        # run gets a chance to drain before the stop lands underneath. Never returns
+        # a stop; only sets/clears the clamp flag `runtime_cap` reads.
+        _account_convergence_clamp(ledger, c, policy)
         # Spec 16: a revise-chain livelock the breaker couldn't unstick.
         livelock_stop = _account_revise_livelock(ledger, c, policy)
         if livelock_stop is not None:
@@ -1752,6 +2009,13 @@ def _run_concurrent_loop(
                 _hot = hot_files(ledger, threshold=policy.hot_file_threshold)
                 _hot_paths = set(_hot)
                 _hot_blocked = hot_owned_paths(ledger, _hot)
+                # GL05 (Item 2): the strict a-priori file-ownership partition — the
+                # paths already held by every in-flight/doing task, so a fan-out can't
+                # hand two tasks the same DECLARED file from tick 0 (the reactive
+                # hot-file gate only engages after N conflicts). Empty when the flag is
+                # off, restoring pre-GL05 dispatch exactly.
+                _owned = (inflight_owned_paths(ledger)
+                          if policy.strict_file_partition else None)
                 _frozen = frozen_paths(ledger)
                 _frozen_owner = None
                 if _frozen:
@@ -1764,7 +2028,8 @@ def _run_concurrent_loop(
                     batch = plan_next_batch(
                         ledger, _idle_members(members, busy), member_tiers,
                         hot_paths=_hot_paths, hot_blocked=_hot_blocked,
-                        frozen=_frozen, frozen_owner_task_id=_frozen_owner)
+                        frozen=_frozen, frozen_owner_task_id=_frozen_owner,
+                        owned_paths=_owned)
                     if not batch:
                         break
                     if len(batch) == 1 and isinstance(batch[0], Complete):
@@ -1786,7 +2051,8 @@ def _run_concurrent_loop(
                     is_merge = isinstance(action, Merge)
                     flight = in_flight.values()
                     if is_merge:
-                        # Integration is serial: a Merge mutates master and
+                        # Integration is serial (GL05 Item 3 — asserted invariant,
+                        # not new behavior): a Merge mutates master and
                         # revalidates other PRs' worktrees, so it must not run
                         # while worker turns write in parallel. Defer it until the
                         # in-flight workers drain (we stop adding new work below,
@@ -1819,6 +2085,11 @@ def _run_concurrent_loop(
                         # next plan_next_batch call won't hand a colliding task out.
                         if _hot:
                             _hot_blocked = hot_owned_paths(ledger, _hot)
+                        # GL05 (Item 2): the just-assigned task is now `doing`, so it
+                        # owns its declared paths a priori; recompute so the next
+                        # plan_next_batch call holds any task declaring the same file.
+                        if policy.strict_file_partition:
+                            _owned = inflight_owned_paths(ledger)
                     fut = pool.submit(
                         _safe_run_turn, run_turn, action, ledger,
                         0 if is_mechanical else 1)
@@ -1943,6 +2214,12 @@ def _run_concurrent_loop(
                 gate_stop = _account_gate_stall(ledger, c, policy)
                 if gate_stop is not None:
                     return gate_stop
+                # GL04 (GAP-5): the run-level convergence brake, wired BEFORE Spec
+                # 16's livelock in the CONCURRENT loop too — this is the very loop a
+                # wide, churning fan-out runs on once Spec 13 lifts the foundation
+                # clamp, so the metric would be dead code exactly where it's needed if
+                # it lived only in the sequential path. Soft (clamp, never a stop).
+                _account_convergence_clamp(ledger, c, policy)
                 # Spec 16: revise-chain livelock probe (mirrors the sequential loop);
                 # wiring BOTH chains is the dead-code lock — Spec 13 lifts the clamp
                 # and real runs go concurrent, so a detector only in the sequential

@@ -65,6 +65,34 @@ hallucinated tool. An unknown tool name is still rejected fail-closed
 (`tool_not_allowed`), but the rejection now names the allowed tools and the real
 read path, and that hint is carried into the task's next dev prompt.
 
+#### Grant-or-delete: the audited design principle (GL03)
+
+When a role systematically invents a tool it was **not** granted — a DEV emitting a
+"run tests" call, once per turn, until something breaks the loop — that hallucinated
+call is not noise to scroll past. It is the agent telling you **what interface the
+task needs**. GL03 treats it as a telemetry ALARM: a pure detector
+(`capabilities.confabulation_from_failure`) recognizes an ungranted-tool-call whose
+intent maps to a capability the role's manifest lacks (distinguished from a plain
+typo of a granted tool, which SPEC-17's corrective hint already handles), and once
+it **repeats** past a threshold it raises exactly one deduped, non-blocking Alert and
+feeds the capability-aware PM a re-plan note — closing the loop
+confabulation → capability-gap → re-plan.
+
+The governing invariant, audited by `capabilities.audit_grant_or_delete`:
+
+> **A role whose duty its manifest cannot discharge is either GRANTED the capability
+> or DELETED from dispatch — never left dispatching into a wall.** A TESTER that
+> structurally never dispatches does *nothing*; a REVIEWER that cannot verify
+> *injects noise*. Grant when the role's duty carries a distinct, load-bearing
+> signal (SPEC-12 gave the TESTER the in-loop gate; SPEC-14 gave the REVIEWER
+> repo-read); delete when it adds no distinct signal even with the capability.
+
+GL03 does not delete any role — SPEC-12/14 already chose *grant* for the two live
+cases; the audit exists so that choice cannot silently regress. Note the honest
+framing: the confabulation→gap link is *inferred* from ACI results, not directly
+studied, so the detector is an advisory heuristic tuned conservatively — it pages
+the PM, it never blocks the run.
+
 ---
 
 ## 2. Models — the most important setup decision
@@ -418,9 +446,16 @@ and FastAPI routers. Update the prose and this contract together.
     "checkpoint_cadence": "per_milestone",
     "checkpoint_n": 5,
     "completion_refused_limit": 2,
+    "convergence_clamp_merge_rate": 0.35,
+    "convergence_clamp_ratio": 0.5,
+    "convergence_release_merge_rate": 0.5,
+    "convergence_release_ratio": 0.35,
     "convergence_stall_limit": 20,
+    "convergence_window": 20,
     "delivery_review_round_limit": 3,
     "dev_repo_read": false,
+    "diff_deadlock": true,
+    "diff_stasis_epsilon": 0.12,
     "foundation_stall_limit": 12,
     "gate_bootstrap": true,
     "gate_min_merge_interval": 3,
@@ -438,10 +473,14 @@ and FastAPI routers. Update the prose and this contract together.
     "pm_idle_limit": 2,
     "review_min_latency_ms": 0,
     "review_screenshot": false,
+    "revert_overlap": 0.7,
     "reviewer_repo_read": false,
     "revise_chain_limit": 3,
     "revise_livelock_limit": 5,
+    "strict_file_partition": true,
     "task_reassignment_limit": 2,
+    "web_probe": true,
+    "web_probe_frames": 30,
     "wedge_min_tasks": 10,
     "wedge_stall_limit": 5,
     "worker_unproductive_limit": 2

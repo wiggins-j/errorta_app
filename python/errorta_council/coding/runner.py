@@ -21,11 +21,13 @@ real caller over ``LocalGateway``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import re
 import threading
+from collections import Counter
 from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
@@ -550,15 +552,89 @@ def _finding_class(findings: list[dict[str, Any]]) -> frozenset[str]:
     return task_dedupe.normalized_tokens(*parts)
 
 
-def _all_unactionable_by_dev(blocking: list[dict[str, Any]]) -> bool:
-    """Spec 15 (Item 3): are ALL blocking findings ones a write-only DEV cannot
-    act on — an execution demand, or uncited (Spec 14's ``cited: false``)? A single
-    real, citable code finding makes this False so the revise still fires."""
+# GL02 (Item 1) — the machine-lane predicate. A finding is MACHINE-LANE when its
+# reason turns on runtime/execution SEMANTICS — does it load, run, race, crash;
+# were the tests run — rather than on the text of the diff. This is deliberately
+# BROADER than ``capabilities.classify_task_text`` (which needs a run-verb AND an
+# evidence-demand, and so misses "renders black at runtime", a claim with neither):
+# a diff cannot evidence an executable question at ANY reviewer false-rejection
+# rate, which is the invariant this predicate fences. It is CONSERVATIVE by
+# construction — only the high-signal runtime phrases below trip it; every
+# ambiguous reason falls to the judgment lane (Spec 14's existing behaviour), which
+# is the documented fail-toward default. Bare "gate"/"probe"/"anchor" are NOT
+# triggers: they name the machine lane's own evidence (a red such run BACKS a
+# claim, §2 below) and appear verbatim in ordinary judgment findings ("stale gate")
+# — including them would route work a DEV can act on.
+# Deliberately anchored to runtime-OUTCOME context, not bare defect verbs. A real,
+# diff-evidenced defect ("null deref in init — src/mod.js:1 crashes") is NOT a
+# machine-lane claim just because it says "crashes"; only a claim tied to running/
+# starting/rendering ("crashes on start", "renders black at runtime", "tests were
+# not run") is. That is the line between a defect a DEV can fix from the diff and an
+# executable question only the executor can decide.
+_RUNTIME_CLAIM_PATTERNS = tuple(re.compile(p) for p in (
+    r"\bat runtime\b", r"\bat start(?:up)?\b", r"\bon (?:start|startup|launch|boot)\b",
+    r"\bcrash\w*\s+(?:on|at|during|when|the)\b",
+    r"\brace condition\b", r"\bdead ?lock\w*", r"\blive ?lock\w*", r"\binfinite loop\b",
+    r"\bblack (?:canvas|screen)\b", r"\bblank (?:canvas|screen)\b",
+    r"\brenders?\s+(?:it\s+)?(?:black|blank|nothing)\b", r"\bnothing renders?\b",
+    r"\bwon'?t\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\b(?:will|does|do)\s+not\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\bdoes\s?n'?t\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\bfails?\s+to\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\bno evidence\b", r"\buntested\b",
+    r"\bnever\s+(?:been\s+)?(?:run|ran|executed|tested)\b",
+    r"\b(?:were|was|are|is|been)\s+not\s+(?:run|ran|executed|tested)\b",
+    r"\bnot\s+(?:actually\s+)?(?:been\s+)?(?:run|ran|executed)\b",
+))
+
+
+def is_execution_claim(finding: dict[str, Any]) -> bool:
+    """GL02 (Item 1): does this finding reason about runtime/execution behaviour a
+    DIFF cannot evidence (machine lane), rather than design/clarity/spec conformance
+    (judgment lane)? Conservative: only the curated high-signal phrases in
+    ``_RUNTIME_CLAIM_PATTERNS`` trip it; anything ambiguous stays judgment."""
+    text = f"{finding.get('title') or ''} {finding.get('body') or ''}".lower()
+    return any(p.search(text) for p in _RUNTIME_CLAIM_PATTERNS)
+
+
+def _red_runtime_evidence(store: LedgerStore, head: str) -> bool:
+    """GL02 (Item 2): is there EXECUTOR evidence that BACKS a runtime claim — a
+    failing (red) acceptance-gate or ``web:probe`` run (GL01) at this head? A red
+    run documents a real runtime failure a DEV can fix, so a machine-lane finding
+    riding on it is a normal cited defect (actionable). A green run CONTRADICTS the
+    claim (Spec 14 Item 5) and does not back it; no run at all leaves it
+    unverifiable — both route rather than bounce to a DEV. Fully guarded."""
+    head = str(head or "")
+    try:
+        runs = store.list_test_runs()
+    except Exception:  # noqa: BLE001 — a read failure means "no evidence"
+        return False
+    for r in reversed(runs):
+        if not isinstance(r, dict):
+            continue
+        if head and str(r.get("head") or "") != head:
+            continue
+        if r.get("passed") is False:
+            return True
+    return False
+
+
+def _all_unactionable_by_dev(blocking: list[dict[str, Any]], *,
+                             has_backing_evidence: bool = False) -> bool:
+    """Spec 15 (Item 3) + GL02 (Items 1-2): are ALL blocking findings ones a
+    write-only DEV cannot act on? A finding is unactionable when it is an execution
+    demand (Spec 15), or uncited (Spec 14's ``cited: false``), OR — GL02 — a
+    machine-lane runtime claim (``is_execution_claim``) with NO executor evidence to
+    back it (``has_backing_evidence`` False): the LLM may not bounce an unverifiable
+    executable question to a DEV who also cannot run anything. A single real, citable
+    code finding — or a machine-lane finding BACKED by a red gate/probe — makes this
+    False so the revise still fires."""
     for f in blocking:
         is_exec = _capabilities.classify_task_text(
             str(f.get("title") or ""), str(f.get("body") or "")) == "execution"
         is_uncited = f.get("cited") is False   # explicit False only; absent != uncited
-        if not (is_exec or is_uncited):
+        is_unbacked_runtime = is_execution_claim(f) and not has_backing_evidence
+        if not (is_exec or is_uncited or is_unbacked_runtime):
             return False
     return True
 
@@ -638,15 +714,268 @@ def _route_unactionable_rejection(
                    "demand is satisfiable.")))
 
 
+# GL02 (Item 3) — the per-head reviewer veto cap. The report (§3 Pathology 2 rec 4)
+# escalates a reviewer's disagreement to the PM after 2 rejections; committed Spec 16
+# caps the revise LINEAGE at depth 3. They count different things and COMPOSE: the
+# per-head cap is reviewer-scoped and task-agnostic (the SAME PR head rejected
+# twice), fires at the finer grain and FIRST — usually short-circuiting the lineage
+# before it reaches depth 3 — while Spec 16's depth cap stays the hard structural
+# backstop (three distinct heads each rejected once, or escalation that never
+# converges). Both enter the ONE PM-replan escalation path; neither flips the verdict.
+_REVIEWER_VETO_CAP = 2
+
+
+def _head_veto_count(store: LedgerStore, head: str) -> int:
+    """GL02 (Item 3): how many times this PR head has ALREADY been vetoed by a
+    reviewer (an actionable rejection that reached the revise seam). Counts the
+    ``reviewer_veto`` markers ``_handle_review_rejection`` records per head — mirrors
+    Spec 15's ``_already_requeued_for_head`` decision-log bookkeeping."""
+    head = str(head or "")
+    try:
+        return sum(1 for d in store.list_decisions()
+                   if d.get("choice") == "reviewer_veto"
+                   and str(d.get("head") or "") == head)
+    except Exception:  # noqa: BLE001 — a read failure counts as no prior veto
+        return 0
+
+
+def _escalate_reviewer_veto(
+    store: LedgerStore, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]], count: int,
+) -> None:
+    """GL02 (Item 3): the same reviewer head vetoed this PR head ``count`` times
+    (>= the cap). Surface the DISAGREEMENT to the PM instead of spawning yet another
+    revise — the reviewer's finding + the diff are already on the PR record. Fail-
+    closed: the PR stays ``changes_requested`` (set by the caller); the verdict is
+    NOT flipped (Spec 16 non-goal, inherited). Deduped per head."""
+    reason = _reason_from_findings(findings)
+    store.record_decision(
+        title=f"reviewer veto cap: {pr['branch']}",
+        context=f"pr {pr['pr_id']}", choice="reviewer_veto_escalated",
+        rationale=(f"the same PR head was rejected {count} times "
+                   f"(cap {_REVIEWER_VETO_CAP}); escalated the disagreement to the PM "
+                   "instead of spawning another revise — an ungrounded reviewer with "
+                   "an absolute veto is a randomized rejection machine"),
+        related_task_ids=[task.task_id, pr.get("task_id", "")])
+    esc_title = f"reviewer disagreement: {pr['branch']}"
+    if not any(t.role == PM and str(t.title or "") == esc_title
+               and t.state not in ("done", "dropped") for t in store.list_tasks()):
+        store.add_task(
+            title=esc_title, role=PM,
+            reason_summary=(reason or "reviewer rejected this head twice"),
+            detail=(f"PR {pr['pr_id']} on branch {pr['branch']} has now been rejected "
+                    f"{count} times by the reviewer on the SAME head, with no dev "
+                    "revise spawned this round. Adjudicate the disagreement: is the "
+                    "reviewer's objection real (re-scope / decompose), or is the PR "
+                    "actually sound (re-plan to let it land)? Do not simply re-queue "
+                    "the same review."
+                    + (f" Reviewer's objection: {reason}." if reason else "")))
+
+
+# GL04 (GAP-4) — the diff-level breaker. A revise lineage can spin in two shapes
+# Spec 16's finding-CLASS breaker is structurally blind to: (a) DIFF-STASIS — the
+# dev keeps resubmitting the essentially-same change (non-progressive iteration);
+# (b) OSCILLATION/REVERT — a revision undoes an earlier one (A->B->A), which reads
+# as progress to a class-only breaker because each hop presents a distinct class.
+# We fingerprint each PR diff once at revise-task creation and, at the NEXT
+# rejection, compare the live diff against the lineage — tripping Spec 16's ONE
+# breaker as a THIRD condition, BEFORE its depth+class cap so we break at the
+# reverting round, not after wasting rounds to depth 3.
+
+_DIFF_HUNK_RE = re.compile(r"^@@ ")
+
+
+def _norm_diff_line(line: str) -> str:
+    """Whitespace-normalize a diff content line for near-identity comparison: drop
+    the leading +/-, strip, and collapse internal whitespace runs. So an
+    indentation-only reshuffle does not read as a different change."""
+    return re.sub(r"\s+", " ", line[1:].strip())
+
+
+def _diff_fingerprint(diff: str) -> dict[str, Any]:
+    """GL04 (GAP-4): a cheap structural summary of a unified PR diff, JSON-round-
+    tripping so it can ride on the revise task's ``_extras`` (like Spec 16's
+    ``finding_class``). Two components:
+
+    * ``shape`` — the sorted set of ``(path, hunk-header)`` tuples, plus ``digest``
+      (a whitespace-normalized content hash), for NEAR-IDENTITY (stasis) comparison;
+    * ``hunks`` — the SIGNED hunk multiset: ``[path, '+'|'-', normalized-line]``
+      entries (repeats preserved), so a REVERT is detectable as an ancestor's
+      multiset with the signs flipped.
+
+    Empty/absent diff -> an empty fingerprint (compares as no-signal, never trips)."""
+    shape: list[list[str]] = []
+    hunks: list[list[str]] = []
+    content: list[str] = []
+    path = ""
+    for raw in (diff or "").splitlines():
+        if raw.startswith("diff --git "):
+            # `diff --git a/<p> b/<p>` — take the b/ path as the current file.
+            parts = raw.split(" b/", 1)
+            path = parts[1].strip() if len(parts) == 2 else ""
+            continue
+        if raw.startswith("+++ "):
+            p = raw[4:].strip()
+            path = p[2:] if p.startswith("b/") else p
+            continue
+        if raw.startswith("--- "):
+            continue
+        if _DIFF_HUNK_RE.match(raw):
+            shape.append([path, raw.strip()])
+            continue
+        if raw.startswith("+") or raw.startswith("-"):
+            sign = raw[0]
+            norm = _norm_diff_line(raw)
+            if not norm:
+                continue  # a pure-whitespace add/remove carries no signal
+            hunks.append([path, sign, norm])
+            content.append(f"{sign}{path}\x00{norm}")
+    digest = hashlib.sha1("\n".join(sorted(content)).encode("utf-8")).hexdigest() \
+        if content else ""
+    return {"shape": sorted(shape), "digest": digest, "hunks": sorted(hunks)}
+
+
+def _fp_hunk_counter(fp: dict[str, Any]) -> Counter:
+    """The signed hunk multiset of a fingerprint as a ``Counter`` keyed on
+    ``(path, sign, line)`` — the comparison currency for both signals."""
+    return Counter(tuple(h) for h in (fp or {}).get("hunks") or [])
+
+
+def _fp_is_empty(fp: dict[str, Any]) -> bool:
+    return not (fp or {}).get("hunks")
+
+
+def _fp_stasis_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """Jaccard DISTANCE between two fingerprints' signed hunk multisets (0.0 ==
+    identical change, 1.0 == disjoint). A distance within ``diff_stasis_epsilon`` is
+    diff-stasis — the same change resubmitted. Two empty fingerprints are treated as
+    disjoint (1.0) so an empty/unreadable diff never reads as stasis."""
+    ca, cb = _fp_hunk_counter(a), _fp_hunk_counter(b)
+    if not ca or not cb:
+        return 1.0
+    inter = sum((ca & cb).values())
+    union = sum((ca | cb).values())
+    return 1.0 - (inter / union) if union else 1.0
+
+
+def _fp_revert_overlap(current: dict[str, Any], ancestor: dict[str, Any]) -> float:
+    """The fraction of ``ancestor``'s change that ``current`` UNDOES: how much of the
+    SIGN-FLIP of the ancestor's signed multiset the current diff reproduces. 1.0 ==
+    a full revert of the ancestor; a mostly-new diff grazing one old hunk stays low
+    (the real-progress lock). 0.0 when either side is empty."""
+    cur = _fp_hunk_counter(current)
+    anc = _fp_hunk_counter(ancestor)
+    if not cur or not anc:
+        return 0.0
+    flipped = Counter()
+    for (path, sign, line), n in anc.items():
+        flipped[(path, "-" if sign == "+" else "+", line)] += n
+    undone = sum((cur & flipped).values())
+    total = sum(flipped.values())
+    return (undone / total) if total else 0.0
+
+
+def _pr_lineage_fingerprints(store: LedgerStore, pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """GL04 (GAP-4): the ANCESTOR diff fingerprints of ``pr``, nearest-first — the
+    same ``pr_id`` back-link walk and cycle/self/terminal guard as
+    ``_revise_lineage_depth``, but rooted on the CURRENT PR (unambiguous) rather than
+    the rejection ``task`` (which is the reviewer task in production, the dev task in
+    the unit-test proxy — walking from the PR is correct for both).
+
+    The dev task that opened ``pr`` is itself a revise carrying the fingerprint of the
+    PR it superseded, so ``fps[0]`` is the immediately preceding lineage member's diff
+    and later entries are older ancestors. Stops at a terminal (retired) ancestor and
+    skips any ancestor with no stored fingerprint."""
+    tasks_by_id = {t.task_id: t for t in store.list_tasks()}
+    cur_task = tasks_by_id.get(pr.get("task_id", ""))
+    seen: set[str] = set()
+    fps: list[dict[str, Any]] = []
+    while cur_task is not None and getattr(cur_task, "pr_id", None):
+        fp = cur_task._extras.get("diff_fingerprint")   # fp of the PR this task supersedes
+        prev_pr_id = cur_task.pr_id
+        if not prev_pr_id or prev_pr_id in seen:  # cycle / self guard
+            break
+        seen.add(prev_pr_id)
+        prev_pr = store.get_pr(prev_pr_id)
+        if prev_pr is None or prev_pr.get("status") in (
+                "merged", "abandoned", "superseded", "blocked"):
+            break
+        if fp:
+            fps.append(fp)
+        cur_task = tasks_by_id.get(prev_pr.get("task_id", ""))
+    return fps
+
+
+def _account_diff_deadlock(
+    store: LedgerStore, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]], diff: str,
+) -> bool:
+    """GL04 (GAP-4): the diff-level trip, run at the rejection seam BEFORE Spec 16's
+    depth+class check. Fingerprint the live PR diff and compare it to the lineage:
+
+    * DIFF-STASIS — within ``diff_stasis_epsilon`` of the immediately preceding
+      member (a resubmitted-essentially-the-same change); or
+    * OSCILLATION/REVERT — reproduces >= ``revert_overlap`` of the sign-flip of ANY
+      ancestor (A->B->A, even with a distinct class per hop); or
+    * an ``anchor_regressed`` decision on this head (GL01 — a green check flipped
+      red is oscillation at the artifact level).
+
+    On a trip, routes into Spec 16's EXISTING escalation (``_break_revise_chain``)
+    with a sub-detail — one blocked PR, one PM re-plan, one deduped alert, feeding
+    Item 3 like any other break. No new stop reason, no second breaker. Returns True
+    iff it broke the chain (the caller then returns without spawning a revise).
+
+    A distinct-diff-each-round lineage (a hard defect needing a fresh fix each hop)
+    trips NONE of these — the regression lock, mirroring Spec 16 Item 2's
+    distinct-class escape hatch."""
+    from .autonomy import load_policy
+    policy = load_policy(store)
+    if not getattr(policy, "diff_deadlock", True):
+        return False
+    current = _diff_fingerprint(diff)
+    depth = _revise_lineage_depth(store, task)
+    ancestors = _pr_lineage_fingerprints(store, pr)
+
+    trigger = ""
+    from . import anchors as _anchors
+    # A revision that left a previously-green anchor CURRENTLY red is oscillation
+    # (GL01→GL04). Gate on being in a real revise lineage (depth >= 1) — a first
+    # attempt failing an anchor is not oscillation — and match on anchor STATE
+    # (head-agnostic), since the break is recorded at the integrated master head,
+    # not this PR's branch tip. Satisfiable: re-green clears it.
+    if depth >= 1 and _anchors.has_unresolved_regression(store):
+        trigger = "a revision regressed a green test anchor (oscillation)"
+    elif not _fp_is_empty(current):
+        eps = float(getattr(policy, "diff_stasis_epsilon", 0.12))
+        overlap = float(getattr(policy, "revert_overlap", 0.7))
+        if ancestors and _fp_stasis_distance(current, ancestors[0]) <= eps:
+            trigger = ("successive revise diffs are near-identical (diff-stasis) — "
+                       "the same change resubmitted")
+        elif any(_fp_revert_overlap(current, anc) >= overlap for anc in ancestors):
+            trigger = ("this revision reverts an earlier one in the lineage "
+                       "(oscillation) — a distinct finding class each hop hid it")
+    if not trigger:
+        return False
+    _break_revise_chain(store, pr=pr, task=task, findings=findings, depth=depth,
+                        trigger=trigger)
+    return True
+
+
 def _break_revise_chain(
     store: LedgerStore, *, pr: dict[str, Any], task: Task,
-    findings: list[dict[str, Any]], depth: int,
+    findings: list[dict[str, Any]], depth: int, trigger: str = "",
 ) -> None:
-    """Spec 16 (Item 2): the revise lineage reached the cap still failing the same
-    finding class. Spawn NO further revise. Block the PR — terminal, and
-    ``_set_mergeable_if_ready`` already refuses to resurrect a ``blocked`` PR, so
-    this can never become a merge path — hand the PM ONE re-plan task (deduped per
-    lineage), record ``revise_chain_broken``, and raise one deduped alert."""
+    """Spec 16 (Item 2): the revise lineage is non-progressive — spawn NO further
+    revise. Block the PR — terminal, and ``_set_mergeable_if_ready`` already refuses
+    to resurrect a ``blocked`` PR, so this can never become a merge path — hand the PM
+    ONE re-plan task (deduped per lineage), record ``revise_chain_broken``, and raise
+    one deduped alert.
+
+    Spec 16's own trip is a repeated finding CLASS at the depth cap; GL04 (GAP-4)
+    reuses this SAME breaker for its diff-level trips (stasis / revert), passing a
+    ``trigger`` that names the diff-level reason. One breaker, one escalation — GAP-4
+    is a third trip condition, not a second breaker."""
+    why = trigger or "the same finding class kept repeating"
     store.update_pr(pr["pr_id"], status="blocked")
     reason = _reason_from_findings(findings)
     esc_title = f"revise chain broken: {pr['branch']}"
@@ -654,26 +983,26 @@ def _break_revise_chain(
                and t.state not in ("done", "dropped") for t in store.list_tasks()):
         store.add_task(
             title=esc_title, role=PM,
-            reason_summary=(reason or "revise chain hit the cap on one finding class"),
-            detail=(f"The revise chain for the PR on branch {pr['branch']} reached "
-                    f"depth {depth}, still failing the same finding class. The PR is "
-                    "blocked. Re-scope, decompose, or abandon this work — do not hand "
-                    "the same rejection back to a dev again."
-                    + (f" Repeated finding: {reason}." if reason else "")))
+            reason_summary=(reason or f"revise chain broken — {why}"),
+            detail=(f"The revise chain for the PR on branch {pr['branch']} is non-"
+                    f"progressive at depth {depth}: {why}. The PR is blocked. Re-scope, "
+                    "decompose, or abandon this work — do not hand the same rejection "
+                    "back to a dev again."
+                    + (f" Finding: {reason}." if reason else "")))
     store.record_decision(
         title=f"revise chain broken: {pr['branch']}",
         context=f"pr {pr['pr_id']}", choice="revise_chain_broken",
-        rationale=(f"revise lineage reached depth {depth} on a repeated finding "
-                   "class; blocked the PR and escalated to the PM instead of "
-                   "spawning another revise"),
-        related_task_ids=[task.task_id])
+        rationale=(f"revise lineage broke at depth {depth} — {why}; blocked the PR "
+                   "and escalated to the PM instead of spawning another revise"),
+        related_task_ids=[task.task_id],
+        extra={"trigger": ("diff_deadlock" if trigger else "finding_class")})
     try:
         from . import attention
         attention.raise_review_alert(
             store.project_id, stage="review",
             title=f"revise chain broken: {pr['branch']}",
             summary=(f"revise chain on branch {pr['branch']} broke at depth {depth} — "
-                     "the same finding class kept repeating; escalated to the PM."),
+                     f"{why}; escalated to the PM."),
             store=store)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
@@ -681,7 +1010,7 @@ def _break_revise_chain(
 
 def _handle_review_rejection(
     store: LedgerStore, workspace: Any, *, pr: dict[str, Any], task: Task,
-    findings: list[dict[str, Any]], source: str,
+    findings: list[dict[str, Any]], source: str, diff: str | None = None,
 ) -> None:
     """Spec 12-18 prep (P0.1): the single seam every "a review said no" path runs
     through — mark the PR ``changes_requested`` and queue the DEV rework.
@@ -704,6 +1033,17 @@ def _handle_review_rejection(
     signature is the point of the seam.
     """
     store.update_pr(pr["pr_id"], status="changes_requested")
+    # Spec 13 (S2): if this rejection is of a foundation-UNLOCKING PR but is OFF-SCOPE
+    # for the foundation (no finding names a foundation file it adds), the clamp is
+    # being held at 1 for an unrelated reason — surface it so the run isn't silently
+    # serialized forever. Accounted FIRST, before any route/veto/break return below,
+    # so this advisory foundation-scope signal is independent of which downstream path
+    # the rejection takes (GL02's per-head veto cap can short-circuit before the revise
+    # spawn). Best-effort so escalation can never break the seam.
+    try:
+        _account_offscope_foundation_rejection(store, pr=pr, findings=findings)
+    except Exception:  # noqa: BLE001 — escalation is advisory, never load-bearing
+        pass
     # Spec 15 (Item 3): if EVERY blocking finding is unactionable by a DEV — an
     # execution demand ("no evidence the tests were run") or uncited (the Spec 14
     # flag) — do NOT spawn a DEV revise task. Forwarding such a rejection to a dev
@@ -711,10 +1051,53 @@ def _handle_review_rejection(
     # Route it to the PM instead; the PR stays changes_requested (never merges),
     # only the DEV rework is withheld. A rejection that also names a real citable
     # defect keeps today's behaviour — the revise addresses that defect.
+    # GL02 (Items 1-2): the two-lane invariant. A blocking finding that reasons about
+    # runtime/execution behaviour (machine lane) is decided by the executor's evidence,
+    # never by the LLM verdict: with a RED gate/probe backing it (GL01) it is a real
+    # cited defect a DEV fixes; WITHOUT that evidence it is unverifiable-by-diff and
+    # must route (to the gate re-review, or the PM), never bounce to a DEV who also
+    # cannot run it. This feeds the runtime-claim signal into Spec 15's ONE suppression
+    # seam below (no second writer) — exactly as Spec 14 Item 3 feeds it the ``cited``
+    # flag. ``approved`` is never touched; the PR stays ``changes_requested``.
     blocking = [f for f in findings if f.get("blocking")]
-    if blocking and _all_unactionable_by_dev(blocking):
+    _backed = _red_runtime_evidence(store, str(pr.get("head") or ""))
+    if blocking and _all_unactionable_by_dev(blocking, has_backing_evidence=_backed):
         _route_unactionable_rejection(store, pr=pr, task=task, findings=findings)
         return
+    # GL02 (Item 3): the per-head reviewer veto cap, at a FINER grain than Spec 16's
+    # depth cap and fired FIRST. Record this actionable veto against the PR head; once
+    # the same head has been vetoed _REVIEWER_VETO_CAP times, escalate the disagreement
+    # to the PM rather than spawn another revise. Because each revise makes a NEW head,
+    # this only trips when the SAME head is rejected repeatedly (e.g. after a Spec 15
+    # re-review), which is precisely the single-head disagreement the report escalates —
+    # orthogonal to the lineage depth Spec 16 walks, so the two never double-fire.
+    _head = str(pr.get("head") or "")
+    _prior_vetoes = _head_veto_count(store, _head)
+    store.record_decision(
+        title=f"reviewer veto: {pr['branch']}", context=f"pr {pr['pr_id']}",
+        choice="reviewer_veto",
+        rationale=f"reviewer rejected head {_head[:12]} (veto #{_prior_vetoes + 1})",
+        related_task_ids=[task.task_id], extra={"head": _head, "pr_id": pr["pr_id"]})
+    if _REVIEWER_VETO_CAP and _prior_vetoes + 1 >= _REVIEWER_VETO_CAP:
+        _escalate_reviewer_veto(store, pr=pr, task=task, findings=findings,
+                                count=_prior_vetoes + 1)
+        return
+    # GL04 (GAP-4): the diff-level breaker, checked BEFORE Spec 16's depth+class cap.
+    # An A->B->A oscillation (a distinct finding class per hop) or a near-identical
+    # resubmission slips past the class-scoped cap entirely; break it at the reverting
+    # round — the round where the signal is — rather than wasting rounds to depth 3.
+    # Only runs when the diff is available (the reviewer/PM arms thread it); a caller
+    # without it (a direct unit-test path) keeps Spec 16's class-only behaviour.
+    # Runs on BOTH the reviewer and strict-mode PM-review arms (both route here).
+    _current_fp: dict[str, Any] | None = None
+    if diff is not None:
+        try:
+            if _account_diff_deadlock(store, pr=pr, task=task, findings=findings,
+                                      diff=diff):
+                return  # broke via Spec 16's escalation; no revise spawned
+            _current_fp = _diff_fingerprint(diff)
+        except Exception:  # noqa: BLE001 — the diff signal must never break the seam
+            _current_fp = None
     # Spec 16 (Item 2): bound the revise chain. If this lineage has already been
     # revised revise_chain_limit times AND this rejection is the SAME finding class
     # the current revise was created to address, the loop is non-progressive — break
@@ -756,21 +1139,15 @@ def _handle_review_rejection(
         reason_summary=reason,
         # Spec 16 (Item 2): this revise is one hop deeper, and carries the finding
         # class it must address — so the NEXT rejection can tell a repeated class
-        # (non-progressive) from a new one (real progress).
+        # (non-progressive) from a new one (real progress). GL04 (GAP-4): it also
+        # carries the diff fingerprint of the PR it supersedes, so the next rejection
+        # can compare diffs for stasis/revert (nearest ancestor == this PR's diff).
         revise_depth=_depth + 1, finding_class=list(_new_class),
+        diff_fingerprint=_current_fp,
         detail=(f"Address {whose} on branch "
                 f"{pr['branch']} and open a new PR. The prior PR "
                 f"({pr['pr_id']}) is superseded when this lands."
                 + (f" Findings: {findings_detail}." if findings_detail else "")))
-    # Spec 13 (S2): if this rejection is of a foundation-UNLOCKING PR but is
-    # OFF-SCOPE for the foundation (no finding names a foundation file it adds),
-    # the clamp is being held at 1 for an unrelated reason — surface it so the run
-    # isn't silently serialized forever. Runs after the revise task above (the
-    # rework still proceeds); best-effort so escalation can never break the seam.
-    try:
-        _account_offscope_foundation_rejection(store, pr=pr, findings=findings)
-    except Exception:  # noqa: BLE001 — escalation is advisory, never load-bearing
-        pass
 
 
 def _account_offscope_foundation_rejection(
@@ -1642,6 +2019,159 @@ def _capability_refusal_note(store: LedgerStore) -> str:
     )
 
 
+def _count_confabulated_tool_failures(
+        store: LedgerStore, task_id: str, tool_name: str) -> int:
+    """GL03: how many times THIS ungranted tool has failed on THIS task — the tally
+    the threshold reads. A systematic capability gap repeats (the live 352-event
+    storm was one tool, one task); a one-off is a typo. Counts the `tool_failed`
+    decisions already recorded verbatim (rationale is ``<tool>: <reason>``), so no
+    second per-event ledger write is needed."""
+    n = 0
+    for record in store.list_decisions():
+        if record.get("choice") != "tool_failed":
+            continue
+        if task_id not in (record.get("related_task_ids") or []):
+            continue
+        if str(record.get("rationale") or "").startswith(f"{tool_name}:"):
+            n += 1
+    return n
+
+
+def _capability_gap_already_recorded(
+        store: LedgerStore, role: str, capability: str) -> bool:
+    """True iff a `tool_confabulation` decision for this (role, capability) already
+    exists — the dedupe lock so the 352-storm records ONE decision, not 352."""
+    for record in store.list_decisions():
+        if (record.get("choice") == "tool_confabulation"
+                and record.get("role") == role
+                and record.get("capability") == capability):
+            return True
+    return False
+
+
+def _detect_tool_confabulation(
+        store: LedgerStore, task: Task, role: str,
+        tool_name: str, reason: str) -> None:
+    """GL03 (Item 1): recognize a repeated ungranted-tool-call attempt as a
+    capability-gap confabulation, raise ONE deduped alarm, and feed the
+    capability-aware PM so the next plan turn re-plans/routes instead of the loop
+    re-spawning the impossible task. Pure detection lives in ``capabilities``; this
+    owns the threshold, the dedupe, and the ledger writes."""
+    from . import attention
+    try:
+        from .autonomy import load_policy
+        policy = load_policy(store)
+    except Exception:  # noqa: BLE001 — a manifest must never fail a turn
+        policy = None
+    manifest = _capabilities.capability_manifest(store, policy)
+    signal = _capabilities.confabulation_from_failure(
+        role, tool_name, reason, manifest)
+    if not signal.is_gap:
+        return
+    # Threshold guard (spec §7): a single stray confabulation is a fat-finger typo,
+    # not a systematic gap — only escalate once the same ungranted tool repeats.
+    count = _count_confabulated_tool_failures(store, task.task_id, tool_name)
+    if count < _capabilities.GAP_ESCALATION_THRESHOLD:
+        return
+    capability = signal.capability or "unknown"
+    # ONE deduped, non-blocking alarm per (role, capability).
+    attention.raise_capability_gap_alert(
+        store.project_id, role=role, capability=capability, tool_name=tool_name,
+        summary=signal.why, store=store)
+    # Record the decision ONCE and feed the PM's planner-feedback channel.
+    if not _capability_gap_already_recorded(store, role, capability):
+        store.record_decision(
+            title=f"tool confabulation: {role} kept trying {tool_name}",
+            context=f"task {task.task_id}", choice="tool_confabulation",
+            rationale=(
+                f"{role} attempted the ungranted tool {tool_name!r} {count}× on "
+                f"task {task.task_id} — its manifest grants no {capability} "
+                "capability, so the task needs an interface it lacks; re-plan/route."),
+            related_task_ids=[task.task_id],
+            extra={"role": role, "capability": capability, "tool_name": tool_name})
+
+
+def _audit_topology_advisory(
+        store: LedgerStore, member_pairs: list[tuple[str, str]],
+        policy: CodingAutonomyPolicy) -> None:
+    """GL05 (Item 1): score the SEATED council against the role-justification
+    principle at run-setup and surface an ADVISORY (not a hard blocker) for any role
+    that fails it — a TESTER with no executor/gate, an ungrounded REVIEWER: "another
+    ungrounded opinion in the same loop". Records one deduped decision + one
+    non-blocking attention signal per flagged role; grant the missing distinct signal
+    (GL01/GL02) or collapse the role (GL03). PM+DEV-only councils always pass — the
+    single-agent-plus-coordination baseline. Fully guarded: never fails the run."""
+    try:
+        from . import attention, topology_audit
+        manifest = _capabilities.capability_manifest(store, policy)
+        seated = tuple(sorted({role for _mid, role in member_pairs}))
+        advisories = topology_audit.topology_advisories(manifest, seated_roles=seated)
+        if not advisories:
+            return
+        already = {
+            str(d.get("title") or "")
+            for d in store.list_decisions()
+            if d.get("choice") == "topology_advisory"
+        }
+        for msg in advisories:
+            title = f"topology advisory: {msg[:80]}"
+            if title in already:
+                continue
+            store.record_decision(
+                title=title, context="run-setup role-justification audit (GL05)",
+                choice="topology_advisory", rationale=msg)
+            try:
+                for s in attention.list_open(store.project_id, store=store):
+                    if (s.kind == "alert" and s.source == "topology_audit"
+                            and s.title == title):
+                        break
+                else:
+                    attention.raise_signal(
+                        store.project_id, kind="alert", source="topology_audit",
+                        stage="development", title=title, summary=msg,
+                        context={"advisory": msg}, store=store)
+            except Exception:  # noqa: BLE001 — the signal is advisory, never fatal
+                pass
+    except Exception:  # noqa: BLE001 — a run-setup advisory must never fail the run
+        pass
+
+
+def _capability_gap_note(store: LedgerStore) -> str:
+    """GL03 (Item 1): tell the capability-aware PM which roles kept reaching for a
+    capability their manifest lacks — the confabulation→gap→re-plan seam. Sibling of
+    ``_capability_refusal_note``; reads the deduped ``tool_confabulation`` decisions.
+    SPEC-15's manifest tells the PM what each role CAN do; this tells it what a role
+    kept TRYING to do and couldn't, so re-planning is grounded."""
+    try:
+        decisions = store.list_decisions()
+    except Exception:  # noqa: BLE001 — prompt assembly must never fail the turn
+        return ""
+    gaps: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in decisions:
+        if record.get("choice") != "tool_confabulation":
+            continue
+        role = str(record.get("role") or "")
+        capability = str(record.get("capability") or "")
+        tool_name = str(record.get("tool_name") or "")
+        key = (role, capability)
+        if key in seen:
+            continue
+        seen.add(key)
+        gaps.append((role, capability, tool_name))
+    if not gaps:
+        return ""
+    items = "; ".join(
+        f"{role} kept trying ungranted {capability} tool {tool_name!r}"
+        for role, capability, tool_name in gaps[-_DUPLICATE_NOTE_CAP:])
+    return (
+        f"{len(gaps)} role/capability gap(s) surfaced from repeated ungranted tool "
+        f"calls ({items}). A role that keeps inventing a tool is telling you the "
+        "task needs an interface it lacks — re-plan or route that work to a "
+        "role/gate that HAS the capability (grant it, or drop the task). Do NOT "
+        "re-dispatch the same work to a role whose manifest cannot discharge it.\n")
+
+
 def _pm_prompt(store: LedgerStore) -> str:
     pending = store.list_unconsumed_interjections()
     pin = ""
@@ -1706,6 +2236,9 @@ def _pm_prompt(store: LedgerStore) -> str:
     done_gate = f"{done_gate}{_duplicate_rejection_note(store)}"
     # Spec 15 (Item 2): and tell it which were refused as unexecutable.
     done_gate = f"{done_gate}{_capability_refusal_note(store)}"
+    # GL03 (Item 1): and which roles kept confabulating a capability they lack, so
+    # the next plan turn re-plans/routes instead of re-spawning the impossible task.
+    done_gate = f"{done_gate}{_capability_gap_note(store)}"
     return _register_pending_composition(
         _pm_prompt_segments(store, pin=pin, done_gate=done_gate))
 
@@ -3128,6 +3661,12 @@ def _mark_finding_citations(findings: list[dict[str, Any]], *, workspace: Any,
         if g.get("blocking"):
             path = str(g.get("path") or "").strip()
             g["cited"] = bool(path) and (not in_tree or path in in_tree)
+            # GL02 (Item 1): tag the lane next to Spec 14's ``cited`` flag so
+            # ``errorta prs`` / post-mortems show which lane decided each blocking
+            # finding. Machine lane = a runtime/execution claim a diff cannot
+            # evidence; everything else (and a pre-GL02 record with no tag) is
+            # judgment — the conservative default.
+            g["lane"] = "machine" if is_execution_claim(g) else "judgment"
         out.append(g)
     return out
 
@@ -3259,6 +3798,46 @@ def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
         passed=passed, sandbox=sandbox)
     store.record_test_run(session, task_id=task_id, head=head)
     return session
+
+
+def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
+                   should_cancel: Optional[Callable[[], bool]] = None) -> None:
+    """GL01 (Item 1 + Item 2): the sibling arm to ``_run_gate`` — the default web
+    probe (the black-canvas oracle) plus the anchor reconcile.
+
+    Registry-INDEPENDENCE is the load-bearing property. ``_run_gate`` returns
+    ``None`` on an empty registry, so a buildless web project that authored no test
+    gets no did-it-render signal from it. This arm runs REGARDLESS of the registry:
+    it stands the served web runtime up, drives the headless liveness probe, and
+    records a ``web:probe`` runtime-test bound to ``head`` (Item 1). It then
+    reconciles test anchors off that recorded run — promoting a green probe/command
+    to an anchor and recording an ``anchor_regressed`` decision + one deduped alert
+    when a previously-green anchor flips red at a new head (Item 2).
+
+    ON by default (``policy.web_probe``); fully fail-open: a non-web project, a
+    headless-browser inability, or any failure records NO evidence and never fails
+    the turn (mirrors ``_runtime_gate_probe``'s cannot-verify posture)."""
+    try:
+        from .autonomy import load_policy
+        policy = load_policy(store)
+    except Exception:  # noqa: BLE001
+        return
+    if not getattr(policy, "web_probe", True):
+        return
+    try:
+        from . import anchors, web_probe
+        run = web_probe.run_and_record(
+            store, workspace, head=head,
+            frames=int(getattr(policy, "web_probe_frames", 30)),
+            should_cancel=should_cancel)
+    except Exception:  # noqa: BLE001 — the probe never fails the turn
+        return
+    if not run:
+        return  # non-web project, or fail-open (no evidence recorded)
+    try:
+        anchors.reconcile(store, run, project_id=store.project_id)
+    except Exception:  # noqa: BLE001 — the anchor lock is best-effort
+        pass
 
 
 # Spec 12 (S1): a merge that touches ONLY these is not gate-relevant — running the
@@ -4185,6 +4764,26 @@ def build_run_turn(
                         rationale=(f"ran the acceptance gate on master head {head[:12]}"
                                    if session is not None
                                    else "no registered commands to run"))
+                    # GL01 (Item 2): reconcile anchors off the command gate too, so
+                    # a registered command that went green becomes an anchor and a
+                    # later red flips it — the gate's results already carry per-
+                    # command passed. The gate session isn't recorded with a head
+                    # dict, so synthesize the run shape the reconcile reads.
+                    if session is not None:
+                        try:
+                            from . import anchors as _anchors
+                            _anchors.reconcile(store, {
+                                "head": head,
+                                "results": [r.to_dict() for r in session.results],
+                            }, project_id=store.project_id)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    # GL01 (Item 1): the registry-INDEPENDENT web probe — the
+                    # black-canvas oracle — runs REGARDLESS of what `_run_gate` did
+                    # (it returns None on an empty registry; the probe must still
+                    # run). Sibling arm, off the same merge-armed GateRun turn.
+                    _web_probe_arm(store, workspace, head=head,
+                                   should_cancel=should_cancel)
             except Exception as exc:  # noqa: BLE001 — a gate error never breaks the loop
                 try:
                     store.record_decision(
@@ -4462,6 +5061,21 @@ def build_run_turn(
                             related_task_ids=[task.task_id])
                         if is_disallowed and not tool_not_allowed_reason:
                             tool_not_allowed_reason = reason
+                        # GL03 (Item 1): a disallowed-tool failure is not only a
+                        # logged event — an ungranted-tool-call attempt whose intent
+                        # maps to a capability the role LACKS is a capability-gap
+                        # signal (the DEV inventing a "run tests" tool is telling you
+                        # what interface the task needs). Detect it, threshold+dedupe
+                        # it, and route it to the PM. The `tool_failed` decision above
+                        # is still recorded verbatim — this routes a signal ALONGSIDE
+                        # it, it does not rewrite the ledger event. `path` is the
+                        # invented tool NAME on a `tool_not_allowed` failure.
+                        if is_disallowed:
+                            try:
+                                _detect_tool_confabulation(
+                                    store, task, DEV, path, reason)
+                            except Exception:  # noqa: BLE001 — telemetry never fails a turn
+                                pass
                     # Spec 17 (Item 3b): carry the disallowed-tool reason forward on
                     # the task so its NEXT composed dev prompt shows the corrective
                     # hint (no corrective-retry path reaches a post-parse
@@ -4727,7 +5341,7 @@ def build_run_turn(
                 else:
                     _handle_review_rejection(
                         store, workspace, pr=pr, task=task,
-                        findings=review_findings, source="reviewer")
+                        findings=review_findings, source="reviewer", diff=diff)
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_reviewed", task=task)
 
@@ -4907,7 +5521,7 @@ def build_run_turn(
                 if not approved:
                     _handle_review_rejection(
                         store, workspace, pr=pr, task=task,
-                        findings=pm_findings, source="pm_review")
+                        findings=pm_findings, source="pm_review", diff=diff)
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_reviewed", task=task)
 
@@ -5286,6 +5900,14 @@ def build_run_turn(
             _delivery_launch_evidence(store, workspace, head,
                                       should_cancel=should_cancel)
 
+        # GL01 (Item 1): the web probe rides delivery too — a runnable web tree's
+        # delivered head gets a did-it-render liveness check (the black-canvas
+        # oracle) recorded as evidence alongside the launch probe, and its anchors
+        # reconciled. Best-effort / fail-open: it records a verdict the reviewer and
+        # `errorta prs` can see, but never blocks `done` here (a headless-browser
+        # inability must not fail delivery) — the GateRun arm is the in-loop gate.
+        _web_probe_arm(store, workspace, head=head, should_cancel=should_cancel)
+
         # `passed` requires a clean launch too. A launch cannot_verify leaves
         # launched_clean=False so it also fails `passed`.
         passed = approved and tests_passed and launched_clean
@@ -5558,6 +6180,8 @@ class CodingRunner:
         by_role = members_by_coding_role(self.members)
         member_pairs = [(m["id"], coding_role_of(m)) for m in self.members
                         if m.get("enabled", True)]
+        # GL05 (Item 1): role-justification audit — advisory only, at run-setup.
+        _audit_topology_advisory(self.store, member_pairs, policy)
         # F127: member tier ranks so the escalate-up ladder reassigns a task a
         # weak member can't do to a stronger one.
         from .model_tier import member_rank

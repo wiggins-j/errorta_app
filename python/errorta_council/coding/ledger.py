@@ -709,7 +709,8 @@ class LedgerStore:
                  model_assignment: dict[str, Any] | None = None,
                  target_files: list[str] | None = None,
                  revise_depth: int = 0,
-                 finding_class: list[str] | None = None) -> Task:
+                 finding_class: list[str] | None = None,
+                 diff_fingerprint: dict[str, Any] | None = None) -> Task:
         if role not in _VALID_ROLES:
             raise LedgerError(f"invalid role: {role!r}")
         ts = _now()
@@ -730,6 +731,13 @@ class LedgerStore:
             # observed pathology), which needs the empty class to round-trip so the
             # next round reads [] (not absent) and empty compares equal to empty.
             extras["finding_class"] = sorted({str(t) for t in finding_class})
+        # GL04 (GAP-4): a revise task also carries the diff fingerprint of the PR it
+        # supersedes (computed once at revise-task creation), so the diff-level
+        # breaker reads it O(1) alongside the finding class. Rides in _extras like the
+        # Spec 16 fields (additive, JSON round-trips, no migration); absent -> today's
+        # behaviour (no stasis/revert signal, exactly as before).
+        if diff_fingerprint:
+            extras["diff_fingerprint"] = diff_fingerprint
         t = Task(
             task_id=f"t-{uuid.uuid4().hex[:12]}", title=title, role=role,
             detail=detail, state="todo", assignee_member_id=assignee_member_id,
@@ -1073,6 +1081,14 @@ class LedgerStore:
                 # approved empty without reading, twice (accepted but flagged).
                 "review_grounded": None, "review_num_turns": None,
                 "review_ungrounded": False,
+                # GL01 (Item 3): the web-probe verdict on the PR's head — console-
+                # error count, non-black liveness, screenshot ref, pass/fail, and
+                # the head it ran against. Seeded falsy so every PR record is
+                # shape-complete and a probe-less PR is byte-identical to today;
+                # stamped by web_probe._attach_verdict_to_prs once a probe runs.
+                "probe_passed": None, "probe_non_black": None,
+                "probe_console_errors": None, "probe_screenshot": "",
+                "probe_reason": "", "probe_head": "",
                 "created_at": _now(), "updated_at": _now(),
             }
             prs[pr["pr_id"]] = pr

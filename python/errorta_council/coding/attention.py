@@ -765,3 +765,61 @@ def raise_tests_skipped_alert(
         summary=summary or "The tester declared a slice not-applicable for testing.",
         store=store,
     )
+
+
+def raise_anchor_regressed_alert(
+    project_id: str, *, key: str, summary: str, stage: str = "development",
+    store: LedgerStore | None = None,
+) -> AttentionSignal | None:
+    """GL01 (Item 2): a non-blocking Alert raised when a previously-green test
+    anchor (a probe/command that passed on master) goes RED at a later integrated
+    head — a mechanical "you broke a previously-passing check" signal. Deduped by
+    (source=anchor_regressed, stage, title) where the title names the anchor key,
+    so repeated reconciles on ONE lineage raise exactly one alert; a re-green then
+    a re-break would raise a fresh one only after the first resolves. Non-blocking:
+    the run continues (the anchor is satisfiable — re-green clears it), the point
+    is to surface the oscillation, not to wedge the merge."""
+    title = f"test anchor regressed: {key}" if key else "test anchor regressed"
+    store = store or _store(project_id)
+    for s in list_open(project_id, store=store):
+        if (s.kind == "alert" and s.source == "anchor_regressed"
+                and s.stage == stage and s.title == title):
+            return None
+    return raise_signal(
+        project_id, kind="alert", source="anchor_regressed", stage=stage,
+        title=title,
+        summary=summary or ("a previously-green check regressed at the "
+                            "integrated head"),
+        store=store,
+    )
+
+
+def raise_capability_gap_alert(
+    project_id: str, *, role: str, capability: str, tool_name: str, summary: str,
+    stage: str = "development", store: LedgerStore | None = None,
+) -> AttentionSignal | None:
+    """GL03 (Item 1): a non-blocking Alert raised when a role systematically
+    confabulates a tool it was not granted (the gravity-golf DEV inventing a "run
+    tests" call) — a live capability-gap signal, not just a logged failure. Deduped
+    by (source=capability_gap, stage, title) where the title names the (role,
+    capability), so a role walled off from a capability raises exactly ONE open
+    signal no matter how many times it re-invents the tool — the 352-event storm
+    this exists to surface must never become 352 alarms. Non-blocking: it pages the
+    run governor (and, via the PM note, re-planning); it does not wedge the run —
+    the confabulation→gap link is an inferred heuristic, tuned conservatively."""
+    title = f"capability gap: {role} kept invoking an ungranted {capability} tool"
+    store = store or _store(project_id)
+    for s in list_open(project_id, store=store):
+        if (s.kind == "alert" and s.source == "capability_gap"
+                and s.stage == stage and s.title == title):
+            return None
+    return raise_signal(
+        project_id, kind="alert", source="capability_gap", stage=stage,
+        title=title,
+        summary=summary or (
+            f"{role} repeatedly attempted the ungranted tool {tool_name!r}; its "
+            f"manifest grants no {capability} capability — the task needs an "
+            "interface it lacks, so re-plan or route it to a role/gate that has it"),
+        context={"role": role, "capability": capability, "tool_name": tool_name},
+        store=store,
+    )
