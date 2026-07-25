@@ -26,7 +26,7 @@ function parseArgs(argv) {
     else rest.push(a);
   }
   if (rest[0]) out.url = rest[0];
-  if (rest[1]) out.frames = Math.max(1, parseInt(rest[1], 10) || 30);
+  if (rest[1]) { const n = parseInt(rest[1], 10); out.frames = Number.isNaN(n) ? 30 : Math.max(0, n); }  // honor 0 (assert on first paint)
   return out;
 }
 

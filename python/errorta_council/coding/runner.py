@@ -906,25 +906,6 @@ def _pr_lineage_fingerprints(store: LedgerStore, pr: dict[str, Any]) -> list[dic
     return fps
 
 
-def _anchor_regressed_for_head(store: LedgerStore, head: str) -> bool:
-    """GL04 (GAP-4): did GL01's anchor lock record an ``anchor_regressed`` decision
-    naming THIS PR head — a revision that flipped a green test anchor red? That is
-    oscillation by definition (artifact-level), so it feeds the diff-deadlock signal
-    directly. GL01 records the broken head as a 12-char prefix in the rationale, so
-    we match on that prefix. Best-effort — a read failure counts as no regression."""
-    head = str(head or "")
-    if not head:
-        return False
-    prefix = head[:12]
-    try:
-        for d in store.list_decisions():
-            if d.get("choice") == "anchor_regressed" and prefix in str(d.get("rationale") or ""):
-                return True
-    except Exception:  # noqa: BLE001
-        pass
-    return False
-
-
 def _account_diff_deadlock(
     store: LedgerStore, *, pr: dict[str, Any], task: Task,
     findings: list[dict[str, Any]], diff: str,
@@ -956,7 +937,13 @@ def _account_diff_deadlock(
     ancestors = _pr_lineage_fingerprints(store, pr)
 
     trigger = ""
-    if _anchor_regressed_for_head(store, str(pr.get("head") or "")):
+    from . import anchors as _anchors
+    # A revision that left a previously-green anchor CURRENTLY red is oscillation
+    # (GL01→GL04). Gate on being in a real revise lineage (depth >= 1) — a first
+    # attempt failing an anchor is not oscillation — and match on anchor STATE
+    # (head-agnostic), since the break is recorded at the integrated master head,
+    # not this PR's branch tip. Satisfiable: re-green clears it.
+    if depth >= 1 and _anchors.has_unresolved_regression(store):
         trigger = "a revision regressed a green test anchor (oscillation)"
     elif not _fp_is_empty(current):
         eps = float(getattr(policy, "diff_stasis_epsilon", 0.12))

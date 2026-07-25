@@ -51,7 +51,8 @@ def promote_anchor(store: Any, key: str, *, head: str) -> None:
     if not key:
         return
     anchors = _load_anchors(store)
-    anchors[key] = {"head": str(head or ""), "at": _now()}
+    # A green result clears any prior regressed state for this key (it re-greened).
+    anchors[key] = {"head": str(head or ""), "at": _now(), "regressed": False}
     try:
         store.set_run_state(**{_RUN_STATE_KEY: anchors})
     except Exception:  # noqa: BLE001
@@ -87,6 +88,19 @@ def broken_anchors(store: Any, run: dict[str, Any]) -> list[dict[str, Any]]:
     return breaks
 
 
+def has_unresolved_regression(store: Any) -> bool:
+    """GL04 signal: is a previously-green anchor CURRENTLY red — a regression that
+    has not been re-greened? Reads the persistent ``regressed`` flag on the anchor
+    state (set at a break, cleared when the key re-greens). Head-agnostic (the break
+    is recorded at the integrated master head, not a branch tip, so a branch-head
+    match would miss) and SATISFIABLE — re-green clears it. Best-effort."""
+    try:
+        return any(isinstance(a, dict) and a.get("regressed")
+                   for a in _load_anchors(store).values())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def reconcile(store: Any, run: dict[str, Any], *,
               project_id: str = "") -> list[dict[str, Any]]:
     """The GateRun / delivery seam calls this after a probe or gate session lands.
@@ -105,6 +119,18 @@ def reconcile(store: Any, run: dict[str, Any], *,
         for r in run.get("results") or []:
             if isinstance(r, dict) and r.get("passed"):
                 promote_anchor(store, str(r.get("command_id") or ""), head=head)
+        if breaks:
+            # Persist the regressed state so `has_unresolved_regression` (GL04)
+            # reads a flag, not a head match. Cleared when the key re-greens.
+            anchors = _load_anchors(store)
+            for b in breaks:
+                k = str(b.get("key") or "")
+                if isinstance(anchors.get(k), dict):
+                    anchors[k]["regressed"] = True
+            try:
+                store.set_run_state(**{_RUN_STATE_KEY: anchors})
+            except Exception:  # noqa: BLE001
+                pass
         for b in breaks:
             _record_break(store, b, project_id=project_id)
         return breaks
@@ -123,7 +149,11 @@ def _record_break(store: Any, brk: dict[str, Any], *, project_id: str) -> None:
     try:
         store.record_decision(
             title="test anchor regressed", context="anchor",
-            choice="anchor_regressed", rationale=rationale)
+            choice="anchor_regressed", rationale=rationale,
+            # Structured heads so a consumer (GL04) matches on a field, not a
+            # substring of the prose (which also contained the green anchor head).
+            extra={"anchor_key": key, "anchor_head": anchor_head,
+                   "broken_head": broken_head})
     except Exception:  # noqa: BLE001
         pass
     pid = project_id or str(getattr(store, "project_id", "") or "")

@@ -188,17 +188,24 @@ def test_distinct_diff_each_round_is_never_broken(
 
 def test_anchor_regression_feeds_the_oscillation_signal(
         tmp_errorta_home, tmp_path) -> None:
-    # GL01's anchor lock recorded that this head flipped a green test anchor red —
-    # oscillation at the artifact level. GAP-4 consumes that decision and breaks even
-    # though this round's diff is genuinely NEW (no stasis, no revert).
+    # GL01's anchor lock: a test anchor was green, then a revision left it RED and
+    # it has not re-greened — a currently-unresolved regression (built via the REAL
+    # reconcile path, not a hand-crafted decision, so this exercises the production
+    # state, not a rationale-substring match). GAP-4 consumes that state and breaks
+    # even though this round's diff is genuinely NEW (no stasis, no revert).
+    from errorta_council.coding import anchors
     s = _store("anchor", tmp_path)
     t0 = s.add_task(title="impl", role="dev")
     p0 = s.record_pr(task_id=t0.task_id, branch="b0", head="h0", dev_member="m")
     r1, p1 = _revise(s, branch="b1", prev_pr=p0, depth=1, cls=["alpha"],
-                     supersedes_diff=DIFF_A)      # p1 head == "h-b1"
-    s.record_decision(title="test anchor regressed", context="anchor",
-                      choice="anchor_regressed",
-                      rationale="anchor 'web:probe' green at h0 now red at h-b1")
+                     supersedes_diff=DIFF_A)
+    anchors.reconcile(s, {"head": "h0",
+                          "results": [{"command_id": "web:probe", "passed": True}]},
+                      project_id="anchor")     # green
+    anchors.reconcile(s, {"head": "hX",
+                          "results": [{"command_id": "web:probe", "passed": False}]},
+                      project_id="anchor")     # regressed at the integrated head
+    assert anchors.has_unresolved_regression(s) is True
     _reject(s, pr=p1, task=r1, findings=[{"blocking": True, "title": "beta"}],
             diff=DIFF_C)                          # a NEW diff — only the anchor trips
 
