@@ -44,6 +44,27 @@ at completion. You (the PM) shape all of this.
 
 **Roles** (`metadata.coding_role`): `pm`, `dev`, `reviewer`, `tester`.
 
+### What each role's turn can actually do (Spec 17)
+
+Every role turn describes the SAME reality the harness enforces: the executed
+Coding Mode tools (`turn_controller._ROLE_TOOLS`), the real read path, and the
+fact that **no role can run a command from inside a turn**. This table matches the
+`tool_guidance` catalog each role is shown (`tool_catalog_text`).
+
+| Role | Executed Coding Mode tool(s) | How it reads the repo | Can it execute? |
+|---|---|---|---|
+| `pm` | none — it plans | the context in its prompt | No — routes execution work to the gate |
+| `dev` | `code_write` | **`repo_read` on:** `Read`/`Grep`/`Glob` **directly** (read-only, cwd = worktree) — never emitted as tool calls; the `coding_turn.v1` envelope carries only `code_write`. **Off:** a typed `context_request` intent | No — execution evidence comes only from the acceptance gate |
+| `reviewer` | none — it judges the diff | **`reviewer_repo_read` on:** `Read`/`Grep`/`Glob` directly, to ground a finding in a real file. **Off:** the diff and gate output already shown | No — it reads the gate output, never produces it |
+| `tester` | none — it chooses commands | the diff / gate output already shown (no in-turn read tool) | No — the **engine** runs the registered commands the tester selects |
+
+A model that wants to read is told **how** (the real tool names when repo-read is
+active, the `context_request` escape hatch when it is not), and every role is told
+explicitly that no execute/run/shell tool exists — so it never guesses a
+hallucinated tool. An unknown tool name is still rejected fail-closed
+(`tool_not_allowed`), but the rejection now names the allowed tools and the real
+read path, and that hint is carried into the task's next dev prompt.
+
 ---
 
 ## 2. Models — the most important setup decision
