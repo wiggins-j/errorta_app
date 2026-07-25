@@ -98,6 +98,19 @@ def test_self_closing_jsx_component_in_a_js_file_is_not_ready() -> None:
     assert _buildless_web_ready(list(tree), _reader(tree)) is False
 
 
+def test_html_in_a_string_stays_ready() -> None:
+    """Regression lock (review Δ): vanilla-JS DOM code that builds markup as a
+    STRING — the most common no-build idiom — must NOT be misread as JSX. The
+    quote before `<` keeps it out of the expression-position JSX match."""
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = (
+        'const root = document.getElementById("app");\n'
+        'root.innerHTML = "<div class=board><ul></ul></div>";\n'
+        'root.insertAdjacentHTML("beforeend", "<li>hi</li>");\n'
+        'const tpl = `<section>${x}</section>`;  // renders </section>\n')
+    assert _buildless_web_ready(list(tree), _reader(tree)) is True
+
+
 def test_bare_reexport_is_not_ready() -> None:
     """A bare re-export (`export {x} from "react"`) has no `import` keyword, so the
     import regexes miss it — the export-from scan must catch the bare specifier."""

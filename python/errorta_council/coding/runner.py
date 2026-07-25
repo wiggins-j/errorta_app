@@ -2764,10 +2764,14 @@ _JS_REQUIRE_RE = re.compile(r"""\brequire\s*\(\s*['"][^'"]+['"]\s*\)""")
 # closing tag `</Tag>`, or a tag returned from a render function
 # (`return <Tag` / `=> <Tag`). `a < b` never matches (a space or non-letter
 # follows `<`); `x >> 1` / generics never match (no tag/`/>`/`</` shape).
-_JSX_RE = re.compile(
-    r"""(?:\breturn\s*|=>\s*)<[A-Za-z]"""       # return <tag / => <tag
-    r"""|<[A-Za-z][\w.-]*(?:\s+[^<>]*?)?/>"""    # <Tag ... /> self-closing
-    r"""|</[A-Za-z][\w.-]*\s*>""")               # </Tag> closing
+# JSX in a .js file needs a transpiler (a browser can't run it). Match a `<Tag`
+# ONLY in an expression-introducing position — right after return / => / = / ( / ,
+# (with optional wrapping paren), never after a quote. Real JSX always appears in
+# one of these positions; HTML built as a STRING (`innerHTML = "<div>"`,
+# `insertAdjacentHTML(x, "<li>")`, a `</section>` in a comment) is always
+# quote/space-preceded, so it can't match — that string-literal false positive
+# would wrongly mark a vanilla-JS no-build app as bundler-required (review Δ).
+_JSX_RE = re.compile(r"""(?:\breturn|=>|[=(,])\s*\(?\s*<[A-Za-z][\w.-]*""")
 # `<script src="…">` / `<link rel="stylesheet" href="…">` — captures the URL.
 _HTML_SCRIPT_SRC_RE = re.compile(
     r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
