@@ -27,6 +27,8 @@ _TERMINAL_BAD = {
     "budget_exhausted", "no_progress", "hard_blocker", "member_unhealthy",
     "worker_unproductive", "completion_blocked", "not_converging",
     "delivery_review_stalled", "revise_livelock",  # Spec 16 (Δ2: mine only)
+    # Spec 18 (Δ2): Specs 04/07/10 added these stop reasons without updating the set.
+    "gate_not_improving", "planning_churn", "dispatch_wedged",
 }
 
 
