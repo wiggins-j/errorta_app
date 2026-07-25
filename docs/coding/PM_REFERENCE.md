@@ -477,6 +477,7 @@ and FastAPI routers. Update the prose and this contract together.
     "reviewer_repo_read": false,
     "revise_chain_limit": 3,
     "revise_livelock_limit": 5,
+    "strict_file_partition": true,
     "task_reassignment_limit": 2,
     "web_probe": true,
     "web_probe_frames": 30,

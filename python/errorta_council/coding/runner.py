@@ -2104,6 +2104,51 @@ def _detect_tool_confabulation(
             extra={"role": role, "capability": capability, "tool_name": tool_name})
 
 
+def _audit_topology_advisory(
+        store: LedgerStore, member_pairs: list[tuple[str, str]],
+        policy: CodingAutonomyPolicy) -> None:
+    """GL05 (Item 1): score the SEATED council against the role-justification
+    principle at run-setup and surface an ADVISORY (not a hard blocker) for any role
+    that fails it — a TESTER with no executor/gate, an ungrounded REVIEWER: "another
+    ungrounded opinion in the same loop". Records one deduped decision + one
+    non-blocking attention signal per flagged role; grant the missing distinct signal
+    (GL01/GL02) or collapse the role (GL03). PM+DEV-only councils always pass — the
+    single-agent-plus-coordination baseline. Fully guarded: never fails the run."""
+    try:
+        from . import attention, topology_audit
+        manifest = _capabilities.capability_manifest(store, policy)
+        seated = tuple(sorted({role for _mid, role in member_pairs}))
+        advisories = topology_audit.topology_advisories(manifest, seated_roles=seated)
+        if not advisories:
+            return
+        already = {
+            str(d.get("title") or "")
+            for d in store.list_decisions()
+            if d.get("choice") == "topology_advisory"
+        }
+        for msg in advisories:
+            title = f"topology advisory: {msg[:80]}"
+            if title in already:
+                continue
+            store.record_decision(
+                title=title, context="run-setup role-justification audit (GL05)",
+                choice="topology_advisory", rationale=msg)
+            try:
+                for s in attention.list_open(store.project_id, store=store):
+                    if (s.kind == "alert" and s.source == "topology_audit"
+                            and s.title == title):
+                        break
+                else:
+                    attention.raise_signal(
+                        store.project_id, kind="alert", source="topology_audit",
+                        stage="development", title=title, summary=msg,
+                        context={"advisory": msg}, store=store)
+            except Exception:  # noqa: BLE001 — the signal is advisory, never fatal
+                pass
+    except Exception:  # noqa: BLE001 — a run-setup advisory must never fail the run
+        pass
+
+
 def _capability_gap_note(store: LedgerStore) -> str:
     """GL03 (Item 1): tell the capability-aware PM which roles kept reaching for a
     capability their manifest lacks — the confabulation→gap→re-plan seam. Sibling of
@@ -6148,6 +6193,8 @@ class CodingRunner:
         by_role = members_by_coding_role(self.members)
         member_pairs = [(m["id"], coding_role_of(m)) for m in self.members
                         if m.get("enabled", True)]
+        # GL05 (Item 1): role-justification audit — advisory only, at run-setup.
+        _audit_topology_advisory(self.store, member_pairs, policy)
         # F127: member tier ranks so the escalate-up ladder reassigns a task a
         # weak member can't do to a stronger one.
         from .model_tier import member_rank

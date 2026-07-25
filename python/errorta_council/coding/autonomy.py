@@ -238,6 +238,16 @@ class CodingAutonomyPolicy:
     # hysteresis that keeps the clamp from flapping on the boundary.
     convergence_release_ratio: float = 0.35
     convergence_release_merge_rate: float = 0.5
+    # GL05 (Item 2): the strict, a-priori file-ownership partition. F159's hot-file
+    # gate is REACTIVE — it serializes a path only after it has conflicted
+    # `hot_file_threshold` times. This holds a file from the FIRST tick a task owns
+    # it, so a fan-out can never hand two in-flight tasks the same DECLARED file
+    # (RQ6's "strictly partitioned file ownership" [13]). Fail-open on silence: a
+    # task that declares no paths is treated as UNKNOWN ownership, not universal, so
+    # it never collapses fan-out to serial (mirrors SPEC-13/F159). On by default — it
+    # is inert for the common prose-silent task and only bites declared colliders.
+    # At `cap == 1` (sequential loop) it is a no-op. On/off switch for the guardrail.
+    strict_file_partition: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -282,6 +292,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "convergence_clamp_merge_rate": p.convergence_clamp_merge_rate,
         "convergence_release_ratio": p.convergence_release_ratio,
         "convergence_release_merge_rate": p.convergence_release_merge_rate,
+        "strict_file_partition": p.strict_file_partition,
     }
 
 
@@ -385,6 +396,10 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         convergence_release_merge_rate=min(1.0, max(
             0.0, float(d.get("convergence_release_merge_rate",
                              base.convergence_release_merge_rate)))),
+        # GL05 (Item 2): plain on/off bool (default ON) — the a-priori file
+        # partition. Absent key -> the dataclass default.
+        strict_file_partition=bool(
+            d.get("strict_file_partition", base.strict_file_partition)),
     )
 
 
@@ -442,6 +457,42 @@ def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
         for hp in hot_set:
             if _paths.paths_intersect(tp, {hp}):
                 owned.add(hp)
+    return owned
+
+
+def inflight_owned_paths(ledger: Any) -> set[str]:
+    """GL05 (Item 2): the STRICT a-priori file-ownership partition — the union of
+    DECLARED (``task_touched_paths``) and OBSERVED (open-PR ``changed_paths``) file
+    paths held by every in-flight DEV task (one that is ``doing`` or has an open,
+    un-merged PR).
+
+    Unlike ``hot_owned_paths`` this is NOT filtered to hot files: it holds a file
+    from the FIRST tick a task owns it, so two in-flight tasks never own the same
+    master file even before the first conflict (the reactive hot-file gate engages
+    only after ``hot_file_threshold`` conflicts). Mirrors ``hot_owned_paths``'s
+    observed-``changed_paths`` signal so a prose-silent writer whose open PR touched
+    a file still owns it. A task with no declared/observed paths contributes nothing
+    — an empty set is UNKNOWN ownership, not universal (mirrors SPEC-13/F159), so
+    this never collapses fan-out to serial on silence."""
+    owned: set[str] = set()
+    observed_by_task: dict[str, set[str]] = {}
+    live_pr_tasks: set[str] = set()
+    list_prs = getattr(ledger, "list_prs", None)
+    if callable(list_prs):
+        for pr in list_prs():
+            if pr.get("status") not in ("merged", "superseded", "abandoned", "closed"):
+                tid = pr.get("task_id")
+                if tid:
+                    live_pr_tasks.add(str(tid))
+                    changed = {_paths.normalize_path(str(p))
+                               for p in (pr.get("changed_paths") or []) if p}
+                    if changed:
+                        observed_by_task.setdefault(str(tid), set()).update(changed)
+    for task in ledger.list_tasks(role=DEV):
+        if task.state != "doing" and task.task_id not in live_pr_tasks:
+            continue
+        owned |= _paths.task_touched_paths(task) | observed_by_task.get(
+            task.task_id, set())
     return owned
 
 
@@ -512,6 +563,9 @@ def runtime_cap(policy: CodingAutonomyPolicy, members: list[tuple[str, str]],
     # engaged. `_account_convergence_clamp` sets/clears the flag with hysteresis; the
     # release path restores this to the base cap, so the clamp can never wedge — it
     # only ever narrows concurrency to 1, never makes a dispatchable task un-runnable.
+    # GL05 (Item 4): this superseded-ratio clamp IS the RQ6 "is parallelism paying
+    # off?" health brake — over threshold it freezes fan-out to serial; GL05 asserts
+    # the wiring rather than adding a second signal.
     if _state.get("convergence_clamped"):
         return 1
     fstatus = str(_state.get("foundation_status", ""))
@@ -1955,6 +2009,13 @@ def _run_concurrent_loop(
                 _hot = hot_files(ledger, threshold=policy.hot_file_threshold)
                 _hot_paths = set(_hot)
                 _hot_blocked = hot_owned_paths(ledger, _hot)
+                # GL05 (Item 2): the strict a-priori file-ownership partition — the
+                # paths already held by every in-flight/doing task, so a fan-out can't
+                # hand two tasks the same DECLARED file from tick 0 (the reactive
+                # hot-file gate only engages after N conflicts). Empty when the flag is
+                # off, restoring pre-GL05 dispatch exactly.
+                _owned = (inflight_owned_paths(ledger)
+                          if policy.strict_file_partition else None)
                 _frozen = frozen_paths(ledger)
                 _frozen_owner = None
                 if _frozen:
@@ -1967,7 +2028,8 @@ def _run_concurrent_loop(
                     batch = plan_next_batch(
                         ledger, _idle_members(members, busy), member_tiers,
                         hot_paths=_hot_paths, hot_blocked=_hot_blocked,
-                        frozen=_frozen, frozen_owner_task_id=_frozen_owner)
+                        frozen=_frozen, frozen_owner_task_id=_frozen_owner,
+                        owned_paths=_owned)
                     if not batch:
                         break
                     if len(batch) == 1 and isinstance(batch[0], Complete):
@@ -1989,7 +2051,8 @@ def _run_concurrent_loop(
                     is_merge = isinstance(action, Merge)
                     flight = in_flight.values()
                     if is_merge:
-                        # Integration is serial: a Merge mutates master and
+                        # Integration is serial (GL05 Item 3 — asserted invariant,
+                        # not new behavior): a Merge mutates master and
                         # revalidates other PRs' worktrees, so it must not run
                         # while worker turns write in parallel. Defer it until the
                         # in-flight workers drain (we stop adding new work below,
@@ -2022,6 +2085,11 @@ def _run_concurrent_loop(
                         # next plan_next_batch call won't hand a colliding task out.
                         if _hot:
                             _hot_blocked = hot_owned_paths(ledger, _hot)
+                        # GL05 (Item 2): the just-assigned task is now `doing`, so it
+                        # owns its declared paths a priori; recompute so the next
+                        # plan_next_batch call holds any task declaring the same file.
+                        if policy.strict_file_partition:
+                            _owned = inflight_owned_paths(ledger)
                     fut = pool.submit(
                         _safe_run_turn, run_turn, action, ledger,
                         0 if is_mechanical else 1)

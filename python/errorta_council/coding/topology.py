@@ -346,6 +346,7 @@ def plan_next_batch(
     hot_blocked: set[str] | None = None,      # F159: hot paths already held this tick
     frozen: set[str] | None = None,           # F159: centralize-frozen paths
     frozen_owner_task_id: str | None = None,  # F159: the only task allowed to touch frozen
+    owned_paths: set[str] | None = None,      # GL05: a-priori file-ownership partition
 ) -> list[CodingAction]:
     """F087 Slice 1 — the concurrent planner: return ALL runnable actions for the
     idle members this tick (vs ``decide_next``'s single action). READ-ONLY.
@@ -426,6 +427,16 @@ def plan_next_batch(
     hot = set(hot_paths or ())
     blocked = set(hot_blocked or ())
     frozen_set = set(frozen or ())
+    # GL05 (Item 2): the strict a-priori file-ownership partition. Engaged ONLY when
+    # the caller opts in by passing `owned_paths` (the concurrent loop does; the `=1`
+    # sequential path and every pre-GL05 caller pass None -> byte-identical dispatch).
+    # `owned` seeds with the paths already held by every in-flight/doing task
+    # (cross-tick), then grows as we place tasks THIS batch, so no two in-flight tasks
+    # (nor two tasks in one batch) ever own the same DECLARED file. Fail-open on
+    # silence: a task with an empty `tp` is never held (empty == unknown ownership,
+    # not universal).
+    partition_on = owned_paths is not None
+    owned = set(owned_paths or ())
     worker_assigned = False
     for role in _WORKER_PRIORITY:
         ids = [m for m in by_role.get(role, []) if m not in used_members]
@@ -435,7 +446,7 @@ def plan_next_batch(
         # from the first-ready ones (F127 reassignment). F159: when the hot/frozen
         # gate is active, fetch extra headroom so a gated task doesn't starve an
         # idle member of the non-colliding work behind it.
-        want = len(ids) + (32 if (hot or frozen_set) else 0)
+        want = len(ids) + (32 if (hot or frozen_set or partition_on) else 0)
         tasks = ledger.next_tasks(role, want, exclude=chosen_tasks)
         for task in tasks:
             # F159: serialize hot-file / frozen-file contention. A task that would
@@ -463,6 +474,14 @@ def plan_next_batch(
                     continue
             if blocked and _paths.paths_intersect(tp, blocked):
                 continue
+            # GL05 (Item 2): strict a-priori file-ownership partition. A task whose
+            # DECLARED paths overlap a path already owned by an in-flight/doing task
+            # (or by a task already placed in THIS batch) waits this tick — the owner's
+            # PR merges first, exactly like the hot-file hold but WITHOUT waiting for N
+            # conflicts. `tp` empty = unknown ownership, not universal, so a
+            # prose-silent task is never globally serialized (fail-open on silence).
+            if partition_on and tp and _paths.paths_intersect(tp, owned):
+                continue
             # F127: assign each task to an eligible (non-excluded) idle member,
             # preferring the highest tier. A task barred for every free member is
             # skipped this tick (it waits / the loop escalates).
@@ -481,6 +500,11 @@ def plan_next_batch(
             # batch touching them waits (cross-tick holds come in via hot_blocked).
             if hot:
                 blocked |= {hp for hp in hot if _paths.paths_intersect(tp, {hp})}
+            # GL05 (Item 2): claim ALL this task's declared paths (not only hot ones)
+            # so a later candidate in the SAME batch can't be handed an overlapping
+            # file; cross-tick holds arrive via `owned_paths`.
+            if partition_on and tp:
+                owned |= tp
 
     # PM plans only when the worker pipeline was dry this tick (and not merging).
     if pm_ids and not worker_assigned:
