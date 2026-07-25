@@ -175,3 +175,88 @@ def test_pm_review_arm_is_guarded_identically(tmp_errorta_home, tmp_path) -> Non
     assert s.get_pr(p3["pr_id"])["status"] == "blocked"
     revises = [t for t in s.list_tasks() if t.title.startswith("revise:")]
     assert len(revises) == 3  # no 4th revise on the PM arm either
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — the livelock detector.
+# --------------------------------------------------------------------------- #
+
+from errorta_council.coding.autonomy import (  # noqa: E402
+    REVISE_LIVELOCK,
+    CodingAutonomyPolicy,
+    LoopCounters,
+    _account_revise_livelock,
+)
+
+
+def _broke(s):
+    s.record_decision(title="broke", context="pr p", choice="revise_chain_broken",
+                      rationale="r")
+
+
+def test_livelock_stops_after_limit_with_no_recovery(
+        tmp_errorta_home, tmp_path) -> None:
+    s = _store("lv1", tmp_path)
+    _broke(s)
+    policy = CodingAutonomyPolicy()               # revise_livelock_limit == 5
+    c = LoopCounters()
+    result = None
+    for i in range(policy.revise_livelock_limit + 3):
+        c.iterations = i
+        result = _account_revise_livelock(s, c, policy)
+        if result is not None:
+            break
+    assert result is not None and result.stop_reason == REVISE_LIVELOCK
+
+
+def test_a_merge_resets_the_livelock_window(tmp_errorta_home, tmp_path) -> None:
+    s = _store("lv2", tmp_path)
+    _broke(s)
+    policy = CodingAutonomyPolicy()
+    c = LoopCounters()
+    for i in range(policy.revise_livelock_limit):      # up to the edge, no stop
+        c.iterations = i
+        assert _account_revise_livelock(s, c, policy) is None
+    # A merge lands somewhere (progress) -> window resets -> still no stop.
+    t = s.add_task(title="x", role="dev")
+    pr = s.record_pr(task_id=t.task_id, branch="bm", head="hm", dev_member="m")
+    s.update_pr(pr["pr_id"], status="merged")
+    c.iterations = policy.revise_livelock_limit
+    assert _account_revise_livelock(s, c, policy) is None
+
+
+def test_livelock_zero_disables(tmp_errorta_home, tmp_path) -> None:
+    s = _store("lv3", tmp_path)
+    _broke(s)
+    policy = CodingAutonomyPolicy(revise_livelock_limit=0)
+    c = LoopCounters()
+    for i in range(20):
+        c.iterations = i
+        assert _account_revise_livelock(s, c, policy) is None
+
+
+def test_livelock_detector_wired_into_both_loops() -> None:
+    # The dead-code lock: the detector must be called in BOTH the sequential and
+    # concurrent loops (Spec 13 lifts the clamp -> real runs go concurrent).
+    import inspect
+
+    from errorta_council.coding import autonomy
+    src = inspect.getsource(autonomy)
+    assert src.count("_account_revise_livelock(ledger, c, policy)") >= 2
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 — stop-reason contract (four sites).
+# --------------------------------------------------------------------------- #
+
+def test_stop_reason_contract_carries_revise_livelock() -> None:
+    from errorta_cli import runstream
+    from errorta_cli.errors import EXIT_RUN_FAILED
+    from errorta_cli.render import status
+    assert "revise_livelock" in runstream.FAILURE_STOP_REASONS
+    assert "revise_livelock" in runstream.STOP_REASON_GLOSS
+    assert "revise_livelock" in status._TERMINAL_BAD
+    assert "revise_livelock" not in runstream.SUCCESS_STOP_REASONS
+    # classify_exit is a fail-closed allowlist -> a failure reason is EXIT_RUN_FAILED.
+    assert runstream.classify_exit(
+        {"state": {"stop_reason": "revise_livelock"}}) == EXIT_RUN_FAILED

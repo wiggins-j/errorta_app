@@ -68,7 +68,7 @@ FAILURE_STOP_REASONS = frozenset({
     "budget_exhausted", "no_progress", "hard_blocker", "member_unhealthy",
     "worker_unproductive", "completion_blocked", "not_converging",
     "delivery_review_stalled", "gate_not_improving", "planning_churn",
-    "dispatch_wedged",
+    "dispatch_wedged", "revise_livelock",
 })
 
 # stop_reasons that are a clean finish / benign stop (exit 0).
@@ -97,6 +97,9 @@ STOP_REASON_GLOSS: dict[str, str] = {
                        "stopped instead of growing the backlog forever"),
     "dispatch_wedged": ("the backlog is wedged — many todo tasks but none "
                         "dispatchable (see the monitor for the blocking deps)"),
+    "revise_livelock": ("a revise chain kept failing the same finding and the "
+                        "PM re-plan didn't recover — stopped instead of looping "
+                        "to the iteration cap"),
     "interrupted": "the run was interrupted (recoverable — resume it)",
     "failed": "the run failed with an unexpected error",
 }

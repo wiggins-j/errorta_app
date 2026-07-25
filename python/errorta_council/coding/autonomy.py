@@ -52,6 +52,7 @@ DELIVERY_REVIEW_STALLED = "delivery_review_stalled"  # F155: delivery review kep
 GATE_NOT_IMPROVING = "gate_not_improving"      # Spec 04: acceptance gate result stuck
 PLANNING_CHURN = "planning_churn"              # Spec 07: PM-only plan turns, no worker
 DISPATCH_WEDGED = "dispatch_wedged"            # Spec 10: large todo backlog, nothing dispatchable
+REVISE_LIVELOCK = "revise_livelock"            # Spec 16: broken revise lineage, no recovery
 
 # --- checkpoint cadences ----------------------------------------------------
 CADENCE_OFF = "off"
@@ -652,6 +653,15 @@ class LoopCounters:
     last_gate_fp: tuple = ()
     last_gate_best: int = -1
     last_gate_iter: int = 0
+    # Spec 16 (Phase 3): revise-livelock tracking. `last_broken_count` is the last
+    # count of `revise_chain_broken` decisions; `last_broken_merges` the last count
+    # of merged PRs (progress anywhere resets the window); `last_broken_iter` the
+    # iteration when either last changed. When broken > 0 and neither has changed
+    # for `revise_livelock_limit` iterations, the PM re-plan did not unstick
+    # anything → stop `revise_livelock`.
+    last_broken_count: int = -1
+    last_broken_merges: int = -1
+    last_broken_iter: int = 0
     # F155: consecutive delivery-review rejections (findings filed) in this run.
     # At delivery_review_round_limit the loop stops `delivery_review_stalled`.
     # Reset to 0 on a PASSING delivery review.
@@ -932,6 +942,44 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
         f"acceptance gate has not improved for {policy.gate_stall_limit} "
         f"iterations (score={score})")
     return LoopResult(GATE_NOT_IMPROVING, c)
+
+
+def _account_revise_livelock(ledger: Any, c: LoopCounters,
+                             policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+    """Spec 16 (Phase 3): make the revise-chain livelock visible to the loop. The
+    Phase 2 breaker blocks a wedged lineage and hands it to the PM — but if the
+    PM's re-plan ALSO fails to make progress, the run would otherwise burn to the
+    iteration cap. So: count broken lineages (`revise_chain_broken` decisions); when
+    that count is non-zero and neither it nor the merged-PR count has changed for
+    ``revise_livelock_limit`` iterations (any merge anywhere is progress and resets
+    the window), stop `revise_livelock`. ``0`` disables the detector.
+
+    This is the livelock every existing guard is blind to: the breaker keeps tasks
+    completing, so the progress fingerprint keeps moving and `not_converging` never
+    fires."""
+    if policy.revise_livelock_limit <= 0:
+        return None
+    broken = sum(1 for d in ledger.list_decisions()
+                 if d.get("choice") == "revise_chain_broken")
+    if broken <= 0:
+        c.last_broken_count = 0
+        c.last_broken_iter = c.iterations
+        return None
+    merges = sum(1 for p in ledger.list_prs() if p.get("status") == "merged")
+    # A change in broken count (a new break) OR a merge (progress anywhere) is
+    # motion — reset the window.
+    if broken != c.last_broken_count or merges != c.last_broken_merges:
+        c.last_broken_count = broken
+        c.last_broken_merges = merges
+        c.last_broken_iter = c.iterations
+        return None
+    if c.iterations - c.last_broken_iter < policy.revise_livelock_limit:
+        return None
+    _maybe_raise_monitor(
+        ledger, "revise_livelock",
+        f"{broken} revise lineage(s) broke and the run has made no merge progress "
+        f"for {policy.revise_livelock_limit} iterations")
+    return LoopResult(REVISE_LIVELOCK, c)
 
 
 def _open_backlog_shape(ledger: Any) -> tuple[int, int]:
@@ -1505,6 +1553,10 @@ def _run_sequential_loop(
         gate_stop = _account_gate_stall(ledger, c, policy)
         if gate_stop is not None:
             return gate_stop
+        # Spec 16: a revise-chain livelock the breaker couldn't unstick.
+        livelock_stop = _account_revise_livelock(ledger, c, policy)
+        if livelock_stop is not None:
+            return livelock_stop
         # Spec 10: a wedged graph — a large todo backlog with nothing dispatchable —
         # named and stopped instead of silently converted into PM plan turns.
         wedge_stop = _account_dispatch_wedge(ledger, c, policy)
@@ -1864,6 +1916,13 @@ def _run_concurrent_loop(
                 gate_stop = _account_gate_stall(ledger, c, policy)
                 if gate_stop is not None:
                     return gate_stop
+                # Spec 16: revise-chain livelock probe (mirrors the sequential loop);
+                # wiring BOTH chains is the dead-code lock — Spec 13 lifts the clamp
+                # and real runs go concurrent, so a detector only in the sequential
+                # path would never fire where it's needed.
+                livelock_stop = _account_revise_livelock(ledger, c, policy)
+                if livelock_stop is not None:
+                    return livelock_stop
                 # Spec 10: wedged-graph probe (mirrors the sequential loop).
                 wedge_stop = _account_dispatch_wedge(ledger, c, policy)
                 if wedge_stop is not None:
