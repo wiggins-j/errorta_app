@@ -490,6 +490,22 @@ def _reason_from_findings(findings: list[dict[str, Any]]) -> str:
     return f"{n} {label}s — '{title}'{loc} +{n - 1} more"
 
 
+def _finding_class(findings: list[dict[str, Any]]) -> frozenset[str]:
+    """Spec 16 (Item 1): the normalized token set over ALL of a rejection's
+    findings — not just the first blocking one, because Specs 14/15 flag and
+    suppress findings, so keying on "the first" would read an absent value and let
+    the livelock survive. Two restatements of the same demand ("no evidence tests
+    were run" / "no evidence that the tests were actually run") collapse to one
+    class. An empty finding set yields the empty class, and empty compares EQUAL to
+    empty — a run of contentless rejections should break the chain (the observed
+    pathology)."""
+    parts: list[str] = []
+    for f in findings:
+        parts.append(str(f.get("title") or ""))
+        parts.append(str(f.get("body") or ""))
+    return task_dedupe.normalized_tokens(*parts)
+
+
 def _all_unactionable_by_dev(blocking: list[dict[str, Any]]) -> bool:
     """Spec 15 (Item 3): are ALL blocking findings ones a write-only DEV cannot
     act on — an execution demand, or uncited (Spec 14's ``cited: false``)? A single
@@ -921,7 +937,7 @@ def _supersede_ancestors(store: LedgerStore, workspace: Any,
         seen.add(prev_pr_id)
         prev_pr = store.get_pr(prev_pr_id)
         if prev_pr is None or prev_pr.get("status") in (
-                "merged", "abandoned", "superseded"):
+                "merged", "abandoned", "superseded", "blocked"):  # Spec 16: +blocked
             break
         store.update_pr(prev_pr_id, status="superseded",
                         superseded_by_pr_id=superseding_pr_id)
@@ -944,6 +960,31 @@ def _supersede_ancestors(store: LedgerStore, workspace: Any,
                 pass
         # walk up: the retired PR's own task may itself be a revise (have a pr_id)
         cur_task = tasks_by_id.get(prev_pr.get("task_id", ""))
+
+
+def _revise_lineage_depth(store: LedgerStore, task: Task) -> int:
+    """Spec 16 (Item 1): count revise-hops from ``task`` back to the original dev
+    task, following each revise task's ``pr_id`` back-link — the same traversal and
+    cycle/self guard as ``_supersede_ancestors``. 0 for an original task, 1 for a
+    first revise, 2 for a revise-of-a-revise, … . Stops at a terminal ancestor PR
+    (``merged``/``abandoned``/``superseded``/``blocked``) so a retired lineage is
+    not walked."""
+    tasks_by_id = {t.task_id: t for t in store.list_tasks()}
+    cur: Task | None = task
+    seen: set[str] = set()
+    depth = 0
+    while cur is not None and getattr(cur, "pr_id", None):
+        prev_pr_id = cur.pr_id
+        if not prev_pr_id or prev_pr_id in seen:  # cycle / self guard
+            break
+        seen.add(prev_pr_id)
+        prev_pr = store.get_pr(prev_pr_id)
+        if prev_pr is None or prev_pr.get("status") in (
+                "merged", "abandoned", "superseded", "blocked"):
+            break
+        depth += 1
+        cur = tasks_by_id.get(prev_pr.get("task_id", ""))
+    return depth
 
 
 def _revalidate_stale_prs(store: LedgerStore, workspace: Any, *,
