@@ -65,6 +65,34 @@ hallucinated tool. An unknown tool name is still rejected fail-closed
 (`tool_not_allowed`), but the rejection now names the allowed tools and the real
 read path, and that hint is carried into the task's next dev prompt.
 
+#### Grant-or-delete: the audited design principle (GL03)
+
+When a role systematically invents a tool it was **not** granted — a DEV emitting a
+"run tests" call, once per turn, until something breaks the loop — that hallucinated
+call is not noise to scroll past. It is the agent telling you **what interface the
+task needs**. GL03 treats it as a telemetry ALARM: a pure detector
+(`capabilities.confabulation_from_failure`) recognizes an ungranted-tool-call whose
+intent maps to a capability the role's manifest lacks (distinguished from a plain
+typo of a granted tool, which SPEC-17's corrective hint already handles), and once
+it **repeats** past a threshold it raises exactly one deduped, non-blocking Alert and
+feeds the capability-aware PM a re-plan note — closing the loop
+confabulation → capability-gap → re-plan.
+
+The governing invariant, audited by `capabilities.audit_grant_or_delete`:
+
+> **A role whose duty its manifest cannot discharge is either GRANTED the capability
+> or DELETED from dispatch — never left dispatching into a wall.** A TESTER that
+> structurally never dispatches does *nothing*; a REVIEWER that cannot verify
+> *injects noise*. Grant when the role's duty carries a distinct, load-bearing
+> signal (SPEC-12 gave the TESTER the in-loop gate; SPEC-14 gave the REVIEWER
+> repo-read); delete when it adds no distinct signal even with the capability.
+
+GL03 does not delete any role — SPEC-12/14 already chose *grant* for the two live
+cases; the audit exists so that choice cannot silently regress. Note the honest
+framing: the confabulation→gap link is *inferred* from ACI results, not directly
+studied, so the detector is an advisory heuristic tuned conservatively — it pages
+the PM, it never blocks the run.
+
 ---
 
 ## 2. Models — the most important setup decision

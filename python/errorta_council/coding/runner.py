@@ -1803,6 +1803,114 @@ def _capability_refusal_note(store: LedgerStore) -> str:
     )
 
 
+def _count_confabulated_tool_failures(
+        store: LedgerStore, task_id: str, tool_name: str) -> int:
+    """GL03: how many times THIS ungranted tool has failed on THIS task — the tally
+    the threshold reads. A systematic capability gap repeats (the live 352-event
+    storm was one tool, one task); a one-off is a typo. Counts the `tool_failed`
+    decisions already recorded verbatim (rationale is ``<tool>: <reason>``), so no
+    second per-event ledger write is needed."""
+    n = 0
+    for record in store.list_decisions():
+        if record.get("choice") != "tool_failed":
+            continue
+        if task_id not in (record.get("related_task_ids") or []):
+            continue
+        if str(record.get("rationale") or "").startswith(f"{tool_name}:"):
+            n += 1
+    return n
+
+
+def _capability_gap_already_recorded(
+        store: LedgerStore, role: str, capability: str) -> bool:
+    """True iff a `tool_confabulation` decision for this (role, capability) already
+    exists — the dedupe lock so the 352-storm records ONE decision, not 352."""
+    for record in store.list_decisions():
+        if (record.get("choice") == "tool_confabulation"
+                and record.get("role") == role
+                and record.get("capability") == capability):
+            return True
+    return False
+
+
+def _detect_tool_confabulation(
+        store: LedgerStore, task: Task, role: str,
+        tool_name: str, reason: str) -> None:
+    """GL03 (Item 1): recognize a repeated ungranted-tool-call attempt as a
+    capability-gap confabulation, raise ONE deduped alarm, and feed the
+    capability-aware PM so the next plan turn re-plans/routes instead of the loop
+    re-spawning the impossible task. Pure detection lives in ``capabilities``; this
+    owns the threshold, the dedupe, and the ledger writes."""
+    from . import attention
+    try:
+        from .autonomy import load_policy
+        policy = load_policy(store)
+    except Exception:  # noqa: BLE001 — a manifest must never fail a turn
+        policy = None
+    manifest = _capabilities.capability_manifest(store, policy)
+    signal = _capabilities.confabulation_from_failure(
+        role, tool_name, reason, manifest)
+    if not signal.is_gap:
+        return
+    # Threshold guard (spec §7): a single stray confabulation is a fat-finger typo,
+    # not a systematic gap — only escalate once the same ungranted tool repeats.
+    count = _count_confabulated_tool_failures(store, task.task_id, tool_name)
+    if count < _capabilities.GAP_ESCALATION_THRESHOLD:
+        return
+    capability = signal.capability or "unknown"
+    # ONE deduped, non-blocking alarm per (role, capability).
+    attention.raise_capability_gap_alert(
+        store.project_id, role=role, capability=capability, tool_name=tool_name,
+        summary=signal.why, store=store)
+    # Record the decision ONCE and feed the PM's planner-feedback channel.
+    if not _capability_gap_already_recorded(store, role, capability):
+        store.record_decision(
+            title=f"tool confabulation: {role} kept trying {tool_name}",
+            context=f"task {task.task_id}", choice="tool_confabulation",
+            rationale=(
+                f"{role} attempted the ungranted tool {tool_name!r} {count}× on "
+                f"task {task.task_id} — its manifest grants no {capability} "
+                "capability, so the task needs an interface it lacks; re-plan/route."),
+            related_task_ids=[task.task_id],
+            extra={"role": role, "capability": capability, "tool_name": tool_name})
+
+
+def _capability_gap_note(store: LedgerStore) -> str:
+    """GL03 (Item 1): tell the capability-aware PM which roles kept reaching for a
+    capability their manifest lacks — the confabulation→gap→re-plan seam. Sibling of
+    ``_capability_refusal_note``; reads the deduped ``tool_confabulation`` decisions.
+    SPEC-15's manifest tells the PM what each role CAN do; this tells it what a role
+    kept TRYING to do and couldn't, so re-planning is grounded."""
+    try:
+        decisions = store.list_decisions()
+    except Exception:  # noqa: BLE001 — prompt assembly must never fail the turn
+        return ""
+    gaps: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in decisions:
+        if record.get("choice") != "tool_confabulation":
+            continue
+        role = str(record.get("role") or "")
+        capability = str(record.get("capability") or "")
+        tool_name = str(record.get("tool_name") or "")
+        key = (role, capability)
+        if key in seen:
+            continue
+        seen.add(key)
+        gaps.append((role, capability, tool_name))
+    if not gaps:
+        return ""
+    items = "; ".join(
+        f"{role} kept trying ungranted {capability} tool {tool_name!r}"
+        for role, capability, tool_name in gaps[-_DUPLICATE_NOTE_CAP:])
+    return (
+        f"{len(gaps)} role/capability gap(s) surfaced from repeated ungranted tool "
+        f"calls ({items}). A role that keeps inventing a tool is telling you the "
+        "task needs an interface it lacks — re-plan or route that work to a "
+        "role/gate that HAS the capability (grant it, or drop the task). Do NOT "
+        "re-dispatch the same work to a role whose manifest cannot discharge it.\n")
+
+
 def _pm_prompt(store: LedgerStore) -> str:
     pending = store.list_unconsumed_interjections()
     pin = ""
@@ -1867,6 +1975,9 @@ def _pm_prompt(store: LedgerStore) -> str:
     done_gate = f"{done_gate}{_duplicate_rejection_note(store)}"
     # Spec 15 (Item 2): and tell it which were refused as unexecutable.
     done_gate = f"{done_gate}{_capability_refusal_note(store)}"
+    # GL03 (Item 1): and which roles kept confabulating a capability they lack, so
+    # the next plan turn re-plans/routes instead of re-spawning the impossible task.
+    done_gate = f"{done_gate}{_capability_gap_note(store)}"
     return _register_pending_composition(
         _pm_prompt_segments(store, pin=pin, done_gate=done_gate))
 
@@ -4689,6 +4800,21 @@ def build_run_turn(
                             related_task_ids=[task.task_id])
                         if is_disallowed and not tool_not_allowed_reason:
                             tool_not_allowed_reason = reason
+                        # GL03 (Item 1): a disallowed-tool failure is not only a
+                        # logged event — an ungranted-tool-call attempt whose intent
+                        # maps to a capability the role LACKS is a capability-gap
+                        # signal (the DEV inventing a "run tests" tool is telling you
+                        # what interface the task needs). Detect it, threshold+dedupe
+                        # it, and route it to the PM. The `tool_failed` decision above
+                        # is still recorded verbatim — this routes a signal ALONGSIDE
+                        # it, it does not rewrite the ledger event. `path` is the
+                        # invented tool NAME on a `tool_not_allowed` failure.
+                        if is_disallowed:
+                            try:
+                                _detect_tool_confabulation(
+                                    store, task, DEV, path, reason)
+                            except Exception:  # noqa: BLE001 — telemetry never fails a turn
+                                pass
                     # Spec 17 (Item 3b): carry the disallowed-tool reason forward on
                     # the task so its NEXT composed dev prompt shows the corrective
                     # hint (no corrective-retry path reaches a post-parse
