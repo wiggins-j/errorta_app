@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from errorta_council.coding.ledger import LedgerStore
@@ -30,7 +29,7 @@ def test_role_tool_catalog_is_scoped() -> None:
     assert allowed_tools_for_role("tester") == ()
     assert "merge_back" not in allowed_tools_for_role("dev")
     assert "code_exec" not in allowed_tools_for_role("dev")
-    assert "merge_back" not in tool_catalog_text("dev")
+    assert "merge_back" not in tool_catalog_text("dev", repo_read=False, gate=False)
 
 
 def test_dev_tool_calls_write_and_record_tool_event(tmp_errorta_home: Path) -> None:
@@ -104,5 +103,8 @@ def test_disallowed_dev_tool_records_failed_event(tmp_errorta_home: Path) -> Non
     events = store.list_tool_events()
     assert events[0]["tool"] == "code_exec"
     assert events[0]["status"] == "failed"
-    assert events[0]["error"] == "tool_not_allowed"
+    # Spec 17 (Item 3a): the recorded error still fails closed but now names the
+    # allowed tool and the real read path.
+    assert events[0]["error"].startswith("tool_not_allowed")
+    assert "code_write" in events[0]["error"]
     assert events[0]["intent"]["args_keys"] == ["command"]

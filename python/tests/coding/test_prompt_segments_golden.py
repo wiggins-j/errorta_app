@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 from errorta_council.coding import capabilities
-from errorta_council.coding.gate_state import latest_gate_text
+from errorta_council.coding.gate_state import gate_available, latest_gate_text
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
     _composition_from_segments,
@@ -200,7 +200,11 @@ def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
         f"{_latest_context_response_text(store, task.task_id)}"
         f"{existing}"
         f"{latest_gate_text(store)}"          # Spec 12 inserts here
-        f"{tool_catalog_text(DEV)} Do not request merge-back.\n"
+        # Spec 17 widens the catalog call: repo_read is resolved per-member (False
+        # for these fixtures, whose members carry no repo_read_root), and `gate` is
+        # the live gate_available (False — no test commands registered).
+        f"{tool_catalog_text(DEV, repo_read=False, gate=gate_available(store))} "
+        "Do not request merge-back.\n"
         "Implement the task via tool-backed writes; preserve all prior functions. "
         "If you write a web server, read its listen port from the PORT environment "
         "variable (with a sensible default) instead of hardcoding one, so the "
@@ -245,6 +249,9 @@ def _old_test_prompt(task, store: LedgerStore) -> str:
         f"Context: {_orientation_text(store)}\n"
         f"{_grounding_packet_text('tester', store, task=task)}"
         f"{latest_gate_text(store)}"          # Spec 12 inserts here
+        # Spec 17 inserts the tester tool_guidance here (tester never has repo_read;
+        # gate is the live gate_available — False for these fixtures).
+        f"{tool_catalog_text(TESTER, repo_read=False, gate=gate_available(store))}\n"
         f"{avail} You CANNOT declare pass or fail — the verdict comes from the "
         "REAL exit code of the commands actually run.\n"
         "This PR implements ONE scoped task, not the whole product. If NO "
@@ -357,6 +364,11 @@ def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> s
         "0 strokes), request changes with a blocking finding citing the file.\n"
         f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"
         f"{_gate_text_for_review()}"          # Spec 12 inserts here
+        # Spec 17 inserts the reviewer tool_guidance here (repo_read/gate default
+        # False for these fixtures — no per-turn repo_read_root, no gate).
+        f"{tool_catalog_text(REVIEWER, repo_read=False, gate=False)} "
+        "Ground every BLOCKING finding in a real file — name it in \"path\" "
+        "(a file:line in the body is better).\n"
         f"{trunc_note}"
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
         '"reviewed_head".\n'

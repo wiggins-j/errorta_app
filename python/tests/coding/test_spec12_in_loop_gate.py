@@ -381,7 +381,11 @@ def test_dev_prompt_has_no_gate_segment_without_a_run(
     task = s.add_task(title="build", role="dev", detail="do the thing")
     prompt = runner._dev_prompt(task, s, readback="")
     assert gate_state.latest_gate_text(s) == ""
-    assert "acceptance gate" not in prompt.lower()
+    # Spec 17: the tool_guidance now always names the acceptance gate as the source
+    # of execution evidence, so "acceptance gate" is no longer a proxy for the
+    # gate-OUTPUT segment. The gate-RUN block (emitted only after a run) is the real
+    # marker of that segment — assert IT is absent when nothing has run.
+    assert "latest acceptance gate run" not in prompt.lower()
 
 
 # --------------------------------------------------------------------------- #
