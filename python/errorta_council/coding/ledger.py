@@ -699,15 +699,29 @@ class LedgerStore:
                  preferred_route_id: str = "",
                  assignment_rationale: str = "",
                  model_assignment: dict[str, Any] | None = None,
-                 target_files: list[str] | None = None) -> Task:
+                 target_files: list[str] | None = None,
+                 revise_depth: int = 0,
+                 finding_class: list[str] | None = None) -> Task:
         if role not in _VALID_ROLES:
             raise LedgerError(f"invalid role: {role!r}")
         ts = _now()
         # F159: an optional declared touched-files list rides in _extras (no schema
         # migration; round-trips via to_dict/_split_unknown). The hot-file gate
         # prefers it over prose inference.
-        extras = {"target_files": [str(p) for p in target_files if p]} \
+        extras: dict[str, Any] = {"target_files": [str(p) for p in target_files if p]} \
             if target_files else {}
+        # Spec 16 (Item 1): a revise task carries its lineage depth and the
+        # normalized finding-class it was created to address, so the circuit breaker
+        # reads them O(1) instead of re-walking. Ride in _extras (additive, no
+        # migration); absent -> depth 0 / no class, exactly today's behaviour.
+        if revise_depth:
+            extras["revise_depth"] = int(revise_depth)
+        if finding_class is not None:
+            # Store even an EMPTY class (a revise passes a list, never None): a run
+            # of CONTENTLESS rejections should break the chain (Spec 16 Item 1 — the
+            # observed pathology), which needs the empty class to round-trip so the
+            # next round reads [] (not absent) and empty compares equal to empty.
+            extras["finding_class"] = sorted({str(t) for t in finding_class})
         t = Task(
             task_id=f"t-{uuid.uuid4().hex[:12]}", title=title, role=role,
             detail=detail, state="todo", assignee_member_id=assignee_member_id,

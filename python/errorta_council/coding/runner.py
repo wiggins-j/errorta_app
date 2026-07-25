@@ -490,6 +490,22 @@ def _reason_from_findings(findings: list[dict[str, Any]]) -> str:
     return f"{n} {label}s — '{title}'{loc} +{n - 1} more"
 
 
+def _finding_class(findings: list[dict[str, Any]]) -> frozenset[str]:
+    """Spec 16 (Item 1): the normalized token set over ALL of a rejection's
+    findings — not just the first blocking one, because Specs 14/15 flag and
+    suppress findings, so keying on "the first" would read an absent value and let
+    the livelock survive. Two restatements of the same demand ("no evidence tests
+    were run" / "no evidence that the tests were actually run") collapse to one
+    class. An empty finding set yields the empty class, and empty compares EQUAL to
+    empty — a run of contentless rejections should break the chain (the observed
+    pathology)."""
+    parts: list[str] = []
+    for f in findings:
+        parts.append(str(f.get("title") or ""))
+        parts.append(str(f.get("body") or ""))
+    return task_dedupe.normalized_tokens(*parts)
+
+
 def _all_unactionable_by_dev(blocking: list[dict[str, Any]]) -> bool:
     """Spec 15 (Item 3): are ALL blocking findings ones a write-only DEV cannot
     act on — an execution demand, or uncited (Spec 14's ``cited: false``)? A single
@@ -578,6 +594,47 @@ def _route_unactionable_rejection(
                    "demand is satisfiable.")))
 
 
+def _break_revise_chain(
+    store: LedgerStore, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]], depth: int,
+) -> None:
+    """Spec 16 (Item 2): the revise lineage reached the cap still failing the same
+    finding class. Spawn NO further revise. Block the PR — terminal, and
+    ``_set_mergeable_if_ready`` already refuses to resurrect a ``blocked`` PR, so
+    this can never become a merge path — hand the PM ONE re-plan task (deduped per
+    lineage), record ``revise_chain_broken``, and raise one deduped alert."""
+    store.update_pr(pr["pr_id"], status="blocked")
+    reason = _reason_from_findings(findings)
+    esc_title = f"revise chain broken: {pr['branch']}"
+    if not any(t.role == PM and str(t.title or "") == esc_title
+               and t.state not in ("done", "dropped") for t in store.list_tasks()):
+        store.add_task(
+            title=esc_title, role=PM,
+            reason_summary=(reason or "revise chain hit the cap on one finding class"),
+            detail=(f"The revise chain for the PR on branch {pr['branch']} reached "
+                    f"depth {depth}, still failing the same finding class. The PR is "
+                    "blocked. Re-scope, decompose, or abandon this work — do not hand "
+                    "the same rejection back to a dev again."
+                    + (f" Repeated finding: {reason}." if reason else "")))
+    store.record_decision(
+        title=f"revise chain broken: {pr['branch']}",
+        context=f"pr {pr['pr_id']}", choice="revise_chain_broken",
+        rationale=(f"revise lineage reached depth {depth} on a repeated finding "
+                   "class; blocked the PR and escalated to the PM instead of "
+                   "spawning another revise"),
+        related_task_ids=[task.task_id])
+    try:
+        from . import attention
+        attention.raise_review_alert(
+            store.project_id, stage="review",
+            title=f"revise chain broken: {pr['branch']}",
+            summary=(f"revise chain on branch {pr['branch']} broke at depth {depth} — "
+                     "the same finding class kept repeating; escalated to the PM."),
+            store=store)
+    except Exception:  # noqa: BLE001 — observability is best-effort
+        pass
+
+
 def _handle_review_rejection(
     store: LedgerStore, workspace: Any, *, pr: dict[str, Any], task: Task,
     findings: list[dict[str, Any]], source: str,
@@ -614,6 +671,22 @@ def _handle_review_rejection(
     if blocking and _all_unactionable_by_dev(blocking):
         _route_unactionable_rejection(store, pr=pr, task=task, findings=findings)
         return
+    # Spec 16 (Item 2): bound the revise chain. If this lineage has already been
+    # revised revise_chain_limit times AND this rejection is the SAME finding class
+    # the current revise was created to address, the loop is non-progressive — break
+    # it (block the PR, hand it to the PM) instead of spawning an N+1th identical
+    # revise. A DIFFERENT class resets the streak (real progress through distinct
+    # defects), so only a genuinely stuck lineage is broken. Covers both the reviewer
+    # and strict-mode PM-review arms — both route through this one seam.
+    from .autonomy import load_policy
+    _limit = max(0, int(getattr(load_policy(store), "revise_chain_limit", 3)))
+    _depth = _revise_lineage_depth(store, task)
+    _new_class = _finding_class(findings)
+    _prev_class = task._extras.get("finding_class")
+    if (_limit and _prev_class is not None and _depth >= _limit
+            and frozenset(_prev_class) == _new_class):
+        _break_revise_chain(store, pr=pr, task=task, findings=findings, depth=_depth)
+        return
     depends = [task.task_id]
     if source == "reviewer":
         # F139 WS-D2: a contract-mismatch rejection reactively spawns a single
@@ -637,6 +710,10 @@ def _handle_review_rejection(
         title=f"revise: {pr['branch']}", role=DEV,
         pr_id=pr["pr_id"], depends_on=depends,
         reason_summary=reason,
+        # Spec 16 (Item 2): this revise is one hop deeper, and carries the finding
+        # class it must address — so the NEXT rejection can tell a repeated class
+        # (non-progressive) from a new one (real progress).
+        revise_depth=_depth + 1, finding_class=list(_new_class),
         detail=(f"Address {whose} on branch "
                 f"{pr['branch']} and open a new PR. The prior PR "
                 f"({pr['pr_id']}) is superseded when this lands."
@@ -921,7 +998,7 @@ def _supersede_ancestors(store: LedgerStore, workspace: Any,
         seen.add(prev_pr_id)
         prev_pr = store.get_pr(prev_pr_id)
         if prev_pr is None or prev_pr.get("status") in (
-                "merged", "abandoned", "superseded"):
+                "merged", "abandoned", "superseded", "blocked"):  # Spec 16: +blocked
             break
         store.update_pr(prev_pr_id, status="superseded",
                         superseded_by_pr_id=superseding_pr_id)
@@ -944,6 +1021,31 @@ def _supersede_ancestors(store: LedgerStore, workspace: Any,
                 pass
         # walk up: the retired PR's own task may itself be a revise (have a pr_id)
         cur_task = tasks_by_id.get(prev_pr.get("task_id", ""))
+
+
+def _revise_lineage_depth(store: LedgerStore, task: Task) -> int:
+    """Spec 16 (Item 1): count revise-hops from ``task`` back to the original dev
+    task, following each revise task's ``pr_id`` back-link — the same traversal and
+    cycle/self guard as ``_supersede_ancestors``. 0 for an original task, 1 for a
+    first revise, 2 for a revise-of-a-revise, … . Stops at a terminal ancestor PR
+    (``merged``/``abandoned``/``superseded``/``blocked``) so a retired lineage is
+    not walked."""
+    tasks_by_id = {t.task_id: t for t in store.list_tasks()}
+    cur: Task | None = task
+    seen: set[str] = set()
+    depth = 0
+    while cur is not None and getattr(cur, "pr_id", None):
+        prev_pr_id = cur.pr_id
+        if not prev_pr_id or prev_pr_id in seen:  # cycle / self guard
+            break
+        seen.add(prev_pr_id)
+        prev_pr = store.get_pr(prev_pr_id)
+        if prev_pr is None or prev_pr.get("status") in (
+                "merged", "abandoned", "superseded", "blocked"):
+            break
+        depth += 1
+        cur = tasks_by_id.get(prev_pr.get("task_id", ""))
+    return depth
 
 
 def _revalidate_stale_prs(store: LedgerStore, workspace: Any, *,

@@ -129,7 +129,19 @@ burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
 `delivery_review_stalled` when the delivery review keeps rejecting the integrated
 result instead of looping to budget), `hot_file_threshold` (2) /
 `hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
-F159 hot-file serializer, `dev_repo_read` (`false`, Spec 11 — see below).
+F159 hot-file serializer, `revise_chain_limit` (3) / `revise_livelock_limit` (5,
+Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below).
+
+**Spec 16 — revise chains are bounded.** A revise chain that keeps getting the
+**same** finding class is non-progressive churn. After `revise_chain_limit` (3)
+revises on one lineage all failing the same class, the engine stops handing the
+rejection back to a dev: it **blocks** that PR (terminal — it can never merge),
+records a `revise_chain_broken` decision, and files **one** PM re-plan task with
+the repeated finding — re-scope, decompose, or abandon that work; do not restate
+it. A *different* finding each round is real progress and is never broken. If the
+re-plan also fails to make any merge progress for `revise_livelock_limit` (5)
+iterations, the run stops with `revise_livelock` (a failure-class stop reason).
+Set either knob to `0` to disable it.
 
 **Spec 11 — `dev_repo_read`.** When `true` (opt-in; default `false`) a DEV turn can READ its task
 worktree in-turn: the `claude_cli` vendor runs with cwd set to the worktree and a
