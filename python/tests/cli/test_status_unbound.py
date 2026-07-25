@@ -142,21 +142,22 @@ def test_caps_at_five_with_more_tail() -> None:
     assert "errorta projects" in flat
 
 
-def test_terminal_bad_stop_reason_renders_in_failure_style(monkeypatch) -> None:
+def test_failed_run_renders_in_failure_style(monkeypatch) -> None:
     import errorta_cli.render as _render
 
     monkeypatch.setattr(_render, "_color_enabled", lambda: True)
-    # list_status "active" would normally style green (cli.ok); the _TERMINAL_BAD
-    # stop reason must override it to the failure style — this is the case the
-    # list-status derivation under-classifies.
+    # A real payload the deriver actually emits: a failed/attention run is
+    # classified list_status "needs attention", which status_cell colors cli.bad.
+    # (No _TERMINAL_BAD overlay — list_status_reason is a category label, never a
+    # raw stop reason, so an overlay on it would be dead code.)
     projects = [{
-        "id": "boom", "list_status": "active",
-        "list_status_reason": "gate_not_improving",
+        "id": "boom", "list_status": "needs attention",
+        "list_status_reason": "blocking_attention",
     }]
     out = render_status(_payload(projects), Verbosity())
     row = next(ln for ln in out.splitlines() if "boom" in ln)
-    assert "\x1b[31m" in row  # cli.bad, not the green an "active" row would get
-    assert "\x1b[32m" not in row  # cli.ok (green) is overridden
+    assert "\x1b[31m" in row       # cli.bad — a failed run reads as failed here too
+    assert "\x1b[32m" not in row   # not the green of a healthy row
 
 
 # --------------------------------------------------------------------------- #

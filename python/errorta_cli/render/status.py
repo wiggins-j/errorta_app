@@ -38,7 +38,7 @@ _TERMINAL_BAD = {
 _UNBOUND_CAP = 5
 # list_status_reasons that add nothing over the status label itself, so the row
 # omits them (a live run / a plain lifecycle state need no extra explanation).
-_UNINFORMATIVE_REASONS = {"", "live_run", "lifecycle"}
+_UNINFORMATIVE_REASONS = {"", "live_run", "lifecycle", "blocking_attention"}
 
 
 def _project_sort_key(proj: dict[str, Any]) -> int:
@@ -51,13 +51,14 @@ def _project_sort_key(proj: dict[str, Any]) -> int:
 
 
 def _unbound_project_row(proj: dict[str, Any]) -> Text:
-    cell = status_cell(proj)  # shared with `errorta projects` (no wording drift)
+    # `status_cell` is shared with `errorta projects` (no wording drift), and its
+    # list-status coloring already renders a failed/attention run in the failure
+    # style — the deriver classifies those as "needs attention" (cli.bad). We do
+    # NOT overlay `_TERMINAL_BAD` here: `list_status_reason` is a derived category
+    # label (live_run / blocking_attention / lifecycle / …), never a raw stop
+    # reason, so such an overlay would never fire on a real payload (review Δ).
+    cell = status_cell(proj)
     reason = str(proj.get("list_status_reason") or "")
-    if reason in _TERMINAL_BAD:
-        # A genuinely bad stop reason the list-status derivation under-classifies
-        # (e.g. gate_not_improving falls through to a plain lifecycle state) still
-        # reads as failed here.
-        cell.style = "cli.bad"
     row = Text()
     row.append(f"{str(proj.get('id') or '?'):<16} ", style="cli.key")
     row.append_text(cell)
