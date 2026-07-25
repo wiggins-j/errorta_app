@@ -28,6 +28,7 @@ import re
 import threading
 from typing import Any, Callable, NamedTuple, Optional
 
+from . import capabilities as _capabilities
 from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
@@ -489,6 +490,58 @@ def _reason_from_findings(findings: list[dict[str, Any]]) -> str:
     return f"{n} {label}s — '{title}'{loc} +{n - 1} more"
 
 
+def _all_unactionable_by_dev(blocking: list[dict[str, Any]]) -> bool:
+    """Spec 15 (Item 3): are ALL blocking findings ones a write-only DEV cannot
+    act on — an execution demand, or uncited (Spec 14's ``cited: false``)? A single
+    real, citable code finding makes this False so the revise still fires."""
+    for f in blocking:
+        is_exec = _capabilities.classify_task_text(
+            str(f.get("title") or ""), str(f.get("body") or "")) == "execution"
+        is_uncited = f.get("cited") is False   # explicit False only; absent != uncited
+        if not (is_exec or is_uncited):
+            return False
+    return True
+
+
+def _route_unactionable_rejection(
+    store: LedgerStore, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]],
+) -> None:
+    """Spec 15 (Item 3): a rejection whose blocking findings are all execution
+    demands / uncited spawns no DEV revise. Record the routing and escalate to the
+    PM once per PR lineage — with a gate the PM reads the gate output and decides
+    (merge vs a real defect); without one it must register a gate or re-scope so
+    the demand becomes satisfiable. The finding is preserved verbatim in the
+    decision — it is routed, not silently dropped."""
+    reason = _reason_from_findings(findings)
+    gate = _gate_state.gate_available(store)
+    choice = "finding_routed_to_gate" if gate else "finding_requires_absent_capability"
+    store.record_decision(
+        title=f"unactionable review rejection: {pr['branch']}",
+        context=f"pr {pr['pr_id']}", choice=choice,
+        rationale=(f"every blocking finding on {pr['branch']} is an execution demand "
+                   "or uncited; no DEV revise spawned — "
+                   + ("gate output is available, escalated to PM to decide"
+                      if gate else "no gate exists, escalated to PM to re-plan")),
+        related_task_ids=[task.task_id])
+    esc_title = f"unexecutable rejection: {pr['branch']}"
+    if not any(t.role == PM and str(t.title or "") == esc_title
+               and t.state not in ("done", "dropped") for t in store.list_tasks()):
+        store.add_task(
+            title=esc_title, role=PM,
+            reason_summary=(reason or "review demanded evidence no role can produce"),
+            detail=(
+                f"PR {pr['pr_id']} on branch {pr['branch']} was rejected only on "
+                "grounds a DEV cannot act on (execution evidence and/or uncited "
+                "findings). No revise was spawned. "
+                + ("Read the acceptance-gate output in your prompt and decide: is "
+                   "the PR actually fine (let it merge), or does a real, citable "
+                   "defect remain to re-plan?" if gate else
+                   "There is no acceptance gate to produce the demanded evidence — "
+                   "plan a task that registers a test command, or re-scope so the "
+                   "demand is satisfiable.")))
+
+
 def _handle_review_rejection(
     store: LedgerStore, workspace: Any, *, pr: dict[str, Any], task: Task,
     findings: list[dict[str, Any]], source: str,
@@ -514,6 +567,17 @@ def _handle_review_rejection(
     signature is the point of the seam.
     """
     store.update_pr(pr["pr_id"], status="changes_requested")
+    # Spec 15 (Item 3): if EVERY blocking finding is unactionable by a DEV — an
+    # execution demand ("no evidence the tests were run") or uncited (the Spec 14
+    # flag) — do NOT spawn a DEV revise task. Forwarding such a rejection to a dev
+    # who also cannot run anything is exactly what drove the gravity-golf spiral.
+    # Route it to the PM instead; the PR stays changes_requested (never merges),
+    # only the DEV rework is withheld. A rejection that also names a real citable
+    # defect keeps today's behaviour — the revise addresses that defect.
+    blocking = [f for f in findings if f.get("blocking")]
+    if blocking and _all_unactionable_by_dev(blocking):
+        _route_unactionable_rejection(store, pr=pr, task=task, findings=findings)
+        return
     depends = [task.task_id]
     if source == "reviewer":
         # F139 WS-D2: a contract-mismatch rejection reactively spawns a single
@@ -1347,6 +1411,36 @@ def _duplicate_rejection_note(store: LedgerStore) -> str:
     )
 
 
+def _capability_refusal_note(store: LedgerStore) -> str:
+    """Spec 15 (Item 2): tell the PM which of its proposed tasks were refused
+    because no role could execute them and no gate exists to produce the demanded
+    evidence. Mirrors ``_duplicate_rejection_note`` — reads the
+    ``task_requires_absent_capability`` decisions so the next plan turn sees WHY,
+    instead of re-proposing the same impossible 'run X and report' task forever."""
+    try:
+        decisions = store.list_decisions()
+    except Exception:  # noqa: BLE001 — prompt assembly must never fail the turn
+        return ""
+    refused: list[str] = []
+    for record in decisions:
+        if record.get("choice") != "task_requires_absent_capability":
+            continue
+        planned = str(record.get("planned_title") or "")
+        if planned and planned not in refused:
+            refused.append(planned)
+    if not refused:
+        return ""
+    titles = refused[-_DUPLICATE_NOTE_CAP:]
+    return (
+        f"{len(refused)} of your earlier proposed tasks were refused because no "
+        "role can run a command and there is no acceptance gate to produce "
+        f"execution evidence (e.g. {'; '.join(repr(t) for t in titles[:3])}). Do "
+        "NOT re-propose 'run X and report' tasks — plan work the gate can verify "
+        "(e.g. 'add a test that fails on trivial levels'), or register a test "
+        "command so a gate exists.\n"
+    )
+
+
 def _pm_prompt(store: LedgerStore) -> str:
     pending = store.list_unconsumed_interjections()
     pin = ""
@@ -1409,6 +1503,8 @@ def _pm_prompt(store: LedgerStore) -> str:
     # Spec 08: tell the PM its proposals were rejected as duplicates. Without
     # this it re-proposes the same job forever — it cannot see the gate.
     done_gate = f"{done_gate}{_duplicate_rejection_note(store)}"
+    # Spec 15 (Item 2): and tell it which were refused as unexecutable.
+    done_gate = f"{done_gate}{_capability_refusal_note(store)}"
     return _register_pending_composition(
         _pm_prompt_segments(store, pin=pin, done_gate=done_gate))
 
@@ -1464,6 +1560,11 @@ def _pm_prompt_segments(store: LedgerStore, *, pin: str,
         # F088-08 boot briefing on the first PM turn; otherwise the F088-07 packet.
         PromptSegment("project_context",
                       _pm_boot_text(store) or _grounding_packet_text("pm", store)),
+        # Spec 15 (Item 1): what each role can actually do, and the rule that no
+        # role can run a command from inside a turn — so the PM stops planning
+        # "run X and report" tasks no DEV can discharge (the gravity-golf wedge).
+        PromptSegment("tool_guidance",
+                      _capabilities.pm_capability_segment(store) + "\n"),
         # The standing PM planning instructions + envelope schema.
         PromptSegment("role_instructions", instructions),
     ]
@@ -1552,8 +1653,39 @@ def _materialize_pm_tasks(
                 },
             )
             continue
+        # Spec 15 (Item 2): an execution-imperative task ("run X and report" /
+        # "verify by running") cannot be discharged by a write-only DEV — the
+        # exact gravity-golf wedge. With a gate, rewrite it to consume the gate
+        # output; without one, refuse at planning time and surface the reason to
+        # the PM through the same channel Spec 08 uses for duplicates. Authoring
+        # ("write a test that fails on trivial levels") is NOT execution and is
+        # untouched — that is valuable DEV work.
+        use_title, use_detail = planned.title, planned.detail
+        if _capabilities.classify_task_text(
+                planned.title, planned.detail) == "execution":
+            if _gate_state.gate_available(store):
+                use_title, use_detail = _capabilities.routed_execution_task(
+                    planned.title)
+                store.record_decision(
+                    title=f"execution task routed to gate: {planned.title}",
+                    context="capability_lint", choice="task_routed_to_gate",
+                    rationale=(f"{planned.title!r} asks a DEV to run and report; "
+                               "rewritten to consume the acceptance-gate output"),
+                    extra={"planned_title": planned.title})
+            else:
+                # Refused: the dependents' title resolves to "" (dropped below).
+                title_to_id[planned.title] = ""
+                store.record_decision(
+                    title=f"task refused (no executor): {planned.title}",
+                    context="capability_lint",
+                    choice="task_requires_absent_capability",
+                    rationale=(f"{planned.title!r} demands execution evidence, but "
+                               "no role can run a command and no acceptance gate "
+                               "exists to produce it; refused at planning time"),
+                    extra={"planned_title": planned.title})
+                continue
         task = store.add_task(
-            title=planned.title,
+            title=use_title,
             # F087-18: PM plans DEV work only. Review/test/merge are auto-driven
             # by the coding team topology (reviewer/tester members pull PRs off
             # the queue). A PM that names a reviewer/tester role for a planned
@@ -1562,7 +1694,7 @@ def _materialize_pm_tasks(
             # the F129 model_assignment surface: proposals in ``planned`` are
             # validated separately by ``model_assignment.build_assignment``.
             role="dev",
-            detail=planned.detail,
+            detail=use_detail,
             parent_task_id=parent_task.task_id if parent_task is not None else None,
             source_spec_artifact_id=(
                 parent_task.source_spec_artifact_id if parent_task is not None else None
@@ -1585,7 +1717,7 @@ def _materialize_pm_tasks(
         title_to_id[planned.title] = task.task_id
         # A second identical proposal in the SAME batch must be caught too.
         open_index.append(task_dedupe.index_entry(
-            task_id=task.task_id, title=planned.title, role=DEV, paths=paths))
+            task_id=task.task_id, title=use_title, role=DEV, paths=paths))
         # Spec 09 §4 — bound the path-owner chaining amplifier. This used to be
         # `path_owners[path] = task.task_id`, which OVERWRITES the owner, so
         # sibling 2 inherited from sibling 1, sibling 3 from sibling 2, ... —

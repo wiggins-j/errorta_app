@@ -1409,9 +1409,28 @@ def get_model_usage(project_id: str) -> dict[str, Any]:
 def add_task(project_id: str, body: _NewTask, request: Request) -> dict[str, Any]:
     _require_tauri_origin(request)
     refuse_local_dataplane_if_remote(f"/coding/projects/{project_id}/tasks")
+    store = LedgerStore(project_id)
+    title, detail = body.title, body.detail
+    # Spec 15 (Item 2): lint operator-authored DEV tasks too — this route bypasses
+    # both the PM plan path and control_actions. An execution-imperative DEV task
+    # is rewritten to consume the gate output, or refused (422) when no gate can
+    # produce the demanded evidence. The refusal is returned to the caller, never
+    # swallowed.
+    if (body.role or "dev") == "dev":
+        from errorta_council.coding import capabilities, gate_state
+        if capabilities.classify_task_text(title, detail or "") == "execution":
+            if gate_state.gate_available(store):
+                title, detail = capabilities.routed_execution_task(title)
+            else:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f"{title!r} demands execution evidence, but no role can "
+                            "run a command and no acceptance gate exists to produce "
+                            "it — write it as work the gate can verify, or register "
+                            "a test command first"))
     try:
-        t = LedgerStore(project_id).add_task(
-            title=body.title, role=body.role, detail=body.detail,
+        t = store.add_task(
+            title=title, role=body.role, detail=detail,
             depends_on=body.depends_on,
         )
     except LedgerError as exc:
