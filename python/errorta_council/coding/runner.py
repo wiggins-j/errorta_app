@@ -4211,7 +4211,12 @@ def build_run_turn(
                         store.update_task(task.task_id, state="todo",
                                           last_tool_failure=tool_not_allowed_reason)
                     else:
-                        store.update_task(task.task_id, state="todo")
+                        # This turn had no disallowed-tool failure (a write-only
+                        # failure, or a clean requeue) — clear any stale hint so the
+                        # next prompt doesn't claim "your last turn had a tool call
+                        # rejected" when the last turn did not (review Minor #1).
+                        store.update_task(task.task_id, state="todo",
+                                          last_tool_failure="")
                     # F136: a turn that produced NO usable write (every tool
                     # failed / was disallowed) is unproductive — feed the F127
                     # escalate-up ladder so a dev that keeps emitting a
