@@ -765,3 +765,30 @@ def raise_tests_skipped_alert(
         summary=summary or "The tester declared a slice not-applicable for testing.",
         store=store,
     )
+
+
+def raise_anchor_regressed_alert(
+    project_id: str, *, key: str, summary: str, stage: str = "development",
+    store: LedgerStore | None = None,
+) -> AttentionSignal | None:
+    """GL01 (Item 2): a non-blocking Alert raised when a previously-green test
+    anchor (a probe/command that passed on master) goes RED at a later integrated
+    head — a mechanical "you broke a previously-passing check" signal. Deduped by
+    (source=anchor_regressed, stage, title) where the title names the anchor key,
+    so repeated reconciles on ONE lineage raise exactly one alert; a re-green then
+    a re-break would raise a fresh one only after the first resolves. Non-blocking:
+    the run continues (the anchor is satisfiable — re-green clears it), the point
+    is to surface the oscillation, not to wedge the merge."""
+    title = f"test anchor regressed: {key}" if key else "test anchor regressed"
+    store = store or _store(project_id)
+    for s in list_open(project_id, store=store):
+        if (s.kind == "alert" and s.source == "anchor_regressed"
+                and s.stage == stage and s.title == title):
+            return None
+    return raise_signal(
+        project_id, kind="alert", source="anchor_regressed", stage=stage,
+        title=title,
+        summary=summary or ("a previously-green check regressed at the "
+                            "integrated head"),
+        store=store,
+    )
