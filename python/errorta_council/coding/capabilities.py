@@ -136,22 +136,26 @@ def pm_capability_segment(store, policy=None) -> str:
 # IS the spec of the lint (see the spec's Item 2 test table).
 # --------------------------------------------------------------------------- #
 
-# A verb about *running* the artifact.
+# A verb about *running* the artifact. Deliberately excludes 'profile' — it is a
+# noun far more often than a verb here ("runtime profile", "user profile", "profile
+# page") and misclassified ordinary feature work as execution.
 _RUN_VERBS = (
-    "run", "execute", "launch", "measure", "benchmark", "profile",
+    "run", "execute", "launch", "measure", "benchmark",
     "reproduce", "rerun", "re-run",
 )
-# A demand to *see the product of a run* — output, a table, pass/fail, a metric.
+# A demand to *see the product of a run* — output, pass/fail. Deliberately excludes
+# 'table' / 'metric(s)': those are feature nouns ("results table", "user metrics")
+# that a real UI task legitimately names, not a demand for run output.
 _EVIDENCE_TERMS = (
-    "paste", "report", "output", "outputs", "results", "result", "table",
+    "paste", "report", "output", "outputs", "results", "result",
     "passes", "passing", "failures", "failure", "failing", "logs", "log",
-    "screenshot", "metric", "metrics", "prove", "proof", "evidence",
+    "screenshot", "prove", "proof", "evidence",
 )
 # Authoring is normal, valuable DEV work and is explicitly whitelisted: WRITE a
 # test, ADD a harness. Checked FIRST so "write a script that runs the levels" is
 # authoring, not execution.
 _AUTHORING_VERBS = (
-    "write", "add", "create", "implement", "author", "scaffold", "define",
+    "write", "add", "create", "implement", "build", "author", "scaffold", "define",
 )
 _AUTHORING_NOUNS = (
     "test", "tests", "harness", "gate", "suite", "benchmark", "fixture",
@@ -174,10 +178,18 @@ def classify_task_text(title: str, detail: str = "") -> str:
       script that runs the levels" (authoring) and "run the linter" (no evidence
       half) do not match.
     * ``"other"`` — everything else; not linted.
+
+    Any authoring verb (add/create/build/write/…) short-circuits execution: BUILDING
+    something is feature work, never a "run X and report" demand — so "Add a launch
+    screen and a results table" is not execution even though it contains 'launch' and
+    'results'. This is the guard against false positives on ordinary app vocabulary.
     """
     text = f"{title or ''} {detail or ''}".lower()
-    if _has_word(text, _AUTHORING_VERBS) and _has_word(text, _AUTHORING_NOUNS):
-        return "authoring"
+    if _has_word(text, _AUTHORING_VERBS):
+        # Authoring a test/harness/gate is the whitelisted "authoring" class;
+        # authoring anything else ("add a launch screen") is just "other" — either
+        # way it is NOT an execution demand.
+        return "authoring" if _has_word(text, _AUTHORING_NOUNS) else "other"
     if _has_word(text, _RUN_VERBS) and _has_word(text, _EVIDENCE_TERMS):
         return "execution"
     return "other"

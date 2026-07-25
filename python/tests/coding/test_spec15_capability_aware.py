@@ -25,16 +25,22 @@ from errorta_council.coding.topology import DEV, PM, REVIEWER, TESTER
     ("Run the linter", "other"),           # run-verb, no evidence demand
     ("Implement the gravity solver", "other"),
     ("Fix the black-screen bug in Render.init", "other"),
+    # Regression locks (code-review finding 1): ordinary app-building vocabulary
+    # must NOT classify as execution just because it contains launch/profile/results.
+    ("Add a launch screen and a results table", "other"),
+    ("Add a profile page that reports user metrics", "other"),
+    ("Detect the runtime profile and report it", "other"),
+    ("Build the results dashboard with a metrics table", "other"),
 ])
 def test_classify_task_text_table(title, expected) -> None:
     assert capabilities.classify_task_text(title) == expected
 
 
 def test_runtime_is_not_a_run_verb() -> None:
-    # 'runtime' must not trip \brun\b — Spec 13 is all about runtime profiles.
+    # 'runtime' must not trip \brun\b — Spec 13 is all about runtime profiles — and
+    # 'profile' is no longer a run-verb, so a runtime task is never execution.
     assert capabilities.classify_task_text(
-        "Detect the runtime profile and report it") != "execution" or True
-    # The real lock: a bare 'runtime' mention with no run-verb is not execution.
+        "Detect the runtime profile and report it") == "other"
     assert capabilities.classify_task_text("Register the runtime profile") == "other"
 
 
@@ -225,3 +231,47 @@ def test_a_real_cited_defect_still_spawns_a_revise(
                      "cited": True, "path": "src/mod.js"}])
     # A genuine, citable code finding is DEV-actionable -> today's behaviour.
     assert any(t.title.startswith("revise:") for t in s.list_tasks())
+
+
+_EXEC_FINDING = [{"severity": "blocking", "blocking": True,
+                  "title": "no evidence the tests were run", "body": ""}]
+
+
+def test_gate_present_execution_demand_requeues_one_re_review(
+        tmp_errorta_home, tmp_path) -> None:
+    from errorta_council.coding import runner
+    s = _real_store("cap9", tmp_path)
+    ws = _ws("cap9", s)
+    s.set_test_commands({"u": {"argv": ["true"], "timeout_seconds": 5}})  # a gate exists
+    pr, review = _pr_and_review(s, ws)
+    runner._handle_review_rejection(s, ws, pr=pr, task=review,
+                                    findings=_EXEC_FINDING, source="reviewer")
+    tasks = s.list_tasks()
+    assert not any(t.title.startswith("revise:") for t in tasks)          # no DEV revise
+    assert any(t.role == "reviewer" and "re-review" in t.title
+               for t in tasks)                                            # one re-review
+    assert not any(t.role == "pm" and t.title.startswith("unexecutable")
+                   for t in tasks)                                        # not escalated yet
+    assert any(d["choice"] == "review_requeued_for_gate"
+               for d in s.list_decisions())
+
+
+def test_second_unactionable_rejection_on_same_head_escalates(
+        tmp_errorta_home, tmp_path) -> None:
+    from errorta_council.coding import runner
+    s = _real_store("cap10", tmp_path)
+    ws = _ws("cap10", s)
+    s.set_test_commands({"u": {"argv": ["true"], "timeout_seconds": 5}})
+    pr, review1 = _pr_and_review(s, ws)
+    runner._handle_review_rejection(s, ws, pr=pr, task=review1,
+                                    findings=_EXEC_FINDING, source="reviewer")  # -> re-review
+    review2 = s.add_task(title="review PR: recheck", role="reviewer",
+                         pr_id=pr["pr_id"], depends_on=[review1.task_id])
+    runner._handle_review_rejection(s, ws, pr=pr, task=review2,
+                                    findings=_EXEC_FINDING, source="reviewer")  # -> escalate
+    # Same head, second time: no second re-review, escalate to the PM instead.
+    reviews = [t for t in s.list_tasks()
+               if t.role == "reviewer" and "re-review" in t.title]
+    assert len(reviews) == 1
+    assert any(t.role == "pm" and t.title.startswith("unexecutable")
+               for t in s.list_tasks())

@@ -503,25 +503,61 @@ def _all_unactionable_by_dev(blocking: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _already_requeued_for_head(store: LedgerStore, head: str) -> bool:
+    """Spec 15 (Item 3): has a gate-output re-review already been queued for this
+    PR head? Bounds the re-review to at most one per head so it cannot loop."""
+    try:
+        return any(d.get("choice") == "review_requeued_for_gate"
+                   and str(d.get("head") or "") == head
+                   for d in store.list_decisions())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _route_unactionable_rejection(
     store: LedgerStore, *, pr: dict[str, Any], task: Task,
     findings: list[dict[str, Any]],
 ) -> None:
     """Spec 15 (Item 3): a rejection whose blocking findings are all execution
-    demands / uncited spawns no DEV revise. Record the routing and escalate to the
-    PM once per PR lineage — with a gate the PM reads the gate output and decides
-    (merge vs a real defect); without one it must register a gate or re-scope so
-    the demand becomes satisfiable. The finding is preserved verbatim in the
-    decision — it is routed, not silently dropped."""
+    demands / uncited spawns no DEV revise. Instead:
+
+    * with a gate, re-queue exactly ONE re-review per head — the review prompt
+      already carries the acceptance-gate output (Spec 12 Item 3), so the demand is
+      SATISFIED, not forwarded: a green gate lets the reviewer approve and the PR
+      merges (this is what keeps a genuinely-fine PR from being stranded). A second
+      unactionable rejection on the same head means the re-review did not resolve
+      it, so it escalates to the PM;
+    * without a gate, escalate to the PM once per lineage to register a gate or
+      re-scope.
+
+    The finding is preserved verbatim in the decision — routed, not dropped."""
     reason = _reason_from_findings(findings)
     gate = _gate_state.gate_available(store)
+    head = str(pr.get("head") or "")
+    if gate and not _already_requeued_for_head(store, head):
+        store.record_decision(
+            title=f"re-review queued with gate output: {pr['branch']}",
+            context=f"pr {pr['pr_id']}", choice="review_requeued_for_gate",
+            rationale=("blocking findings were all execution demands / uncited; "
+                       "re-queued one re-review with the gate output attached rather "
+                       "than spawning a DEV revise nobody could satisfy"),
+            related_task_ids=[task.task_id], extra={"head": head})
+        store.add_task(
+            title=f"review PR: {pr['branch']} (re-review, gate output attached)",
+            role=REVIEWER, pr_id=pr["pr_id"], depends_on=[task.task_id],
+            reason_summary="re-review with acceptance-gate output attached",
+            detail=("The prior review demanded execution evidence. The acceptance-"
+                    "gate output is in your prompt now — decide on THAT evidence. Do "
+                    "NOT reject again for missing execution evidence: if the gate is "
+                    "green and the diff is sound, approve."))
+        return
     choice = "finding_routed_to_gate" if gate else "finding_requires_absent_capability"
     store.record_decision(
         title=f"unactionable review rejection: {pr['branch']}",
         context=f"pr {pr['pr_id']}", choice=choice,
         rationale=(f"every blocking finding on {pr['branch']} is an execution demand "
                    "or uncited; no DEV revise spawned — "
-                   + ("gate output is available, escalated to PM to decide"
+                   + ("re-review with gate output did not resolve it, escalated to PM"
                       if gate else "no gate exists, escalated to PM to re-plan")),
         related_task_ids=[task.task_id])
     esc_title = f"unexecutable rejection: {pr['branch']}"
@@ -533,10 +569,10 @@ def _route_unactionable_rejection(
             detail=(
                 f"PR {pr['pr_id']} on branch {pr['branch']} was rejected only on "
                 "grounds a DEV cannot act on (execution evidence and/or uncited "
-                "findings). No revise was spawned. "
-                + ("Read the acceptance-gate output in your prompt and decide: is "
-                   "the PR actually fine (let it merge), or does a real, citable "
-                   "defect remain to re-plan?" if gate else
+                "findings), and a gate-output re-review did not clear it. No revise "
+                "was spawned. "
+                + ("Decide: is the PR actually fine (re-plan to let it land), or does "
+                   "a real, citable defect remain?" if gate else
                    "There is no acceptance gate to produce the demanded evidence — "
                    "plan a task that registers a test command, or re-scope so the "
                    "demand is satisfiable.")))
