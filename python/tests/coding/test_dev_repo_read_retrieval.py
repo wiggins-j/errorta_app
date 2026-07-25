@@ -27,9 +27,13 @@ from errorta_council.coding.runner import (
 from errorta_council.coding.topology import DEV, Assign
 from errorta_council.coding.workspace import CodingWorkspace
 
+# The dev runs on claude_cli — the only vendor that honors the read-only cwd
+# invocation repo_read promises (Spec 17). The worktree-root threading this file
+# locks only happens for a repo_read-honoring vendor, so the fixture declares it.
 MEMBERS = [
     {"id": "m-pm", "enabled": True, "metadata": {"coding_role": "pm"}},
-    {"id": "m-dev", "enabled": True, "metadata": {"coding_role": "dev"}},
+    {"id": "m-dev", "enabled": True, "metadata": {"coding_role": "dev"},
+     "provider_kind": "claude_cli", "gateway_route_id": "claude_cli.opus"},
     {"id": "m-rev", "enabled": True, "metadata": {"coding_role": "reviewer"}},
     {"id": "m-test", "enabled": True, "metadata": {"coding_role": "tester"}},
 ]

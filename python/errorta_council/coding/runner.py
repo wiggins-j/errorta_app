@@ -69,6 +69,45 @@ from .workspace import CodingWorkspace
 
 MemberCaller = Callable[[dict[str, Any], str], str]
 
+# Spec 17 (Item 1): the gateway vendors that actually HONOR the read-only cwd
+# invocation ``repo_read`` promises. Only the ``claude_cli`` provider runs the
+# turn with cwd=worktree and a Read/Grep/Glob allowlist and consumes the
+# ``repo_read_root`` metadata (see errorta_model_gateway/providers/
+# async_claude_cli.py — it is the single consumer today). Every other vendor
+# (codex_cli, cursor_cli, remote APIs) silently ignores the metadata, so naming
+# Read/Grep/Glob in its tool catalog would be a lie and forwarding the key a
+# no-op. A future vendor that grows a real read surface is a one-line add here.
+_REPO_READ_HONORING_VENDORS = frozenset({"claude_cli"})
+
+
+def _member_vendor(member: dict[str, Any]) -> str:
+    """The gateway vendor (provider class) for a member — the prefix of its
+    ``gateway_route_id`` before the first '.' (``claude_cli.opus`` ->
+    ``claude_cli``), falling back to ``provider_kind`` when the route carries no
+    prefix."""
+    route_id = str(member.get("gateway_route_id") or "").strip()
+    if "." in route_id:
+        return route_id.split(".", 1)[0]
+    return route_id or str(member.get("provider_kind") or "")
+
+
+def _vendor_honors_repo_read(member: dict[str, Any]) -> bool:
+    """True when the member's vendor actually runs the read-only cwd invocation
+    ``repo_read`` promises (i.e. consumes ``repo_read_root`` metadata)."""
+    return _member_vendor(member) in _REPO_READ_HONORING_VENDORS
+
+
+def _member_honors_repo_read(member: dict[str, Any], policy_flag: bool) -> bool:
+    """Spec 17 (Item 1): ``repo_read`` is effectively ON for a member only when
+    BOTH the policy flag is on AND the member's vendor honors the read-only cwd
+    invocation. Gating the per-turn ``repo_read_root`` tag on this (rather than
+    the raw policy flag) keeps the prompt catalog, the forwarded metadata, and
+    the grounding-reflex check all consistent: a codex/cursor member never
+    receives Read/Grep/Glob, so its catalog shows the context_request/off
+    variant and no no-op key is forwarded."""
+    return bool(policy_flag) and _vendor_honors_repo_read(member)
+
+
 # F143: per-turn token usage crosses the string-typed MemberCaller seam via a
 # thread-local sink. ``gateway_member_caller`` writes the gateway result's token
 # fields; the capturing wrapper clears the sink before each call and reads it after,
@@ -4343,8 +4382,15 @@ def build_run_turn(
                 # copy so the shared member config is never mutated. Best-effort:
                 # any failure to resolve the root falls back to the unchanged
                 # member (single-shot empty-temp-dir path).
+                # Spec 17 (Item 1): gate on the member's ACTUAL vendor, not the
+                # raw policy flag — only a repo_read-honoring vendor (claude_cli
+                # today) receives the read-only cwd turn, so only it gets the
+                # `repo_read_root` tag. A codex/cursor DEV keeps the plain member
+                # (no key), so its catalog and metadata never promise tools it
+                # won't get.
                 dev_member = member
-                if dev_repo_read and workspace is not None and branch is not None:
+                if (_member_honors_repo_read(member, dev_repo_read)
+                        and workspace is not None and branch is not None):
                     try:
                         repo_root = workspace.task_root(task.task_id, branch=branch)
                         # Spec 14: canonical `repo_read_root` (was dev_repo_read_root).
@@ -4542,7 +4588,10 @@ def build_run_turn(
                 # otherwise succeed).
                 review_member = member
                 review_root = None
-                if reviewer_repo_read:
+                # Spec 17 (Item 1): only a repo_read-honoring vendor gets the
+                # tag, so the reviewer catalog / metadata / grounding-reflex all
+                # match the reviewer's real invocation.
+                if _member_honors_repo_read(member, reviewer_repo_read):
                     try:
                         review_root = workspace.task_root(pr["task_id"],
                                                           branch=pr["branch"])
@@ -4799,7 +4848,8 @@ def build_run_turn(
                 # otherwise the second half of the strict-mode dual review stays
                 # blind. Best-effort, per-turn copy (shared config never mutated).
                 pm_review_member = member
-                if reviewer_repo_read:
+                # Spec 17 (Item 1): vendor-honor the tag here too.
+                if _member_honors_repo_read(member, reviewer_repo_read):
                     try:
                         _pmr = workspace.task_root(pr["task_id"], branch=pr["branch"])
                         pm_review_member = {**member, "repo_read_root": str(_pmr)}
@@ -5326,10 +5376,17 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
         # the policy is off -> unchanged single-shot path. The provider accepts the
         # generic `repo_read_root`; the legacy `dev_repo_read_root` key is still
         # forwarded so a mixed-version pair keeps working.
+        # Spec 17 (Item 1): forward the read-only worktree root ONLY to a vendor
+        # that actually honors it (claude_cli today). The dispatch sites already
+        # gate the tag on the vendor, so in the normal flow a non-honoring member
+        # never carries the key; this second check keeps the seam honest against
+        # any other path that might set it, and guarantees the forwarded metadata
+        # never disagrees with the prompt catalog.
         metadata: dict[str, Any] = {}
         repo_read_root = (member.get("repo_read_root")
                           or member.get("dev_repo_read_root"))
-        if isinstance(repo_read_root, str) and repo_read_root.strip():
+        if (isinstance(repo_read_root, str) and repo_read_root.strip()
+                and _vendor_honors_repo_read(member)):
             metadata["repo_read_root"] = repo_read_root.strip()
         req = LocalCouncilModelRequest(
             role=str(member.get("role", "answerer")),
