@@ -15,6 +15,8 @@ and its two safety properties from the code review:
 import sys
 from pathlib import Path
 
+import pytest
+
 from errorta_council.coding import gate_bootstrap, gate_state, runner
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.topology import GateRun, decide_next, plan_next_batch
@@ -407,3 +409,173 @@ def test_delivery_uses_the_shared_run_gate(monkeypatch) -> None:
     # The delivery_review path invokes the shared executor rather than a second
     # inlined run_test_commands call.
     assert "_run_gate(store, workspace, head=head" in src
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 (Item 5) — the runtime-probe arm. A runtime-ONLY project (a runnable
+# managed_local profile, NO test commands — the buildless-web case) gets a real
+# in-loop validation arm: `_run_gate(probe_runtime=True)` drives the F146 Slice C
+# launch machinery and folds a `runtime:launch` verdict into the gate record, so a
+# crash-on-start is a red gate in-loop instead of only at delivery. These spawn
+# REAL short-lived children through the F039 sandbox (as the F146 suite does).
+# --------------------------------------------------------------------------- #
+
+_CLEAN_START = ["python", "-c", "print('booted ok')"]
+_CRASH_START = ["python", "-c", "raise RuntimeError('startup boom: import failed')"]
+
+
+@pytest.fixture
+def _fast_probe(monkeypatch):
+    """Keep the launch probe fast and never leak a child across tests."""
+    from errorta_council.coding import runtime_process as rp
+    monkeypatch.setattr(rp, "_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(rp, "_GRACE_SECONDS", 1.0)
+    monkeypatch.setattr(rp, "_LAUNCH_PROBE_SECONDS", 1.0)
+    monkeypatch.setattr(rp, "_LAUNCH_HTTP_PROBE_SECONDS", 2.5)
+    yield
+    rp.teardown_all()
+
+
+def _add_runtime(store: LedgerStore, start_argv, *, kind: str = "cli") -> None:
+    from errorta_council.coding.runtime import RuntimeProfileStore, validate_profile
+    rstore = RuntimeProfileStore.for_ledger(store)
+    rstore.upsert_profile(validate_profile(
+        {"kind": kind, "runtime_mode": "managed_local", "start": start_argv,
+         "sandbox": "auto"}, profile_id="default", project_id=store.project_id))
+
+
+def test_run_gate_runtime_only_produces_a_gate_record(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch, _fast_probe) -> None:
+    """Item 5's acceptance: a project with a runnable profile and NO commands
+    produces an in-loop gate record from the runtime probe."""
+    s = _store("rt1", tmp_path)
+    ws = _ws("rt1", s)
+    monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
+    _add_runtime(s, _CLEAN_START)
+    assert s.get_test_commands() == {}  # runtime-only: the gate has no commands
+
+    session = runner._run_gate(s, ws, head="feedface", task_id="in-loop-gate",
+                               probe_runtime=True)
+    assert session is not None
+    assert "runtime:launch" in session.command_ids
+    assert session.passed is True  # a clean launch is a green gate
+    runs = s.list_test_runs()
+    assert runs[-1]["head"] == "feedface"
+    assert any(r["command_id"] == "runtime:launch" for r in runs[-1]["results"])
+
+
+def test_run_gate_runtime_crash_is_a_red_gate(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch, _fast_probe) -> None:
+    """A crash-on-start is caught in-loop as a red gate — the whole point of the
+    arm (delivery no longer the first place a startup crash surfaces)."""
+    s = _store("rt2", tmp_path)
+    ws = _ws("rt2", s)
+    monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
+    _add_runtime(s, _CRASH_START, kind="desktop")
+
+    session = runner._run_gate(s, ws, head="deadc0de", task_id="in-loop-gate",
+                               probe_runtime=True)
+    assert session is not None
+    assert session.passed is False
+    rt = [r for r in session.results if r.command_id == "runtime:launch"]
+    assert rt and rt[0].passed is False
+
+
+def test_run_gate_folds_runtime_probe_alongside_commands(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch, _fast_probe) -> None:
+    """Commands + runtime fold into ONE recorded session (a single latest gate
+    record for Spec 04 + the prompt segments), not two."""
+    s = _store("rt3", tmp_path)
+    ws = _ws("rt3", s)
+    monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
+    s.set_test_commands({"acc": {**_OK, "scope": "acceptance"}})
+    _add_runtime(s, _CLEAN_START)
+
+    before = len(s.list_test_runs())
+    session = runner._run_gate(s, ws, head="cafebabe", task_id="in-loop-gate",
+                               probe_runtime=True)
+    assert session is not None
+    assert set(session.command_ids) == {"acc", "runtime:launch"}
+    assert session.passed is True
+    # Exactly one new gate record carrying both verdicts.
+    assert len(s.list_test_runs()) == before + 1
+
+
+def test_runtime_arm_is_opt_in_and_leaves_tester_condition_alone(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch, _fast_probe) -> None:
+    """Regression lock (Δ review): the runtime arm lives in the in-loop gate, not
+    the TESTER branch. The default `_run_gate` (probe_runtime=False — delivery's
+    own call) never probes runtime, and the tester-spawn condition keys on UNIT
+    commands only, so a runnable-profile-only project spawns no tester turn."""
+    s = _store("rt4", tmp_path)
+    ws = _ws("rt4", s)
+    monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
+    _add_runtime(s, _CLEAN_START)
+    # Opt-in: without probe_runtime a runtime-only project still returns None.
+    assert runner._run_gate(s, ws, head="h", task_id="t") is None
+    # The tester-spawn condition is unchanged — no unit command exists.
+    assert s.get_unit_test_commands() == {}
+
+
+def test_tester_spawn_condition_and_not_applicable_path_unchanged() -> None:
+    """Source lock for Item 5's regression: the runtime arm must NOT relax the
+    tester-spawn condition (it still gates on unit commands) and the
+    `not_applicable` escape must remain intact."""
+    import inspect
+
+    from errorta_council.coding import runner as r
+    src = inspect.getsource(r.build_run_turn)
+    assert "if store.get_unit_test_commands():" in src  # tester spawn unchanged
+    assert "tests_not_applicable" in src                # not_applicable path intact
+
+
+def test_arm_after_merge_arms_on_a_runtime_only_project(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
+    """The stopgap is reverted: a runtime-only project (a runnable profile, no
+    commands) now arms gate_due once the interval accumulates — because the
+    runtime arm gives the GateRun something to execute."""
+    from errorta_council.coding.autonomy import CodingAutonomyPolicy, save_policy
+
+    s = _store("rt5", tmp_path)
+    ws = _ws("rt5", s)
+    _add_runtime(s, _CLEAN_START)
+    save_policy(s, CodingAutonomyPolicy(gate_min_merge_interval=1))
+    runner._arm_gate_after_merge(s, ws, changed=["src/a.py"], head="h1")
+    assert s.get_run_state().get("gate_due") is True
+
+
+def test_runtime_probe_exception_degrades_cleanly(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
+    """A runtime-probe exception records a decision and never fails the turn (the
+    gate path is fail-open). No process spawn — the launch helper is stubbed."""
+    s = _store("rt6", tmp_path)
+    ws = _ws("rt6", s)
+    _add_runtime(s, _CLEAN_START)
+
+    def _boom(*a, **k):
+        raise RuntimeError("probe exploded")
+    monkeypatch.setattr(runner, "_delivery_launch_evidence", _boom)
+
+    session = runner._run_gate(s, ws, head="h", task_id="in-loop-gate",
+                               probe_runtime=True)
+    assert session is None  # no command session, probe raised -> nothing recorded
+    assert [c for c in (d.get("choice") for d in s.list_decisions())
+            if c == "gate_runtime_error"]
+
+
+def test_runtime_cannot_verify_is_not_a_red_gate(
+        tmp_errorta_home: Path, tmp_path: Path, monkeypatch) -> None:
+    """An INABILITY to launch (sandbox/setup/spawn — cannot_verify) is
+    environmental, not a code crash: it records a decision, NOT a red gate that
+    would churn Spec 04's stall detector."""
+    s = _store("rt7", tmp_path)
+    ws = _ws("rt7", s)
+    _add_runtime(s, _CLEAN_START)
+    monkeypatch.setattr(runner, "_delivery_launch_evidence",
+                        lambda *a, **k: (False, True, "sandbox unavailable"))
+
+    session = runner._run_gate(s, ws, head="h", task_id="in-loop-gate",
+                               probe_runtime=True)
+    assert session is None
+    assert s.list_test_runs() == []  # no red gate record
+    assert "gate_runtime_cannot_verify" in [d.get("choice") for d in s.list_decisions()]

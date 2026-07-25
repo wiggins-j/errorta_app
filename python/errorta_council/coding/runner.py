@@ -43,7 +43,12 @@ from .ledger import LedgerStore, Task, format_focus_lines
 from .orientation import build_orientation_packet
 from .schemas import TurnErrorCode, TurnParseError, parse_coding_turn
 from .skills import primary_skill, record_turn_skill
-from .testing import resolve_commands, run_test_commands
+from .testing import (
+    TestRunResult,
+    TestRunSession,
+    resolve_commands,
+    run_test_commands,
+)
 from .topology import (
     DEV,
     PM,
@@ -2984,8 +2989,77 @@ def _mark_finding_citations(findings: list[dict[str, Any]], *, workspace: Any,
     return out
 
 
+def _runnable_managed_local_profile(store: LedgerStore) -> bool:
+    """Spec 12 Item 5: whether the project has a launchable ``managed_local``
+    runtime profile — the exact class the F146 Slice C launch probe
+    (``_delivery_launch_evidence`` / ``launch_probe``) actually runs. Narrower
+    than ``evidence._has_runnable_runtime`` (which counts ANY ``start`` argv,
+    including a container profile the launch probe skips), so the in-loop runtime
+    arm and the ``gate_due`` arming only trip when the machinery will really
+    execute — a container-only project must not churn a no-op GateRun. Fully
+    guarded: a read error means "nothing to probe"."""
+    try:
+        from .runtime import RuntimeProfileStore
+        profiles = RuntimeProfileStore.for_ledger(store).list_profiles()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(getattr(p, "runtime_mode", "") == "managed_local"
+               and getattr(p, "start", None) for p in profiles)
+
+
+def _runtime_gate_probe(
+    store: LedgerStore, workspace: Any, *, head: str,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Optional[TestRunResult]:
+    """Spec 12 Item 5: drive the F146 Slice C launch machinery for the in-loop
+    gate and classify the delivered runtime's startup as a synthetic
+    ``runtime:launch`` ``TestRunResult`` (``passed`` only on a clean launch), so a
+    crash-on-start is a RED gate in-loop — caught here instead of only at
+    delivery. REUSES ``_delivery_launch_evidence`` (the RuntimeProcessManager,
+    port allocation, sandboxing, headless env, and teardown) rather than
+    duplicating that fragile process lifecycle.
+
+    Returns ``None`` when the launch could not be VERIFIED — an environmental
+    inability (sandbox unavailable / setup / spawn failure), which is not a code
+    crash and must not churn a red gate; it records a decision instead. Fully
+    guarded: any failure records a decision and returns ``None``, never raising
+    into the caller (the whole in-loop gate is fail-open)."""
+    try:
+        launched_clean, cannot_verify, detail = _delivery_launch_evidence(
+            store, workspace, head, should_cancel=should_cancel)
+    except Exception as exc:  # noqa: BLE001 — a probe failure never fails the turn
+        _record_runtime_probe_decision(
+            store, choice="gate_runtime_error", rationale=str(exc))
+        return None
+    if cannot_verify:
+        _record_runtime_probe_decision(
+            store, choice="gate_runtime_cannot_verify",
+            rationale=detail or "runtime launch could not be verified")
+        return None
+    return TestRunResult(
+        command_id="runtime:launch", argv_sha256="",
+        status="completed" if launched_clean else "failed",
+        exit_code=0 if launched_clean else 1, passed=bool(launched_clean),
+        duration_ms=0, stdout_sha256="", stdout_preview="",
+        stderr_preview=str(detail or "")[:4000],
+        reason="" if launched_clean else "runtime crashed on start")
+
+
+def _record_runtime_probe_decision(store: LedgerStore, *, choice: str,
+                                   rationale: str) -> None:
+    """Best-effort audit of a runtime-probe outcome that did not become a gate
+    result (an inability to verify, or a probe error). Never raises."""
+    try:
+        store.record_decision(
+            title="in-loop runtime probe", context="in_loop_gate",
+            choice=choice, rationale=str(rationale)[:2000])
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
-              should_cancel: Optional[Callable[[], bool]] = None) -> Any:
+              should_cancel: Optional[Callable[[], bool]] = None,
+              probe_runtime: bool = False) -> Any:
     """Spec 12 (S1): run EVERY registered command (unit + acceptance) against the
     integrated master tree, bound to ``head``, and record the session. This is the
     deterministic gate executor — no model command selection, so the verdict
@@ -2993,18 +3067,53 @@ def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
     the delivery gate share one code path.
 
     Returns the ``TestRunSession`` (its ``.passed`` is the verdict), or ``None``
-    when there are no commands to run. Runs against ``workspace.root()`` (the
-    merged tree) precisely because the interesting defects — a self-sabotaging
-    harness, a black-screen init race — are INTEGRATION defects invisible on a
-    single branch."""
+    when there is nothing to run. Runs against ``workspace.root()`` (the merged
+    tree) precisely because the interesting defects — a self-sabotaging harness, a
+    black-screen init race — are INTEGRATION defects invisible on a single branch.
+
+    Spec 12 Item 5 — the runtime arm. When ``probe_runtime`` is set (the in-loop
+    gate) AND the project has a runnable ``managed_local`` runtime profile, the
+    F146 Slice C launch machinery is also driven and FOLDED into the recorded
+    session as a synthetic ``runtime:launch`` result — so a runtime that crashes
+    on start is a red gate in-loop, and a runtime-ONLY project (a runnable
+    profile, no commands) still produces a gate record. ``delivery_review`` leaves
+    ``probe_runtime`` False: it runs its own ``_delivery_launch_evidence``
+    separately, so the shared executor must not double-probe there."""
     registry = store.get_test_commands()
-    if not registry:
-        return None
-    command_ids = list(registry.keys())
-    session = run_test_commands(
-        workspace.root(), registry, command_ids,
-        should_cancel=should_cancel,
-        require_sandbox=store.get_require_sandbox())
+    cmd_session = None
+    if registry:
+        command_ids = list(registry.keys())
+        cmd_session = run_test_commands(
+            workspace.root(), registry, command_ids,
+            should_cancel=should_cancel,
+            require_sandbox=store.get_require_sandbox())
+
+    runtime_result: Optional[TestRunResult] = None
+    if probe_runtime and _runnable_managed_local_profile(store):
+        runtime_result = _runtime_gate_probe(
+            store, workspace, head=head, should_cancel=should_cancel)
+
+    if runtime_result is None:
+        # No runtime arm -> today's exact behavior (delivery + command-only gate).
+        if cmd_session is None:
+            return None
+        store.record_test_run(cmd_session, task_id=task_id, head=head)
+        return cmd_session
+
+    # Item 5: fold the runtime probe into ONE session alongside the command
+    # results, so the newest gate record carries both verdicts — a single
+    # ``latest_gate_run`` for Spec 04's stall detector and the prompt segments.
+    command_ids = list(cmd_session.command_ids) if cmd_session else []
+    results = list(cmd_session.results) if cmd_session else []
+    unknown_ids = list(cmd_session.unknown_ids) if cmd_session else []
+    passed = bool(cmd_session.passed) if cmd_session else True
+    sandbox = str(getattr(cmd_session, "sandbox", "") or "") if cmd_session else ""
+    command_ids.append(runtime_result.command_id)
+    results.append(runtime_result)
+    passed = passed and bool(runtime_result.passed)
+    session = TestRunSession(
+        command_ids=command_ids, results=results, unknown_ids=unknown_ids,
+        passed=passed, sandbox=sandbox)
     store.record_test_run(session, task_id=task_id, head=head)
     return session
 
@@ -3055,14 +3164,14 @@ def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
         gate_bootstrap.maybe_bootstrap(store, workspace, policy)
     except Exception:  # noqa: BLE001 — bootstrap is best-effort
         pass
-    # Only arm when the GateRun will actually EXECUTE something. Until Spec 12
-    # Item 5 (the runtime-probe arm) lands, `_run_gate` runs registered COMMANDS
-    # only and returns None on an empty registry — so arming on a runtime-only
-    # project (no commands, a runnable profile) just churns a no-op GateRun and a
-    # `gate_no_commands` decision every interval. Gate on commands, not the broader
-    # `gate_available`. Expand this to include the runtime arm when Item 5 lands.
+    # Only arm when the GateRun will actually EXECUTE something. Spec 12 Item 5
+    # landed the runtime-probe arm, so `_run_gate(probe_runtime=True)` now executes
+    # on registered COMMANDS or a runnable managed_local runtime profile — arm on
+    # either. NOT the broader `gate_available`/`_has_runnable_runtime` (which count
+    # a container profile the launch probe skips): a container-only project would
+    # otherwise churn a no-op GateRun every interval.
     try:
-        if not store.get_test_commands():
+        if not (store.get_test_commands() or _runnable_managed_local_profile(store)):
             return
     except Exception:  # noqa: BLE001
         return
@@ -3922,7 +4031,8 @@ def build_run_turn(
                         head = workspace.head() or ""
                     session = _run_gate(store, workspace, head=head,
                                         task_id="in-loop-gate",
-                                        should_cancel=should_cancel)
+                                        should_cancel=should_cancel,
+                                        probe_runtime=True)
                     passed = None if session is None else bool(session.passed)
                     store.record_decision(
                         title="in-loop acceptance gate",
