@@ -1423,6 +1423,25 @@ def _latest_context_response_text(store: LedgerStore, task_id: str) -> str:
             "refs):\n```json\n" + body + "\n```\n")
 
 
+# Spec 17 (Item 3): a bounded cap on the carried tool-failure line, so a chatty
+# rejected-tool reason cannot crowd out the rest of the prompt.
+_TOOL_FAILURE_CAP = 400
+
+
+def _last_tool_failure_text(task: Task) -> str:
+    """Spec 17 (Item 3): render the task's carried tool failure as a bounded
+    corrective line, or '' when there is none. This is the ONLY channel by which
+    the model sees a `tool_not_allowed` rejection — the failure happens after a
+    successful parse, so no corrective-retry path reaches it; it is persisted on
+    the task and replayed here on the next dispatch, then cleared on the next
+    successful write."""
+    failure = str(getattr(task, "last_tool_failure", "") or "").strip()
+    if not failure:
+        return ""
+    return ("\nYour last turn on this task had a tool call rejected — do NOT repeat "
+            f"it; use the real read path named below:\n{failure[:_TOOL_FAILURE_CAP]}\n")
+
+
 def _pm_boot_text(store: LedgerStore) -> str:
     """F088-08: on the FIRST PM turn only, a grounded boot briefing. First turn =
     no tasks have been created yet. Returns '' on later turns or with no grounding
@@ -1945,23 +1964,27 @@ def _repoint_dropped_dependents(
     return touched
 
 
-def _dev_prompt(task: Task, store: LedgerStore, readback: str = "") -> str:
+def _dev_prompt(task: Task, store: LedgerStore, readback: str = "", *,
+                repo_read: bool = False) -> str:
     # F087-17: the dev works on its own branch off master. The current contents
     # of the worktree (everything merged so far) are inlined so the dev EXTENDS
     # the project instead of regenerating a file from scratch and clobbering
     # prior work. code_write replaces the WHOLE file, so it must include
     # everything that should remain.
-    return _register_pending_composition(_dev_prompt_segments(task, store, readback))
+    return _register_pending_composition(
+        _dev_prompt_segments(task, store, readback, repo_read=repo_read))
 
 
 def _dev_prompt_segments(task: Task, store: LedgerStore,
-                         readback: str = "") -> list[PromptSegment]:
+                         readback: str = "", *,
+                         repo_read: bool = False) -> list[PromptSegment]:
     """F143-01 Slice F: the DEV prompt as ordered labeled segments. Joined verbatim
     this equals the pre-refactor ``_dev_prompt`` string byte-for-byte (golden-locked)."""
     existing = (f"Current files in the worktree (EXTEND these — do not drop "
                 f"existing code; code_write replaces the whole file so include "
                 f"all of it):\n{readback}\n" if readback
                 else "The worktree is empty; create the files from scratch.\n")
+    _gate_available = _gate_state.gate_available(store)
     envelope = (
         "Implement the task via tool-backed writes; preserve all prior functions. "
         # F101-03: the runtime injects a free PORT env var and expects the server
@@ -1999,6 +2022,12 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
         # Prior PM/reviewer context response threaded to this task.
         PromptSegment("prior_outputs",
                       _latest_context_response_text(store, task.task_id)),
+        # Spec 17 (Item 3): the last tool failure this task hit, carried forward on
+        # its next dispatch (a rejected unknown tool never reaches the corrective-
+        # retry path, so the ONLY way the model sees it is on the next composed
+        # prompt). Empty (absent) with no carried failure -> byte-identical to
+        # before; cleared on the next successful write so it never nags.
+        PromptSegment("prior_outputs", _last_tool_failure_text(task)),
         # The current worktree snapshot the dev extends.
         PromptSegment("repo_snapshot", existing),
         # Spec 12 (S1): the latest acceptance-gate output (verbatim), so "iterate
@@ -2006,9 +2035,14 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
         # instead of re-reasoning from a half-context. Empty (absent) when no gate
         # has run, so a gate-less project's prompt is byte-identical to before.
         PromptSegment("gate_output", _gate_state.latest_gate_text(store)),
-        # Tool catalog / how-to-emit-tool-calls guidance.
-        PromptSegment("tool_guidance",
-                      f"{tool_catalog_text(DEV)} Do not request merge-back.\n"),
+        # Tool catalog / how-to-emit-tool-calls guidance. Spec 17: the catalog is
+        # capability-aware — repo_read is resolved from THIS member's real
+        # invocation (not per-project), and `gate` names where execution evidence
+        # comes from.
+        PromptSegment(
+            "tool_guidance",
+            f"{tool_catalog_text(DEV, repo_read=repo_read, gate=_gate_available)} "
+            "Do not request merge-back.\n"),
         # Standing implement instructions + envelope schema.
         PromptSegment("role_instructions", envelope),
     ]
@@ -2058,7 +2092,8 @@ def _task_is_governance_sourced(task: Task) -> bool:
 
 def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
                       project_context: str, scope_task: Task | None = None,
-                      *, gate_text: str = "") -> str:
+                      *, gate_text: str = "", repo_read: bool = False,
+                      gate: bool = False) -> str:
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
@@ -2110,13 +2145,14 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     return _register_pending_composition(_review_pr_prompt_segments(
         task, pr, project_context, task_scope=task_scope, bar=bar, cap=cap,
         trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example,
-        gate_text=gate_text))
+        gate_text=gate_text, repo_read=repo_read, gate=gate))
 
 
 def _review_pr_prompt_segments(
         task: Task, pr: dict[str, Any], project_context: str, *,
         task_scope: str, bar: str, cap: str, trunc: str, trunc_note: str,
-        verdict_example: str, gate_text: str = "") -> list[PromptSegment]:
+        verdict_example: str, gate_text: str = "", repo_read: bool = False,
+        gate: bool = False) -> list[PromptSegment]:
     """F143-01 Slice F: the reviewer prompt as ordered labeled segments. Joined
     verbatim this equals the pre-refactor ``_review_pr_prompt`` string byte-for-byte
     (golden-locked). The branchy truncation/scope logic stays in ``_review_pr_prompt``;
@@ -2179,6 +2215,17 @@ def _review_pr_prompt_segments(
         # empty (absent) when no gate has run, so the prompt is unchanged for a
         # gate-less project.
         PromptSegment("gate_output", gate_text),
+        # Spec 17 (Item 1 + Phase 2): the reviewer's capability-aware tool_guidance
+        # (new — the reviewer had none). Names Read/Grep/Glob when in-turn retrieval
+        # is on (so a finding can be grounded in a real file), or that it judges from
+        # the diff when it is off; always states no role can execute. Carries the
+        # cite-a-file rule that makes Spec 14's `cited` flag satisfiable, framed
+        # around the read capability.
+        PromptSegment(
+            "tool_guidance",
+            f"{tool_catalog_text(REVIEWER, repo_read=repo_read, gate=gate)} "
+            "Ground every BLOCKING finding in a real file — name it in \"path\" "
+            "(a file:line in the body is better).\n"),
         # Truncation caveat (empty when the diff fit).
         PromptSegment("role_instructions", trunc_note),
         # reviewed_head echo instruction + verdict envelope schema.
@@ -2535,6 +2582,15 @@ def _test_prompt_segments(task: Task, store: LedgerStore, *,
         # sees the last integrated result before choosing commands. Empty (absent)
         # with no gate run -> byte-identical to before.
         PromptSegment("gate_output", _gate_state.latest_gate_text(store)),
+        # Spec 17 (Item 1 + Phase 2): the tester's capability-aware tool_guidance
+        # (new — the tester had none). The tester never gets in-turn retrieval
+        # (repo_read is False), so the catalog states it judges from the context
+        # provided and that no role can execute — the ENGINE runs the registered
+        # commands; the tester only chooses them.
+        PromptSegment(
+            "tool_guidance",
+            tool_catalog_text(TESTER, repo_read=False,
+                              gate=_gate_state.gate_available(store)) + "\n"),
         # Standing test instructions (available commands + envelope schema).
         PromptSegment("role_instructions", instructions),
     ]
@@ -4085,8 +4141,21 @@ def build_run_turn(
                         dev_member = {**member, "repo_read_root": str(repo_root)}
                     except Exception:  # noqa: BLE001 — retrieval is best-effort
                         dev_member = member
+                # Spec 17 (Item 1 / edge case): resolve repo_read from THIS member's
+                # actual invocation, not the policy, so a mixed-vendor team's prompt
+                # never lies. Read BOTH the canonical `repo_read_root` and the legacy
+                # `dev_repo_read_root` key (Spec 14 renamed it on a parallel branch;
+                # the two must land in either order). NOTE: the prompt is composed
+                # here, BEFORE any mid-turn retrieval fallback (async_claude_cli), so
+                # a fallback turn may not have the tools its prompt named — harmless
+                # (the fallback still emits a normal envelope), just not chased.
+                dev_repo_read_active = bool(
+                    dev_member.get("repo_read_root")
+                    or dev_member.get("dev_repo_read_root"))
                 parsed = _parse_member_turn(
-                    DEV, task.task_id, dev_member, _dev_prompt(task, store, readback),
+                    DEV, task.task_id, dev_member,
+                    _dev_prompt(task, store, readback,
+                                repo_read=dev_repo_read_active),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 if isinstance(parsed, TurnParseError):
                     store.record_decision(
@@ -4116,15 +4185,38 @@ def build_run_turn(
                                        for tc in intent.tool_calls]}
                 writes = controller.execute_dev_turn(task=task, member=member, data=data)
                 if writes.failures:
+                    tool_not_allowed_reason = ""
                     for path, reason in writes.failures:
-                        choice = "tool_failed" if reason == "tool_not_allowed" else "write_failed"
+                        # Spec 17 (Item 3a): the reason is now the enriched
+                        # `tool_not_allowed: <tool> — ...` string, so match on the
+                        # PREFIX, not equality, to keep the `tool_failed` decision
+                        # classification (and its test) stable.
+                        is_disallowed = reason.startswith(
+                            TurnErrorCode.tool_not_allowed.value)
+                        choice = "tool_failed" if is_disallowed else "write_failed"
                         title = "tool failed" if choice == "tool_failed" else "write failed"
                         store.record_decision(
                             title=f"{title}: {task.title}",
                             context=f"task {task.task_id}", choice=choice,
                             rationale=f"{path}: {reason}",
                             related_task_ids=[task.task_id])
-                    store.update_task(task.task_id, state="todo")
+                        if is_disallowed and not tool_not_allowed_reason:
+                            tool_not_allowed_reason = reason
+                    # Spec 17 (Item 3b): carry the disallowed-tool reason forward on
+                    # the task so its NEXT composed dev prompt shows the corrective
+                    # hint (no corrective-retry path reaches a post-parse
+                    # `tool_not_allowed`). A write-failure (bad path/binary) is a
+                    # different class and is not carried.
+                    if tool_not_allowed_reason:
+                        store.update_task(task.task_id, state="todo",
+                                          last_tool_failure=tool_not_allowed_reason)
+                    else:
+                        # This turn had no disallowed-tool failure (a write-only
+                        # failure, or a clean requeue) — clear any stale hint so the
+                        # next prompt doesn't claim "your last turn had a tool call
+                        # rejected" when the last turn did not (review Minor #1).
+                        store.update_task(task.task_id, state="todo",
+                                          last_tool_failure="")
                     # F136: a turn that produced NO usable write (every tool
                     # failed / was disallowed) is unproductive — feed the F127
                     # escalate-up ladder so a dev that keeps emitting a
@@ -4155,7 +4247,8 @@ def build_run_turn(
                         reason="write_missing")
                 if workspace is None or branch is None:
                     # No worktree -> can't open a PR; mark done (degenerate path).
-                    store.update_task(task.task_id, state="done")
+                    # Spec 17: a write landed -> clear any carried tool-failure hint.
+                    store.update_task(task.task_id, state="done", last_tool_failure="")
                     return TurnOutcome(kind="task_done", task=task)
                 # F139 WS-C (supersedes F087-19 #3's auto-close): a dev turn whose
                 # branch has NO net change vs master must NOT be counted as
@@ -4176,7 +4269,10 @@ def build_run_turn(
                 # for the real PR below); `writes.net_changed_files` is the same
                 # signal surfaced on the summary but is only informational here.
                 if not workspace.pr_diff(branch).strip():
-                    store.update_task(task.task_id, state="todo")
+                    # Spec 17: the tool was used correctly (a code_write succeeded,
+                    # it just changed nothing) — clear the carried failure so a
+                    # resolved rejection does not nag on the requeue.
+                    store.update_task(task.task_id, state="todo", last_tool_failure="")
                     store.record_decision(
                         title=f"no net change vs master: {task.title}",
                         context=f"task {task.task_id}", choice="superseded_on_master",
@@ -4210,7 +4306,9 @@ def build_run_turn(
                         store.update_pr(pr["pr_id"], unlocks_foundation=True)
                 except Exception:  # noqa: BLE001 — best-effort observability signal
                     pass
-                store.update_task(task.task_id, state="done")
+                # Spec 17 (Item 3b): a real write landed (PR opened) — clear any
+                # carried tool-failure hint so it never becomes stale nagging.
+                store.update_task(task.task_id, state="done", last_tool_failure="")
                 store.add_task(title=f"review PR: {task.title}", role=REVIEWER,
                                pr_id=pr["pr_id"], depends_on=[task.task_id])
                 store.record_decision(
@@ -4242,11 +4340,20 @@ def build_run_turn(
                     except Exception:  # noqa: BLE001 — retrieval is best-effort
                         review_member, review_root = member, None
 
+                # Spec 17: resolve repo_read from the reviewer's OWN per-turn member
+                # (both the canonical and legacy key), so the catalog matches its
+                # real invocation.
+                review_repo_read = bool(
+                    review_member.get("repo_read_root")
+                    or review_member.get("dev_repo_read_root"))
+
                 def _review_once(extra: str = "") -> Any:
                     prompt = _review_pr_prompt(
                         task, pr, diff, ctx,
                         scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
-                        gate_text=_gate_state.latest_gate_text(store))
+                        gate_text=_gate_state.latest_gate_text(store),
+                        repo_read=review_repo_read,
+                        gate=_gate_state.gate_available(store))
                     return _parse_member_turn(
                         REVIEWER, task.task_id, review_member, prompt + extra,
                         context=f"task {task.task_id}",
@@ -4488,12 +4595,17 @@ def build_run_turn(
                         pm_review_member = {**member, "repo_read_root": str(_pmr)}
                     except Exception:  # noqa: BLE001
                         pm_review_member = member
+                pm_review_repo_read = bool(
+                    pm_review_member.get("repo_read_root")
+                    or pm_review_member.get("dev_repo_read_root"))
                 parsed = _parse_member_turn(
                     REVIEWER, task.task_id, pm_review_member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
                         scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
-                        gate_text=_gate_state.latest_gate_text(store)),
+                        gate_text=_gate_state.latest_gate_text(store),
+                        repo_read=pm_review_repo_read,
+                        gate=_gate_state.gate_available(store)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 pm_findings: list[dict[str, Any]] = []
                 if isinstance(parsed, TurnParseError):

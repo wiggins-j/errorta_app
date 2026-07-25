@@ -66,9 +66,60 @@ def _resolve_write_content(args: dict[str, Any]) -> str | bytes:
     return str(args.get("content", ""))
 
 
-def tool_catalog_text(role: str) -> str:
+def tool_catalog_text(role: str, *, repo_read: bool, gate: bool) -> str:
+    """Spec 17 (Item 1): the tool_guidance text for ``role``, describing the SAME
+    reality the harness enforces — the executed errorta tools, the real read path,
+    and the fact that no role can execute anything from inside a turn.
+
+    ``repo_read`` and ``gate`` are REQUIRED keyword args (no defaults): a call site
+    that omits one raises ``TypeError`` rather than silently rendering a catalog
+    that does not match the member's real invocation — the exact class of bug this
+    spec exists to kill. Resolve them from the member's actual turn, never a
+    per-project guess.
+
+    The invariant (locked by ``test_spec17_tool_catalog``): the errorta-tool list
+    embedded here equals ``", ".join(allowed_tools_for_role(role)) or "none"``
+    exactly — the F087-14 WS-3 discipline that nothing is advertised which is not
+    executed. Everything else in the string may change with the spec; the prompt
+    goldens move with it.
+    """
     tools = ", ".join(allowed_tools_for_role(role)) or "none"
-    return f"Available Coding Mode tools for role {role}: {tools}."
+    out = [f"Available Coding Mode tools for role {role}: {tools}."]
+    if repo_read:
+        # Spec 11/14: read-only in-turn retrieval is on for this member — the CLI
+        # runs with cwd = the task worktree. These are NATIVE tools used directly
+        # mid-turn; they are NOT errorta tool calls and never go in the envelope.
+        out.append(
+            " You may also read the repository directly with Read, Grep, and Glob: "
+            "they run in the current working directory, are read-only, and are used "
+            "DIRECTLY mid-turn — do NOT emit them as Coding Mode tool calls (the "
+            "coding_turn.v1 envelope carries only the executed tools above).")
+    elif role == DEV:
+        # No in-turn retrieval, but the dev has a typed read-only escape hatch that
+        # is fully implemented and answered — name it so the model asks instead of
+        # guessing a tool name.
+        out.append(
+            " You have no in-turn file-read tool; to see a file or contract you do "
+            "not have, emit a context_request intent (a typed, read-only ask) "
+            "rather than guessing a tool name.")
+    else:
+        out.append(
+            " You have no in-turn file-read tool; judge only from the context "
+            "already provided above (the diff, grounding, and any gate output).")
+    # The explicit negative — present in EVERY rendering. Post-Spec 12 it names
+    # where execution evidence does come from (the acceptance gate), so a model
+    # never plans a hallucinated run/exec tool to produce it.
+    if gate:
+        out.append(
+            " There is no execute, run, or shell tool for any role — do not plan "
+            "one; execution evidence comes only from the acceptance gate, whose "
+            "output appears in the gate section above once it has run.")
+    else:
+        out.append(
+            " There is no execute, run, or shell tool for any role — do not plan "
+            "one; execution evidence comes only from the acceptance gate (none is "
+            "configured for this run yet).")
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -108,7 +159,21 @@ class CodingTurnController:
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
             intent = self._safe_intent(tool=tool, args=args, index=idx)
             if tool not in allowed_tools_for_role(DEV):
-                reason = TurnErrorCode.tool_not_allowed.value
+                # Spec 17 (Item 3a): the rejection stays fail-closed, but the
+                # recorded error now NAMES the allowed tools and the real read path
+                # so an operator (and, via the carry-forward, the model) sees how to
+                # recover instead of guessing another tool name. The read path
+                # depends on whether in-turn retrieval is on for THIS member.
+                allowed = ", ".join(allowed_tools_for_role(DEV)) or "none"
+                repo_read = bool(member.get("repo_read_root")
+                                 or member.get("dev_repo_read_root"))
+                read_path = ("to read files use Read/Grep/Glob directly"
+                             if repo_read
+                             else "to read a file use a context_request intent")
+                reason = (
+                    f"{TurnErrorCode.tool_not_allowed.value}: "
+                    f"{tool or '<missing-tool>'} — this role executes only: "
+                    f"{allowed}; {read_path}")
                 failures.append((tool or "<missing-tool>", reason))
                 self.store.record_tool_event(
                     turn_id=turn_id,
