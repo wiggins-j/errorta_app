@@ -84,6 +84,62 @@ def test_tsx_anywhere_is_not_ready() -> None:
     assert _buildless_web_ready(list(tree), _reader(tree)) is False
 
 
+def test_jsx_in_a_js_file_is_not_ready() -> None:
+    """JSX syntax inside a referenced .js file needs a transpiler/bundler — the
+    extension is .js but a browser can't run it as-is."""
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = "export function App(){ return <div className='x'>hi</div>; }"
+    assert _buildless_web_ready(list(tree), _reader(tree)) is False
+
+
+def test_self_closing_jsx_component_in_a_js_file_is_not_ready() -> None:
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = "const el = <App foo={1} />;\n"
+    assert _buildless_web_ready(list(tree), _reader(tree)) is False
+
+
+def test_html_in_a_string_stays_ready() -> None:
+    """Regression lock (review Δ): vanilla-JS DOM code that builds markup as a
+    STRING — the most common no-build idiom — must NOT be misread as JSX. The
+    quote before `<` keeps it out of the expression-position JSX match."""
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = (
+        'const root = document.getElementById("app");\n'
+        'root.innerHTML = "<div class=board><ul></ul></div>";\n'
+        'root.insertAdjacentHTML("beforeend", "<li>hi</li>");\n'
+        'const tpl = `<section>${x}</section>`;  // renders </section>\n')
+    assert _buildless_web_ready(list(tree), _reader(tree)) is True
+
+
+def test_bare_reexport_is_not_ready() -> None:
+    """A bare re-export (`export {x} from "react"`) has no `import` keyword, so the
+    import regexes miss it — the export-from scan must catch the bare specifier."""
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = 'export {useState} from "react";\n'
+    assert _buildless_web_ready(list(tree), _reader(tree)) is False
+
+
+def test_relative_reexport_is_ready() -> None:
+    """A relative re-export is browser-resolvable and must NOT disqualify (no
+    over-trigger)."""
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = 'export {init} from "./engine.js";\n'
+    assert _buildless_web_ready(list(tree), _reader(tree)) is True
+
+
+def test_plain_js_with_comparisons_stays_ready() -> None:
+    """Regression lock against over-triggering the JSX detector: a plain-JS module
+    full of `<`/`>` comparisons and generics-looking text is NOT JSX."""
+    tree = dict(_INDEX_REL_SCRIPT)
+    tree["src/main.js"] = (
+        "export function clamp(a, b){\n"
+        "  if (a < b && b > 0) return a;\n"
+        "  const shifted = b >> 1;\n"
+        "  return a < 0 ? 0 : shifted;\n"
+        "}\n")
+    assert _buildless_web_ready(list(tree), _reader(tree)) is True
+
+
 def test_cdn_script_src_is_not_ready() -> None:
     tree = dict(_INDEX_REL_SCRIPT)
     tree["index.html"] = (
@@ -404,8 +460,10 @@ def test_ordinary_reviewer_rejection_still_spawns_a_revise(
 # --------------------------------------------------------------------------- #
 
 
-def test_stall_rationale_mentions_the_buildless_web_foundation(
+def test_stall_rationale_is_generic_without_a_web_shape(
         tmp_errorta_home: Path, tmp_path: Path) -> None:
+    """With no persisted shape diagnosis, the rationale falls back to the generic
+    three-shape list (and still names index.html as one valid foundation)."""
     from errorta_council.coding.autonomy import (
         CodingAutonomyPolicy,
         LoopCounters,
@@ -422,3 +480,33 @@ def test_stall_rationale_mentions_the_buildless_web_foundation(
     assert "index.html" in rationale
     # It must NOT flatly claim a manifest is the only foundation.
     assert "no build manifest + source entrypoint has merged" not in rationale
+
+
+def test_stall_rationale_is_shape_aware_for_a_web_only_tree(
+        tmp_errorta_home: Path, tmp_path: Path) -> None:
+    """Spec 13 (Item 2): a web-only tree that references a not-yet-merged
+    entrypoint gets a rationale naming THAT specific condition — not the generic
+    three-shape list, which a bare "index.html" substring check would also pass."""
+    from errorta_council.coding.autonomy import (
+        CodingAutonomyPolicy,
+        LoopCounters,
+        _account_foundation_stall,
+    )
+
+    s = _store("stall-web", tmp_path)
+    ws = _ws("stall-web", s)
+    # index.html references src/main.js, but only index.html has merged so far.
+    _merge_file(ws, "t1", "index.html", '<script src="src/main.js"></script>')
+    assert refresh_foundation_status(s, ws) == "pending"
+
+    c = LoopCounters()
+    pol = CodingAutonomyPolicy(foundation_stall_limit=1)
+    _account_foundation_stall(s, c, pol)
+    rationale = next(d["rationale"] for d in s.list_decisions()
+                     if d["choice"] == "foundation_not_converging")
+    # Names the SPECIFIC failing condition (the absent referenced entrypoint) —
+    # a generic three-shape list contains neither the filename nor "absent".
+    assert "src/main.js" in rationale
+    assert "absent on master" in rationale
+    # ...and is therefore NOT the generic multi-shape sentence.
+    assert "A foundation is: a build manifest" not in rationale

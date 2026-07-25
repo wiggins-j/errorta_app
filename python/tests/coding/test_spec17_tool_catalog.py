@@ -136,6 +136,140 @@ def test_autonomy_prose_does_not_claim_a_different_default() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Item 1 (follow-up) — vendor-honor repo_read so the prompt can't lie.
+#
+# The dev/reviewer/pm-review dispatch tags a per-turn member copy with
+# ``repo_read_root`` ONLY when the member's vendor actually runs the read-only
+# cwd invocation (claude_cli today). A codex/cursor member with the policy ON
+# must get the repo_read=OFF catalog (no Read/Grep/Glob named) and must NOT have
+# the no-op ``repo_read_root`` metadata forwarded.
+# --------------------------------------------------------------------------- #
+
+def _dev_env(task_id: str) -> str:
+    import json
+    return json.dumps({
+        "schema_version": "coding_turn.v1", "role": "dev", "task_id": task_id,
+        "intent": {"kind": "tool_plan", "task_type": "implementation",
+                   "tool_calls": [{"tool": "code_write",
+                                   "args": {"path": "calc.py",
+                                            "content": "def add(a,b):\n return a+b\n"}}]}})
+
+
+def _dev_members(vendor_route: str | None):
+    m = {"id": "m-dev", "enabled": True, "metadata": {"coding_role": "dev"}}
+    if vendor_route is not None:
+        m["provider_kind"] = vendor_route.split(".", 1)[0]
+        m["gateway_route_id"] = vendor_route
+    return [m]
+
+
+def _run_dev_turn_capture_prompt(vendor_route: str | None, tmp_home: Path):
+    """Drive one dev turn with dev_repo_read ON; return the prompt the member
+    received (so we can assert what the tool catalog told it)."""
+    from errorta_council.coding.runner import (
+        build_run_turn,
+        members_by_coding_role,
+    )
+    from errorta_council.coding.topology import Assign
+
+    pid = "s17vh_" + (vendor_route or "none").replace(".", "_")
+    store = LedgerStore(pid)
+    store.create_project(north_star="x", definition_of_done="d",
+                         target="new", repo_path=None)
+    task = store.add_task(title="impl", role=DEV)
+    ws = CodingWorkspace(pid, store)
+    ws.setup(target="new", repo_path=None)
+
+    seen: dict[str, object] = {}
+
+    def caller(member, prompt):
+        seen["prompt"] = prompt
+        seen["root"] = member.get("repo_read_root")
+        return _dev_env(task.task_id)
+
+    rt = build_run_turn(store, ws, members_by_coding_role(_dev_members(vendor_route)),
+                        caller, guardrail_enabled=True, dev_repo_read=True)
+    rt(Assign(member_id="m-dev", task_id=task.task_id, role=DEV), store)
+    return seen
+
+
+def test_non_claude_cli_dev_gets_repo_read_off_catalog(tmp_errorta_home: Path) -> None:
+    """The core fix: a codex dev with dev_repo_read ON is NOT tagged, so its
+    prompt shows the repo_read=OFF (context_request) variant — no Read/Grep/Glob
+    named, and no worktree root threaded."""
+    seen = _run_dev_turn_capture_prompt("codex_cli.gpt5", tmp_errorta_home)
+    prompt = str(seen["prompt"])
+    assert "context_request" in prompt
+    assert "Read, Grep, and Glob" not in prompt
+    assert seen["root"] is None
+
+
+def test_claude_cli_dev_still_gets_repo_read_on(tmp_errorta_home: Path) -> None:
+    """Regression lock: a claude_cli dev with the flag on keeps repo_read ON —
+    the catalog names the native read tools and the worktree root is threaded."""
+    seen = _run_dev_turn_capture_prompt("claude_cli.opus", tmp_errorta_home)
+    prompt = str(seen["prompt"])
+    assert "Read, Grep, and Glob" in prompt
+    assert "context_request" not in prompt
+    assert isinstance(seen["root"], str) and seen["root"]
+
+
+def test_metadata_not_forwarded_for_non_honoring_vendor() -> None:
+    """The gateway seam vendor-gates the forwarding too: even if a non-honoring
+    member somehow carries ``repo_read_root``, the request metadata drops it (so
+    the prompt catalog and the forwarded key never disagree)."""
+    from errorta_council.coding.runner import gateway_member_caller
+
+    captured: dict[str, object] = {}
+
+    class _FakeGateway:
+        async def call(self, req):
+            captured["metadata"] = dict(req.metadata)
+
+            class _R:
+                content = "{}"
+                raw_usage_available = False
+                input_tokens = None
+                output_tokens = None
+                provider_class = "codex_cli"
+                model = "gpt5"
+                cache_read_input_tokens = None
+                cache_write_input_tokens = None
+            return _R()
+
+    caller = gateway_member_caller(_FakeGateway())
+    caller({"id": "m-dev", "gateway_route_id": "codex_cli.gpt5",
+            "provider_kind": "codex_cli",
+            "repo_read_root": "/tmp/wt-xyz"}, "hi")
+    assert "repo_read_root" not in captured["metadata"]
+
+    # Honoring vendor still forwards it (paired regression).
+    captured.clear()
+    caller({"id": "m-dev", "gateway_route_id": "claude_cli.opus",
+            "provider_kind": "claude_cli",
+            "repo_read_root": "/tmp/wt-xyz"}, "hi")
+    assert captured["metadata"].get("repo_read_root") == "/tmp/wt-xyz"
+
+
+def test_member_honors_repo_read_helper() -> None:
+    """The centralized predicate: ON only when BOTH the policy flag and a
+    honoring vendor; a future vendor is a one-line add to the vendor set."""
+    from errorta_council.coding.runner import (
+        _REPO_READ_HONORING_VENDORS,
+        _member_honors_repo_read,
+    )
+
+    claude = {"gateway_route_id": "claude_cli.opus", "provider_kind": "claude_cli"}
+    codex = {"gateway_route_id": "codex_cli.gpt5", "provider_kind": "codex_cli"}
+    assert _member_honors_repo_read(claude, True) is True
+    assert _member_honors_repo_read(claude, False) is False   # policy gates too
+    assert _member_honors_repo_read(codex, True) is False      # vendor gates
+    # provider_kind fallback when the route carries no prefix.
+    assert _member_honors_repo_read({"provider_kind": "claude_cli"}, True) is True
+    assert _REPO_READ_HONORING_VENDORS == frozenset({"claude_cli"})
+
+
+# --------------------------------------------------------------------------- #
 # Item 3 — the tool_not_allowed corrective hint + carry-forward.
 # --------------------------------------------------------------------------- #
 

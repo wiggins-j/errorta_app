@@ -820,26 +820,44 @@ def _account_foundation_stall(ledger: Any, c: LoopCounters,
         if c.foundation_stall % limit != 0:
             return
         c.foundation_alerted = True
+        # Spec 13 (Item 2): for a web-only tree the runner persists which specific
+        # Item-1 condition is failing (`foundation_stall_reason`); lead the
+        # rationale with it so the PM gets a cause it can act on, not a generic
+        # three-shape list. Absent (non-web tree / undiagnosable) -> generic.
+        try:
+            reason = str(ledger.get_run_state().get(
+                "foundation_stall_reason", "") or "")
+        except Exception:  # noqa: BLE001
+            reason = ""
+        if reason:
+            rationale = (
+                "no runnable foundation has merged to master after "
+                f"{c.foundation_stall} clamped iterations — worker concurrency "
+                "stays at 1 until it lands. This is a no-build web target and it "
+                f"is not yet self-resolving: {reason}. A human may need to guide "
+                "the PM.")
+        else:
+            rationale = (
+                # Spec 13 (S2): don't assert a manifest is required — a
+                # buildless web project (index.html + relative <script src>
+                # modules the browser resolves) is foundation-ready with NO
+                # manifest, so the old "needs a build manifest" wording sent
+                # the PM to add one that never should exist. State both valid
+                # foundations.
+                "no runnable foundation has merged to master after "
+                f"{c.foundation_stall} clamped iterations — worker concurrency "
+                "stays at 1 until it lands. A foundation is: a build manifest "
+                "+ source entrypoint (node/compiled); a script entrypoint "
+                "(python/etc.); or, for a no-build web target, an index.html "
+                "whose <script src>/<link> graph resolves entirely against "
+                "files on master (no bare-specifier imports / JSX). A human "
+                "may need to guide the PM.")
         try:
             ledger.record_decision(
                 title="foundation not converging",
                 context="foundation_gate",
                 choice="foundation_not_converging",
-                rationale=(
-                    # Spec 13 (S2): don't assert a manifest is required — a
-                    # buildless web project (index.html + relative <script src>
-                    # modules the browser resolves) is foundation-ready with NO
-                    # manifest, so the old "needs a build manifest" wording sent
-                    # the PM to add one that never should exist. State both valid
-                    # foundations.
-                    "no runnable foundation has merged to master after "
-                    f"{c.foundation_stall} clamped iterations — worker concurrency "
-                    "stays at 1 until it lands. A foundation is: a build manifest "
-                    "+ source entrypoint (node/compiled); a script entrypoint "
-                    "(python/etc.); or, for a no-build web target, an index.html "
-                    "whose <script src>/<link> graph resolves entirely against "
-                    "files on master (no bare-specifier imports / JSX). A human "
-                    "may need to guide the PM."),
+                rationale=rationale,
             )
         except Exception:  # noqa: BLE001
             pass

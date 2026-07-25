@@ -43,7 +43,12 @@ from .ledger import LedgerStore, Task, format_focus_lines
 from .orientation import build_orientation_packet
 from .schemas import TurnErrorCode, TurnParseError, parse_coding_turn
 from .skills import primary_skill, record_turn_skill
-from .testing import resolve_commands, run_test_commands
+from .testing import (
+    TestRunResult,
+    TestRunSession,
+    resolve_commands,
+    run_test_commands,
+)
 from .topology import (
     DEV,
     PM,
@@ -63,6 +68,45 @@ from .turn_controller import CodingTurnController, tool_catalog_text
 from .workspace import CodingWorkspace
 
 MemberCaller = Callable[[dict[str, Any], str], str]
+
+# Spec 17 (Item 1): the gateway vendors that actually HONOR the read-only cwd
+# invocation ``repo_read`` promises. Only the ``claude_cli`` provider runs the
+# turn with cwd=worktree and a Read/Grep/Glob allowlist and consumes the
+# ``repo_read_root`` metadata (see errorta_model_gateway/providers/
+# async_claude_cli.py — it is the single consumer today). Every other vendor
+# (codex_cli, cursor_cli, remote APIs) silently ignores the metadata, so naming
+# Read/Grep/Glob in its tool catalog would be a lie and forwarding the key a
+# no-op. A future vendor that grows a real read surface is a one-line add here.
+_REPO_READ_HONORING_VENDORS = frozenset({"claude_cli"})
+
+
+def _member_vendor(member: dict[str, Any]) -> str:
+    """The gateway vendor (provider class) for a member — the prefix of its
+    ``gateway_route_id`` before the first '.' (``claude_cli.opus`` ->
+    ``claude_cli``), falling back to ``provider_kind`` when the route carries no
+    prefix."""
+    route_id = str(member.get("gateway_route_id") or "").strip()
+    if "." in route_id:
+        return route_id.split(".", 1)[0]
+    return route_id or str(member.get("provider_kind") or "")
+
+
+def _vendor_honors_repo_read(member: dict[str, Any]) -> bool:
+    """True when the member's vendor actually runs the read-only cwd invocation
+    ``repo_read`` promises (i.e. consumes ``repo_read_root`` metadata)."""
+    return _member_vendor(member) in _REPO_READ_HONORING_VENDORS
+
+
+def _member_honors_repo_read(member: dict[str, Any], policy_flag: bool) -> bool:
+    """Spec 17 (Item 1): ``repo_read`` is effectively ON for a member only when
+    BOTH the policy flag is on AND the member's vendor honors the read-only cwd
+    invocation. Gating the per-turn ``repo_read_root`` tag on this (rather than
+    the raw policy flag) keeps the prompt catalog, the forwarded metadata, and
+    the grounding-reflex check all consistent: a codex/cursor member never
+    receives Read/Grep/Glob, so its catalog shows the context_request/off
+    variant and no no-op key is forwarded."""
+    return bool(policy_flag) and _vendor_honors_repo_read(member)
+
 
 # F143: per-turn token usage crosses the string-typed MemberCaller seam via a
 # thread-local sink. ``gateway_member_caller`` writes the gateway result's token
@@ -2706,7 +2750,28 @@ _BUNDLER_REQUIRED_EXT = (".ts", ".tsx", ".jsx", ".vue", ".svelte")
 _JS_IMPORT_FROM_RE = re.compile(
     r"""\bimport\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""")
 _JS_IMPORT_BARE_RE = re.compile(r"""\bimport\s*['"]([^'"]+)['"]""")
+# `export {x} from "react"` / `export * from "react"` — a bare RE-EXPORT. The
+# import regexes require `\bimport\b`, so a re-export whose specifier is bare
+# (needs a bundler) would otherwise slip through. Same specifier semantics as
+# the import case: a leading "." or "/" is browser-resolvable, anything else is
+# a bare specifier only a bundler resolves.
+_JS_EXPORT_FROM_RE = re.compile(
+    r"""\bexport\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""")
 _JS_REQUIRE_RE = re.compile(r"""\brequire\s*\(\s*['"][^'"]+['"]\s*\)""")
+# JSX inside a `.js` file — a transpiler/bundler signal (a browser can't run it
+# as-is). Conservative: match a real JSX element, never a bare `<` or an `a < b`
+# comparison. Three unambiguous shapes: a self-closing element `<Tag ... />`, a
+# closing tag `</Tag>`, or a tag returned from a render function
+# (`return <Tag` / `=> <Tag`). `a < b` never matches (a space or non-letter
+# follows `<`); `x >> 1` / generics never match (no tag/`/>`/`</` shape).
+# JSX in a .js file needs a transpiler (a browser can't run it). Match a `<Tag`
+# ONLY in an expression-introducing position — right after return / => / = / ( / ,
+# (with optional wrapping paren), never after a quote. Real JSX always appears in
+# one of these positions; HTML built as a STRING (`innerHTML = "<div>"`,
+# `insertAdjacentHTML(x, "<li>")`, a `</section>` in a comment) is always
+# quote/space-preceded, so it can't match — that string-literal false positive
+# would wrongly mark a vanilla-JS no-build app as bundler-required (review Δ).
+_JSX_RE = re.compile(r"""(?:\breturn|=>|[=(,])\s*\(?\s*<[A-Za-z][\w.-]*""")
 # `<script src="…">` / `<link rel="stylesheet" href="…">` — captures the URL.
 _HTML_SCRIPT_SRC_RE = re.compile(
     r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
@@ -2821,13 +2886,71 @@ def _buildless_web_ready(files: list[str], read: Any) -> bool:
             return False  # unreadable/oversized referenced script -> fail closed
         if _JS_REQUIRE_RE.search(body):
             return False
+        if _JSX_RE.search(body):
+            return False  # JSX in a .js file -> needs a transpiler/bundler
         for spec in _JS_IMPORT_FROM_RE.findall(body):
             if not spec.startswith((".", "/")):
                 return False  # bare specifier -> needs a bundler
         for spec in _JS_IMPORT_BARE_RE.findall(body):
             if not spec.startswith((".", "/")):
                 return False
+        for spec in _JS_EXPORT_FROM_RE.findall(body):
+            if not spec.startswith((".", "/")):
+                return False  # bare re-export specifier -> needs a bundler
     return True
+
+
+def _buildless_stall_reason(files: list[str], read: Any) -> Optional[str]:
+    """Spec 13 (Item 2): for a WEB-ONLY tree that is not yet buildless-ready, name
+    the specific Item-1 condition that is failing — a cause the PM can act on
+    (e.g. "index.html references src/main.js, absent on master") instead of the
+    generic "a foundation is one of three shapes" sentence. Returns ``None`` when
+    the tree is already buildless-ready or nothing can be diagnosed (fall back to
+    the generic rationale). Mirrors ``_buildless_web_ready``'s condition order."""
+    fileset = set(files)
+    if "index.html" not in fileset:
+        return "no index.html has merged to master yet"
+    bundler = next((f for f in files if f.endswith(_BUNDLER_REQUIRED_EXT)), None)
+    if bundler is not None:
+        return f"{bundler} is a bundler-required file, so a manifest is needed"
+    html = read("index.html")
+    if not isinstance(html, str) or len(html) > _BUILDLESS_READ_CAP:
+        return "index.html on master could not be read"
+    referenced_scripts: list[str] = []
+    for m in _HTML_SCRIPT_SRC_RE.finditer(html):
+        url = m.group(1)
+        if not _is_relative_url(url):
+            return (f"index.html loads an external <script src> ({url}), so "
+                    "the tree is not self-contained")
+        target = _resolve_against("index.html", url)
+        if target not in fileset:
+            return f"index.html references {target}, absent on master"
+        referenced_scripts.append(target)
+    for m in _HTML_LINK_HREF_RE.finditer(html):
+        url = m.group(1)
+        if not _is_relative_url(url):
+            if re.search(r"stylesheet", m.group(0), re.IGNORECASE):
+                return (f"index.html links an external stylesheet ({url}), so "
+                        "the tree is not self-contained")
+            continue
+        target = _resolve_against("index.html", url)
+        if target not in fileset and target.endswith((".css",)):
+            return f"index.html references {target}, absent on master"
+    if not referenced_scripts:
+        return "index.html references no local <script src> yet"
+    for rel in referenced_scripts:
+        body = read(rel)
+        if not isinstance(body, str) or len(body) > _BUILDLESS_READ_CAP:
+            return f"referenced script {rel} could not be read"
+        if _JS_REQUIRE_RE.search(body) or _JSX_RE.search(body):
+            return (f"{rel} uses a bundler-required construct "
+                    "(require()/JSX), so a manifest is needed")
+        for spec in (*_JS_IMPORT_FROM_RE.findall(body),
+                     *_JS_IMPORT_BARE_RE.findall(body),
+                     *_JS_EXPORT_FROM_RE.findall(body)):
+            if not spec.startswith((".", "/")):
+                return f'{rel} imports the bare specifier "{spec}", so a bundler/manifest is needed'
+    return None
 
 
 def foundation_ready(store: LedgerStore, workspace: Any) -> bool:
@@ -2919,8 +3042,33 @@ def refresh_foundation_status(store: LedgerStore, workspace: Any) -> str:
     except Exception:  # noqa: BLE001
         pass
     status = "merged" if foundation_ready(store, workspace) else "pending"
+    # Spec 13 (Item 2): while pending, persist a shape-aware stall reason for a
+    # WEB-ONLY tree so `_account_foundation_stall` (which sees only the ledger)
+    # can name the specific failing Item-1 condition instead of a generic list.
+    # Best-effort — cleared unless we can diagnose a web-only shape.
+    reason = ""
+    if status == "pending":
+        try:
+            files = [f for f in workspace.list_files(scope="master")
+                     if f != ".gitignore"]
+            web_only = any(f.endswith(_WEB_ONLY_EXT) for f in files) and not any(
+                f.endswith(_MANIFEST_BOUND_EXT) and not f.endswith(_WEB_ONLY_EXT)
+                for f in files)
+            if web_only:
+                def _read(rel: str) -> str | None:
+                    raw = workspace.read_master_file(rel)
+                    if raw is None:
+                        return None
+                    try:
+                        return raw.decode("utf-8")
+                    except (UnicodeDecodeError, AttributeError):
+                        return None
+                reason = _buildless_stall_reason(files, _read) or ""
+        except Exception:  # noqa: BLE001 — diagnosis is best-effort
+            reason = ""
     try:
-        store.set_run_state(foundation_status=status)
+        store.set_run_state(foundation_status=status,
+                            foundation_stall_reason=reason)
     except Exception:  # noqa: BLE001
         pass
     # F141 WS-I: a `new` project crosses into the steering phase (Current Focus
@@ -2984,8 +3132,77 @@ def _mark_finding_citations(findings: list[dict[str, Any]], *, workspace: Any,
     return out
 
 
+def _runnable_managed_local_profile(store: LedgerStore) -> bool:
+    """Spec 12 Item 5: whether the project has a launchable ``managed_local``
+    runtime profile — the exact class the F146 Slice C launch probe
+    (``_delivery_launch_evidence`` / ``launch_probe``) actually runs. Narrower
+    than ``evidence._has_runnable_runtime`` (which counts ANY ``start`` argv,
+    including a container profile the launch probe skips), so the in-loop runtime
+    arm and the ``gate_due`` arming only trip when the machinery will really
+    execute — a container-only project must not churn a no-op GateRun. Fully
+    guarded: a read error means "nothing to probe"."""
+    try:
+        from .runtime import RuntimeProfileStore
+        profiles = RuntimeProfileStore.for_ledger(store).list_profiles()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(getattr(p, "runtime_mode", "") == "managed_local"
+               and getattr(p, "start", None) for p in profiles)
+
+
+def _runtime_gate_probe(
+    store: LedgerStore, workspace: Any, *, head: str,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Optional[TestRunResult]:
+    """Spec 12 Item 5: drive the F146 Slice C launch machinery for the in-loop
+    gate and classify the delivered runtime's startup as a synthetic
+    ``runtime:launch`` ``TestRunResult`` (``passed`` only on a clean launch), so a
+    crash-on-start is a RED gate in-loop — caught here instead of only at
+    delivery. REUSES ``_delivery_launch_evidence`` (the RuntimeProcessManager,
+    port allocation, sandboxing, headless env, and teardown) rather than
+    duplicating that fragile process lifecycle.
+
+    Returns ``None`` when the launch could not be VERIFIED — an environmental
+    inability (sandbox unavailable / setup / spawn failure), which is not a code
+    crash and must not churn a red gate; it records a decision instead. Fully
+    guarded: any failure records a decision and returns ``None``, never raising
+    into the caller (the whole in-loop gate is fail-open)."""
+    try:
+        launched_clean, cannot_verify, detail = _delivery_launch_evidence(
+            store, workspace, head, should_cancel=should_cancel)
+    except Exception as exc:  # noqa: BLE001 — a probe failure never fails the turn
+        _record_runtime_probe_decision(
+            store, choice="gate_runtime_error", rationale=str(exc))
+        return None
+    if cannot_verify:
+        _record_runtime_probe_decision(
+            store, choice="gate_runtime_cannot_verify",
+            rationale=detail or "runtime launch could not be verified")
+        return None
+    return TestRunResult(
+        command_id="runtime:launch", argv_sha256="",
+        status="completed" if launched_clean else "failed",
+        exit_code=0 if launched_clean else 1, passed=bool(launched_clean),
+        duration_ms=0, stdout_sha256="", stdout_preview="",
+        stderr_preview=str(detail or "")[:4000],
+        reason="" if launched_clean else "runtime crashed on start")
+
+
+def _record_runtime_probe_decision(store: LedgerStore, *, choice: str,
+                                   rationale: str) -> None:
+    """Best-effort audit of a runtime-probe outcome that did not become a gate
+    result (an inability to verify, or a probe error). Never raises."""
+    try:
+        store.record_decision(
+            title="in-loop runtime probe", context="in_loop_gate",
+            choice=choice, rationale=str(rationale)[:2000])
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
-              should_cancel: Optional[Callable[[], bool]] = None) -> Any:
+              should_cancel: Optional[Callable[[], bool]] = None,
+              probe_runtime: bool = False) -> Any:
     """Spec 12 (S1): run EVERY registered command (unit + acceptance) against the
     integrated master tree, bound to ``head``, and record the session. This is the
     deterministic gate executor — no model command selection, so the verdict
@@ -2993,18 +3210,53 @@ def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
     the delivery gate share one code path.
 
     Returns the ``TestRunSession`` (its ``.passed`` is the verdict), or ``None``
-    when there are no commands to run. Runs against ``workspace.root()`` (the
-    merged tree) precisely because the interesting defects — a self-sabotaging
-    harness, a black-screen init race — are INTEGRATION defects invisible on a
-    single branch."""
+    when there is nothing to run. Runs against ``workspace.root()`` (the merged
+    tree) precisely because the interesting defects — a self-sabotaging harness, a
+    black-screen init race — are INTEGRATION defects invisible on a single branch.
+
+    Spec 12 Item 5 — the runtime arm. When ``probe_runtime`` is set (the in-loop
+    gate) AND the project has a runnable ``managed_local`` runtime profile, the
+    F146 Slice C launch machinery is also driven and FOLDED into the recorded
+    session as a synthetic ``runtime:launch`` result — so a runtime that crashes
+    on start is a red gate in-loop, and a runtime-ONLY project (a runnable
+    profile, no commands) still produces a gate record. ``delivery_review`` leaves
+    ``probe_runtime`` False: it runs its own ``_delivery_launch_evidence``
+    separately, so the shared executor must not double-probe there."""
     registry = store.get_test_commands()
-    if not registry:
-        return None
-    command_ids = list(registry.keys())
-    session = run_test_commands(
-        workspace.root(), registry, command_ids,
-        should_cancel=should_cancel,
-        require_sandbox=store.get_require_sandbox())
+    cmd_session = None
+    if registry:
+        command_ids = list(registry.keys())
+        cmd_session = run_test_commands(
+            workspace.root(), registry, command_ids,
+            should_cancel=should_cancel,
+            require_sandbox=store.get_require_sandbox())
+
+    runtime_result: Optional[TestRunResult] = None
+    if probe_runtime and _runnable_managed_local_profile(store):
+        runtime_result = _runtime_gate_probe(
+            store, workspace, head=head, should_cancel=should_cancel)
+
+    if runtime_result is None:
+        # No runtime arm -> today's exact behavior (delivery + command-only gate).
+        if cmd_session is None:
+            return None
+        store.record_test_run(cmd_session, task_id=task_id, head=head)
+        return cmd_session
+
+    # Item 5: fold the runtime probe into ONE session alongside the command
+    # results, so the newest gate record carries both verdicts — a single
+    # ``latest_gate_run`` for Spec 04's stall detector and the prompt segments.
+    command_ids = list(cmd_session.command_ids) if cmd_session else []
+    results = list(cmd_session.results) if cmd_session else []
+    unknown_ids = list(cmd_session.unknown_ids) if cmd_session else []
+    passed = bool(cmd_session.passed) if cmd_session else True
+    sandbox = str(getattr(cmd_session, "sandbox", "") or "") if cmd_session else ""
+    command_ids.append(runtime_result.command_id)
+    results.append(runtime_result)
+    passed = passed and bool(runtime_result.passed)
+    session = TestRunSession(
+        command_ids=command_ids, results=results, unknown_ids=unknown_ids,
+        passed=passed, sandbox=sandbox)
     store.record_test_run(session, task_id=task_id, head=head)
     return session
 
@@ -3055,14 +3307,14 @@ def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
         gate_bootstrap.maybe_bootstrap(store, workspace, policy)
     except Exception:  # noqa: BLE001 — bootstrap is best-effort
         pass
-    # Only arm when the GateRun will actually EXECUTE something. Until Spec 12
-    # Item 5 (the runtime-probe arm) lands, `_run_gate` runs registered COMMANDS
-    # only and returns None on an empty registry — so arming on a runtime-only
-    # project (no commands, a runnable profile) just churns a no-op GateRun and a
-    # `gate_no_commands` decision every interval. Gate on commands, not the broader
-    # `gate_available`. Expand this to include the runtime arm when Item 5 lands.
+    # Only arm when the GateRun will actually EXECUTE something. Spec 12 Item 5
+    # landed the runtime-probe arm, so `_run_gate(probe_runtime=True)` now executes
+    # on registered COMMANDS or a runnable managed_local runtime profile — arm on
+    # either. NOT the broader `gate_available`/`_has_runnable_runtime` (which count
+    # a container profile the launch probe skips): a container-only project would
+    # otherwise churn a no-op GateRun every interval.
     try:
-        if not store.get_test_commands():
+        if not (store.get_test_commands() or _runnable_managed_local_profile(store)):
             return
     except Exception:  # noqa: BLE001
         return
@@ -3922,7 +4174,8 @@ def build_run_turn(
                         head = workspace.head() or ""
                     session = _run_gate(store, workspace, head=head,
                                         task_id="in-loop-gate",
-                                        should_cancel=should_cancel)
+                                        should_cancel=should_cancel,
+                                        probe_runtime=True)
                     passed = None if session is None else bool(session.passed)
                     store.record_decision(
                         title="in-loop acceptance gate",
@@ -4133,8 +4386,15 @@ def build_run_turn(
                 # copy so the shared member config is never mutated. Best-effort:
                 # any failure to resolve the root falls back to the unchanged
                 # member (single-shot empty-temp-dir path).
+                # Spec 17 (Item 1): gate on the member's ACTUAL vendor, not the
+                # raw policy flag — only a repo_read-honoring vendor (claude_cli
+                # today) receives the read-only cwd turn, so only it gets the
+                # `repo_read_root` tag. A codex/cursor DEV keeps the plain member
+                # (no key), so its catalog and metadata never promise tools it
+                # won't get.
                 dev_member = member
-                if dev_repo_read and workspace is not None and branch is not None:
+                if (_member_honors_repo_read(member, dev_repo_read)
+                        and workspace is not None and branch is not None):
                     try:
                         repo_root = workspace.task_root(task.task_id, branch=branch)
                         # Spec 14: canonical `repo_read_root` (was dev_repo_read_root).
@@ -4332,7 +4592,10 @@ def build_run_turn(
                 # otherwise succeed).
                 review_member = member
                 review_root = None
-                if reviewer_repo_read:
+                # Spec 17 (Item 1): only a repo_read-honoring vendor gets the
+                # tag, so the reviewer catalog / metadata / grounding-reflex all
+                # match the reviewer's real invocation.
+                if _member_honors_repo_read(member, reviewer_repo_read):
                     try:
                         review_root = workspace.task_root(pr["task_id"],
                                                           branch=pr["branch"])
@@ -4589,7 +4852,8 @@ def build_run_turn(
                 # otherwise the second half of the strict-mode dual review stays
                 # blind. Best-effort, per-turn copy (shared config never mutated).
                 pm_review_member = member
-                if reviewer_repo_read:
+                # Spec 17 (Item 1): vendor-honor the tag here too.
+                if _member_honors_repo_read(member, reviewer_repo_read):
                     try:
                         _pmr = workspace.task_root(pr["task_id"], branch=pr["branch"])
                         pm_review_member = {**member, "repo_read_root": str(_pmr)}
@@ -5116,10 +5380,17 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
         # the policy is off -> unchanged single-shot path. The provider accepts the
         # generic `repo_read_root`; the legacy `dev_repo_read_root` key is still
         # forwarded so a mixed-version pair keeps working.
+        # Spec 17 (Item 1): forward the read-only worktree root ONLY to a vendor
+        # that actually honors it (claude_cli today). The dispatch sites already
+        # gate the tag on the vendor, so in the normal flow a non-honoring member
+        # never carries the key; this second check keeps the seam honest against
+        # any other path that might set it, and guarantees the forwarded metadata
+        # never disagrees with the prompt catalog.
         metadata: dict[str, Any] = {}
         repo_read_root = (member.get("repo_read_root")
                           or member.get("dev_repo_read_root"))
-        if isinstance(repo_read_root, str) and repo_read_root.strip():
+        if (isinstance(repo_read_root, str) and repo_read_root.strip()
+                and _vendor_honors_repo_read(member)):
             metadata["repo_read_root"] = repo_read_root.strip()
         req = LocalCouncilModelRequest(
             role=str(member.get("role", "answerer")),

@@ -38,18 +38,63 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
-# stderr/stdout signatures that mean the command could not RUN (vs a real test
-# failure). A candidate that trips one of these is refused — registering it would
-# create a gate that is red forever for an environment reason, wedging the run.
-_UNRUNNABLE_SIGNATURES = (
-    "cannot find module",              # node: missing dependency (jsdom, …)
-    "no module named",                 # python: missing pytest / import
-    "modulenotfounderror",
+# Signatures that mean the command could not RUN (vs a real test failure). A
+# candidate that trips one of these is refused — registering it would create a
+# gate that is red forever for an environment reason, wedging the run.
+#
+# Split into two tiers because some phrases are ambiguous. "No such file or
+# directory" and "Cannot find module" print BOTH when an interpreter/loader fails
+# to launch AND in the output of a real, running test that merely asserts on a
+# missing file or an unresolved module. Substring-matching them anywhere would
+# misclassify a genuinely-executing, genuinely-failing acceptance test as
+# unrunnable and REFUSE it — the exact opposite of the D1 intent (a real non-zero
+# failure DOES register). So the ambiguous tier only refuses when there is no
+# evidence a test framework actually ran.
+
+# Unambiguous launch failures: the interpreter/entrypoint itself never started a
+# test. Safe to match anywhere in the output.
+_LAUNCH_FAILURE_SIGNATURES = (
     "command not found",               # shell: interpreter absent from PATH
     "is not recognized",               # windows: interpreter absent
-    "no such file or directory",       # entrypoint / interpreter missing
-    "err_module_not_found",
+    "err_module_not_found",            # node: loader failed before user code
+    "modulenotfounderror",             # python: import failed at collection
 )
+
+# Ambiguous: appears in a failed launch AND in a real test's assertion output.
+# Only treated as unrunnable when no test-framework output co-occurs (no test ran).
+_AMBIGUOUS_LAUNCH_SIGNATURES = (
+    "cannot find module",              # node: missing dependency (jsdom, …)
+    "no module named",                 # python: missing import (sans traceback)
+    "no such file or directory",       # entrypoint / interpreter missing
+)
+
+# Retained as the union for any caller/introspection that wants the full set.
+_UNRUNNABLE_SIGNATURES = _LAUNCH_FAILURE_SIGNATURES + _AMBIGUOUS_LAUNCH_SIGNATURES
+
+# Output characteristic of a test framework actually running tests. If any of
+# these is present, a test executed — an ambiguous file/module phrase in the same
+# output is then a real assertion failure (register), not a failed launch. The
+# bootstrap only ever proposes node (*.test.js) and pytest, so these cover the
+# runners in play; the list biases toward REGISTERING (matching one keeps a real
+# test), which is the intended bias.
+_TEST_OUTPUT_MARKERS = (
+    "test session starts",             # pytest banner
+    "collected ",                      # pytest collection line
+    "short test summary",              # pytest
+    " passed", " failed",              # pytest summary ("1 failed, 2 passed")
+    "passing", "failing",              # mocha
+    "test suites:", "tests:",          # jest
+    "# tests ", "# pass ", "# fail ",  # node:test summary
+    "\nok ", "\nnot ok ",              # TAP
+    "✓", "✗",                          # mocha/jest/node tick marks
+)
+
+
+def _looks_like_test_output(blob: str) -> bool:
+    """True if the process emitted output characteristic of a test framework
+    actually running tests. Distinguishes a real test that RAN and failed a
+    file/module assertion from an interpreter/loader that never launched a test."""
+    return any(m in blob for m in _TEST_OUTPUT_MARKERS)
 
 
 def _list_master(workspace: Any) -> list[str]:
@@ -109,9 +154,17 @@ def _smoke_ran_cleanly(session: Any) -> tuple[bool, str]:
         return False, f"status={status} ({getattr(r, 'reason', '') or 'launch failed'})"
     blob = (str(getattr(r, "stderr_preview", "") or "")
             + "\n" + str(getattr(r, "stdout_preview", "") or "")).lower()
-    for sig in _UNRUNNABLE_SIGNATURES:
+    # Unambiguous launch failures refuse regardless of anything else.
+    for sig in _LAUNCH_FAILURE_SIGNATURES:
         if sig in blob:
-            return False, f"unrunnable: matched {sig!r}"
+            return False, f"unrunnable: launch failure {sig!r}"
+    # Ambiguous file/module phrases only mean "could not run" when no test
+    # framework actually ran; if a test executed, this is a real assertion
+    # failure and IS the signal we want to register.
+    if not _looks_like_test_output(blob):
+        for sig in _AMBIGUOUS_LAUNCH_SIGNATURES:
+            if sig in blob:
+                return False, f"unrunnable: {sig!r} with no test output"
     return True, "ran"
 
 
