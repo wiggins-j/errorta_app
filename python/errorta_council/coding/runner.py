@@ -550,15 +550,89 @@ def _finding_class(findings: list[dict[str, Any]]) -> frozenset[str]:
     return task_dedupe.normalized_tokens(*parts)
 
 
-def _all_unactionable_by_dev(blocking: list[dict[str, Any]]) -> bool:
-    """Spec 15 (Item 3): are ALL blocking findings ones a write-only DEV cannot
-    act on — an execution demand, or uncited (Spec 14's ``cited: false``)? A single
-    real, citable code finding makes this False so the revise still fires."""
+# GL02 (Item 1) — the machine-lane predicate. A finding is MACHINE-LANE when its
+# reason turns on runtime/execution SEMANTICS — does it load, run, race, crash;
+# were the tests run — rather than on the text of the diff. This is deliberately
+# BROADER than ``capabilities.classify_task_text`` (which needs a run-verb AND an
+# evidence-demand, and so misses "renders black at runtime", a claim with neither):
+# a diff cannot evidence an executable question at ANY reviewer false-rejection
+# rate, which is the invariant this predicate fences. It is CONSERVATIVE by
+# construction — only the high-signal runtime phrases below trip it; every
+# ambiguous reason falls to the judgment lane (Spec 14's existing behaviour), which
+# is the documented fail-toward default. Bare "gate"/"probe"/"anchor" are NOT
+# triggers: they name the machine lane's own evidence (a red such run BACKS a
+# claim, §2 below) and appear verbatim in ordinary judgment findings ("stale gate")
+# — including them would route work a DEV can act on.
+# Deliberately anchored to runtime-OUTCOME context, not bare defect verbs. A real,
+# diff-evidenced defect ("null deref in init — src/mod.js:1 crashes") is NOT a
+# machine-lane claim just because it says "crashes"; only a claim tied to running/
+# starting/rendering ("crashes on start", "renders black at runtime", "tests were
+# not run") is. That is the line between a defect a DEV can fix from the diff and an
+# executable question only the executor can decide.
+_RUNTIME_CLAIM_PATTERNS = tuple(re.compile(p) for p in (
+    r"\bat runtime\b", r"\bat start(?:up)?\b", r"\bon (?:start|startup|launch|boot)\b",
+    r"\bcrash\w*\s+(?:on|at|during|when|the)\b",
+    r"\brace condition\b", r"\bdead ?lock\w*", r"\blive ?lock\w*", r"\binfinite loop\b",
+    r"\bblack (?:canvas|screen)\b", r"\bblank (?:canvas|screen)\b",
+    r"\brenders?\s+(?:it\s+)?(?:black|blank|nothing)\b", r"\bnothing renders?\b",
+    r"\bwon'?t\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\b(?:will|does|do)\s+not\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\bdoes\s?n'?t\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\bfails?\s+to\s+(?:load|run|start|render|boot|launch|init\w*)\b",
+    r"\bno evidence\b", r"\buntested\b",
+    r"\bnever\s+(?:been\s+)?(?:run|ran|executed|tested)\b",
+    r"\b(?:were|was|are|is|been)\s+not\s+(?:run|ran|executed|tested)\b",
+    r"\bnot\s+(?:actually\s+)?(?:been\s+)?(?:run|ran|executed)\b",
+))
+
+
+def is_execution_claim(finding: dict[str, Any]) -> bool:
+    """GL02 (Item 1): does this finding reason about runtime/execution behaviour a
+    DIFF cannot evidence (machine lane), rather than design/clarity/spec conformance
+    (judgment lane)? Conservative: only the curated high-signal phrases in
+    ``_RUNTIME_CLAIM_PATTERNS`` trip it; anything ambiguous stays judgment."""
+    text = f"{finding.get('title') or ''} {finding.get('body') or ''}".lower()
+    return any(p.search(text) for p in _RUNTIME_CLAIM_PATTERNS)
+
+
+def _red_runtime_evidence(store: LedgerStore, head: str) -> bool:
+    """GL02 (Item 2): is there EXECUTOR evidence that BACKS a runtime claim — a
+    failing (red) acceptance-gate or ``web:probe`` run (GL01) at this head? A red
+    run documents a real runtime failure a DEV can fix, so a machine-lane finding
+    riding on it is a normal cited defect (actionable). A green run CONTRADICTS the
+    claim (Spec 14 Item 5) and does not back it; no run at all leaves it
+    unverifiable — both route rather than bounce to a DEV. Fully guarded."""
+    head = str(head or "")
+    try:
+        runs = store.list_test_runs()
+    except Exception:  # noqa: BLE001 — a read failure means "no evidence"
+        return False
+    for r in reversed(runs):
+        if not isinstance(r, dict):
+            continue
+        if head and str(r.get("head") or "") != head:
+            continue
+        if r.get("passed") is False:
+            return True
+    return False
+
+
+def _all_unactionable_by_dev(blocking: list[dict[str, Any]], *,
+                             has_backing_evidence: bool = False) -> bool:
+    """Spec 15 (Item 3) + GL02 (Items 1-2): are ALL blocking findings ones a
+    write-only DEV cannot act on? A finding is unactionable when it is an execution
+    demand (Spec 15), or uncited (Spec 14's ``cited: false``), OR — GL02 — a
+    machine-lane runtime claim (``is_execution_claim``) with NO executor evidence to
+    back it (``has_backing_evidence`` False): the LLM may not bounce an unverifiable
+    executable question to a DEV who also cannot run anything. A single real, citable
+    code finding — or a machine-lane finding BACKED by a red gate/probe — makes this
+    False so the revise still fires."""
     for f in blocking:
         is_exec = _capabilities.classify_task_text(
             str(f.get("title") or ""), str(f.get("body") or "")) == "execution"
         is_uncited = f.get("cited") is False   # explicit False only; absent != uncited
-        if not (is_exec or is_uncited):
+        is_unbacked_runtime = is_execution_claim(f) and not has_backing_evidence
+        if not (is_exec or is_uncited or is_unbacked_runtime):
             return False
     return True
 
@@ -638,6 +712,64 @@ def _route_unactionable_rejection(
                    "demand is satisfiable.")))
 
 
+# GL02 (Item 3) — the per-head reviewer veto cap. The report (§3 Pathology 2 rec 4)
+# escalates a reviewer's disagreement to the PM after 2 rejections; committed Spec 16
+# caps the revise LINEAGE at depth 3. They count different things and COMPOSE: the
+# per-head cap is reviewer-scoped and task-agnostic (the SAME PR head rejected
+# twice), fires at the finer grain and FIRST — usually short-circuiting the lineage
+# before it reaches depth 3 — while Spec 16's depth cap stays the hard structural
+# backstop (three distinct heads each rejected once, or escalation that never
+# converges). Both enter the ONE PM-replan escalation path; neither flips the verdict.
+_REVIEWER_VETO_CAP = 2
+
+
+def _head_veto_count(store: LedgerStore, head: str) -> int:
+    """GL02 (Item 3): how many times this PR head has ALREADY been vetoed by a
+    reviewer (an actionable rejection that reached the revise seam). Counts the
+    ``reviewer_veto`` markers ``_handle_review_rejection`` records per head — mirrors
+    Spec 15's ``_already_requeued_for_head`` decision-log bookkeeping."""
+    head = str(head or "")
+    try:
+        return sum(1 for d in store.list_decisions()
+                   if d.get("choice") == "reviewer_veto"
+                   and str(d.get("head") or "") == head)
+    except Exception:  # noqa: BLE001 — a read failure counts as no prior veto
+        return 0
+
+
+def _escalate_reviewer_veto(
+    store: LedgerStore, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]], count: int,
+) -> None:
+    """GL02 (Item 3): the same reviewer head vetoed this PR head ``count`` times
+    (>= the cap). Surface the DISAGREEMENT to the PM instead of spawning yet another
+    revise — the reviewer's finding + the diff are already on the PR record. Fail-
+    closed: the PR stays ``changes_requested`` (set by the caller); the verdict is
+    NOT flipped (Spec 16 non-goal, inherited). Deduped per head."""
+    reason = _reason_from_findings(findings)
+    store.record_decision(
+        title=f"reviewer veto cap: {pr['branch']}",
+        context=f"pr {pr['pr_id']}", choice="reviewer_veto_escalated",
+        rationale=(f"the same PR head was rejected {count} times "
+                   f"(cap {_REVIEWER_VETO_CAP}); escalated the disagreement to the PM "
+                   "instead of spawning another revise — an ungrounded reviewer with "
+                   "an absolute veto is a randomized rejection machine"),
+        related_task_ids=[task.task_id, pr.get("task_id", "")])
+    esc_title = f"reviewer disagreement: {pr['branch']}"
+    if not any(t.role == PM and str(t.title or "") == esc_title
+               and t.state not in ("done", "dropped") for t in store.list_tasks()):
+        store.add_task(
+            title=esc_title, role=PM,
+            reason_summary=(reason or "reviewer rejected this head twice"),
+            detail=(f"PR {pr['pr_id']} on branch {pr['branch']} has now been rejected "
+                    f"{count} times by the reviewer on the SAME head, with no dev "
+                    "revise spawned this round. Adjudicate the disagreement: is the "
+                    "reviewer's objection real (re-scope / decompose), or is the PR "
+                    "actually sound (re-plan to let it land)? Do not simply re-queue "
+                    "the same review."
+                    + (f" Reviewer's objection: {reason}." if reason else "")))
+
+
 def _break_revise_chain(
     store: LedgerStore, *, pr: dict[str, Any], task: Task,
     findings: list[dict[str, Any]], depth: int,
@@ -704,6 +836,17 @@ def _handle_review_rejection(
     signature is the point of the seam.
     """
     store.update_pr(pr["pr_id"], status="changes_requested")
+    # Spec 13 (S2): if this rejection is of a foundation-UNLOCKING PR but is OFF-SCOPE
+    # for the foundation (no finding names a foundation file it adds), the clamp is
+    # being held at 1 for an unrelated reason — surface it so the run isn't silently
+    # serialized forever. Accounted FIRST, before any route/veto/break return below,
+    # so this advisory foundation-scope signal is independent of which downstream path
+    # the rejection takes (GL02's per-head veto cap can short-circuit before the revise
+    # spawn). Best-effort so escalation can never break the seam.
+    try:
+        _account_offscope_foundation_rejection(store, pr=pr, findings=findings)
+    except Exception:  # noqa: BLE001 — escalation is advisory, never load-bearing
+        pass
     # Spec 15 (Item 3): if EVERY blocking finding is unactionable by a DEV — an
     # execution demand ("no evidence the tests were run") or uncited (the Spec 14
     # flag) — do NOT spawn a DEV revise task. Forwarding such a rejection to a dev
@@ -711,9 +854,36 @@ def _handle_review_rejection(
     # Route it to the PM instead; the PR stays changes_requested (never merges),
     # only the DEV rework is withheld. A rejection that also names a real citable
     # defect keeps today's behaviour — the revise addresses that defect.
+    # GL02 (Items 1-2): the two-lane invariant. A blocking finding that reasons about
+    # runtime/execution behaviour (machine lane) is decided by the executor's evidence,
+    # never by the LLM verdict: with a RED gate/probe backing it (GL01) it is a real
+    # cited defect a DEV fixes; WITHOUT that evidence it is unverifiable-by-diff and
+    # must route (to the gate re-review, or the PM), never bounce to a DEV who also
+    # cannot run it. This feeds the runtime-claim signal into Spec 15's ONE suppression
+    # seam below (no second writer) — exactly as Spec 14 Item 3 feeds it the ``cited``
+    # flag. ``approved`` is never touched; the PR stays ``changes_requested``.
     blocking = [f for f in findings if f.get("blocking")]
-    if blocking and _all_unactionable_by_dev(blocking):
+    _backed = _red_runtime_evidence(store, str(pr.get("head") or ""))
+    if blocking and _all_unactionable_by_dev(blocking, has_backing_evidence=_backed):
         _route_unactionable_rejection(store, pr=pr, task=task, findings=findings)
+        return
+    # GL02 (Item 3): the per-head reviewer veto cap, at a FINER grain than Spec 16's
+    # depth cap and fired FIRST. Record this actionable veto against the PR head; once
+    # the same head has been vetoed _REVIEWER_VETO_CAP times, escalate the disagreement
+    # to the PM rather than spawn another revise. Because each revise makes a NEW head,
+    # this only trips when the SAME head is rejected repeatedly (e.g. after a Spec 15
+    # re-review), which is precisely the single-head disagreement the report escalates —
+    # orthogonal to the lineage depth Spec 16 walks, so the two never double-fire.
+    _head = str(pr.get("head") or "")
+    _prior_vetoes = _head_veto_count(store, _head)
+    store.record_decision(
+        title=f"reviewer veto: {pr['branch']}", context=f"pr {pr['pr_id']}",
+        choice="reviewer_veto",
+        rationale=f"reviewer rejected head {_head[:12]} (veto #{_prior_vetoes + 1})",
+        related_task_ids=[task.task_id], extra={"head": _head, "pr_id": pr["pr_id"]})
+    if _REVIEWER_VETO_CAP and _prior_vetoes + 1 >= _REVIEWER_VETO_CAP:
+        _escalate_reviewer_veto(store, pr=pr, task=task, findings=findings,
+                                count=_prior_vetoes + 1)
         return
     # Spec 16 (Item 2): bound the revise chain. If this lineage has already been
     # revised revise_chain_limit times AND this rejection is the SAME finding class
@@ -762,15 +932,6 @@ def _handle_review_rejection(
                 f"{pr['branch']} and open a new PR. The prior PR "
                 f"({pr['pr_id']}) is superseded when this lands."
                 + (f" Findings: {findings_detail}." if findings_detail else "")))
-    # Spec 13 (S2): if this rejection is of a foundation-UNLOCKING PR but is
-    # OFF-SCOPE for the foundation (no finding names a foundation file it adds),
-    # the clamp is being held at 1 for an unrelated reason — surface it so the run
-    # isn't silently serialized forever. Runs after the revise task above (the
-    # rework still proceeds); best-effort so escalation can never break the seam.
-    try:
-        _account_offscope_foundation_rejection(store, pr=pr, findings=findings)
-    except Exception:  # noqa: BLE001 — escalation is advisory, never load-bearing
-        pass
 
 
 def _account_offscope_foundation_rejection(
@@ -3128,6 +3289,12 @@ def _mark_finding_citations(findings: list[dict[str, Any]], *, workspace: Any,
         if g.get("blocking"):
             path = str(g.get("path") or "").strip()
             g["cited"] = bool(path) and (not in_tree or path in in_tree)
+            # GL02 (Item 1): tag the lane next to Spec 14's ``cited`` flag so
+            # ``errorta prs`` / post-mortems show which lane decided each blocking
+            # finding. Machine lane = a runtime/execution claim a diff cannot
+            # evidence; everything else (and a pre-GL02 record with no tag) is
+            # judgment — the conservative default.
+            g["lane"] = "machine" if is_execution_claim(g) else "judgment"
         out.append(g)
     return out
 
