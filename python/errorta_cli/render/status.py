@@ -12,7 +12,8 @@ from typing import Any
 from rich.table import Table
 from rich.text import Text
 
-from . import muted, render
+from . import NO_PROJECT_MSG, muted, render
+from .project import status_cell, status_label
 
 _STATUS_STYLE = {
     "running": "cli.warn",
@@ -30,6 +31,61 @@ _TERMINAL_BAD = {
     # Spec 18 (Δ2): Specs 04/07/10 added these stop reasons without updating the set.
     "gate_not_improving", "planning_churn", "dispatch_wedged",
 }
+
+# Spec 18: the unbound `status` view. A bounded, run-focused slice of the project
+# list — running first, then blocking attention, then the rest — capped so it
+# stays a status view rather than a second `errorta projects`.
+_UNBOUND_CAP = 5
+# list_status_reasons that add nothing over the status label itself, so the row
+# omits them (a live run / a plain lifecycle state need no extra explanation).
+_UNINFORMATIVE_REASONS = {"", "live_run", "lifecycle"}
+
+
+def _project_sort_key(proj: dict[str, Any]) -> int:
+    label = status_label(proj)
+    if label == "running":
+        return 0
+    if label == "needs attention":
+        return 1
+    return 2
+
+
+def _unbound_project_row(proj: dict[str, Any]) -> Text:
+    cell = status_cell(proj)  # shared with `errorta projects` (no wording drift)
+    reason = str(proj.get("list_status_reason") or "")
+    if reason in _TERMINAL_BAD:
+        # A genuinely bad stop reason the list-status derivation under-classifies
+        # (e.g. gate_not_improving falls through to a plain lifecycle state) still
+        # reads as failed here.
+        cell.style = "cli.bad"
+    row = Text()
+    row.append(f"{str(proj.get('id') or '?'):<16} ", style="cli.key")
+    row.append_text(cell)
+    if reason and reason not in _UNINFORMATIVE_REASONS:
+        row.append(f"  {reason}", style="cli.muted")
+    return row
+
+
+def _unbound_project_lines(projects: Any) -> list[Any]:
+    """The actionable project slice printed when nothing is bound to the cwd.
+
+    Empty when there are no projects — an empty table is noise, so the caller
+    prints just the no-project message.
+    """
+    items = [p for p in (projects or []) if isinstance(p, dict)]
+    if not items:
+        return []
+    ordered = sorted(items, key=_project_sort_key)  # stable: bucket order within
+    shown = ordered[:_UNBOUND_CAP]
+    lines: list[Any] = [Text("")]
+    lines.extend(_unbound_project_row(proj) for proj in shown)
+    extra = len(ordered) - len(shown)
+    if extra > 0:
+        lines.append(muted(f"(+{extra} more — errorta projects)"))
+    lines.append(Text(""))
+    lines.append(muted("errorta open <id>      bind this directory"))
+    lines.append(muted("errorta watch          live dashboard for the bound project"))
+    return lines
 
 
 def render_status(payload: Any, verbosity: Any) -> str:
@@ -55,7 +111,8 @@ def render_status(payload: Any, verbosity: Any) -> str:
 
     pid = (payload or {}).get("project_id")
     if not pid:
-        lines.append(muted("project: (none bound to this directory)"))
+        lines.append(muted(NO_PROJECT_MSG))
+        lines.extend(_unbound_project_lines((payload or {}).get("projects")))
         return render(*lines)
 
     lines.append(Text(f"project: {pid}", style="cli.key"))

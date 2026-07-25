@@ -28,6 +28,21 @@ _LIST_STATUS_STYLE = {
 }
 
 
+def status_label(proj: dict[str, Any]) -> str:
+    """The derived list-status label one project row shows."""
+    return str(proj.get("list_status") or proj.get("status") or "?")
+
+
+def status_cell(proj: dict[str, Any]) -> Text:
+    """Styled list-status label for one project row.
+
+    Shared by the ``projects`` table and the unbound ``status`` view (Spec 18) so
+    the two surfaces cannot drift on status wording or color.
+    """
+    label = status_label(proj)
+    return Text(label, style=_LIST_STATUS_STYLE.get(label, "white"))
+
+
 def render_projects(payload: Any, verbosity: Any) -> str:
     projects = (payload or {}).get("projects") or []
     if not projects:
@@ -38,10 +53,9 @@ def render_projects(payload: Any, verbosity: Any) -> str:
     table.add_column("reason", style="cli.muted")
     table.add_column("north star", style="cli.muted")
     for proj in projects:
-        status = str(proj.get("list_status") or proj.get("status") or "?")
         table.add_row(
             str(proj.get("id") or "?"),
-            Text(status, style=_LIST_STATUS_STYLE.get(status, "white")),
+            status_cell(proj),
             truncate(proj.get("list_status_reason") or "", 28),
             truncate(proj.get("north_star") or "", 48),
         )
