@@ -86,6 +86,23 @@ def test_invalid_role_400(tmp_errorta_home: Path) -> None:
     assert r.status_code == 400
 
 
+def test_add_task_route_refuses_unexecutable_dev_task(tmp_errorta_home: Path) -> None:
+    # Spec 15 (Item 2): the operator-authored task route lints too. An
+    # execution-imperative DEV task with no gate is refused (422), not swallowed.
+    c = _client(tmp_errorta_home)
+    c.post("/coding/projects", json={"project_id": "pcap", "north_star": "n",
+           "definition_of_done": "d", "target": "new"})
+    r = c.post("/coding/projects/pcap/tasks",
+               json={"title": "Run the acceptance gate and report results",
+                     "role": "dev"})
+    assert r.status_code == 422
+    # An ordinary authoring task is untouched.
+    ok = c.post("/coding/projects/pcap/tasks",
+                json={"title": "Write a test that fails on trivial levels",
+                      "role": "dev"})
+    assert ok.status_code == 200
+
+
 def test_edit_north_star(tmp_errorta_home: Path) -> None:
     c = _client(tmp_errorta_home)
     c.post("/coding/projects", json={"project_id": "p4", "north_star": "old",

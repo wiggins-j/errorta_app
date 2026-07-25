@@ -369,6 +369,23 @@ def create_task(
             matched_title=duplicate.title,
             rule=duplicate.rule,
         )
+    # Spec 15 (Item 2): the second task-creation chokepoint gets the same
+    # execution-imperative lint as the PM plan path. Only DEV tasks (running IS a
+    # tester's job, so a tester task is never linted). With a gate, rewrite to
+    # consume the gate output; without one, refuse with a legible reason.
+    if role == "dev":
+        from . import capabilities, gate_state
+        if capabilities.classify_task_text(title, detail) == "execution":
+            if gate_state.gate_available(store):
+                title, detail = capabilities.routed_execution_task(title)
+            else:
+                raise ControlActionError(
+                    "task_requires_absent_capability",
+                    f"{title!r} demands execution evidence, but no role can run a "
+                    "command and no acceptance gate exists to produce it — write it "
+                    "as work the gate can verify (e.g. 'add a test that fails on "
+                    "trivial levels'), or register a test command first",
+                )
     task = store.add_task(title=title, role=role, detail=detail,
                           target_files=target_files)
     return pm_changes.record_change(

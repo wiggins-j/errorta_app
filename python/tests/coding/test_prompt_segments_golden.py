@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from errorta_council.coding import capabilities
 from errorta_council.coding.gate_state import latest_gate_text
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
@@ -33,10 +34,8 @@ from errorta_council.coding.runner import (
     _pm_prompt,
     _pm_prompt_segments,
     _review_pr_prompt,
-    _review_pr_prompt_segments,
     _skill_line,
     _test_prompt,
-    _test_prompt_segments,
     join_segments,
 )
 from errorta_council.coding.topology import DEV, PM, REVIEWER, TESTER
@@ -139,6 +138,9 @@ def _old_pm_prompt(store: LedgerStore) -> str:
         f"{_model_assignment_prompt(store)}"
         f"Project state: {_orientation_text(store)}\n"
         f"{_pm_boot_text(store) or _grounding_packet_text('pm', store)}"
+        # Spec 15 (Item 1): the reference CALLS the renderer at the fixed insertion
+        # point (the P0.5 seam pattern), so this stays a real byte-lock on the rest.
+        f"{capabilities.pm_capability_segment(store)}\n"
         "Plan the next batch of DEV tasks only — each task is a unit of code a "
         "developer implements. Review, testing, and merge happen AUTOMATICALLY "
         "for every task (each opened PR is reviewed, tested, and merged into "
