@@ -138,6 +138,33 @@ def test_three_same_class_rejections_break_the_chain(
     assert s.get_pr(p3["pr_id"])["status"] == "blocked"   # PR blocked (terminal)
 
 
+def _revise_empty(s, *, branch, prev_pr, depth):
+    t = s.add_task(title=f"revise: {branch}", role="dev", pr_id=prev_pr["pr_id"],
+                   revise_depth=depth, finding_class=[])   # empty class stored as []
+    pr = s.record_pr(task_id=t.task_id, branch=branch, head=f"h-{branch}",
+                     dev_member="m")
+    return t, pr
+
+
+def test_contentless_rejections_break_the_chain(
+        tmp_errorta_home, tmp_path) -> None:
+    # Code-review fix #1: an empty finding class must compare equal to empty and
+    # break the chain — a run of CONTENTLESS rejections is the observed pathology.
+    s = _store("empty", tmp_path)
+    t0 = s.add_task(title="impl", role="dev")
+    p0 = s.record_pr(task_id=t0.task_id, branch="b0", head="h0", dev_member="m")
+    _r1, p1 = _revise_empty(s, branch="b1", prev_pr=p0, depth=1)
+    _r2, p2 = _revise_empty(s, branch="b2", prev_pr=p1, depth=2)
+    r3, p3 = _revise_empty(s, branch="b3", prev_pr=p2, depth=3)
+    # A contentless rejection (no findings -> empty class) at the cap breaks it.
+    runner._handle_review_rejection(s, None, pr=p3, task=r3,
+                                    findings=[], source="reviewer")
+    assert s.get_pr(p3["pr_id"])["status"] == "blocked"
+    assert any(d["choice"] == "revise_chain_broken" for d in s.list_decisions())
+    revises = [t for t in s.list_tasks() if t.title.startswith("revise:")]
+    assert len(revises) == 3    # no 4th revise on the contentless lineage either
+
+
 def test_different_class_at_the_cap_does_not_break(
         tmp_errorta_home, tmp_path) -> None:
     # The real-progress lock: a lineage working through DISTINCT defects is healthy
@@ -190,8 +217,9 @@ from errorta_council.coding.autonomy import (  # noqa: E402
 
 
 def _broke(s):
-    s.record_decision(title="broke", context="pr p", choice="revise_chain_broken",
-                      rationale="r")
+    # The livelock detector counts UNRESOLVED breaker escalations — an open PM
+    # "revise chain broken:" task (what _break_revise_chain files).
+    s.add_task(title="revise chain broken: b", role="pm", reason_summary="r")
 
 
 def test_livelock_stops_after_limit_with_no_recovery(
@@ -223,6 +251,27 @@ def test_a_merge_resets_the_livelock_window(tmp_errorta_home, tmp_path) -> None:
     s.update_pr(pr["pr_id"], status="merged")
     c.iterations = policy.revise_livelock_limit
     assert _account_revise_livelock(s, c, policy) is None
+
+
+def test_resolved_escalation_disarms_the_livelock(
+        tmp_errorta_home, tmp_path) -> None:
+    # Code-review fix #2: once the PM handles the escalation (task done/dropped),
+    # the detector disarms — a resolved break must not keep it armed for a benign
+    # no-merge tail.
+    s = _store("lv4", tmp_path)
+    pm = s.add_task(title="revise chain broken: b", role="pm")
+    policy = CodingAutonomyPolicy()
+    c = LoopCounters()
+    c.iterations = 0
+    assert _account_revise_livelock(s, c, policy) is None   # armed while open
+    s.update_task(pm.task_id, state="done")                 # PM resolved it
+    result = None
+    for i in range(1, policy.revise_livelock_limit + 3):
+        c.iterations = i
+        result = _account_revise_livelock(s, c, policy)
+        if result is not None:
+            break
+    assert result is None                                   # disarmed -> never stops
 
 
 def test_livelock_zero_disables(tmp_errorta_home, tmp_path) -> None:

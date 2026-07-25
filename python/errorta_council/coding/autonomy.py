@@ -959,8 +959,17 @@ def _account_revise_livelock(ledger: Any, c: LoopCounters,
     fires."""
     if policy.revise_livelock_limit <= 0:
         return None
-    broken = sum(1 for d in ledger.list_decisions()
-                 if d.get("choice") == "revise_chain_broken")
+    # Count UNRESOLVED breaker escalations: an open PM "revise chain broken:" task.
+    # NOT the append-only `revise_chain_broken` decisions — those are monotonic, so
+    # a break the PM later resolved (re-scoped/abandoned) would keep the detector
+    # armed and could false-stop a benign no-merge tail. When the PM handles the
+    # escalation (marks the task done/dropped), it stops counting — "the PM's re-plan
+    # did not unstick anything" is exactly an escalation that stays open.
+    broken = sum(
+        1 for t in ledger.list_tasks()
+        if getattr(t, "role", "") == "pm"
+        and str(getattr(t, "title", "") or "").startswith("revise chain broken:")
+        and getattr(t, "state", "") not in ("done", "dropped"))
     if broken <= 0:
         c.last_broken_count = 0
         c.last_broken_iter = c.iterations

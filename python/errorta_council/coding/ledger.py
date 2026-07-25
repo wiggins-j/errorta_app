@@ -716,7 +716,11 @@ class LedgerStore:
         # migration); absent -> depth 0 / no class, exactly today's behaviour.
         if revise_depth:
             extras["revise_depth"] = int(revise_depth)
-        if finding_class:
+        if finding_class is not None:
+            # Store even an EMPTY class (a revise passes a list, never None): a run
+            # of CONTENTLESS rejections should break the chain (Spec 16 Item 1 — the
+            # observed pathology), which needs the empty class to round-trip so the
+            # next round reads [] (not absent) and empty compares equal to empty.
             extras["finding_class"] = sorted({str(t) for t in finding_class})
         t = Task(
             task_id=f"t-{uuid.uuid4().hex[:12]}", title=title, role=role,
