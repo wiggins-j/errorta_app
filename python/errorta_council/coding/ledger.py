@@ -709,7 +709,8 @@ class LedgerStore:
                  model_assignment: dict[str, Any] | None = None,
                  target_files: list[str] | None = None,
                  revise_depth: int = 0,
-                 finding_class: list[str] | None = None) -> Task:
+                 finding_class: list[str] | None = None,
+                 diff_fingerprint: dict[str, Any] | None = None) -> Task:
         if role not in _VALID_ROLES:
             raise LedgerError(f"invalid role: {role!r}")
         ts = _now()
@@ -730,6 +731,13 @@ class LedgerStore:
             # observed pathology), which needs the empty class to round-trip so the
             # next round reads [] (not absent) and empty compares equal to empty.
             extras["finding_class"] = sorted({str(t) for t in finding_class})
+        # GL04 (GAP-4): a revise task also carries the diff fingerprint of the PR it
+        # supersedes (computed once at revise-task creation), so the diff-level
+        # breaker reads it O(1) alongside the finding class. Rides in _extras like the
+        # Spec 16 fields (additive, JSON round-trips, no migration); absent -> today's
+        # behaviour (no stasis/revert signal, exactly as before).
+        if diff_fingerprint:
+            extras["diff_fingerprint"] = diff_fingerprint
         t = Task(
             task_id=f"t-{uuid.uuid4().hex[:12]}", title=title, role=role,
             detail=detail, state="todo", assignee_member_id=assignee_member_id,

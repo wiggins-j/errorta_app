@@ -21,11 +21,13 @@ real caller over ``LocalGateway``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import re
 import threading
+from collections import Counter
 from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
@@ -770,15 +772,223 @@ def _escalate_reviewer_veto(
                     + (f" Reviewer's objection: {reason}." if reason else "")))
 
 
+# GL04 (GAP-4) — the diff-level breaker. A revise lineage can spin in two shapes
+# Spec 16's finding-CLASS breaker is structurally blind to: (a) DIFF-STASIS — the
+# dev keeps resubmitting the essentially-same change (non-progressive iteration);
+# (b) OSCILLATION/REVERT — a revision undoes an earlier one (A->B->A), which reads
+# as progress to a class-only breaker because each hop presents a distinct class.
+# We fingerprint each PR diff once at revise-task creation and, at the NEXT
+# rejection, compare the live diff against the lineage — tripping Spec 16's ONE
+# breaker as a THIRD condition, BEFORE its depth+class cap so we break at the
+# reverting round, not after wasting rounds to depth 3.
+
+_DIFF_HUNK_RE = re.compile(r"^@@ ")
+
+
+def _norm_diff_line(line: str) -> str:
+    """Whitespace-normalize a diff content line for near-identity comparison: drop
+    the leading +/-, strip, and collapse internal whitespace runs. So an
+    indentation-only reshuffle does not read as a different change."""
+    return re.sub(r"\s+", " ", line[1:].strip())
+
+
+def _diff_fingerprint(diff: str) -> dict[str, Any]:
+    """GL04 (GAP-4): a cheap structural summary of a unified PR diff, JSON-round-
+    tripping so it can ride on the revise task's ``_extras`` (like Spec 16's
+    ``finding_class``). Two components:
+
+    * ``shape`` — the sorted set of ``(path, hunk-header)`` tuples, plus ``digest``
+      (a whitespace-normalized content hash), for NEAR-IDENTITY (stasis) comparison;
+    * ``hunks`` — the SIGNED hunk multiset: ``[path, '+'|'-', normalized-line]``
+      entries (repeats preserved), so a REVERT is detectable as an ancestor's
+      multiset with the signs flipped.
+
+    Empty/absent diff -> an empty fingerprint (compares as no-signal, never trips)."""
+    shape: list[list[str]] = []
+    hunks: list[list[str]] = []
+    content: list[str] = []
+    path = ""
+    for raw in (diff or "").splitlines():
+        if raw.startswith("diff --git "):
+            # `diff --git a/<p> b/<p>` — take the b/ path as the current file.
+            parts = raw.split(" b/", 1)
+            path = parts[1].strip() if len(parts) == 2 else ""
+            continue
+        if raw.startswith("+++ "):
+            p = raw[4:].strip()
+            path = p[2:] if p.startswith("b/") else p
+            continue
+        if raw.startswith("--- "):
+            continue
+        if _DIFF_HUNK_RE.match(raw):
+            shape.append([path, raw.strip()])
+            continue
+        if raw.startswith("+") or raw.startswith("-"):
+            sign = raw[0]
+            norm = _norm_diff_line(raw)
+            if not norm:
+                continue  # a pure-whitespace add/remove carries no signal
+            hunks.append([path, sign, norm])
+            content.append(f"{sign}{path}\x00{norm}")
+    digest = hashlib.sha1("\n".join(sorted(content)).encode("utf-8")).hexdigest() \
+        if content else ""
+    return {"shape": sorted(shape), "digest": digest, "hunks": sorted(hunks)}
+
+
+def _fp_hunk_counter(fp: dict[str, Any]) -> Counter:
+    """The signed hunk multiset of a fingerprint as a ``Counter`` keyed on
+    ``(path, sign, line)`` — the comparison currency for both signals."""
+    return Counter(tuple(h) for h in (fp or {}).get("hunks") or [])
+
+
+def _fp_is_empty(fp: dict[str, Any]) -> bool:
+    return not (fp or {}).get("hunks")
+
+
+def _fp_stasis_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """Jaccard DISTANCE between two fingerprints' signed hunk multisets (0.0 ==
+    identical change, 1.0 == disjoint). A distance within ``diff_stasis_epsilon`` is
+    diff-stasis — the same change resubmitted. Two empty fingerprints are treated as
+    disjoint (1.0) so an empty/unreadable diff never reads as stasis."""
+    ca, cb = _fp_hunk_counter(a), _fp_hunk_counter(b)
+    if not ca or not cb:
+        return 1.0
+    inter = sum((ca & cb).values())
+    union = sum((ca | cb).values())
+    return 1.0 - (inter / union) if union else 1.0
+
+
+def _fp_revert_overlap(current: dict[str, Any], ancestor: dict[str, Any]) -> float:
+    """The fraction of ``ancestor``'s change that ``current`` UNDOES: how much of the
+    SIGN-FLIP of the ancestor's signed multiset the current diff reproduces. 1.0 ==
+    a full revert of the ancestor; a mostly-new diff grazing one old hunk stays low
+    (the real-progress lock). 0.0 when either side is empty."""
+    cur = _fp_hunk_counter(current)
+    anc = _fp_hunk_counter(ancestor)
+    if not cur or not anc:
+        return 0.0
+    flipped = Counter()
+    for (path, sign, line), n in anc.items():
+        flipped[(path, "-" if sign == "+" else "+", line)] += n
+    undone = sum((cur & flipped).values())
+    total = sum(flipped.values())
+    return (undone / total) if total else 0.0
+
+
+def _pr_lineage_fingerprints(store: LedgerStore, pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """GL04 (GAP-4): the ANCESTOR diff fingerprints of ``pr``, nearest-first — the
+    same ``pr_id`` back-link walk and cycle/self/terminal guard as
+    ``_revise_lineage_depth``, but rooted on the CURRENT PR (unambiguous) rather than
+    the rejection ``task`` (which is the reviewer task in production, the dev task in
+    the unit-test proxy — walking from the PR is correct for both).
+
+    The dev task that opened ``pr`` is itself a revise carrying the fingerprint of the
+    PR it superseded, so ``fps[0]`` is the immediately preceding lineage member's diff
+    and later entries are older ancestors. Stops at a terminal (retired) ancestor and
+    skips any ancestor with no stored fingerprint."""
+    tasks_by_id = {t.task_id: t for t in store.list_tasks()}
+    cur_task = tasks_by_id.get(pr.get("task_id", ""))
+    seen: set[str] = set()
+    fps: list[dict[str, Any]] = []
+    while cur_task is not None and getattr(cur_task, "pr_id", None):
+        fp = cur_task._extras.get("diff_fingerprint")   # fp of the PR this task supersedes
+        prev_pr_id = cur_task.pr_id
+        if not prev_pr_id or prev_pr_id in seen:  # cycle / self guard
+            break
+        seen.add(prev_pr_id)
+        prev_pr = store.get_pr(prev_pr_id)
+        if prev_pr is None or prev_pr.get("status") in (
+                "merged", "abandoned", "superseded", "blocked"):
+            break
+        if fp:
+            fps.append(fp)
+        cur_task = tasks_by_id.get(prev_pr.get("task_id", ""))
+    return fps
+
+
+def _anchor_regressed_for_head(store: LedgerStore, head: str) -> bool:
+    """GL04 (GAP-4): did GL01's anchor lock record an ``anchor_regressed`` decision
+    naming THIS PR head — a revision that flipped a green test anchor red? That is
+    oscillation by definition (artifact-level), so it feeds the diff-deadlock signal
+    directly. GL01 records the broken head as a 12-char prefix in the rationale, so
+    we match on that prefix. Best-effort — a read failure counts as no regression."""
+    head = str(head or "")
+    if not head:
+        return False
+    prefix = head[:12]
+    try:
+        for d in store.list_decisions():
+            if d.get("choice") == "anchor_regressed" and prefix in str(d.get("rationale") or ""):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _account_diff_deadlock(
+    store: LedgerStore, *, pr: dict[str, Any], task: Task,
+    findings: list[dict[str, Any]], diff: str,
+) -> bool:
+    """GL04 (GAP-4): the diff-level trip, run at the rejection seam BEFORE Spec 16's
+    depth+class check. Fingerprint the live PR diff and compare it to the lineage:
+
+    * DIFF-STASIS — within ``diff_stasis_epsilon`` of the immediately preceding
+      member (a resubmitted-essentially-the-same change); or
+    * OSCILLATION/REVERT — reproduces >= ``revert_overlap`` of the sign-flip of ANY
+      ancestor (A->B->A, even with a distinct class per hop); or
+    * an ``anchor_regressed`` decision on this head (GL01 — a green check flipped
+      red is oscillation at the artifact level).
+
+    On a trip, routes into Spec 16's EXISTING escalation (``_break_revise_chain``)
+    with a sub-detail — one blocked PR, one PM re-plan, one deduped alert, feeding
+    Item 3 like any other break. No new stop reason, no second breaker. Returns True
+    iff it broke the chain (the caller then returns without spawning a revise).
+
+    A distinct-diff-each-round lineage (a hard defect needing a fresh fix each hop)
+    trips NONE of these — the regression lock, mirroring Spec 16 Item 2's
+    distinct-class escape hatch."""
+    from .autonomy import load_policy
+    policy = load_policy(store)
+    if not getattr(policy, "diff_deadlock", True):
+        return False
+    current = _diff_fingerprint(diff)
+    depth = _revise_lineage_depth(store, task)
+    ancestors = _pr_lineage_fingerprints(store, pr)
+
+    trigger = ""
+    if _anchor_regressed_for_head(store, str(pr.get("head") or "")):
+        trigger = "a revision regressed a green test anchor (oscillation)"
+    elif not _fp_is_empty(current):
+        eps = float(getattr(policy, "diff_stasis_epsilon", 0.12))
+        overlap = float(getattr(policy, "revert_overlap", 0.7))
+        if ancestors and _fp_stasis_distance(current, ancestors[0]) <= eps:
+            trigger = ("successive revise diffs are near-identical (diff-stasis) — "
+                       "the same change resubmitted")
+        elif any(_fp_revert_overlap(current, anc) >= overlap for anc in ancestors):
+            trigger = ("this revision reverts an earlier one in the lineage "
+                       "(oscillation) — a distinct finding class each hop hid it")
+    if not trigger:
+        return False
+    _break_revise_chain(store, pr=pr, task=task, findings=findings, depth=depth,
+                        trigger=trigger)
+    return True
+
+
 def _break_revise_chain(
     store: LedgerStore, *, pr: dict[str, Any], task: Task,
-    findings: list[dict[str, Any]], depth: int,
+    findings: list[dict[str, Any]], depth: int, trigger: str = "",
 ) -> None:
-    """Spec 16 (Item 2): the revise lineage reached the cap still failing the same
-    finding class. Spawn NO further revise. Block the PR — terminal, and
-    ``_set_mergeable_if_ready`` already refuses to resurrect a ``blocked`` PR, so
-    this can never become a merge path — hand the PM ONE re-plan task (deduped per
-    lineage), record ``revise_chain_broken``, and raise one deduped alert."""
+    """Spec 16 (Item 2): the revise lineage is non-progressive — spawn NO further
+    revise. Block the PR — terminal, and ``_set_mergeable_if_ready`` already refuses
+    to resurrect a ``blocked`` PR, so this can never become a merge path — hand the PM
+    ONE re-plan task (deduped per lineage), record ``revise_chain_broken``, and raise
+    one deduped alert.
+
+    Spec 16's own trip is a repeated finding CLASS at the depth cap; GL04 (GAP-4)
+    reuses this SAME breaker for its diff-level trips (stasis / revert), passing a
+    ``trigger`` that names the diff-level reason. One breaker, one escalation — GAP-4
+    is a third trip condition, not a second breaker."""
+    why = trigger or "the same finding class kept repeating"
     store.update_pr(pr["pr_id"], status="blocked")
     reason = _reason_from_findings(findings)
     esc_title = f"revise chain broken: {pr['branch']}"
@@ -786,26 +996,26 @@ def _break_revise_chain(
                and t.state not in ("done", "dropped") for t in store.list_tasks()):
         store.add_task(
             title=esc_title, role=PM,
-            reason_summary=(reason or "revise chain hit the cap on one finding class"),
-            detail=(f"The revise chain for the PR on branch {pr['branch']} reached "
-                    f"depth {depth}, still failing the same finding class. The PR is "
-                    "blocked. Re-scope, decompose, or abandon this work — do not hand "
-                    "the same rejection back to a dev again."
-                    + (f" Repeated finding: {reason}." if reason else "")))
+            reason_summary=(reason or f"revise chain broken — {why}"),
+            detail=(f"The revise chain for the PR on branch {pr['branch']} is non-"
+                    f"progressive at depth {depth}: {why}. The PR is blocked. Re-scope, "
+                    "decompose, or abandon this work — do not hand the same rejection "
+                    "back to a dev again."
+                    + (f" Finding: {reason}." if reason else "")))
     store.record_decision(
         title=f"revise chain broken: {pr['branch']}",
         context=f"pr {pr['pr_id']}", choice="revise_chain_broken",
-        rationale=(f"revise lineage reached depth {depth} on a repeated finding "
-                   "class; blocked the PR and escalated to the PM instead of "
-                   "spawning another revise"),
-        related_task_ids=[task.task_id])
+        rationale=(f"revise lineage broke at depth {depth} — {why}; blocked the PR "
+                   "and escalated to the PM instead of spawning another revise"),
+        related_task_ids=[task.task_id],
+        extra={"trigger": ("diff_deadlock" if trigger else "finding_class")})
     try:
         from . import attention
         attention.raise_review_alert(
             store.project_id, stage="review",
             title=f"revise chain broken: {pr['branch']}",
             summary=(f"revise chain on branch {pr['branch']} broke at depth {depth} — "
-                     "the same finding class kept repeating; escalated to the PM."),
+                     f"{why}; escalated to the PM."),
             store=store)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
@@ -813,7 +1023,7 @@ def _break_revise_chain(
 
 def _handle_review_rejection(
     store: LedgerStore, workspace: Any, *, pr: dict[str, Any], task: Task,
-    findings: list[dict[str, Any]], source: str,
+    findings: list[dict[str, Any]], source: str, diff: str | None = None,
 ) -> None:
     """Spec 12-18 prep (P0.1): the single seam every "a review said no" path runs
     through — mark the PR ``changes_requested`` and queue the DEV rework.
@@ -885,6 +1095,22 @@ def _handle_review_rejection(
         _escalate_reviewer_veto(store, pr=pr, task=task, findings=findings,
                                 count=_prior_vetoes + 1)
         return
+    # GL04 (GAP-4): the diff-level breaker, checked BEFORE Spec 16's depth+class cap.
+    # An A->B->A oscillation (a distinct finding class per hop) or a near-identical
+    # resubmission slips past the class-scoped cap entirely; break it at the reverting
+    # round — the round where the signal is — rather than wasting rounds to depth 3.
+    # Only runs when the diff is available (the reviewer/PM arms thread it); a caller
+    # without it (a direct unit-test path) keeps Spec 16's class-only behaviour.
+    # Runs on BOTH the reviewer and strict-mode PM-review arms (both route here).
+    _current_fp: dict[str, Any] | None = None
+    if diff is not None:
+        try:
+            if _account_diff_deadlock(store, pr=pr, task=task, findings=findings,
+                                      diff=diff):
+                return  # broke via Spec 16's escalation; no revise spawned
+            _current_fp = _diff_fingerprint(diff)
+        except Exception:  # noqa: BLE001 — the diff signal must never break the seam
+            _current_fp = None
     # Spec 16 (Item 2): bound the revise chain. If this lineage has already been
     # revised revise_chain_limit times AND this rejection is the SAME finding class
     # the current revise was created to address, the loop is non-progressive — break
@@ -926,8 +1152,11 @@ def _handle_review_rejection(
         reason_summary=reason,
         # Spec 16 (Item 2): this revise is one hop deeper, and carries the finding
         # class it must address — so the NEXT rejection can tell a repeated class
-        # (non-progressive) from a new one (real progress).
+        # (non-progressive) from a new one (real progress). GL04 (GAP-4): it also
+        # carries the diff fingerprint of the PR it supersedes, so the next rejection
+        # can compare diffs for stasis/revert (nearest ancestor == this PR's diff).
         revise_depth=_depth + 1, finding_class=list(_new_class),
+        diff_fingerprint=_current_fp,
         detail=(f"Address {whose} on branch "
                 f"{pr['branch']} and open a new PR. The prior PR "
                 f"({pr['pr_id']}) is superseded when this lands."
@@ -5080,7 +5309,7 @@ def build_run_turn(
                 else:
                     _handle_review_rejection(
                         store, workspace, pr=pr, task=task,
-                        findings=review_findings, source="reviewer")
+                        findings=review_findings, source="reviewer", diff=diff)
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_reviewed", task=task)
 
@@ -5260,7 +5489,7 @@ def build_run_turn(
                 if not approved:
                     _handle_review_rejection(
                         store, workspace, pr=pr, task=task,
-                        findings=pm_findings, source="pm_review")
+                        findings=pm_findings, source="pm_review", diff=diff)
                 _set_mergeable_if_ready(pr["pr_id"])
                 return TurnOutcome(kind="pr_reviewed", task=task)
 
