@@ -391,7 +391,7 @@ in place.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `status` | Sidecar health + the bound project's run state (`state`, last `stop_reason`, counters). | |
+| `status` | Sidecar health + the bound project's run state (`state`, last `stop_reason`, counters). From an **unbound** directory it instead lists active projects and how to target one (see below). | |
 | `log` | Team Log narrative, colorized by role. | `--role`, `--member`, `--grep`, `--watch` |
 | `decisions` | Decision event stream (`--kind` supports globs, e.g. `pr_*`). | `--kind`, `--watch` |
 | `turns` | Per-turn transcript (role / route / outcome / tokens). | `--limit`, `--watch` |
@@ -402,6 +402,16 @@ in place.
 | `pr` | One PR's detail + worktree diff (via `delta`/pager if present). | `--id` |
 | `tokens` | Token usage rollup (by role / route / member; measured vs. estimated). | `--watch` |
 | `attention [(read)\|resolve <signal>]` ‡ | Problems + alerts (read), or resolve a signal. | `--state`, `--action`, `--suggestion-id`, `--correction-file`, `--watch`, `--yes` |
+
+**`status` from an unbound directory.** Run from a directory that is not bound to
+any project (a home dir, a scratch shell, a second terminal), `status` still
+reports sidecar health and then, instead of stopping at
+`project: (none bound)`, lists what the sidecar is actually doing: a bounded,
+run-focused slice of the projects — running first, then any needing attention,
+then the rest — capped at five with a `(+N more — errorta projects)` tail, and
+the exact next commands (`errorta open <id>` to bind here, `errorta watch` for
+the live dashboard). `errorta status --json` returns the full, unfiltered project
+list for scripting; `errorta projects` is the complete human view.
 
 ### Mid-run steering
 
