@@ -159,6 +159,57 @@ def test_terminal_bad_stop_reason_renders_in_failure_style(monkeypatch) -> None:
     assert "\x1b[32m" not in row  # cli.ok (green) is overridden
 
 
+# --------------------------------------------------------------------------- #
+# Regression lock — the BOUND render must stay byte-identical to main.
+# --------------------------------------------------------------------------- #
+
+def test_bound_render_is_byte_identical() -> None:
+    """Spec 18 is CLI-only and must not perturb the bound-status rendering.
+
+    A representative bound payload (health + a failed run with caps, backlog,
+    counters, resumable + last_error) locked to its exact string. If this drifts,
+    the unbound work leaked into the bound path.
+    """
+    payload = {
+        "project_id": "demo",
+        "health": {
+            "service": "errorta", "version": "0.1.0", "python": "3.14",
+            "build": {"commit": "abc123", "dirty": True},
+            "residency": {"mode": "local"},
+        },
+        "run": {
+            "running": False, "can_resume": True,
+            "state": {
+                "status": "failed", "stop_reason": "gate_not_improving",
+                "last_error": "boom",
+                "counters": {"iterations": 3, "model_calls": 10, "tasks_done": 2},
+            },
+            "caps": {
+                "max_iterations": 40, "max_model_calls": None,
+                "max_parallel_workers": None, "delivery_review_round_limit": 6,
+                "defaulted": ["max_model_calls"],
+            },
+            "backlog": {"todo": 5, "dispatchable": 0},
+        },
+    }
+    expected = (
+        "sidecar: errorta v0.1.0 (python 3.14)\n"
+        "build:   abc123 (dirty)\n"
+        "residency: local\n"
+        "project: demo\n"
+        "run:     failed\n"
+        "stop:    gate_not_improving\n"
+        "         (resumable)\n"
+        "error:   boom\n"
+        "caps: iterations 40  model_calls ∞ (default)  parallel auto  delivery_rounds 6\n"
+        "todo:    5 (dispatchable: 0)\n"
+        "  iterations    3\n"
+        "  model_calls  10\n"
+        "  tasks_done    2"
+    )
+    assert render_status(payload, Verbosity()) == expected
+
+
 def test_json_mode_returns_full_unfiltered_list(make_ctx) -> None:
     items = [{"id": "a", "list_status": "running", "list_status_reason": "live_run",
               "north_star": "ship"}]
