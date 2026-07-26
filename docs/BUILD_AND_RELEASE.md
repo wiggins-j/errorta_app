@@ -56,8 +56,11 @@ target, and **does not commit or tag** — you review and commit the bump yourse
 Two gates stop drift from shipping:
 
 - `python/tests/test_version_identity.py` fails if the three disagree;
-- **`release-cli.sh`'s preflight `die`s on drift** — on `--check`, on `--dry-run`,
-  and on a real build. `0.1.0-alpha.11` shipped before this gate existed: the
+- **`release-cli.sh` refuses to build on drift** — `preflight()` gates `--check`,
+  and a separate `version identity` step (which runs *before* pyinstaller) gates
+  `--dry-run` and real builds. A `--version` override that disagrees with the
+  declared version is refused too, unless you pass `--allow-version-mismatch`.
+  `0.1.0-alpha.11` shipped before this gate existed: the
   binary self-reported `0.1.0-alpha.10`, and an operator reasonably concluded
   their `brew upgrade` hadn't taken effect.
 

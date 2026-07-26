@@ -38,11 +38,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PYPROJECT = _REPO_ROOT / "python" / "pyproject.toml"
 _APP_INIT = _REPO_ROOT / "python" / "errorta_app" / "__init__.py"
 _CLI_INIT = _REPO_ROOT / "python" / "errorta_cli" / "__init__.py"
+_QUERY_INIT = _REPO_ROOT / "python" / "errorta_query" / "__init__.py"
 _RELEASE_CLI = _REPO_ROOT / "scripts" / "release-cli.sh"
 _BUMP_SCRIPT = _REPO_ROOT / "scripts" / "bump-version.sh"
 _CLI_SPEC = _REPO_ROOT / "python" / "cli.spec"
 
-# The exact sed program at scripts/release-cli.sh:202 — the release pipeline's
+# The exact sed program in scripts/release-cli.sh (version resolution) — the release pipeline's
 # ONLY version source. Locking the literal here means a rewrite of that line
 # fails this test instead of silently producing an unversioned release.
 _SED_PROGRAM = r's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p'
@@ -86,6 +87,16 @@ def test_three_version_declarations_are_byte_equal() -> None:
         f"self-report a version it was not released as. "
         f"Fix: {_FIX} — e.g. `bash scripts/bump-version.sh {canonical}`."
     )
+    # errorta_query ships in the same wheel/binary (pyproject `include =
+    # ["errorta_*"]`). Nothing reads its literal today — which is exactly why it
+    # silently drifted to alpha.10 while the others moved; lock it before some
+    # future health payload starts reporting it.
+    qry = _first_decl(_QUERY_INIT, "__version__")
+    assert qry == canonical, (
+        f"VERSION DRIFT: python/errorta_query/__init__.py says {qry!r} but "
+        f"python/pyproject.toml says {canonical!r}. It ships in the same "
+        f"binary. Fix: {_FIX} — e.g. `bash scripts/bump-version.sh {canonical}`."
+    )
 
 
 def test_imported_dunder_versions_match_the_source_literals() -> None:
@@ -105,7 +116,7 @@ def test_imported_dunder_versions_match_the_source_literals() -> None:
 
 
 def test_release_cli_sed_program_is_unchanged() -> None:
-    """release-cli.sh:202 still carries the exact regex this test replicates."""
+    """release-cli.sh still carries the exact regex this test replicates."""
     text = _RELEASE_CLI.read_text(encoding="utf-8")
     assert _SED_PROGRAM in text, (
         "scripts/release-cli.sh no longer contains the expected version-extraction "

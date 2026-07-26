@@ -38,6 +38,10 @@ Options:
                     platforms' values are preserved). Omit to skip formula work.
   --push-tap        After rendering the formula, git commit + push the tap.
                     Requires --tap-dir. Omit to leave the change uncommitted.
+  --allow-version-mismatch
+                    Permit --version to differ from python/pyproject.toml. The
+                    artifact is labelled with --version while the binary
+                    self-reports the declared one. Refused without this flag.
   --skip-notarize   Skip macOS codesign + notarization (produces an ad-hoc
                     signed binary — installs+runs via brew, but a browser
                     download is Gatekeeper-blocked; auto-skipped on Linux).
@@ -66,6 +70,7 @@ TAP_DIR=""
 PUSH_TAP=0
 SKIP_NOTARIZE=0
 DRY_RUN=0
+ALLOW_VERSION_MISMATCH=0
 CHECK=0
 CHECK_ONLINE=0
 WITH_GROUNDING=0
@@ -78,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --with-grounding) WITH_GROUNDING=1; shift ;;
     --push-tap)     PUSH_TAP=1; shift ;;
     --skip-notarize) SKIP_NOTARIZE=1; shift ;;
+    --allow-version-mismatch) ALLOW_VERSION_MISMATCH=1; shift ;;
     --check)        CHECK=1; shift ;;
     --online)       CHECK_ONLINE=1; shift ;;
     --dry-run)      DRY_RUN=1; shift ;;
@@ -134,30 +140,44 @@ read_decl() { # <file> <lhs>
 # --dry-run is gated too — a dry-run that previews a mislabeled artifact is not
 # a useful dry-run.
 check_version_identity() { # [--quiet]
-  local quiet=0 v_proj v_app v_cli
+  local quiet=0 v_proj v_app v_cli v_qry
   [[ "${1:-}" == "--quiet" ]] && quiet=1
   v_proj="$(read_decl "$REPO_ROOT/python/pyproject.toml" version)"
   v_app="$(read_decl "$REPO_ROOT/python/errorta_app/__init__.py" __version__)"
   v_cli="$(read_decl "$REPO_ROOT/python/errorta_cli/__init__.py" __version__)"
+  # errorta_query ships in the same wheel/binary; nothing reads it today, which
+  # is precisely how it drifted unnoticed. Gate it like the rest.
+  v_qry="$(read_decl "$REPO_ROOT/python/errorta_query/__init__.py" __version__)"
 
-  if [[ -z "$v_proj" || -z "$v_app" || -z "$v_cli" ]]; then
-    die "could not read all three version declarations (pyproject='$v_proj' errorta_app='$v_app' errorta_cli='$v_cli')."
+  if [[ -z "$v_proj" || -z "$v_app" || -z "$v_cli" || -z "$v_qry" ]]; then
+    die "could not read all version declarations (pyproject='$v_proj' errorta_app='$v_app' errorta_cli='$v_cli' errorta_query='$v_qry')."
   fi
   # `||` is deliberate: drift means "not ALL three equal", so either mirror
   # differing is a failure. (shellcheck's SC2055 heuristic misreads this.)
   # shellcheck disable=SC2055
-  if [[ "$v_proj" != "$v_app" || "$v_proj" != "$v_cli" ]]; then
+  if [[ "$v_proj" != "$v_app" || "$v_proj" != "$v_cli" || "$v_proj" != "$v_qry" ]]; then
     die "version identity DRIFT — the binary would self-report a version it was not released as:
     python/pyproject.toml          = $v_proj   (names the tag, tarball, formula)
     python/errorta_app/__init__.py = $v_app   (/healthz, /version)
     python/errorta_cli/__init__.py = $v_cli   (errorta status)
+    python/errorta_query/__init__.py = $v_qry   (ships in the same binary)
   Fix with:  bash scripts/bump-version.sh $v_proj"
   fi
-  [[ $quiet -eq 1 ]] || log "OK    version identity: $v_proj (pyproject == errorta_app == errorta_cli)"
-  # An explicit --version override does not make the three disagree, but it does
-  # decouple the artifact name from what the binary self-reports. Say so.
+  [[ $quiet -eq 1 ]] || log "OK    version identity: $v_proj (pyproject == errorta_app == errorta_cli == errorta_query)"
+  # An explicit --version override does not make the three declarations disagree,
+  # but it DOES decouple the artifact label from what the binary self-reports —
+  # which is precisely the alpha.11 defect this spec exists to make impossible
+  # (tag/tarball/formula say X, /healthz says Y). Refuse it by default; an
+  # operator who genuinely wants a relabelled artifact must say so explicitly.
+  if [[ -n "${VERSION:-}" && "$VERSION" != "$v_proj" && ${ALLOW_VERSION_MISMATCH:-0} -ne 1 ]]; then
+    die "--version override '$VERSION' != declared '$v_proj'.
+  The artifact would be labelled '$VERSION' while the binary self-reports '$v_proj'
+  — the exact drift this gate exists to prevent.
+  Fix with:  bash scripts/bump-version.sh $VERSION
+  Or, if you really want a relabelled artifact:  --allow-version-mismatch"
+  fi
   if [[ -n "${VERSION:-}" && "$VERSION" != "$v_proj" ]]; then
-    log "WARN  --version override '$VERSION' != declared '$v_proj' — the artifact will be labelled '$VERSION' but the binary self-reports '$v_proj'."
+    log "WARN  --version override '$VERSION' != declared '$v_proj' (--allow-version-mismatch) — the binary will self-report '$v_proj'."
   fi
 }
 
@@ -331,7 +351,13 @@ cleanup_build_info() {
 
 stamp_build_info() {
   local commit dirty built_at
-  commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  # No `|| echo unknown` fallback: `_from_bundle()` only requires a TRUTHY commit,
+  # so the literal "unknown" would win tier 1 and stamp authoritative-looking
+  # nonsense (app-doctor then reports STALE instead of "no stamp"). A release
+  # script with no git has no business claiming provenance.
+  commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+    || die "cannot read the git commit for build provenance (not a checkout?)."
+  [[ -n "$commit" ]] || die "git rev-parse HEAD returned empty — cannot stamp provenance."
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   dirty=false
   if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then
@@ -351,7 +377,11 @@ if [[ $DRY_RUN -eq 1 ]]; then
   log "[dry-run] would stamp python/errorta_app/_build_info.json {commit,built_at,dirty,source:release-cli} and remove it after the build"
 else
   # Install the trap BEFORE writing, so an interrupt mid-write still cleans up.
-  trap cleanup_build_info EXIT INT TERM
+  # INT/TERM must also EXIT: a bash signal handler returns to the next statement,
+  # so a bare cleanup would delete the stamp and then happily build, sign and
+  # upload a binary with no provenance — the exact thing this stamp exists for.
+  trap cleanup_build_info EXIT
+  trap 'cleanup_build_info; exit 130' INT TERM
   stamp_build_info
 fi
 

@@ -26,6 +26,10 @@ cd "$REPO_ROOT"
 PYPROJECT="$REPO_ROOT/python/pyproject.toml"
 APP_INIT="$REPO_ROOT/python/errorta_app/__init__.py"
 CLI_INIT="$REPO_ROOT/python/errorta_cli/__init__.py"
+# errorta_query ships in the same wheel/binary (pyproject include = ["errorta_*"]),
+# so its literal is a mirror too — nothing reads it today, but an unlocked
+# version literal is exactly how this drift class starts.
+QUERY_INIT="$REPO_ROOT/python/errorta_query/__init__.py"
 
 usage() {
   cat <<'EOF'
@@ -35,6 +39,7 @@ Rewrites the three Python version declarations to <version>:
   python/pyproject.toml            version = "..."      (canonical)
   python/errorta_app/__init__.py   __version__ = "..."  (mirror)
   python/errorta_cli/__init__.py   __version__ = "..."  (mirror)
+  python/errorta_query/__init__.py __version__ = "..."  (mirror)
 
 <version> must look like  X.Y.Z  or  X.Y.Z-(alpha|beta|rc).N   e.g. 0.1.0-alpha.12
 
@@ -73,11 +78,11 @@ if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]
   die "malformed version '$NEW_VERSION' — expected X.Y.Z or X.Y.Z-(alpha|beta|rc).N (e.g. 0.1.0-alpha.12)."
 fi
 
-for f in "$PYPROJECT" "$APP_INIT" "$CLI_INIT"; do
+for f in "$PYPROJECT" "$APP_INIT" "$CLI_INIT" "$QUERY_INIT"; do
   [[ -f "$f" ]] || die "missing declaration file: ${f#"$REPO_ROOT"/}"
 done
 
-# --- read the current values (same regex release-cli.sh:202 uses) ---
+# --- read the current values (same regex the version-resolution sed in release-cli.sh uses) ---
 read_decl() { # <file> <lhs>  -> the first  <lhs> = "value"  literal
   sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
 }
@@ -85,17 +90,20 @@ read_decl() { # <file> <lhs>  -> the first  <lhs> = "value"  literal
 CUR_PROJ="$(read_decl "$PYPROJECT" version)"
 CUR_APP="$(read_decl "$APP_INIT" __version__)"
 CUR_CLI="$(read_decl "$CLI_INIT" __version__)"
+CUR_QRY="$(read_decl "$QUERY_INIT" __version__)"
 
 [[ -n "$CUR_PROJ" ]] || die "could not read version = \"...\" from python/pyproject.toml."
 [[ -n "$CUR_APP"  ]] || die "could not read __version__ = \"...\" from python/errorta_app/__init__.py."
 [[ -n "$CUR_CLI"  ]] || die "could not read __version__ = \"...\" from python/errorta_cli/__init__.py."
+[[ -n "$CUR_QRY"  ]] || die "could not read __version__ = \"...\" from python/errorta_query/__init__.py."
 
-log "current: pyproject=$CUR_PROJ  errorta_app=$CUR_APP  errorta_cli=$CUR_CLI"
+log "current: pyproject=$CUR_PROJ  errorta_app=$CUR_APP  errorta_cli=$CUR_CLI  errorta_query=$CUR_QRY"
 log "target:  $NEW_VERSION"
 
 # Idempotent: already at the target with all three agreeing -> nothing to do.
-if [[ "$CUR_PROJ" == "$NEW_VERSION" && "$CUR_APP" == "$NEW_VERSION" && "$CUR_CLI" == "$NEW_VERSION" ]]; then
-  log "already at $NEW_VERSION in all three declarations — no changes."
+if [[ "$CUR_PROJ" == "$NEW_VERSION" && "$CUR_APP" == "$NEW_VERSION" \
+      && "$CUR_CLI" == "$NEW_VERSION" && "$CUR_QRY" == "$NEW_VERSION" ]]; then
+  log "already at $NEW_VERSION in all declarations — no changes."
   exit 0
 fi
 
@@ -135,11 +143,12 @@ rewrite() { # <file> <lhs> <slot>
 rewrite "$PYPROJECT" version     pyproject
 rewrite "$APP_INIT"  __version__ app_init
 rewrite "$CLI_INIT"  __version__ cli_init
+rewrite "$QUERY_INIT" __version__ query_init
 
 # --- verify the rewrite actually landed, then show the diff ---
 echo
 for triple in "$PYPROJECT|version|pyproject" "$APP_INIT|__version__|app_init" \
-              "$CLI_INIT|__version__|cli_init"; do
+              "$CLI_INIT|__version__|cli_init" "$QUERY_INIT|__version__|query_init"; do
   IFS='|' read -r f lhs slot <<<"$triple"
   got="$(read_decl "$f" "$lhs")"
   [[ "$got" == "$NEW_VERSION" ]] \
