@@ -75,6 +75,32 @@ class PMAssist:
 
 
 @dataclass(frozen=True)
+class LastWord:
+    """SPEC-23: give the PM ONE bounded turn before a HEURISTIC stop lands.
+
+    A detector computes between turns from the ledger alone and its only
+    vocabulary is ``None`` or a terminal stop — so a run that is working can be
+    ended by a detector whose own evidence is wrong, and nothing is in a position
+    to say otherwise. This action is that position: the loop constructs it at the
+    moment a heuristic stop WOULD have been returned and asks the PM to propose a
+    concrete next action or confirm the halt.
+
+    Deliberately NOT returned by ``decide_next`` — it is never scheduled, only
+    injected by ``autonomy._intervene`` at a quiescent point, and it rides the
+    existing ``run_turn`` seam (no new member, no new role, no new schema).
+
+    * ``member_id`` — the PM.
+    * ``detector``  — the heuristic ``stop_reason`` that is about to fire.
+    * ``evidence``  — what that detector observed, its threshold, and for how
+      long (the :class:`~errorta_council.coding.autonomy.DetectorEvidence` text
+      that the attention Problem is raised with, so both say the same thing).
+    """
+    member_id: str
+    detector: str
+    evidence: str = ""
+
+
+@dataclass(frozen=True)
 class Merge:
     """F087-17: give the PM a turn to merge an approved+green PR into master."""
     member_id: str
@@ -121,6 +147,7 @@ CodingAction = (
     Assign
     | Plan
     | PMAssist
+    | LastWord
     | Merge
     | GateRun
     | GovernancePlan

@@ -69,6 +69,7 @@ from .topology import (
     GovernanceMaterialize,
     GovernancePlan,
     GovernanceReview,
+    LastWord,
     Merge,
     Plan,
     PMAssist,
@@ -3009,6 +3010,55 @@ def _pm_assist_prompt(store: LedgerStore, task: Task) -> str:
     )
 
 
+def _last_word_prompt(store: LedgerStore, action: Any) -> str:
+    """SPEC-23 (Item 2) — the intervention prompt: the run is about to stop on a
+    HEURISTIC detector; propose a concrete next action, or confirm the halt.
+
+    Deliberately mirrors ``_pm_assist_prompt`` above, and just as deliberately asks
+    a DIFFERENT question. PM assist asks a TASK question ("split or re-scope this
+    task") and is structurally forbidden from doing anything else. This asks a RUN
+    question, and its answer may legitimately be to abandon a task entirely and
+    attack the North Star another way — a move rung 4 cannot make. That is why the
+    two compose instead of duplicating each other.
+
+    Carries three things and nothing else: the detector and its threshold, the
+    evidence the detector actually computed (the same string its attention Problem
+    was raised with — the last word is that string's first real consumer), and the
+    demand, stated as a binary. Plus the standing orientation so the proposal is
+    grounded.
+
+    SPEC-24 will render live detector state into every PM prompt; when it lands,
+    this prompt should CALL that renderer rather than growing its own copy."""
+    detector = str(getattr(action, "detector", "") or "the run")
+    evidence = str(getattr(action, "evidence", "") or detector)
+    return (
+        f"{_skill_line(PM)} You are the PM of an autonomous coding team, and this "
+        "run is about to STOP.\n"
+        f"Project state: {_orientation_text(store)}\n"
+        f"A guard called `{detector}` has tripped: {evidence}.\n"
+        "That guard is a heuristic computed between turns from the ledger alone — "
+        "it can be wrong, and it cannot see what you know. This is your last word "
+        "before the run ends.\n"
+        "Answer ONE of two ways.\n"
+        "(1) PROPOSE A CONCRETE NEXT ACTION — a different route to the North Star, "
+        "not a restatement of work already queued. Reply with a coding_turn.v1 PM "
+        "plan envelope carrying at least one NEW dev task; each task needs explicit "
+        "acceptance criteria and the exact files/interfaces in scope. A duplicate of "
+        "an already-open task is rejected and reads as (2), so change the approach "
+        "rather than repeating it. If the work really is finished, set done=true "
+        "with a non-empty completion_summary — it is checked against the open "
+        "backlog like any other completion claim.\n"
+        "(2) CONFIRM THE HALT — if stopping is genuinely right, say so in a decision "
+        "and add no tasks. The run will end with the reason above and your rationale "
+        "on the record.\n"
+        "Reply with ONLY a coding_turn.v1 PM envelope: "
+        '{"schema_version":"coding_turn.v1","role":"pm","intent":'
+        '{"kind":"plan","done":false,"tasks":[{"title":"...",'
+        '"role":"dev","detail":"Acceptance criteria... Files...",'
+        '"depends_on":[]}],"decisions":[{"title":"...","rationale":"..."}]}}.'
+    )
+
+
 def _pm_turn_made_progress(
     intent: Any, created: list[Task],
     prior_decision_titles: Optional[set[str]] = None,
@@ -5446,6 +5496,101 @@ def build_run_turn(
             )
             return TurnOutcome(kind="planned", made_progress=False)
 
+        if isinstance(action, LastWord):
+            # SPEC-23 (Item 2) — the last word. The loop injected this turn at the
+            # exact moment a HEURISTIC stop would have been returned; the PM is
+            # asked to propose a concrete next action or confirm the halt.
+            #
+            # The runner CLASSIFIES the answer because only it can see what
+            # survived materialization: "a task the engine can act on" (not "a
+            # response arrived") is the reset condition, or the intervention is a
+            # licence to loop. The verdict rides back on `TurnOutcome.last_word`;
+            # `autonomy._intervene` applies the reset map and records the outcome.
+            member = _member(PM, action.member_id)
+            record_turn_skill(store, member_id=member.get("id", "m-pm"),
+                              task_id="last-word", role=PM)
+            parsed = _parse_member_turn(
+                PM, None, member, _last_word_prompt(store, action),
+                context=f"last_word:{action.detector}")
+            if isinstance(parsed, TurnParseError):
+                # UNHEARD, never agreement. This is the Spec 21 lesson in its
+                # purest form — repeated schema rejection was read as PM idleness
+                # and terminated a healthy run. The run still stops (the original
+                # reason, unchanged), but the record must say the PM was not heard
+                # rather than that it agreed.
+                store.record_decision(
+                    title="pm last word rejected",
+                    context=f"last_word:{action.detector}",
+                    choice="pm_turn_rejected",
+                    rationale=f"{parsed.code.value}: {parsed.detail}")
+                return TurnOutcome(
+                    kind="noop", made_progress=False,
+                    reason=f"last_word_unparsed: {parsed.code.value}",
+                    last_word={
+                        "outcome": "unparsed",
+                        "rationale": f"{parsed.code.value}: {parsed.detail}"})
+            intent = parsed.intent
+            if isinstance(intent, BlockedIntent):
+                # Spec 25's typed "I am blocked". An honest answer, and an honest
+                # ABSTENTION: the PM has no next action to propose, so the halt
+                # stands — with its reason on the record instead of nothing.
+                reason = _blocked_reason_text(intent)
+                store.record_decision(
+                    title="pm last word blocked",
+                    context=f"last_word:{action.detector}", choice="blocked",
+                    rationale=reason)
+                _record_capability_ask(store, intent, role=PM, task=None,
+                                       context=f"last_word:{action.detector}")
+                return TurnOutcome(
+                    kind="noop", made_progress=False,
+                    last_word={"outcome": "confirmed",
+                               "rationale": f"the PM answered blocked — {reason}"})
+            for dec in intent.decisions:
+                store.record_decision(
+                    title=dec.title, context="pm_decision",
+                    choice="pm_decision", rationale=dec.rationale)
+            said = "; ".join(
+                f"{d.title}: {d.rationale}".strip(": ") for d in intent.decisions)
+            if intent.done:
+                # No special authority to declare victory: the F128 completion gate
+                # judges this claim exactly as it judges any other.
+                open_items = pending_completion_work(store)
+                if open_items:
+                    store.record_decision(
+                        title="last word completion refused: open work remains",
+                        context=f"last_word:{action.detector}",
+                        choice="pm_completion_refused",
+                        rationale=summarize_open_items(open_items))
+                    return TurnOutcome(
+                        kind="noop", made_progress=False,
+                        last_word={
+                            "outcome": "confirmed",
+                            "rationale": ("the PM claimed done, but open work "
+                                          "remains: "
+                                          f"{summarize_open_items(open_items)}")})
+                store.set_completion(intent.completion_summary)
+                return TurnOutcome(
+                    kind="project_done",
+                    last_word={"outcome": "done",
+                               "rationale": intent.completion_summary})
+            created = _materialize_pm_tasks(store, intent)
+            if created:
+                return TurnOutcome(
+                    kind="planned", made_progress=True,
+                    last_word={
+                        "outcome": "accepted",
+                        "rationale": said or "proposed new work",
+                        "task_ids": [t.task_id for t in created]})
+            # Decisions only, or every proposed task rejected as a duplicate /
+            # unexecutable. Nothing materialized, so there is nothing for the loop
+            # to act on — an abstention, and the halt stands. Deliberately STRICTER
+            # than Spec 21's "a decisions-only turn is legal" rule: legal for a
+            # routine turn, not sufficient to reset a detector window.
+            return TurnOutcome(
+                kind="planned", made_progress=False,
+                last_word={"outcome": "confirmed",
+                           "rationale": said or "the PM proposed nothing new"})
+
         if isinstance(action, Plan):
             if _redispatch_conflicted_prs(store, workspace):
                 return TurnOutcome(kind="planned", model_calls=0)
@@ -6482,6 +6627,10 @@ def build_run_turn(
             role, task_id = PM, "plan"
         elif isinstance(action, PMAssist):
             role, task_id = PM, action.task_id
+        elif isinstance(action, LastWord):
+            # SPEC-23: attributed to the PM, keyed by the detector that asked, so
+            # the transcript shows WHY the harness spent this turn.
+            role, task_id = PM, f"last-word:{action.detector}"
         elif isinstance(action, GovernancePlan):
             role, task_id = PM, f"governance:{action.phase}"
         elif isinstance(action, GovernanceReview):
@@ -7108,6 +7257,15 @@ class CodingRunner:
         # every 'doing' task is a safe-to-requeue orphan.
         from .run_recovery import reclaim_stranded_inflight
         reclaim_stranded_inflight(self.store, reason="run_start")
+        # SPEC-23 (Item 6): the last-word SNAPSHOT (which detector was asked, what
+        # it answered) describes one run and must not be read as this run's. A
+        # FRESH start clears it; a resume/continue — the only caller that passes
+        # `counters` — keeps it, because the budget it belongs to is carried too.
+        if counters is None:
+            try:
+                self.store.set_run_state(last_words=None)
+            except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
+                pass
         # F087-15 M2: persist a worktree fingerprint so resume can verify the
         # worktree wasn't deleted/reset between interruption and resume.
         if self.workspace is not None:

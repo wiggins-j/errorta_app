@@ -148,7 +148,15 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
 
 1. A run ends `definition_of_done` with a playable artifact (SPEC-28 asserts it).
 2. No run ends on a heuristic stop without a recorded PM intervention that was
-   given a real chance to continue.
+   given a real chance to continue. **(SPEC-23 — landed.** Every heuristic stop
+   now routes through `autonomy._intervene` at all four loop hook sites, and each
+   intervention leaves two decisions plus a `run_state.last_words` snapshot the
+   CLI renders. Bounded at `last_word_limit` (2) per run, persisted across
+   `errorta continue`, one turn per detector unless a PR merged in between —
+   worst case 2 extra iterations and 2 extra model calls. What it is *not* yet: an
+   unparsed intervention still cannot be retried, and a PM whose correct answer is
+   "wait for the in-flight PRs" reads as an abstention until a no-op-with-reason
+   plan shape exists.)
 3. Any `500` or turn rejection leaves a traceback and a correlation id.
 4. The topology advisory either resolves or the role is not seated. **(SPEC-26 —
    landed, and mechanically checkable.** Two honest readings, recorded rather than

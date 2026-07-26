@@ -728,6 +728,24 @@ the PM re-plan didn't recover; the run stops instead of looping to the iteration
 cap). The unknown-reason default is also a failure (fail-closed), so a new engine
 stop reason the CLI hasn't learned still gates CI correctly.
 
+**A second summary line (Spec 23).** Most failure-class reasons are *heuristics* —
+a detector's opinion that the run is stuck. Before one lands, the engine gives the
+PM one bounded turn to propose a different approach or confirm the halt, so a
+terminal summary may carry an extra line saying what the PM answered. No stop
+reason and no exit code changes: a run that was asked and stopped anyway exits
+exactly as it did before. The two wordings mean different things and the
+distinction matters when you are reading a failed pipeline:
+
+* *"the PM was asked about `X` and confirmed the halt: …"* — the team agrees the
+  run should stop, and its reasoning is in the line.
+* *"the PM was asked about `X` and could not be read — the halt was NOT
+  confirmed"* — the intervention turn failed to parse. Nobody agreed to anything;
+  the run stopped on the detector's evidence alone, and this is usually worth
+  investigating (`errorta log` shows the rejected turn).
+
+A run with `last_word_limit: 0`, or one that never tripped a heuristic stop,
+prints exactly what it printed before.
+
 ### One sidecar, one owner
 
 The CLI and the desktop app share the **same store on disk**, but exactly **one

@@ -231,7 +231,8 @@ burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
 result instead of looping to budget), `hot_file_threshold` (2) /
 `hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
 F159 hot-file serializer, `revise_chain_limit` (3) / `revise_livelock_limit` (5,
-Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below).
+Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below),
+`last_word_limit` (2, Spec 23 — see below).
 
 **Spec 16 — revise chains are bounded.** A revise chain that keeps getting the
 **same** finding class is non-progressive churn. After `revise_chain_limit` (3)
@@ -243,6 +244,33 @@ it. A *different* finding each round is real progress and is never broken. If th
 re-plan also fails to make any merge progress for `revise_livelock_limit` (5)
 iterations, the run stops with `revise_livelock` (a failure-class stop reason).
 Set either knob to `0` to disable it.
+
+**Spec 23 — `last_word_limit`, and what a last-word turn is.** The engine can end
+a run about a dozen ways and only a couple of them mean "the work is done" or "a
+human/budget said stop". Everything else — `no_progress`, `not_converging`,
+`gate_not_improving`, `planning_churn`, `dispatch_wedged`, `revise_livelock`,
+`delivery_review_stalled`, an exhausted F127 ladder — is a **heuristic**: a
+detector's opinion, computed between turns from the ledger alone, which can be
+wrong. Before one of those lands, the PM gets **one bounded turn** on it.
+
+That turn is a **last word**, and the PM will see it as a prompt naming the guard
+that tripped, the evidence it computed, and a binary demand: *propose a concrete
+next action, or confirm the halt.* Two answers keep the run alive — a plan
+carrying at least one task that actually **materializes** (a duplicate or an
+unexecutable proposal materializes nothing and reads as an abstention), or a
+`done` claim, which is then judged by the ordinary completion gate like any other.
+Anything else — decisions only, a `blocked` turn, or a turn that could not be
+parsed — stops the run with **exactly** the stop reason it would have had anyway,
+plus the PM's rationale on the ledger. An unparsed turn is recorded as *not
+heard*, never as agreement.
+
+Hard stops are never intervened on: `budget_exhausted`, `cancelled`,
+`checkpoint`, `hard_blocker`, `member_unhealthy`. Bounded three ways:
+`last_word_limit` (2) per run — persisted, so it does not re-arm on
+`errorta continue` — one turn per detector unless a PR merges in between, and the
+turn itself is excluded from detector accounting so an intervention can never
+trigger another. Worst case: 2 extra iterations and 2 extra model calls.
+`last_word_limit=0` disables the whole mechanism.
 
 **Spec 11 — `dev_repo_read`.** When `true` (opt-in; default `false`) a DEV turn can READ its task
 worktree in-turn: the `claude_cli` vendor runs with cwd set to the worktree and a
@@ -523,9 +551,10 @@ and FastAPI routers. Update the prose and this contract together.
 
 > **Spec 22-28 batch, prep PR (P0.1).** Five more `autonomy_defaults` keys below
 > are landed ahead of their features and have **no consumers yet** — setting them
-> changes nothing until the matching spec merges: `last_word_limit` (Spec 23),
+> changes nothing until the matching spec merges:
 > `governance_proximity` (Spec 24), `blocked_turn_limit` (Spec 25),
-> `capability_overrides` (Spec 26), `narrow_limit` (Spec 27). Same reason as
+> `capability_overrides` (Spec 26), `narrow_limit` (Spec 27).
+> (`last_word_limit` is now **live** — see "Spec 23" below.) Same reason as
 > above: five branches build in parallel without racing `CodingAutonomyPolicy`.
 > Each knob's **disable value** — `0` for the ints, `0.0` for
 > `governance_proximity`, `{}` for `capability_overrides` — is required to

@@ -29,6 +29,7 @@ from .topology import (
     Complete,
     GateRun,
     GovernanceMaterialize,
+    LastWord,
     Merge,
     Plan,
     PMAssist,
@@ -53,6 +54,70 @@ GATE_NOT_IMPROVING = "gate_not_improving"      # Spec 04: acceptance gate result
 PLANNING_CHURN = "planning_churn"              # Spec 07: PM-only plan turns, no worker
 DISPATCH_WEDGED = "dispatch_wedged"            # Spec 10: large todo backlog, nothing dispatchable
 REVISE_LIVELOCK = "revise_livelock"            # Spec 16: broken revise lineage, no recovery
+
+# --- SPEC-23 (Item 1): the stop-reason taxonomy, HARD vs HEURISTIC ----------- #
+#
+# An autonomous run should end for exactly two reasons: the work is DONE, or a
+# human/budget said STOP. Every other condition is a detector's OPINION that the
+# run is stuck — a signal to change strategy, not to terminate. The split below is
+# the spec's table, in code, and `test_spec23_continue_by_default.py` locks it as an
+# exact partition of the constants above, so a new stop reason added without a
+# class fails CI instead of silently defaulting to "terminate".
+#
+# NO string values change here and no reason is added or removed, so the CLI's
+# fail-closed allowlist (`runstream.FAILURE_STOP_REASONS` / `SUCCESS_STOP_REASONS`)
+# and its own partition lock need zero edits (batch regression lock 1).
+
+# Terminate immediately, exactly as today. An intervention here would either cost
+# a model call the run does not have (budget), argue with a human (cancel,
+# checkpoint), or ask the PM to propose a strategy for something that is not a
+# strategy problem (a member declared a hard blocker; a provider cannot
+# authenticate).
+HARD_STOP_REASONS = frozenset({
+    BUDGET_EXHAUSTED,   # the budget said stop — an intervention costs what it lacks
+    CANCELLED,          # a human said stop
+    CHECKPOINT,         # the operator's own cadence knob, resumable via `continue`
+    HARD_BLOCKER,       # a MEMBER declared it — the team is asking for a human
+    MEMBER_UNHEALTHY,   # after the F120 classify-aware cap — not a strategy problem
+})
+
+# A detector's opinion, computed between turns from the ledger alone. These are
+# what SPEC-23 hands to the PM before they land.
+HEURISTIC_STOP_REASONS = frozenset({
+    NO_PROGRESS,               # pm_idle_limit consecutive non-progressing PM turns
+    NOT_CONVERGING,            # progress fingerprint unchanged for N iterations
+    GATE_NOT_IMPROVING,        # gate score not strictly improving for N iterations
+    PLANNING_CHURN,            # N PM plan turns with no worker turn
+    DISPATCH_WEDGED,           # a big todo backlog with nothing dispatchable
+    REVISE_LIVELOCK,           # broken lineage + no merge for N iterations
+    DELIVERY_REVIEW_STALLED,   # N delivery rejections
+    WORKER_UNPRODUCTIVE,       # but only the LADDER-EXHAUSTED return (see below)
+    COMPLETION_BLOCKED,        # HEURISTIC, but ALREADY intervened — see below
+})
+
+# The DONE outcome, plus the one heuristic reason this spec deliberately defers.
+# `no_actionable_work` comes from `decide_next` returning `Complete`, not from a
+# detector window, so there is no window to reset — and it is CLI SUCCESS-class,
+# so intervening there risks flipping an exit code. SPEC-27 owns it.
+TERMINAL_STOP_REASONS = frozenset({DEFINITION_OF_DONE, NO_ACTIONABLE_WORK})
+
+# Where `_intervene` actually fires: HEURISTIC minus `completion_blocked`.
+# F128's `_handle_completion_refused` ALREADY is a last-word loop — the PM is
+# re-prompted with the open item set between claims, `completion_refused_limit`
+# times, and its prompt shows it exactly what is open. A second intervention would
+# ask the same party the same question, so the class is recorded (above) and the
+# hook is not wired (SPEC-23 Item 4). Written as a derived set so a future reader
+# sees the decision rather than assuming an oversight.
+_INTERVENABLE_STOP_REASONS = HEURISTIC_STOP_REASONS - {COMPLETION_BLOCKED}
+
+# `_handle_unproductive` returns WORKER_UNPRODUCTIVE from two places with two
+# different meanings: the ladder was exhausted (a strategy problem — exactly what
+# the PM should re-route), and its own `except` arm (the escalation code THREW —
+# an engine fault). Asking a PM to propose a strategy for an engine bug is noise,
+# so the except arm returns this sentinel instead; the call sites map it to the
+# SAME `worker_unproductive` stop reason (no new reason) carrying
+# `detail={"engine_fault": True}`, which `_intervene` treats as HARD.
+ENGINE_FAULT_UNPRODUCTIVE = "worker_unproductive:engine_fault"
 
 # --- checkpoint cadences ----------------------------------------------------
 CADENCE_OFF = "off"
@@ -839,6 +904,17 @@ class TurnOutcome:
     # routing around a member, the other by fixing a model. Consumed only by
     # `_apply_outcome`'s PM accounting; `schema_reject_limit` bounds it.
     schema_rejected: bool = False
+    # SPEC-23 (Item 2): how the runner CLASSIFIED a last-word turn, as
+    # ``{"outcome": accepted|done|confirmed|unparsed, "rationale": str,
+    #    "task_ids": [...]}``. Set only for a ``LastWord`` action; ``None`` on every
+    # other turn, so nothing else in the loop changes shape.
+    #
+    # The runner classifies because only it can see what survived materialization —
+    # the Spec 08 dedupe gate and the Spec 15 capability lint decide whether the
+    # PM's proposal produced ROWS, and "a task materialized" (not "a response
+    # arrived") is the reset condition, or the intervention would be a licence to
+    # loop. `_intervene` reads this to apply the reset map and record the outcome.
+    last_word: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -935,6 +1011,24 @@ class LoopCounters:
     # appears (or the backlog shrinks below the floor). At `wedge_stall_limit` the
     # run stops `dispatch_wedged`.
     wedge_streak: int = 0
+    # SPEC-23 (Item 3, bound 1): how many LAST-WORD interventions this run has
+    # spent. The run-wide budget is `last_word_limit` (default 2), so the whole
+    # feature can cost at most that many extra PM turns — 2 iterations and 2 model
+    # calls against a default `max_iterations` of 200. PERSISTED (see
+    # `_WINDOW_STREAK_FIELDS`) because the budget must not silently re-arm on
+    # `errorta continue`: without that, N continues buy N*limit interventions and
+    # the bound is fiction.
+    last_words: int = 0
+    # SPEC-23 (Item 3, bound 2): `detector -> (iteration, merged_pr_count)` at that
+    # detector's last intervention. A SECOND intervention for the same detector is
+    # refused BEFORE the turn is dispatched unless the merged-PR count has risen
+    # since — the same "any merge anywhere is progress" signal
+    # `_account_revise_livelock` already trusts, so no new notion of progress. This
+    # is what makes the pathological case (a detector that keeps re-tripping because
+    # the PM's proposal did nothing) cost exactly ONE turn, not one per trip.
+    # Deliberately NOT persisted: it is a within-run routing decision, and a
+    # continue is an operator intervention that may well have changed the situation.
+    last_word_by_detector: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -1034,6 +1128,11 @@ _WINDOW_STREAK_FIELDS = {
     "last_gate_best": "last_gate_best",
     "last_broken_count": "last_broken_count",
     "last_broken_merges": "last_broken_merges",
+    # SPEC-23: the intervention budget. Not a detector window, but it rides the
+    # same seam for the same reason — its subject (this run's spent last words)
+    # outlives the process, so re-arming it on `errorta continue` would make
+    # Item 3's bound fiction: three continues would buy six interventions.
+    "last_words": "last_words",
 }
 
 # ``(iteration-anchor field, persisted elapsed key)`` — stored as
@@ -1264,6 +1363,21 @@ def _maybe_raise_monitor(ledger: Any, detector: str,
     return evidence
 
 
+def _stop_with_evidence(reason: str, c: LoopCounters,
+                        evidence: DetectorEvidence, **detail: Any) -> LoopResult:
+    """SPEC-23 — a detector's stop, CARRYING the evidence it just computed.
+
+    P0.3 turned detector evidence into a value for exactly this: without a carrier
+    the intervention prompt would re-derive the same numbers a third time and drift
+    (the SPEC-19 "four declarations, two values" shape). `detail["evidence"]` is
+    that value, JSON-safe; `_last_word_evidence` is its first consumer. Purely
+    additive — every existing `detail` key a caller passes is preserved, and the
+    stop reason is untouched (batch regression lock 1)."""
+    if isinstance(evidence, DetectorEvidence):
+        detail["evidence"] = evidence.to_dict()
+    return LoopResult(reason, c, detail=detail)
+
+
 def _account_foundation_stall(ledger: Any, c: LoopCounters,
                               policy: CodingAutonomyPolicy) -> None:
     """F139 WS-A: while the foundation is pending, count clamped iterations; at
@@ -1393,11 +1507,14 @@ def _account_convergence(ledger: Any, c: LoopCounters,
     stalled = c.iterations - c.last_progress_iter
     if stalled < limit:
         return None
-    _maybe_raise_monitor(ledger, "not_converging", DetectorEvidence(
+    # P0.3: build the evidence ONCE — the monitor Problem and SPEC-23's
+    # intervention prompt must read the same object, not two re-derivations.
+    evidence = DetectorEvidence(
         detector="not_converging",
         text="no merged progress, PR transition, or ladder activity",
-        value=stalled, threshold=limit))
-    return LoopResult(NOT_CONVERGING, c)
+        value=stalled, threshold=limit)
+    _maybe_raise_monitor(ledger, "not_converging", evidence)
+    return _stop_with_evidence(NOT_CONVERGING, c, evidence)
 
 
 def _account_gate_stall(ledger: Any, c: LoopCounters,
@@ -1443,12 +1560,13 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
     # improve — the run should be ended by the definition of done, not by this.
     if not _gate_has_failure(ledger):
         return None
-    _maybe_raise_monitor(ledger, "gate_not_improving", DetectorEvidence(
+    evidence = DetectorEvidence(
         detector="gate_not_improving",
         text=(f"acceptance gate has not improved for {policy.gate_stall_limit} "
               f"iterations (score={score})"),
-        value=stalled, threshold=policy.gate_stall_limit))
-    return LoopResult(GATE_NOT_IMPROVING, c)
+        value=stalled, threshold=policy.gate_stall_limit)
+    _maybe_raise_monitor(ledger, "gate_not_improving", evidence)
+    return _stop_with_evidence(GATE_NOT_IMPROVING, c, evidence)
 
 
 def _gate_has_failure(ledger: Any) -> bool:
@@ -1651,12 +1769,13 @@ def _account_revise_livelock(ledger: Any, c: LoopCounters,
     stalled = c.iterations - c.last_broken_iter
     if stalled < policy.revise_livelock_limit:
         return None
-    _maybe_raise_monitor(ledger, "revise_livelock", DetectorEvidence(
+    evidence = DetectorEvidence(
         detector="revise_livelock",
         text=(f"{broken} revise lineage(s) broke and the run has made no merge "
               f"progress for {policy.revise_livelock_limit} iterations"),
-        value=stalled, threshold=policy.revise_livelock_limit))
-    return LoopResult(REVISE_LIVELOCK, c)
+        value=stalled, threshold=policy.revise_livelock_limit)
+    _maybe_raise_monitor(ledger, "revise_livelock", evidence)
+    return _stop_with_evidence(REVISE_LIVELOCK, c, evidence)
 
 
 def _open_backlog_shape(ledger: Any) -> tuple[int, int]:
@@ -1705,12 +1824,13 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
     if c.plan_streak < policy.plan_streak_limit:
         return None
     depth, distinct = _open_backlog_shape(ledger)
-    _maybe_raise_monitor(ledger, "planning_churn", DetectorEvidence(
+    evidence = DetectorEvidence(
         detector="planning_churn",
         text=(f"{c.plan_streak} consecutive planning turns with no worker turn "
               f"(backlog {depth} open task(s) across {distinct} distinct title(s))"),
-        value=c.plan_streak, threshold=policy.plan_streak_limit))
-    return LoopResult(PLANNING_CHURN, c)
+        value=c.plan_streak, threshold=policy.plan_streak_limit)
+    _maybe_raise_monitor(ledger, "planning_churn", evidence)
+    return _stop_with_evidence(PLANNING_CHURN, c, evidence)
 
 
 def _dispatch_wedge_culprits(ledger: Any, todo: list[Task]) -> str:
@@ -1811,10 +1931,11 @@ def _account_dispatch_wedge(ledger: Any, c: LoopCounters,
     if c.wedge_streak < policy.wedge_stall_limit:
         return None
     summary = _dispatch_wedge_culprits(ledger, todo)
-    _maybe_raise_monitor(ledger, "dispatch_wedged", DetectorEvidence(
+    evidence = DetectorEvidence(
         detector="dispatch_wedged", text=summary,
-        value=c.wedge_streak, threshold=policy.wedge_stall_limit))
-    return LoopResult(DISPATCH_WEDGED, c, detail={"summary": summary})
+        value=c.wedge_streak, threshold=policy.wedge_stall_limit)
+    _maybe_raise_monitor(ledger, "dispatch_wedged", evidence)
+    return _stop_with_evidence(DISPATCH_WEDGED, c, evidence, summary=summary)
 
 
 def _maybe_raise_member_health(
@@ -1919,7 +2040,18 @@ def _handle_unproductive(
     from the task and reassign (the scheduler then prefers a higher tier). When
     same-role recovery is exhausted, schedule the bounded PM-assist rung; return
     ``WORKER_UNPRODUCTIVE`` only when no PM exists or the ladder itself fails.
-    Never raises into the loop."""
+    Never raises into the loop.
+
+    SPEC-23 (Item 1 Δ note / Item 5): the two terminal returns mean DIFFERENT
+    things and must stay distinguishable. The ladder-exhausted return below is a
+    strategy problem — every rung was tried and the task is genuinely unexecutable,
+    exactly what the PM should re-route, so it is HEURISTIC and gets a last word.
+    The ``except`` arm is an ENGINE FAULT: the escalation code itself threw. Asking
+    a PM to propose a strategy for an engine bug is noise, so it returns
+    :data:`ENGINE_FAULT_UNPRODUCTIVE`, which the call sites map to the same
+    ``worker_unproductive`` stop reason (no new reason, no exit-code change)
+    carrying ``detail={"engine_fault": True}`` — and `_intervene` treats that as
+    HARD."""
     try:
         member_id = str(getattr(action, "member_id", "") or outcome.member_id or "")
         task_id = str(getattr(action, "task_id", "") or "")
@@ -2061,7 +2193,8 @@ def _handle_unproductive(
             getattr(action, "member_id", ""),
             getattr(action, "task_id", ""),
         )
-        return WORKER_UNPRODUCTIVE
+        # SPEC-23: an engine fault, NOT a run condition — stop visibly and hard.
+        return ENGINE_FAULT_UNPRODUCTIVE
 
 
 def _raise_worker_unproductive_problem(
@@ -2175,6 +2308,311 @@ def _account_member_outcome(
     return None
 
 
+# --- SPEC-23: the last word ------------------------------------------------- #
+#
+# THE WORST-CASE COST, stated numerically because the constraint governing this
+# whole batch is "do not reintroduce the 2026-07-24 forever-loop":
+#
+#   * at most ``policy.last_word_limit`` interventions per run (default 2),
+#   * each costing EXACTLY ONE PM turn -> 1 iteration + 1 model call,
+#   * => <= 2 extra iterations and <= 2 extra model calls against a default
+#     ``max_iterations`` of 200 (1%), and the budget survives `errorta continue`
+#     (``c.last_words`` is persisted), so N continues do not buy N*limit turns.
+#
+# Both costs are counted through the ORDINARY counters, so ``budget_exhausted``
+# (HARD) still dominates and can never be deferred by an intervention. Three
+# independent bounds make the feature acyclic:
+#
+#   1. the run budget above;
+#   2. same-detector-once-without-progress — a second intervention for the same
+#      detector is refused BEFORE dispatch unless a PR merged in between, so a
+#      detector that keeps re-tripping costs ONE turn, not one per trip;
+#   3. non-recursion — the intervention turn is excluded from detector accounting
+#      (`_apply_outcome`, plus the counter snapshot/restore below), so an
+#      intervention can never manufacture the condition for another intervention.
+#
+# `test_spec23_continue_by_default.py::test_worst_case_intervention_cost` asserts
+# the arithmetic; the other locks there assert each bound.
+
+_LAST_WORD_ACCEPTED = "accepted"
+_LAST_WORD_DONE = "done"
+_LAST_WORD_CONFIRMED = "confirmed"
+_LAST_WORD_UNPARSED = "unparsed"
+
+# outcome -> the decision `choice` recorded for it (Item 6). "done" rides
+# `last_word_accepted`: the PM proposed something the engine can act on, and the
+# F128 completion gate — not the last word — judges whether it sticks.
+_LAST_WORD_CHOICE = {
+    _LAST_WORD_ACCEPTED: "last_word_accepted",
+    _LAST_WORD_DONE: "last_word_accepted",
+    _LAST_WORD_CONFIRMED: "last_word_confirmed",
+    _LAST_WORD_UNPARSED: "last_word_unparsed",
+}
+
+
+def _delivery_review_evidence(c: LoopCounters,
+                              policy: CodingAutonomyPolicy) -> DetectorEvidence:
+    """F155's stop has no `_account_*` producer — it is counted inline in both
+    loops — so its evidence is built here rather than re-derived inside
+    `_intervene`. No monitor Problem is raised (there never was one for this
+    reason); this is the prompt-facing value only."""
+    return DetectorEvidence(
+        detector=DELIVERY_REVIEW_STALLED,
+        text=("the delivery review rejected the integrated head "
+              f"{c.delivery_review_rounds} time(s) in a row"),
+        value=c.delivery_review_rounds,
+        threshold=policy.delivery_review_round_limit)
+
+
+def _merged_pr_count(ledger: Any) -> int:
+    """Merged PRs so far — the progress signal bound 2 keys on. Deliberately the
+    SAME one `_account_revise_livelock` already trusts ("any merge anywhere is
+    progress"), so this introduces no new notion of progress. Guarded: an
+    unreadable ledger reports 0, which makes the bound STRICTER (no second
+    intervention), never looser."""
+    try:
+        return sum(1 for p in ledger.list_prs() if p.get("status") == "merged")
+    except Exception:  # noqa: BLE001 — a read hiccup must never break the loop
+        return 0
+
+
+def _last_word_evidence(stop: LoopResult) -> str:
+    """The detector's own evidence sentence for the intervention prompt.
+
+    Reads the value P0.3 made the detectors carry (`_stop_with_evidence`) rather
+    than re-deriving the numbers here. Falls back to the bare detector id for the
+    stops that have no `DetectorEvidence` (they are named in the loop instead)."""
+    detail = stop.detail or {}
+    ev = detail.get("evidence")
+    if not isinstance(ev, dict):
+        return str(detail.get("summary") or stop.stop_reason)
+    text = str(ev.get("text") or stop.stop_reason)
+    value, threshold = ev.get("value"), ev.get("threshold")
+    if value is not None and threshold is not None:
+        text = f"{text} [reading {value} against a threshold of {threshold}]"
+    return text
+
+
+def _reset_detector_window(c: LoopCounters, detector: str) -> None:
+    """SPEC-23 Item 2's RESET MAP — enumerated, never inferred.
+
+    Resetting the wrong counter is precisely how this becomes a silent
+    forever-loop, so each detector resets exactly the field that bounds ITS window
+    and nothing else. Note `gate_not_improving` resets the window anchor and NOT
+    ``last_gate_best``: the best score observed is a FACT, not a window, and
+    clearing it would let a run re-earn the same score forever."""
+    if detector == NO_PROGRESS:
+        c.pm_idle = 0
+    elif detector == NOT_CONVERGING:
+        c.last_progress_iter = c.iterations
+    elif detector == GATE_NOT_IMPROVING:
+        c.last_gate_iter = c.iterations
+    elif detector == PLANNING_CHURN:
+        c.plan_streak = 0
+    elif detector == DISPATCH_WEDGED:
+        c.wedge_streak = 0
+    elif detector == REVISE_LIVELOCK:
+        c.last_broken_iter = c.iterations
+    elif detector == DELIVERY_REVIEW_STALLED:
+        c.delivery_review_rounds = 0
+    # WORKER_UNPRODUCTIVE: nothing to reset — the F127 ladder already zeroed
+    # `c.unproductive_counts[key]`, and the PM's replacements are new tasks with
+    # fresh budgets of their own.
+
+
+def _record_last_word(ledger: Any, *, title: str, detector: str, choice: str,
+                      rationale: str, related: Optional[list[str]] = None,
+                      extra: Optional[dict[str, Any]] = None) -> None:
+    """One ledger decision, best-effort. An intervention that leaves no trace
+    repeats the very mistake SPEC-22 went first to fix, but a signal-store hiccup
+    must still never break the run loop."""
+    try:
+        ledger.record_decision(
+            title=title, context=f"last_word:{detector}", choice=choice,
+            rationale=rationale[:2000], related_task_ids=related or [],
+            extra=extra or {})
+    except Exception:  # noqa: BLE001 — recording must never break the run loop
+        pass
+
+
+def _publish_last_words(ledger: Any, c: LoopCounters, *, detector: str,
+                        outcome: str, rationale: str) -> None:
+    """Item 6 — the run-state snapshot the CLI's second summary line reads.
+
+    Distinct from ``counters.last_words`` (the budget, persisted at the terminal
+    writers): this carries the OUTCOME, so an operator can tell "the PM agreed"
+    from "we could not hear the PM" — a distinction the Spec 21 post-mortem shows
+    is load-bearing."""
+    try:
+        ledger.set_run_state(last_words={
+            "count": int(c.last_words),
+            "detector": detector,
+            "outcome": outcome,
+            "rationale": rationale[:2000],
+        })
+    except Exception:  # noqa: BLE001 — a run-state hiccup must never break the loop
+        pass
+
+
+def _intervene(
+    ledger: Any,
+    members: list[tuple[str, str]],
+    policy: CodingAutonomyPolicy,
+    c: LoopCounters,
+    stop: Optional[LoopResult],
+    *,
+    run_turn: RunTurn,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    rec: Optional[CodingReconciler] = None,
+    delivery_review: Optional[Callable[[Any], Any]] = None,
+) -> Optional[LoopResult]:
+    """Return ``None`` to CONTINUE the run (the PM proposed something actionable
+    and that detector's window was reset), or the :class:`LoopResult` to return
+    as-is.
+
+    Called from every site in BOTH loop chains where a heuristic stop would have
+    been returned. A HARD stop takes the first early return below and is byte-for-
+    byte unchanged — that single early return is what the hard-stop regression lock
+    asserts, parametrized over every member of :data:`HARD_STOP_REASONS`.
+
+    The run still ends with the reason the detector named: this does not make
+    stops advisory, it makes them *reviewable* by the one component placed to
+    choose a different strategy."""
+    if stop is None:
+        return None
+    # --- the hard-stop path: ONE early return, no model call, no ledger write --
+    if stop.stop_reason not in _INTERVENABLE_STOP_REASONS:
+        return stop
+    detail = stop.detail or {}
+    if detail.get("engine_fault"):
+        return stop  # the escalation code threw — an engine bug, not a strategy
+    # 0 disables the whole mechanism and restores today's trace exactly (the
+    # batch's escape hatch, and this module's `0 disables` convention).
+    if policy.last_word_limit <= 0:
+        return stop
+    if c.last_words >= policy.last_word_limit:
+        return stop
+    detector = stop.stop_reason
+    merges = _merged_pr_count(ledger)
+    prior = c.last_word_by_detector.get(detector)
+    if prior is not None and merges <= prior[1]:
+        # Bound 2: this detector already had its turn and nothing merged since, so
+        # the PM's proposal did not unstick it. Refused BEFORE the model call —
+        # "it stopped" must not be true of an implementation that dispatched a turn
+        # and ignored the answer.
+        return stop
+    # A cancel must never wait on an intervention, and the budget must never be
+    # overspent by one: both are re-checked immediately before the model call.
+    if should_cancel is not None and should_cancel():
+        return stop
+    if c.iterations >= policy.max_iterations:
+        return stop
+    if (policy.max_model_calls is not None
+            and c.model_calls >= policy.max_model_calls):
+        return stop
+    pm_ids = [mid for mid, role in members if role == PM]
+    if not pm_ids:
+        return stop  # nobody to ask (mirrors the F127 ladder's own PM guard)
+
+    evidence = _last_word_evidence(stop)
+    action = LastWord(member_id=pm_ids[0], detector=detector, evidence=evidence)
+    c.last_words += 1
+    c.last_word_by_detector[detector] = (c.iterations, merges)
+    _record_last_word(
+        ledger, title=f"last word requested: {detector}", detector=detector,
+        choice="last_word_requested", rationale=evidence,
+        extra={"detector": detector,
+               "threshold": (detail.get("evidence") or {}).get("threshold"),
+               "window_iters": (detail.get("evidence") or {}).get("value"),
+               "intervention_index": c.last_words, "merged_prs": merges})
+
+    # Bound 3 (non-recursion), belt: snapshot every counter a synthetic turn the
+    # HARNESS initiated could otherwise feed. `_apply_outcome` already excludes a
+    # LastWord planning turn; this also covers the done-claim path below, where the
+    # ordinary completion machinery runs and would touch `pm_idle`.
+    snap = (c.pm_idle, c.plan_streak, c.schema_rejects, c.false_done_streak,
+            dict(c.unproductive_counts))
+    outcome = _safe_run_turn(run_turn, action, ledger, 1)
+    c.iterations += 1
+    c.model_calls += max(0, int(outcome.model_calls))
+    c.turns_repaired += max(0, int(outcome.repairs))
+    (c.pm_idle, c.plan_streak, c.schema_rejects, c.false_done_streak) = snap[:4]
+    c.unproductive_counts = snap[4]
+
+    verdict = outcome.last_word or {}
+    kind = str(verdict.get("outcome") or _LAST_WORD_UNPARSED)
+    if kind not in _LAST_WORD_CHOICE:
+        kind = _LAST_WORD_UNPARSED
+    if _crashed(outcome):
+        # The turn itself blew up. Treated as NO ANSWER, never as agreement — see
+        # the unparsed branch below.
+        kind = _LAST_WORD_UNPARSED
+    rationale = str(verdict.get("rationale") or "")
+    task_ids = [str(t) for t in (verdict.get("task_ids") or [])]
+
+    if kind in (_LAST_WORD_ACCEPTED, _LAST_WORD_DONE):
+        _reset_detector_window(c, detector)
+        _record_last_word(
+            ledger, title=f"last word accepted: {detector}", detector=detector,
+            choice=_LAST_WORD_CHOICE[kind],
+            rationale=rationale or "the PM proposed a concrete next action",
+            related=task_ids,
+            extra={"detector": detector, "claimed_done": kind == _LAST_WORD_DONE,
+                   "intervention_index": c.last_words})
+        _publish_last_words(ledger, c, detector=detector, outcome=kind,
+                            rationale=rationale)
+        if kind == _LAST_WORD_DONE and rec is not None:
+            # Routed to the NORMAL done path: the F128 completion gate judges this
+            # claim exactly as it judges any other, and `decide_next` returns
+            # `Complete(definition_of_done)` next iteration if it sticks. The last
+            # word gets no special authority to declare victory.
+            _apply_outcome(rec, ledger, action, outcome, c, delivery_review, policy)
+            (c.pm_idle, c.plan_streak, c.schema_rejects, c.false_done_streak) = snap[:4]
+        return None  # CONTINUE
+
+    # --- the run stops, with the ORIGINAL stop_reason, byte-identical --------- #
+    if kind == _LAST_WORD_UNPARSED:
+        # THE SPEC 21 LESSON, in its purest form: an unheard PM is NOT a
+        # consenting one. Three of four PM retries in the 2026-07-26 run died on a
+        # schema rejection while the model kept re-emitting a reasonable shape, and
+        # the harness read repeated rejection as agreement-by-silence. Both the
+        # decision and the stop summary must say the PM was not heard.
+        note = rationale or "the last-word turn could not be parsed"
+        _record_last_word(
+            ledger, title=f"last word not heard: {detector}", detector=detector,
+            choice="last_word_unparsed",
+            rationale=(f"the PM was asked to propose a next action or confirm the "
+                       f"halt, and its turn could not be read ({note}); stopping "
+                       f"with the original reason {detector} — this is NOT a "
+                       f"confirmation"),
+            extra={"detector": detector, "intervention_index": c.last_words})
+    else:
+        _record_last_word(
+            ledger, title=f"last word confirmed: {detector}", detector=detector,
+            choice="last_word_confirmed",
+            rationale=(rationale or "the PM proposed nothing the engine could act "
+                       "on; the halt stands"),
+            extra={"detector": detector, "intervention_index": c.last_words})
+    _publish_last_words(ledger, c, detector=detector, outcome=kind,
+                        rationale=rationale)
+    return LoopResult(stop.stop_reason, c, detail={
+        **detail,
+        "last_word": {"detector": detector, "outcome": kind,
+                      "pm_rationale": rationale},
+    })
+
+
+def _unproductive_result(sentinel: str, c: LoopCounters, action: Any) -> LoopResult:
+    """Map `_handle_unproductive`'s return to a `LoopResult`, preserving the
+    ladder-exhausted / engine-fault distinction (SPEC-23 Item 5). The stop REASON
+    is `worker_unproductive` either way — only the detail differs, so no CLI set
+    and no exit code moves."""
+    detail: dict[str, Any] = {"task_id": getattr(action, "task_id", "")}
+    if sentinel == ENGINE_FAULT_UNPRODUCTIVE:
+        detail["engine_fault"] = True
+    return LoopResult(WORKER_UNPRODUCTIVE, c, detail=detail)
+
+
 def _run_sequential_loop(
     ledger: Any,
     members: list[tuple[str, str]],
@@ -2190,6 +2628,24 @@ def _run_sequential_loop(
     pool_members: Optional[list[tuple[str, str]]] = None,
 ) -> LoopResult:
     """The original one-action-per-iteration loop (max_parallel_workers <= 1)."""
+
+    def _last_word(stop: Optional[LoopResult]) -> Optional[LoopResult]:
+        """SPEC-23 — route a stop through the intervention hook. ``None`` back
+        means the PM proposed something actionable and the run CONTINUES; anything
+        else is the result to return as-is. Reads the enclosing ``policy``, which
+        `policy_provider` may have re-read this iteration.
+
+        Every caller answers ``None`` with ``continue``, never fall-through. That
+        is deliberate and it costs nothing: each of these sites RETURNS today, so
+        `continue` skips exactly what the return already skips — while
+        fall-through would run code the stopping path has never reached (e.g. the
+        `pm_assist_exhausted` outcome also carries ``hard_blocker``, so falling
+        through would swap `worker_unproductive` for `hard_blocker` and break
+        batch regression lock 1). The intervention IS this iteration's work."""
+        return _intervene(ledger, members, policy, c, stop, run_turn=run_turn,
+                          should_cancel=should_cancel, rec=rec,
+                          delivery_review=delivery_review)
+
     while True:
         if policy_provider is not None:
             policy = policy_provider()
@@ -2238,7 +2694,11 @@ def _run_sequential_loop(
         # no_progress / not_converging never trip — cap the rejected rounds here so
         # a persistently-failing delivery ends truthfully, not at budget_exhausted.
         if c.delivery_review_rounds >= policy.delivery_review_round_limit:
-            return LoopResult(DELIVERY_REVIEW_STALLED, c)
+            dr_stop = _last_word(_stop_with_evidence(
+                DELIVERY_REVIEW_STALLED, c, _delivery_review_evidence(c, policy)))
+            if dr_stop is not None:
+                return dr_stop
+            continue
 
         # F128: the runner refused a PM done=true claim (open work remained). The
         # PM is re-prompted next turn; if it keeps falsely claiming done, escalate
@@ -2273,16 +2733,24 @@ def _run_sequential_loop(
         if outcome.unproductive:
             up_stop = _handle_unproductive(ledger, action, outcome, c, policy, members)
             if up_stop is not None:
-                return LoopResult(up_stop, c, detail={"task_id": getattr(action, "task_id", "")})
+                # SPEC-23 Item 4: the last word is a new rung 5 on the F127 ladder —
+                # the cheap, mechanical, task-scoped rungs run first, and only a
+                # genuinely exhausted ladder asks the run-scoped question.
+                kept = _last_word(_unproductive_result(up_stop, c, action))
+                if kept is not None:
+                    return kept
+                continue
         else:
             _reset_unproductive_count(c, action, outcome)
 
         if outcome.kind == "pm_assist_exhausted":
-            return LoopResult(
-                WORKER_UNPRODUCTIVE,
-                c,
-                detail={"task_id": getattr(action, "task_id", "")},
-            )
+            # The same ladder ending by a different door — hooked identically.
+            pa_stop = _last_word(LoopResult(
+                WORKER_UNPRODUCTIVE, c,
+                detail={"task_id": getattr(action, "task_id", "")}))
+            if pa_stop is not None:
+                return pa_stop
+            continue
 
         if outcome.hard_blocker:
             _maybe_raise_monitor(ledger, "hard_blocker", DetectorEvidence(
@@ -2291,10 +2759,15 @@ def _run_sequential_loop(
 
         # PM made no progress N times in a row -> nothing left to do.
         if c.pm_idle >= policy.pm_idle_limit:
-            _maybe_raise_monitor(ledger, "no_progress", DetectorEvidence(
+            np_evidence = DetectorEvidence(
                 detector="no_progress", text="PM made no progress",
-                value=c.pm_idle, threshold=policy.pm_idle_limit))
-            return LoopResult(NO_PROGRESS, c)
+                value=c.pm_idle, threshold=policy.pm_idle_limit)
+            _maybe_raise_monitor(ledger, "no_progress", np_evidence)
+            np_stop = _last_word(
+                _stop_with_evidence(NO_PROGRESS, c, np_evidence))
+            if np_stop is not None:
+                return np_stop
+            continue
 
         # Spec 07: the PM-only pathology — plan turn after plan turn with no worker
         # ever running. Checked beside NO_PROGRESS because it is the same class of
@@ -2302,7 +2775,10 @@ def _run_sequential_loop(
         # looks productive so pm_idle never climbs.
         churn_stop = _account_planning_churn(ledger, c, policy)
         if churn_stop is not None:
-            return churn_stop
+            churn_stop = _last_word(churn_stop)
+            if churn_stop is not None:
+                return churn_stop
+            continue
 
         # F139 WS-A/WS-E: surface a stuck foundation, and stop a run where nothing
         # is moving anywhere (distinct from NO_PROGRESS, which is a PM-idle stop).
@@ -2310,13 +2786,19 @@ def _run_sequential_loop(
         _account_hot_file_freeze(ledger, c, policy)
         conv_stop = _account_convergence(ledger, c, policy)
         if conv_stop is not None:
-            return conv_stop
+            conv_stop = _last_word(conv_stop)
+            if conv_stop is not None:
+                return conv_stop
+            continue
         # Spec 04: stop a run whose acceptance gate result keeps repeating without
         # improving (the 6/12-with-a-churning-head loop). Keyed on the gate result,
         # so it catches churn that `not_converging` (progress fingerprint) misses.
         gate_stop = _account_gate_stall(ledger, c, policy)
         if gate_stop is not None:
-            return gate_stop
+            gate_stop = _last_word(gate_stop)
+            if gate_stop is not None:
+                return gate_stop
+            continue
         # GL04 (GAP-5): the run-level convergence brake — SOFT (clamp fan-out to
         # serial, releasable) and wired BEFORE Spec 16's hard livelock stop, so the
         # run gets a chance to drain before the stop lands underneath. Never returns
@@ -2325,12 +2807,18 @@ def _run_sequential_loop(
         # Spec 16: a revise-chain livelock the breaker couldn't unstick.
         livelock_stop = _account_revise_livelock(ledger, c, policy)
         if livelock_stop is not None:
-            return livelock_stop
+            livelock_stop = _last_word(livelock_stop)
+            if livelock_stop is not None:
+                return livelock_stop
+            continue
         # Spec 10: a wedged graph — a large todo backlog with nothing dispatchable —
         # named and stopped instead of silently converted into PM plan turns.
         wedge_stop = _account_dispatch_wedge(ledger, c, policy)
         if wedge_stop is not None:
-            return wedge_stop
+            wedge_stop = _last_word(wedge_stop)
+            if wedge_stop is not None:
+                return wedge_stop
+            continue
 
         # Checkpoint AFTER making progress on a unit; resume continues cleanly.
         if _checkpoint_due(policy, c, milestone):
@@ -2464,6 +2952,15 @@ def _run_concurrent_loop(
     pending_stop: Optional[LoopResult] = None
     milestone = False
 
+    def _last_word(stop: Optional[LoopResult]) -> Optional[LoopResult]:
+        """SPEC-23 — route a stop through the intervention hook (see the
+        sequential loop's twin). Wiring BOTH chains is the dead-code lock: real
+        fanned-out runs live HERE once Spec 13 lifts the foundation clamp, so a
+        hook only in the sequential path would never fire where it is needed."""
+        return _intervene(ledger, members, policy, c, stop, run_turn=run_turn,
+                          should_cancel=should_cancel, rec=rec,
+                          delivery_review=delivery_review)
+
     def _over_budget() -> bool:
         if c.iterations + len(in_flight) >= policy.max_iterations:
             return True
@@ -2594,7 +3091,20 @@ def _run_concurrent_loop(
             # --- nothing running and nothing dispatched -> terminal ---------
             if not in_flight:
                 if pending_stop is not None:
-                    return pending_stop
+                    # HOOK SITE 3 of 4 (SPEC-23 Item 5). This is the return point
+                    # that is easy to miss: nothing is running and the dispatch
+                    # phase was skipped because a stop was already staged, so a
+                    # staged `delivery_review_stalled` / `worker_unproductive`
+                    # escapes un-intervened if only the drain block below is hooked.
+                    kept = _last_word(pending_stop)
+                    if kept is not None:
+                        return kept
+                    # Accepted: clear the staged stop and re-enter dispatch with the
+                    # PM's new work. `continue` (not fall-through) is load-bearing —
+                    # falling through would reach `decide_next` and return
+                    # NO_ACTIONABLE_WORK, i.e. a DIFFERENT stop reason.
+                    pending_stop = None
+                    continue
                 action = decide_next(ledger, members, member_tiers)
                 if isinstance(action, Complete):
                     return LoopResult(action.reason, c)
@@ -2627,7 +3137,9 @@ def _run_concurrent_loop(
                 # of looping to budget_exhausted. Drain-stop like the other caps.
                 if (c.delivery_review_rounds >= policy.delivery_review_round_limit
                         and pending_stop is None):
-                    pending_stop = LoopResult(DELIVERY_REVIEW_STALLED, c)
+                    pending_stop = _stop_with_evidence(
+                        DELIVERY_REVIEW_STALLED, c,
+                        _delivery_review_evidence(c, policy))
                 # F128: a refused PM done-claim escalates to a blocking
                 # completion_blocked Problem if the PM keeps falsely claiming done;
                 # otherwise any productive turn resets the streak.
@@ -2657,9 +3169,9 @@ def _run_concurrent_loop(
                     up_stop = _handle_unproductive(
                         ledger, action, outcome, c, policy, members)
                     if up_stop is not None and pending_stop is None:
-                        pending_stop = LoopResult(
-                            up_stop, c,
-                            detail={"task_id": getattr(action, "task_id", "")})
+                        # SPEC-23: preserves the ladder-exhausted / engine-fault
+                        # split (same stop reason, different detail).
+                        pending_stop = _unproductive_result(up_stop, c, action)
                 else:
                     _reset_unproductive_count(c, action, outcome)
                 if outcome.kind == "pm_assist_exhausted" and pending_stop is None:
@@ -2676,6 +3188,15 @@ def _run_concurrent_loop(
             # resume continues cleanly; while work is still running, keep going.
             if not in_flight:
                 if pending_stop is not None:
+                    # HOOK SITE 4 of 4 (SPEC-23 Item 5) — the drain point. Placed
+                    # BEFORE the member-health / hard-blocker special cases below:
+                    # both reasons are HARD, so `_intervene` returns them on its
+                    # first line and their handling is byte-for-byte unchanged.
+                    kept = _last_word(pending_stop)
+                    if kept is None:
+                        pending_stop = None
+                        continue  # the PM proposed work — keep running
+                    pending_stop = kept
                     if pending_stop.stop_reason == MEMBER_UNHEALTHY:
                         d = pending_stop.detail or {}
                         failure = d.get("_failure")
@@ -2694,15 +3215,23 @@ def _run_concurrent_loop(
                                          .get("reason", "") or "")))
                     return pending_stop
                 if c.pm_idle >= policy.pm_idle_limit:
-                    _maybe_raise_monitor(ledger, "no_progress", DetectorEvidence(
+                    np_evidence = DetectorEvidence(
                         detector="no_progress", text="PM made no progress",
-                        value=c.pm_idle, threshold=policy.pm_idle_limit))
-                    return LoopResult(NO_PROGRESS, c)
+                        value=c.pm_idle, threshold=policy.pm_idle_limit)
+                    _maybe_raise_monitor(ledger, "no_progress", np_evidence)
+                    np_stop = _last_word(
+                        _stop_with_evidence(NO_PROGRESS, c, np_evidence))
+                    if np_stop is not None:
+                        return np_stop
+                    continue
                 # Spec 07: PM-only planning churn (mirrors the sequential loop),
                 # checked at this same quiescent point.
                 churn_stop = _account_planning_churn(ledger, c, policy)
                 if churn_stop is not None:
-                    return churn_stop
+                    churn_stop = _last_word(churn_stop)
+                    if churn_stop is not None:
+                        return churn_stop
+                    continue
                 # F139 WS-A/WS-E: foundation-stall surfacing + convergence stop,
                 # checked at this quiescent (in-flight empty) point so a resume
                 # continues cleanly.
@@ -2710,11 +3239,17 @@ def _run_concurrent_loop(
                 _account_hot_file_freeze(ledger, c, policy)
                 conv_stop = _account_convergence(ledger, c, policy)
                 if conv_stop is not None:
-                    return conv_stop
+                    conv_stop = _last_word(conv_stop)
+                    if conv_stop is not None:
+                        return conv_stop
+                    continue
                 # Spec 04: gate-repeat stall stop, at this same quiescent point.
                 gate_stop = _account_gate_stall(ledger, c, policy)
                 if gate_stop is not None:
-                    return gate_stop
+                    gate_stop = _last_word(gate_stop)
+                    if gate_stop is not None:
+                        return gate_stop
+                    continue
                 # GL04 (GAP-5): the run-level convergence brake, wired BEFORE Spec
                 # 16's livelock in the CONCURRENT loop too — this is the very loop a
                 # wide, churning fan-out runs on once Spec 13 lifts the foundation
@@ -2727,11 +3262,17 @@ def _run_concurrent_loop(
                 # path would never fire where it's needed.
                 livelock_stop = _account_revise_livelock(ledger, c, policy)
                 if livelock_stop is not None:
-                    return livelock_stop
+                    livelock_stop = _last_word(livelock_stop)
+                    if livelock_stop is not None:
+                        return livelock_stop
+                    continue
                 # Spec 10: wedged-graph probe (mirrors the sequential loop).
                 wedge_stop = _account_dispatch_wedge(ledger, c, policy)
                 if wedge_stop is not None:
-                    return wedge_stop
+                    wedge_stop = _last_word(wedge_stop)
+                    if wedge_stop is not None:
+                        return wedge_stop
+                    continue
                 if _checkpoint_due(policy, c, milestone):
                     c.since_checkpoint = 0
                     return LoopResult(CHECKPOINT, c)
@@ -2750,6 +3291,17 @@ def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
     F146 Slice B: ``delivery_review`` (when provided) verifies the INTEGRATED
     delivered head as a unit before a ``project_done`` is allowed to stick."""
     milestone = False
+    # SPEC-23 (Item 3, bound 3) — NON-RECURSION. A last-word turn is a turn the
+    # HARNESS initiated, not the PM's own move, so it must be excluded from
+    # detector accounting: charging `pm_idle` / `plan_streak` for it would let an
+    # intervention feed the very counter that triggered it, and an intervention
+    # could then manufacture the condition for another one. Scoped to the PLANNING
+    # kinds: a `project_done` last word is deliberately routed through the normal
+    # completion path below (Item 2), where the F128 gate judges it like any other
+    # done claim.
+    if isinstance(action, LastWord) and outcome.kind in {"planned",
+                                                         "governance_progress"}:
+        return milestone
     # Spec 25 (Item 3a): a turn that PARSED clears the shape-rejection window,
     # whatever else it did — the window bounds consecutive rejections, so one
     # malformed response between good ones must cost nothing.
