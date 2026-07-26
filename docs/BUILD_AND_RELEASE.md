@@ -32,6 +32,51 @@ the tap formula.** The version is read from `python/pyproject.toml` (the single
 source of truth) and drives the git tag (`cli-vX.Y.Z`), the tarball name, and the
 formula `version`.
 
+### Bumping the version — `scripts/bump-version.sh`, never a hand-edit
+
+Spec 19. The Python lineage declares its version in **three** places that must
+never disagree:
+
+| Declaration | Who reads it |
+|---|---|
+| `python/pyproject.toml` → `version` | **canonical** — `release-cli.sh` seds it for the tag, the tarball name, the formula |
+| `python/errorta_app/__init__.py` → `__version__` | `/healthz`, `/version`, the FastAPI app `version=` |
+| `python/errorta_cli/__init__.py` → `__version__` | `errorta status` — the CLI's self-report |
+
+Change all three with one command:
+
+```sh
+bash scripts/bump-version.sh 0.1.0-alpha.12    # rewrites + prints a diff
+```
+
+It refuses a malformed version, refuses to bump on top of unrelated uncommitted
+edits to those files (`--allow-dirty` overrides), is a no-op when already at the
+target, and **does not commit or tag** — you review and commit the bump yourself.
+
+Two gates stop drift from shipping:
+
+- `python/tests/test_version_identity.py` fails if the three disagree;
+- **`release-cli.sh`'s preflight `die`s on drift** — on `--check`, on `--dry-run`,
+  and on a real build. `0.1.0-alpha.11` shipped before this gate existed: the
+  binary self-reported `0.1.0-alpha.10`, and an operator reasonably concluded
+  their `brew upgrade` hadn't taken effect.
+
+Out of scope: the **desktop app** lineage (`package.json` / `src-tauri/Cargo.toml`
+/ `tauri.conf.json`). It ships on a separate train owned by `release-macos.sh`.
+
+### Build provenance in the released binary
+
+`release-cli.sh` writes `python/errorta_app/_build_info.json`
+(`{commit, built_at, dirty, source:"release-cli"}`) immediately before PyInstaller
+and removes it afterward via a `trap`; `python/cli.spec` bundles it so the frozen
+sidecar finds it at `sys._MEIPASS/errorta_app/`. That is what makes
+`/healthz.build.commit` a real SHA instead of `null` — and therefore what lets
+`scripts/app-doctor.sh` detect a stale bundle and lets the CLI's co-drive guard
+match builds instead of refusing on `'None'` vs `'None'`.
+
+The file is `.gitignore`d and must never be committed. Releasing from a **dirty
+tree** stamps `dirty: true` and prints a warning; it does not refuse.
+
 ### Why it's per-platform
 
 PyInstaller only builds for the **host OS/arch**, so this script releases **one

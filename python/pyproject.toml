@@ -1,5 +1,9 @@
 [project]
 name = "errorta-app"
+# Spec 19: THE canonical version for the Python lineage (sidecar + CLI).
+# scripts/release-cli.sh seds this line for the tag / tarball / Homebrew formula;
+# errorta_app.__version__ and errorta_cli.__version__ mirror it. Change it only
+# via `scripts/bump-version.sh X.Y.Z`.
 version = "0.1.0-alpha.11"
 description = "Errorta Python sidecar: thin web layer over AIAR."
 requires-python = ">=3.10"

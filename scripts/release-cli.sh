@@ -118,6 +118,49 @@ source_release_env() { # source ~/.config/errorta-release.env if present
   fi
 }
 
+# --- Spec 19 Item 3: version identity gate -------------------------------- #
+# The Python lineage declares its version in three places. pyproject.toml names
+# the tag / tarball / formula; errorta_app.__version__ and errorta_cli.__version__
+# are what the shipped binary SELF-REPORTS (/healthz, /version, `errorta status`).
+# 0.1.0-alpha.11 shipped with the mirrors a release behind — the binary told
+# operators their upgrade hadn't taken effect. This refuses to build on drift.
+#
+# Reads the same `<lhs> = "value"` shape release-cli.sh already seds for VERSION.
+read_decl() { # <file> <lhs>
+  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
+}
+
+# Dies on drift. Called from preflight() (--check) AND from the build path, so
+# --dry-run is gated too — a dry-run that previews a mislabeled artifact is not
+# a useful dry-run.
+check_version_identity() { # [--quiet]
+  local quiet=0 v_proj v_app v_cli
+  [[ "${1:-}" == "--quiet" ]] && quiet=1
+  v_proj="$(read_decl "$REPO_ROOT/python/pyproject.toml" version)"
+  v_app="$(read_decl "$REPO_ROOT/python/errorta_app/__init__.py" __version__)"
+  v_cli="$(read_decl "$REPO_ROOT/python/errorta_cli/__init__.py" __version__)"
+
+  if [[ -z "$v_proj" || -z "$v_app" || -z "$v_cli" ]]; then
+    die "could not read all three version declarations (pyproject='$v_proj' errorta_app='$v_app' errorta_cli='$v_cli')."
+  fi
+  # `||` is deliberate: drift means "not ALL three equal", so either mirror
+  # differing is a failure. (shellcheck's SC2055 heuristic misreads this.)
+  # shellcheck disable=SC2055
+  if [[ "$v_proj" != "$v_app" || "$v_proj" != "$v_cli" ]]; then
+    die "version identity DRIFT — the binary would self-report a version it was not released as:
+    python/pyproject.toml          = $v_proj   (names the tag, tarball, formula)
+    python/errorta_app/__init__.py = $v_app   (/healthz, /version)
+    python/errorta_cli/__init__.py = $v_cli   (errorta status)
+  Fix with:  bash scripts/bump-version.sh $v_proj"
+  fi
+  [[ $quiet -eq 1 ]] || log "OK    version identity: $v_proj (pyproject == errorta_app == errorta_cli)"
+  # An explicit --version override does not make the three disagree, but it does
+  # decouple the artifact name from what the binary self-reports. Say so.
+  if [[ -n "${VERSION:-}" && "$VERSION" != "$v_proj" ]]; then
+    log "WARN  --version override '$VERSION' != declared '$v_proj' — the artifact will be labelled '$VERSION' but the binary self-reports '$v_proj'."
+  fi
+}
+
 # preflight: validate prerequisites for THIS run; return 0 iff all pass.
 # Honors OS/ARCH/SKIP_NOTARIZE (resolved before this is called). A Developer-ID
 # build (macOS, not --skip-notarize) additionally checks the signing identity,
@@ -126,6 +169,10 @@ preflight() {
   local ok=1 mac_sign=0 f
   [[ "$OS" == "darwin" && $SKIP_NOTARIZE -eq 0 ]] && mac_sign=1
   step "preflight ($OS/$ARCH — $([[ $mac_sign -eq 1 ]] && echo 'Developer ID' || echo 'ad-hoc') signing)"
+
+  # Spec 19 Item 3 — dies on drift (does not merely set ok=0): shipping a
+  # mislabeled binary is worse than not shipping.
+  check_version_identity
 
   resolve_pyinstaller
   if [[ -n "$PYINSTALLER" ]]; then log "OK    pyinstaller: $PYINSTALLER"
@@ -251,10 +298,62 @@ if [[ $CHECK -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 0. Spec 19 Item 3 — version identity gate on the BUILD path.
+#    --check exits above via preflight; this catches --dry-run and real builds.
+# ---------------------------------------------------------------------------
+step "version identity"
+check_version_identity
+
+# ---------------------------------------------------------------------------
 # 1. Build the binary with PyInstaller.
 # ---------------------------------------------------------------------------
 step "build (pyinstaller python/cli.spec)"
 resolve_pyinstaller
+
+# --- Spec 19 Item 4: stamp build provenance into the binary --------------- #
+# build_info.py resolves bundled _build_info.json -> ERRORTA_BUILD_COMMIT ->
+# live git -> "unknown", and _from_git() deliberately returns None when frozen.
+# The desktop pipeline (build-sidecar.sh) writes tier 1; this pipeline never
+# did, so every released CLI binary reported commit=null — which broke the
+# stale-build check, app-doctor.sh, and the co-drive guard (it refused to
+# co-drive a sidecar whose build "could not be confirmed to match", comparing
+# 'None' to 'None'). python/cli.spec bundles this file when present.
+#
+# It is a BUILD ARTIFACT: .gitignore'd, and removed on exit via trap so a failed
+# or interrupted build never leaves a stale stamp in the worktree (which would
+# then poison the next source-checkout run's provenance).
+BUILD_INFO_JSON="$REPO_ROOT/python/errorta_app/_build_info.json"
+
+cleanup_build_info() {
+  [[ -f "$BUILD_INFO_JSON" ]] && rm -f "$BUILD_INFO_JSON"
+  return 0
+}
+
+stamp_build_info() {
+  local commit dirty built_at
+  commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  dirty=false
+  if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then
+    dirty=true
+    # Deliberately a WARNING, not a refusal: provenance should describe reality,
+    # and a maintainer sometimes releases with a legitimate local patch.
+    log "WARN  releasing from a DIRTY tree — stamping dirty:true. The binary's"
+    log "WARN  /healthz.build.commit will NOT fully describe what was built."
+  fi
+  # Shape is exactly what build_info._from_bundle() expects (build_info.py:39-48).
+  printf '{"commit":"%s","built_at":"%s","dirty":%s,"source":"release-cli"}\n' \
+    "$commit" "$built_at" "$dirty" > "$BUILD_INFO_JSON"
+  log "stamped build provenance: commit=$commit dirty=$dirty source=release-cli"
+}
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  log "[dry-run] would stamp python/errorta_app/_build_info.json {commit,built_at,dirty,source:release-cli} and remove it after the build"
+else
+  # Install the trap BEFORE writing, so an interrupt mid-write still cleans up.
+  trap cleanup_build_info EXIT INT TERM
+  stamp_build_info
+fi
 
 # Export the signing env the spec honors (python/cli.spec reads
 # ERRORTA_CODESIGN_IDENTITY / ERRORTA_ENTITLEMENTS_PLIST) so PyInstaller signs
@@ -285,6 +384,15 @@ else
   [[ -f "$BINARY" ]] || die "expected binary not produced at $BINARY."
   log "smoke-test: $BINARY --help"
   "$BINARY" --help >/dev/null || die "$BINARY --help failed to run."
+fi
+
+# The stamp has served its purpose (it is inside the binary now) — drop it
+# immediately rather than waiting for the EXIT trap, so the worktree is clean
+# for the rest of the (long) notarize/upload run. The trap remains armed and is
+# harmless once the file is gone.
+if [[ $DRY_RUN -eq 0 ]]; then
+  cleanup_build_info
+  log "removed the build-time _build_info.json stamp from the worktree."
 fi
 
 # ---------------------------------------------------------------------------

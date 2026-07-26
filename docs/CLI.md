@@ -794,6 +794,16 @@ already streams to completion on its own (adding `--watch` to it is a no-op the
 CLI notes). If a `--watch` view looks idle, the run may simply be between turns —
 `errorta status` confirms the current `state`.
 
+**Did my upgrade actually take effect?** The version line printed by
+`errorta status` (and the sidecar's own startup banner) is **authoritative**: it
+is the version the binary was released as. If it disagrees with
+`brew list --versions errorta`, that is a **bug worth reporting** — not a stale
+sidecar to restart. Since Spec 19 the release pipeline refuses to build when the
+three version declarations disagree, so a mismatch means something went wrong in
+release engineering rather than on your machine. (This is exactly what bit
+`0.1.0-alpha.11`: the binary carried every current feature but called itself
+`0.1.0-alpha.10`, and the investigation chased a phantom stale build.)
+
 **Where do my keys and projects live?** Under `ERRORTA_HOME` (defaults to
 `~/.errorta`): keys in `provider-keys.json` (mode 0600, masked on read), projects
 under `council/coding-projects/<id>/`. The CLI and the app read and write the same

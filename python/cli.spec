@@ -104,13 +104,28 @@ _AIAR_HIDDENIMPORTS = [
 # have different top-level names and are kept.)
 _AIAR_EXCLUDES = [] if _BUNDLE_AIAR else ["aiar", "chromadb", "sentence_transformers"]
 
-# Build provenance: scripts/build-sidecar.sh (or the CLI build script) writes
-# errorta_app/_build_info.json from the git HEAD right before this spec runs, so
-# the frozen `errorta __serve__` sidecar reports its commit on /healthz (the
-# CLI's stale-build / commit-mismatch check reads it). Bundle it only if present.
+# Build provenance (Spec 19 Item 4): scripts/release-cli.sh writes
+# errorta_app/_build_info.json from the git HEAD right before invoking
+# PyInstaller on this spec (and removes it after), so the frozen
+# `errorta __serve__` sidecar reports its commit on /healthz — which is what the
+# stale-build check, scripts/app-doctor.sh, and the CLI's co-drive guard all
+# read. PyInstaller unpacks it to sys._MEIPASS/errorta_app/_build_info.json,
+# exactly where build_info._bundled_paths() looks (build_info.py:29-36).
+#
+# The existence probe MUST be anchored to the spec's own directory, not the
+# cwd: release-cli.sh runs `pyinstaller python/cli.spec` from the REPO ROOT
+# (unlike build-sidecar.sh, which cds into python/ first), so a cwd-relative
+# probe would silently be False and every released binary would land back on
+# provenance "unknown". PyInstaller resolves the relative datas SOURCE path
+# against the spec dir already (Analysis passes workingdir=spec_dir), so only
+# the probe needs fixing.
+# SPECPATH is PyInstaller's injected spec DIRECTORY (build_main.py: specpath,
+# specnm = os.path.split(spec)) — i.e. <repo>/python — not the spec file itself.
+_SPEC_DIR = os.path.abspath(SPECPATH)  # noqa: F821 (PyInstaller-injected global)
 _build_info_datas = (
     [("errorta_app/_build_info.json", "errorta_app")]
-    if os.path.isfile("errorta_app/_build_info.json") else []
+    if os.path.isfile(os.path.join(_SPEC_DIR, "errorta_app", "_build_info.json"))
+    else []
 )
 
 # The command modules are imported for their registration side effects via a
