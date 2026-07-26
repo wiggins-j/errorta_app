@@ -11,6 +11,10 @@ in-process sidecar launch. Everything else talks to the sidecar over HTTP.
 """
 from __future__ import annotations
 
-__version__ = "0.1.0-alpha.10"
+# Spec 19: MIRROR of python/pyproject.toml's `version` (the canonical value).
+# Never hand-edit — run `scripts/bump-version.sh X.Y.Z`, which rewrites all
+# three declarations. tests/test_version_identity.py locks them byte-equal and
+# scripts/release-cli.sh's preflight refuses to build on drift.
+__version__ = "0.1.0-alpha.11"
 
 __all__ = ["__version__"]
