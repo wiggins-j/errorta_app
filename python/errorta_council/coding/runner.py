@@ -1826,10 +1826,66 @@ def _answer_dev_context_request(store: LedgerStore, task: Task, intent: Any) -> 
     return answer
 
 
-def _latest_context_response_text(store: LedgerStore, task_id: str) -> str:
-    """F088-09: deliver the most recent context response for THIS task back to the
+# Spec 20: the dev context-request channel is BOUNDED. Before this it was the one
+# dev dead-end that requeued the task without an `unproductive` signal, so the
+# F127 escalate-up ladder never engaged — and because only the MOST RECENT answer
+# was threaded back, a follow-up ask saw a prompt byte-identical to the one that
+# produced it: same prompt -> same output -> a deterministic fixed point that
+# re-dispatched forever. Three caps close it: how many asks a task gets, how many
+# answers are threaded back (so consecutive prompts actually differ), and how much
+# of a question is quoted into the exhaustion ledger row.
+_CONTEXT_REQUEST_LIMIT = 3
+_CONTEXT_RESPONSE_THREAD_N = 3
+_CONTEXT_QUESTION_CAP = 400
+
+
+def _context_question_key(question: Any) -> str:
+    """Spec 20: fold a context question to its repeat-detection key — whitespace
+    collapsed, case-folded, then HASHED. The hash (not the text) is what gets
+    persisted on the task, for two reasons: the ledger row stays a fixed 64 bytes
+    however long the question is, and the comparison sees the WHOLE question.
+    Truncating the text before comparing would let two genuinely different asks
+    that share a long preamble ("I am implementing task t-…<350 chars>… so: <the
+    actual question>") collide and trip the verbatim-repeat guard on a legitimate,
+    progressing follow-up. The readable question survives in the recorded
+    `context_request` / `context_request_exhausted` decisions, so nothing is lost
+    for debugging."""
+    folded = " ".join(str(question or "").split()).lower()
+    return hashlib.sha256(folded.encode("utf-8")).hexdigest()
+
+
+def _context_attempts_of(extras: Any, default: int = 0) -> int:
+    """Spec 20: read the persisted per-task ask counter DEFENSIVELY. `update_task`
+    takes `**patch` and routes unknown keys straight through `_split_unknown` into
+    `_extras` with no validation, so any present or future caller — or a migrated
+    or hand-edited row — can leave a non-numeric value under this key. A bare
+    `int(...)` would then raise out of DEV prompt composition, which runs on EVERY
+    dev turn: `_latest_context_response_text` was total before Spec 20 (it could
+    only return "" or a string) and must stay that way. A junk value degrades to
+    `default` instead, which at worst re-arms a bounded 3-ask budget."""
+    raw = (extras or {}).get("context_request_attempts")
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _latest_context_response_text(store: LedgerStore, task_id: str, *,
+                                  task: Task | None = None) -> str:
+    """F088-09: deliver the recorded context responses for THIS task back to the
     dev in a dedicated typed channel (the dev asked; it must receive the answer).
-    Returns '' if there is none."""
+    Returns '' if there is none.
+
+    Spec 20: thread the last ``_CONTEXT_RESPONSE_THREAD_N`` answers oldest-first
+    instead of only the latest, and state the remaining ask budget plainly. The
+    single-answer version made every follow-up turn compose the SAME prompt (the
+    same question retrieves the same corpus/memory hits), which is why the loop
+    never converged; carrying the whole recent thread guarantees turn N+1 differs
+    from turn N, and the budget line tells the dev when it must stop asking and
+    implement with what it has. Pass ``task`` so the budget reflects the persisted
+    counter (authoritative — a short-circuited repeat records no answer)."""
     try:
         responses = [d["context_response"] for d in store.list_decisions()
                      if d.get("choice") == "context_request"
@@ -1839,9 +1895,45 @@ def _latest_context_response_text(store: LedgerStore, task_id: str) -> str:
         return ""
     if not responses:
         return ""
-    body = json.dumps(responses[-1], ensure_ascii=False, sort_keys=True)
-    return ("\nContext response to YOUR earlier request (use this answer; cite "
-            "refs):\n```json\n" + body + "\n```\n")
+    body = "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True)
+                     for r in responses[-_CONTEXT_RESPONSE_THREAD_N:])
+    # The persisted counter REPLACES the answer count when it is present — it is
+    # not a floor. The recorded `context_request` decisions are append-only, so
+    # `max(...)` would pin the rendered budget to asks that may have been
+    # deliberately forgiven: `attention.resolve_stale_worker_unproductive` zeroes
+    # the counter when a room change rescues an exhausted task, precisely to
+    # re-arm the channel for the new route, and a floor would still tell that
+    # dev "0 remain — do NOT ask again" while the runner would happily serve 3.
+    # Fall back to the answer count only for a task that predates the counter.
+    ctx_extras = getattr(task, "_extras", {}) or {} if task is not None else {}
+    # Clamp the DISPLAYED spend at the limit. The dispatch branch already writes
+    # at most `_CONTEXT_REQUEST_LIMIT`, but the key is an unvalidated passthrough
+    # and an exhausted task is re-dispatched several times while the F127 ladder
+    # walks its rungs — rendering "You have used 5 of 3 context requests" would
+    # feed the model a self-contradictory instruction on exactly the turns where
+    # it most needs a clear one. Gating is unaffected: it reads the raw counter.
+    asked = min(_context_attempts_of(ctx_extras, default=len(responses)),
+                _CONTEXT_REQUEST_LIMIT)
+    remaining = max(0, _CONTEXT_REQUEST_LIMIT - asked)
+    budget = (
+        f"You have used {asked} of {_CONTEXT_REQUEST_LIMIT} context requests on "
+        f"this task; {remaining} remain. "
+        # Δ review: this must OVERRIDE the capability text, not merely contradict
+        # it. The tool catalog (Spec 17) unconditionally tells a DEV without repo
+        # read to "emit a context_request intent to see a file", and Spec 17's
+        # `tool_not_allowed` carry-forward repeats that string in prior_outputs —
+        # so an exhausted dev was being pointed straight back at the one channel
+        # it is forbidden from, which is how it kept walking the ladder.
+        + ("You have NO context requests left — do NOT ask again; implement the "
+           "task with the evidence above. This OVERRIDES any earlier instruction "
+           "in this prompt to emit a context_request intent: that channel is "
+           "closed for this task. If you truly cannot proceed, say so in your "
+           "summary rather than asking again.\n" if remaining <= 0 else
+           "Ask again ONLY if the answers above genuinely do not contain what you "
+           "need; re-asking a question you already asked is treated as a dead end "
+           "and spends the whole budget at once.\n"))
+    return ("\nContext response to YOUR earlier request (use these answers, "
+            "oldest first; cite refs):\n```json\n" + body + "\n```\n" + budget)
 
 
 # Spec 17 (Item 3): a bounded cap on the carried tool-failure line, so a chatty
@@ -2596,9 +2688,12 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
         # Retrieved project grounding for the dev.
         PromptSegment("project_context",
                       _grounding_packet_text("dev", store, task=task)),
-        # Prior PM/reviewer context response threaded to this task.
+        # Prior PM/reviewer context responses threaded to this task. Spec 20
+        # passes the task so the rendered ask-budget reads off the persisted
+        # counter rather than the answer count alone.
         PromptSegment("prior_outputs",
-                      _latest_context_response_text(store, task.task_id)),
+                      _latest_context_response_text(store, task.task_id,
+                                                    task=task)),
         # Spec 17 (Item 3): the last tool failure this task hit, carried forward on
         # its next dispatch (a rejected unknown tool never reaches the corrective-
         # retry path, so the ONLY way the model sees it is on the next composed
@@ -5033,11 +5128,67 @@ def build_run_turn(
                 intent = parsed.intent
                 # F088-09: a read-only context request — answer from grounding,
                 # record it, and re-queue the task so the dev acts on the answer.
-                # No file writes, no durable mutation.
+                # No file writes, no durable mutation. Spec 20 bounds it below.
                 from .schemas import DeveloperContextRequestIntent
                 if isinstance(intent, DeveloperContextRequestIntent):
+                    # Spec 20: bound the channel. This was the ONLY dev dead-end
+                    # that requeued to `todo` without `unproductive=True`, so no
+                    # counter moved, no rung of the F127 ladder fired, and the
+                    # task was re-dispatched forever (live: a dev asking the same
+                    # question every turn). `schemas.py` also relabels ANY unknown
+                    # dev intent kind carrying a non-empty `question` into
+                    # `context_request`, so a schema-confused dev is funnelled
+                    # straight into this branch — the guard therefore has to live
+                    # here, on the runner, not in the schema.
+                    ctx_extras = getattr(task, "_extras", {}) or {}
+                    ctx_key = _context_question_key(intent.question)
+                    ctx_prior = str(
+                        ctx_extras.get("last_context_question_key") or "")
+                    ctx_attempts = _context_attempts_of(ctx_extras) + 1
+                    # A VERBATIM repeat proves the previous answer did not help;
+                    # re-answering retrieves the same hits and is guaranteed to
+                    # loop, so it spends the whole budget at once instead of
+                    # burning one slot per wasted model call.
+                    ctx_repeat = bool(ctx_prior) and ctx_key == ctx_prior
+                    if ctx_repeat or ctx_attempts > _CONTEXT_REQUEST_LIMIT:
+                        store.record_decision(
+                            title=f"context request exhausted: {task.title}",
+                            context=f"task {task.task_id}",
+                            choice="context_request_exhausted",
+                            rationale=(
+                                f"{str(intent.question or '')[:_CONTEXT_QUESTION_CAP]} "
+                                f"(ask {ctx_attempts} of {_CONTEXT_REQUEST_LIMIT}"
+                                + ("; verbatim repeat of the previous question"
+                                   if ctx_repeat else "") + ")"),
+                            related_task_ids=[task.task_id])
+                        # Persist EXACTLY the limit, never `ctx_attempts` — an
+                        # exhausted task keeps getting dispatched while the F127
+                        # ladder walks its rungs, and a counter that kept growing
+                        # would both drift the rendered budget past the cap and
+                        # give a rescued task a bogus starting point. The limit is
+                        # the saturated "spent" value: the gate is `> LIMIT`, so
+                        # the very next ask still exhausts. A verbatim repeat on
+                        # ask 1 saturates here too — that is the short-circuit.
+                        store.update_task(
+                            task.task_id, state="todo",
+                            context_request_attempts=_CONTEXT_REQUEST_LIMIT,
+                            last_context_question_key=ctx_key)
+                        # Hand off to the EXISTING F127 escalate-up ladder (model
+                        # escalation -> member exclusion -> PM assist -> blocking
+                        # Problem) rather than inventing a second mechanism.
+                        return TurnOutcome(
+                            kind="noop", unproductive=True,
+                            member_id=str(member.get("id", "")), member_role=DEV,
+                            member_route=str(member.get("gateway_route_id", "")),
+                            reason="context_request_exhausted")
+                    # Under budget: answer from grounding, record it, and re-queue
+                    # the task so the dev acts on the answer. No file writes, no
+                    # durable mutation — and NOT unproductive, so a legitimate
+                    # single question never starts the dev up the ladder.
                     _answer_dev_context_request(store, task, intent)
-                    store.update_task(task.task_id, state="todo")
+                    store.update_task(task.task_id, state="todo",
+                                      context_request_attempts=ctx_attempts,
+                                      last_context_question_key=ctx_key)
                     return TurnOutcome(kind="noop")
                 data = {"task_type": intent.task_type,
                         "tool_calls": [{"tool": tc.tool, "args": tc.args}

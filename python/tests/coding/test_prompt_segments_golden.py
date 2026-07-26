@@ -197,7 +197,14 @@ def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
         f"{task.title}. {task.detail}\n"
         f"Context: {_orientation_text(store)}\n"
         f"{_grounding_packet_text('dev', store, task=task)}"
-        f"{_latest_context_response_text(store, task.task_id)}"
+        # Spec 20 widens this helper: it threads the last N context responses
+        # (oldest-first) plus the remaining ask budget, and takes the task so the
+        # budget reads off the persisted counter. The reference calls the LIVE
+        # helper (it never inlined the text), so the lock still catches accidental
+        # drift in every other segment; with no recorded context request — the
+        # fixture case, and the only case this golden asserts — it returns "" and
+        # the DEV prompt stays byte-identical to the pre-refactor string.
+        f"{_latest_context_response_text(store, task.task_id, task=task)}"
         f"{existing}"
         f"{latest_gate_text(store)}"          # Spec 12 inserts here
         # Spec 17 widens the catalog call: repo_read is resolved per-member (False
