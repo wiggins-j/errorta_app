@@ -109,6 +109,11 @@ def render_status(payload: Any, verbosity: Any) -> str:
     mode = residency.get("mode") or residency.get("residency")
     if mode:
         lines.append(muted(f"residency: {mode}"))
+    # Spec 22 Item 1: where the sidecar's stdout/stderr land. This is the line
+    # that turns "a 500 with no greppable content" into `grep <error id> <path>`.
+    log_path = (payload or {}).get("log_path")
+    if log_path:
+        lines.append(muted(f"log:     {log_path}"))
 
     pid = (payload or {}).get("project_id")
     if not pid:

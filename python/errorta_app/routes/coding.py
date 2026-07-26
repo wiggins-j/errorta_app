@@ -548,6 +548,77 @@ def _project_list_out(project: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Spec 22 Items 3 + 4 — create/delete leave no residue, and a partial delete
+# leaves something the API can still act on.
+# --------------------------------------------------------------------------- #
+
+def _cleanup_failed_create(store: LedgerStore, exc: BaseException) -> None:
+    """Remove a project directory this request created, then stay out of the way.
+
+    Exception-swallowing by construction: a cleanup failure must NEVER mask the
+    original error the caller is about to see. When the residue survives it is at
+    least *named* at WARNING so it can be found by hand.
+    """
+    from errorta_tools.runner.apply_workspace import resilient_rmtree
+
+    try:
+        resilient_rmtree(store.dir)
+    except Exception as cleanup_exc:  # noqa: BLE001 — see docstring
+        logging.getLogger("errorta.coding").warning(
+            "create of project %r failed (%s) and its half-made directory could "
+            "not be removed (%s): %s",
+            store.project_id, exc, cleanup_exc, store.dir,
+        )
+
+
+def _destroy_ledger_dir(store: LedgerStore) -> None:
+    """Delete the ledger directory, ``project.json`` FIRST.
+
+    Spec 22 Item 4. ``resilient_rmtree`` raises on its final attempt, so a delete
+    that fails part-way through used to return a 500 *and* leave a tree whose
+    ``project.json`` might already be gone — and both ``GET`` and ``DELETE`` 404
+    on a missing ``project.json``, so that tree was unreachable through the API
+    forever (the observed `pocketboard2` / `punprod` shape). Dropping the manifest
+    first inverts that: the directory is immediately un-listable, and the
+    now-idempotent DELETE below can always sweep whatever is left.
+    """
+    from errorta_tools.runner.apply_workspace import resilient_rmtree
+
+    root = store.dir
+    if not root.exists():
+        return
+    resolved = root.resolve()
+    if not resolved.is_relative_to(root.parent.resolve()):  # pragma: no cover
+        raise LedgerError("project directory escapes ledger root")
+    try:
+        (root / "project.json").unlink()
+    except OSError:
+        pass
+    resilient_rmtree(resolved)
+
+
+def _sweep_project_residue(project_id: str, store: LedgerStore) -> None:
+    """Remove every project-id-keyed location for a project with no manifest."""
+    from errorta_council.coding.workspace import CodingWorkspace
+
+    try:
+        from errorta_council.coding import runtime_process as _runtime
+        from errorta_council.coding.runtime import RuntimeProfileStore
+
+        _runtime.teardown_project(project_id)
+        _runtime.reap_persisted_sessions(
+            RuntimeProfileStore.for_ledger(store), project_id=project_id)
+    except Exception:  # noqa: BLE001 — reaping is best-effort; never block delete
+        pass
+    try:
+        CodingWorkspace(project_id, store).destroy()
+    except Exception:  # noqa: BLE001 — the apply-workspace may already be gone
+        pass
+    _destroy_ledger_dir(store)
+    _RUNS.pop(project_id, None)
+
+
 @router.post("/projects")
 def create_project(body: _NewProject, request: Request) -> dict[str, Any]:
     _require_tauri_origin(request)
@@ -569,14 +640,29 @@ def create_project(body: _NewProject, request: Request) -> dict[str, Any]:
         store = LedgerStore(body.project_id)  # backstop: store re-validates the slug
     except LedgerError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    store.create_project(
-        north_star=body.north_star, definition_of_done=body.definition_of_done,
-        target=body.target, repo_path=body.repo_path,
-        delivery_root=delivery_root,
-        work_request=str(body.work_request or "")[:20_000],
-    )
-    grounding_result = _apply_grounding_payload(store, body.grounding)
-    out = {"project": _project_out(store)}
+    # Spec 22 Item 3 — compensating cleanup. Upfront validation (above) covers
+    # bad INPUT; it cannot cover execution failures, because
+    # `_apply_grounding_payload` does real work (imports, a bootstrap job,
+    # filesystem writes) that no amount of validation makes infallible. Without
+    # this, a failure after `create_project` left `<ledger_root>/<id>/` — plus the
+    # `.run.lock` the first store.lock drops next to it — on disk, and the retry
+    # tripped over the residue. The precondition is the guard that makes cleanup
+    # safe: only remove the directory if THIS request created it, so a race where
+    # a concurrent create won can never delete the winner's project.
+    created_dir = not store.dir.exists()
+    try:
+        store.create_project(
+            north_star=body.north_star, definition_of_done=body.definition_of_done,
+            target=body.target, repo_path=body.repo_path,
+            delivery_root=delivery_root,
+            work_request=str(body.work_request or "")[:20_000],
+        )
+        grounding_result = _apply_grounding_payload(store, body.grounding)
+        out = {"project": _project_out(store)}
+    except BaseException as exc:
+        if created_dir:
+            _cleanup_failed_create(store, exc)
+        raise
     if grounding_result:
         out.update(grounding_result)
     return out
@@ -598,6 +684,18 @@ def delete_project(project_id: str, request: Request) -> dict[str, Any]:
     try:
         proj = store.get_project()
     except ProjectNotFound:
+        # Spec 22 Item 4 — idempotent cleanup. A directory that lost its
+        # `project.json` part-way through a failed rmtree used to 404 on BOTH GET
+        # and DELETE, i.e. be unreachable through the API forever. Sweeping the
+        # residue instead is the only change that makes such a tree reachable, and
+        # it is the correct semantic for a delete regardless. The liveness check
+        # runs FIRST so a sweep can never delete under a running run.
+        if store.dir.exists():
+            if _thread_alive(project_id):
+                raise HTTPException(
+                    status_code=409, detail="project run is still active")
+            _sweep_project_residue(project_id, store)
+            return {"deleted": True, "project_id": project_id, "swept": True}
         raise HTTPException(status_code=404, detail="project not found")
     if _thread_alive(project_id):
         raise HTTPException(status_code=409, detail="project run is still active")
@@ -622,7 +720,11 @@ def delete_project(project_id: str, request: Request) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 — reaping is best-effort; never block delete
             pass
         ws.destroy()
-        store.delete_project()
+        # Spec 22 Item 4: `project.json` first, then the tree — see
+        # `_destroy_ledger_dir`. Replaces `store.delete_project()` (same
+        # containment assertions, opposite order) so a partially-failed rmtree
+        # leaves a sweepable directory rather than a stranded one.
+        _destroy_ledger_dir(store)
         _RUNS.pop(project_id, None)
     return {"deleted": True, "project_id": project_id}
 

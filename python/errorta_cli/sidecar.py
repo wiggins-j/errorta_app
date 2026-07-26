@@ -32,7 +32,12 @@ only when we are NOT driving the single advertised sidecar (a real second one).
 
 The HTTP probe and the process launch are module-level seams
 (``probe_healthz`` / ``_launch``) so tests exercise the adopt-vs-spawn logic and
-the foreign-app refusal without a real sidecar or a real subprocess.
+the foreign-app refusal without a real sidecar or a real subprocess. ``_launch``
+takes a keyword-only ``home`` (Spec 22 Item 1) — fakes must accept ``**kwargs``.
+
+**Spec 22 Item 1.** A CLI-spawned sidecar's stdout and stderr are merged into
+``${ERRORTA_HOME}/logs/sidecar.log`` (rotated at spawn, one previous generation
+kept) instead of ``DEVNULL``, so a startup crash leaves its traceback on disk.
 """
 from __future__ import annotations
 
@@ -68,6 +73,11 @@ _HEALTHZ_PROBE_TIMEOUT = 1.0
 _SPAWN_READY_BUDGET = 15.0
 _SPAWN_POLL_INTERVAL = 0.1
 
+# Spec 22 Item 1 — rotate `logs/sidecar.log` at spawn once it crosses this, and
+# keep exactly one previous generation. Two files, hard-capped at 16 MB total.
+# Mirrors errorta_app.sidecar_log.MAX_BYTES (the in-process half of the budget).
+_LOG_ROTATE_BYTES = 8 * 1024 * 1024
+
 try:  # POSIX cross-process file lock; absent on Windows (handled gracefully).
     import fcntl
 
@@ -76,6 +86,7 @@ except ImportError:  # pragma: no cover — Windows only
     _HAVE_FCNTL = False
 
 _warned_lock_degraded = False
+_warned_log_degraded = False
 
 
 @dataclass
@@ -119,15 +130,81 @@ def probe_healthz(port: int, *, timeout: float = _HEALTHZ_PROBE_TIMEOUT) -> dict
     return body if isinstance(body, dict) else None
 
 
-def _launch(argv: list[str], env: dict[str, str]) -> subprocess.Popen:
-    """Spawn the sidecar process (its own session so it outlives this call)."""
-    return subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-        argv,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+def _rotate_sidecar_log(home: Path) -> None:
+    """Spec 22 Item 1 — keep exactly two generations, 16 MB total, forever.
+
+    The child holds the fd for its whole life, so nothing can rotate the file
+    *underneath* a running sidecar. Rotation therefore happens here, at spawn:
+    if the log crossed the cap, rename it to ``sidecar.log.1`` (displacing any
+    previous ``.1``) and let the caller open a fresh one. This runs inside
+    ``_home_lock`` (``resolve`` already serialises the discover-or-spawn
+    decision), so two concurrent launches can't both rotate. Best-effort — a
+    rotation failure must never stop a spawn.
+    """
+    path = config.sidecar_log_path(home)
+    try:
+        if path.stat().st_size <= _LOG_ROTATE_BYTES:
+            return
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        os.replace(path, path.with_name(path.name + ".1"))
+
+
+def _open_sidecar_log(home: Path | None) -> Any:
+    """Return an append-mode fd for the sidecar log, or ``DEVNULL``.
+
+    **Fail open.** A read-only home or an unwritable ``logs/`` degrades to
+    ``DEVNULL`` with a one-time stderr warning, exactly as ``_home_lock``
+    degrades without ``fcntl``. A CLI that refuses to run because it cannot open
+    a log file is a worse product than one that logs nothing.
+    """
+    global _warned_log_degraded
+    if home is None:  # pragma: no cover — every production caller passes home
+        return subprocess.DEVNULL
+    try:
+        _rotate_sidecar_log(home)
+        path = config.sidecar_log_path(home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, "ab", buffering=0)  # noqa: SIM115 — owned by the child
+    except OSError as exc:
+        if not _warned_log_degraded:
+            print(
+                f"warning: could not open the sidecar log "
+                f"({config.sidecar_log_path(home)}): {exc}. The sidecar's output "
+                "will not be recorded.",
+                file=sys.stderr,
+            )
+            _warned_log_degraded = True
+        return subprocess.DEVNULL
+
+
+def _launch(
+    argv: list[str], env: dict[str, str], *, home: Path | None = None
+) -> subprocess.Popen:
+    """Spawn the sidecar process (its own session so it outlives this call).
+
+    Spec 22 Item 1: stdout and stderr go to ``${ERRORTA_HOME}/logs/sidecar.log``
+    instead of ``DEVNULL``. **Merged deliberately** — interleaving is the point;
+    a traceback split across two files is worse than either. The fd is inherited
+    by the detached child and outlives this CLI process, so a sidecar that dies
+    during startup leaves its traceback behind instead of only an exit code.
+    """
+    sink = _open_sidecar_log(home)
+    try:
+        return subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            argv,
+            env=env,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        # The child inherited a dup of the fd; ours is done. (DEVNULL is an int
+        # sentinel, not a file object, so only a real handle is closed.)
+        if hasattr(sink, "close"):
+            with contextlib.suppress(OSError):
+                sink.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -386,10 +463,10 @@ def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
     # honestly report `started_by=cli` (the desktop app reads this when deciding
     # whether to adopt this shared sidecar).
     env.setdefault("ERRORTA_STARTED_BY", "cli")
-    proc = _launch(_serve_argv(), env)
+    proc = _launch(_serve_argv(), env, home=home)
 
     try:
-        body = _wait_ready(port, proc)
+        body = _wait_ready(port, proc, home=home)
     except BaseException:
         # A failed spawn must not leave a detached child running: the next
         # invocation would find no record and spawn *another*, accumulating
@@ -429,13 +506,23 @@ def _kill_child(proc: subprocess.Popen | None) -> None:
             proc.wait(timeout=5)
 
 
-def _wait_ready(port: int, proc: subprocess.Popen | None) -> dict | None:
+def _wait_ready(
+    port: int, proc: subprocess.Popen | None, *, home: Path | None = None
+) -> dict | None:
     """Poll ``/healthz`` until the spawned sidecar answers (bounded)."""
     deadline = time.monotonic() + _SPAWN_READY_BUDGET
     while time.monotonic() < deadline:
         if proc is not None and proc.poll() is not None:
+            # Spec 22 Item 1: the traceback the child just printed is now ON DISK
+            # (the fd redirect in `_launch`), so say where instead of handing the
+            # operator a bare exit code for a Python process we used to silence.
+            where = (
+                f"; its output is in {config.sidecar_log_path(home)}"
+                if home is not None else ""
+            )
             raise SidecarUnreachable(
                 f"the sidecar exited during startup (code {proc.returncode})"
+                f"{where}"
             )
         body = probe_healthz(port)
         if body is not None:

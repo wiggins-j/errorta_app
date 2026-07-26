@@ -391,7 +391,7 @@ in place.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `status` | Sidecar health + the bound project's run state (`state`, last `stop_reason`, counters). From an **unbound** directory it instead lists active projects and how to target one (see below). | |
+| `status` | Sidecar health, the sidecar **log path**, and the bound project's run state (`state`, last `stop_reason`, counters). From an **unbound** directory it instead lists active projects and how to target one (see below). | |
 | `log` | Team Log narrative, colorized by role. | `--role`, `--member`, `--grep`, `--watch` |
 | `decisions` | Decision event stream (`--kind` supports globs, e.g. `pr_*`). | `--kind`, `--watch` |
 | `turns` | Per-turn transcript (role / route / outcome / tokens). | `--limit`, `--watch` |
@@ -761,6 +761,24 @@ prints a compatibility warning (behavior may differ) — update so both sides ma
 `PATH`. For the single binary, `mv ./errorta /usr/local/bin/errorta`. For a
 checkout, symlink the dev launcher:
 `ln -sf "$PWD/scripts/dev-errorta" /usr/local/bin/errorta`.
+
+**A command fails with `sidecar returned 500: … (error id: e-…)`.** That id is
+the whole point: the sidecar logged the full traceback under it. Grep the log —
+`errorta status` prints its path, and it is `${ERRORTA_HOME}/logs/sidecar.log`
+(`~/.errorta/logs/sidecar.log` by default):
+
+```bash
+grep -A 40 e-0123456789ab ~/.errorta/logs/sidecar.log
+```
+
+The log is the merged stdout+stderr of the CLI-spawned sidecar plus its
+structured, **redacted** log lines. It is capped at 8 MB with one previous
+generation kept as `sidecar.log.1`, and is rotated when a new sidecar is
+spawned. A `500` from an older sidecar carries no id; the error string is then
+unchanged from before.
+
+**The sidecar exited during startup.** The message names the log file. The
+child's traceback is at the end of it: `tail -50 ~/.errorta/logs/sidecar.log`.
 
 **`run` says setup is required (exit code 12).** A fresh project must confirm the
 readiness gate first: `errorta setup --confirm --yes`, then `errorta run --yes`.

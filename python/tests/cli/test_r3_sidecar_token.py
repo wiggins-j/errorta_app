@@ -71,7 +71,7 @@ def test_failed_spawn_removes_token_file(monkeypatch, tmp_path: Path) -> None:
     token file is removed (no stale secret for a sidecar that never came up)."""
     from errorta_cli.errors import SidecarUnreachable
 
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         return _FakeProc(pid=4321)
 
     monkeypatch.setattr(sidecar, "_launch", fake_launch)
@@ -91,7 +91,7 @@ def test_failed_spawn_removes_token_file(monkeypatch, tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 def _spawn_with_fake_launch(monkeypatch, tmp_path, launched: dict) -> sidecar.SidecarHandle:
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         launched["env"] = env
         launched["port"] = int(env["ERRORTA_SIDECAR_PORT"])
         return _FakeProc(pid=4321)
@@ -172,7 +172,7 @@ def test_respawn_rotates_token(monkeypatch, tmp_path: Path) -> None:
     sidecar.write_token(tmp_path, "old-token")
     spawned: dict = {}
 
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         spawned["port"] = int(env["ERRORTA_SIDECAR_PORT"])
         spawned["env"] = env
         return _FakeProc(pid=9001)
