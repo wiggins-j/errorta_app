@@ -1098,11 +1098,50 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
         return None
     if c.iterations - c.last_gate_iter < policy.gate_stall_limit:
         return None
+    # Spec 21: a GREEN gate is not a stalled one. The score is "how many commands
+    # pass", so a gate with nothing failing sits at its maximum forever and can
+    # never strictly increase — which this detector read as churn and used to STOP
+    # a healthy run. That is what killed the gravity-golf run at iteration 22 with
+    # 6/6 PRs merged and zero revises: the only gate signal was a runtime probe
+    # that PASSED, twice.
+    #
+    # The pathology this detector actually exists for is a RED gate that stays red
+    # (stuck at 6/12 while the PR head churns). So require something to be failing
+    # before calling it a stall. When the gate is green there is nothing to
+    # improve — the run should be ended by the definition of done, not by this.
+    if not _gate_has_failure(ledger):
+        return None
     _maybe_raise_monitor(
         ledger, "gate_not_improving",
         f"acceptance gate has not improved for {policy.gate_stall_limit} "
         f"iterations (score={score})")
     return LoopResult(GATE_NOT_IMPROVING, c)
+
+
+def _gate_has_failure(ledger: Any) -> bool:
+    """Is anything in the latest gate result actually FAILING? Only then can the
+    gate meaningfully "not improve". Mirrors `_gate_fingerprint`'s reading of the
+    same record (per-command exit codes, else the run-level `passed`, else the
+    delivery verdict) and is guarded identically — an unreadable ledger reports no
+    failure, so the detector stays silent rather than stopping a run on a hiccup."""
+    try:
+        runs = ledger.list_test_runs() or []
+    except Exception:  # noqa: BLE001
+        return False
+    if runs:
+        latest = runs[-1]
+        results = latest.get("results") or []
+        if results:
+            return any(r.get("exit_code") not in (0, None) for r in results)
+        if latest.get("passed") is not None:
+            return not bool(latest.get("passed"))
+    try:
+        reviews = ledger.list_delivery_reviews() or []
+        if reviews:
+            return not bool(reviews[-1].get("passed"))
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 _CONVERGENCE_RESOLVED = ("merged", "superseded", "blocked", "abandoned")
