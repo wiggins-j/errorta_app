@@ -99,6 +99,27 @@ class PMDecision(BaseModel):
     choice: str
     rationale: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_decision_as_title(cls, data: Any) -> Any:
+        """Spec 21: models routinely emit ``{"decision": ..., "rationale": ...}``
+        for a decision entry — the field is *called* a decision, so that is the
+        natural key. With ``extra="ignore"`` that silently dropped, leaving
+        ``title`` missing and failing the whole turn: 3 of 4 PM retries in the
+        gravity-golf run died on ``missing decisions[0].title`` while the model
+        kept re-emitting the same reasonable shape. Accept the synonym instead of
+        rejecting a turn over a field name."""
+        if isinstance(data, dict) and not str(data.get("title") or "").strip():
+            for alias in ("decision", "summary", "name"):
+                if str(data.get(alias) or "").strip():
+                    data = {**data, "title": str(data[alias])}
+                    break
+        if isinstance(data, dict) and not str(data.get("choice") or "").strip():
+            # `choice` is a bookkeeping tag, not something a planner reasons about;
+            # defaulting it beats failing a turn that carried real reasoning.
+            data = {**data, "choice": "pm_decision"}
+        return data
+
 
 class PMPlanIntent(BaseModel):
     model_config = {"extra": "ignore"}
@@ -112,8 +133,20 @@ class PMPlanIntent(BaseModel):
     def _done_rules(self) -> "PMPlanIntent":
         if self.done and not self.completion_summary.strip():
             raise ValueError("done=true requires a completion_summary")
-        if not self.done and not self.tasks:
-            raise ValueError("done=false requires at least one task")
+        # Spec 21: a not-done turn with no NEW tasks is legitimate and common —
+        # the PM is waiting on in-flight work, or pruning duplicates it just
+        # created. Requiring a task made that state INEXPRESSIBLE: the
+        # gravity-golf PM tried four times to say "drop these duplicate HUD
+        # tasks, add nothing, not done", was rejected every time, and each
+        # rejection counted as no-progress until `pm_idle_limit` stopped a
+        # healthy run. An empty turn is still refused (no tasks AND no
+        # decisions) — that is the real stall this rule was reaching for, and
+        # `pm_idle_limit` already bounds a PM that keeps emitting them.
+        if not self.done and not self.tasks and not self.decisions:
+            raise ValueError(
+                "done=false requires at least one task or decision (an empty "
+                "plan turn does nothing; to record a no-op deliberately, emit a "
+                "decision explaining what you are waiting on)")
         return self
 
 
