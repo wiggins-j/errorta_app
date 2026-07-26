@@ -685,6 +685,13 @@ def resolve_stale_worker_unproductive(
             task_reassignment_count=0,
             pm_assist_pending=False,
             pm_assist_attempts=0,
+            # Spec 20: the per-task context-request budget is a ladder counter
+            # too — leave it set and a task rescued by a room change re-hits the
+            # cap on its first turn and re-raises the identical Problem. Clear
+            # the remembered question with it so the verbatim-repeat guard does
+            # not fire against an ask made by the PREVIOUS (failed) route.
+            context_request_attempts=0,
+            last_context_question_key="",
             reassignment_from_member_id=None,
             reassignment_attempts=None,
             reassignment_reason=None,

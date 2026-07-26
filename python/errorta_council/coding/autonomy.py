@@ -1450,6 +1450,27 @@ def _maybe_raise_member_health(
         pass
 
 
+# Spec 20: the per-task context-request budget is a ladder counter, so the two
+# F127 rungs that ROUTE AROUND a failure — model escalation (same member, strictly
+# stronger route) and member exclusion + reassignment (a different member) — must
+# re-arm it, exactly as `attention.resolve_stale_worker_unproductive` already does
+# for the run-start rescue. Those rungs exist to give a fresh or stronger route a
+# fair attempt; leaving the counter saturated hands it a task whose context channel
+# is already spent, so its FIRST well-formed turn scores `context_request_exhausted`
+# and it never gets the channel it may actually need. The remembered question goes
+# with it, so the verbatim-repeat guard cannot fire against an ask made by the
+# PREVIOUS (failed) route. Still bounded, and terminal: each rung is itself capped
+# (`model_escalation_limit` / `task_reassignment_limit`), so the worst case is
+# _CONTEXT_REQUEST_LIMIT asks per rung, not an unbounded re-arm. Deliberately NOT
+# applied to the pm-assist or terminal rungs in `common_patch`: neither installs a
+# new dev route (PM assist re-scopes into fresh tasks, which get fresh budgets of
+# their own), so re-arming there would only re-open the loop this bounded.
+_CONTEXT_BUDGET_REARM = {
+    "context_request_attempts": 0,
+    "last_context_question_key": "",
+}
+
+
 def _handle_unproductive(
     ledger: Any, action: Any, outcome: TurnOutcome, c: LoopCounters,
     policy: CodingAutonomyPolicy, members: list[tuple[str, str]],
@@ -1498,6 +1519,18 @@ def _handle_unproductive(
                 model_assignment=next_assignment.to_dict(),
                 model_escalation_attempts=attempts,
                 model_escalation_reason=outcome.reason or "unparseable",
+                # Spec 20: a strictly stronger route is a new attempt — re-arm the
+                # context-request budget so it is not born already exhausted.
+                #
+                # Δ review: but NOT when the budget is what it just burned. A
+                # stronger model asking the same corpus the same question gets the
+                # same answers, so re-arming here multiplied the cap by the rung
+                # count (~25 dev calls of pure asking on one task — the same order
+                # as the unbounded pathology this bounds). Reassignment still
+                # re-arms below: that is a genuinely different member, which may
+                # phrase the ask differently. Escalation is the same member.
+                **({} if outcome.reason == "context_request_exhausted"
+                   else _CONTEXT_BUDGET_REARM),
             )
             ledger.record_decision(
                 title=f"task model escalated: {task.title or task_id}",
@@ -1542,6 +1575,9 @@ def _handle_unproductive(
                 reassignment_from_member_id=member_id,
                 reassignment_attempts=attempts,
                 reassignment_reason=outcome.reason or "unparseable",
+                # Spec 20: a different member is a new attempt — re-arm the
+                # context-request budget so it is not born already exhausted.
+                **_CONTEXT_BUDGET_REARM,
             )
             ledger.record_decision(
                 title=f"worker excluded: {task.title or task_id}",
