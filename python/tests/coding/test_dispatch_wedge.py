@@ -116,7 +116,11 @@ def test_wedge_trips_after_the_sustained_window_and_names_the_culprit(
     raised: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "errorta_council.coding.autonomy._maybe_raise_monitor",
-        lambda ledger, detector, reason: raised.append((detector, reason)),
+        # Spec 22-28 P0.3: detectors now hand `_maybe_raise_monitor` a structured
+        # `DetectorEvidence` instead of a bare string. `.reason` is the same text
+        # the monitor records, so the assertions below are unchanged.
+        lambda ledger, detector, evidence: raised.append(
+            (detector, getattr(evidence, "reason", evidence))),
     )
 
     stop = None

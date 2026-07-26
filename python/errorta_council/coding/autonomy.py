@@ -248,6 +248,40 @@ class CodingAutonomyPolicy:
     # is inert for the common prose-silent task and only bites declared colliders.
     # At `cap == 1` (sequential loop) it is a no-op. On/off switch for the guardrail.
     strict_file_partition: bool = True
+    # --- Spec 22-28 batch (prep PR P0.1) — landed with NO CONSUMERS ----------- #
+    # Every knob below is inert in this commit: nothing reads it. They ship early
+    # so the five feature branches never race `CodingAutonomyPolicy` /
+    # `policy_to_dict` / `policy_from_dict` (the Spec 12-18 batch proved the seam).
+    # Each one's DISABLE VALUE (0 / 0.0 / {}) must reproduce today's trace exactly
+    # — that is the batch's escape hatch, and each spec must keep it true.
+    #
+    # SPEC-23: how many times ONE run may hand a heuristic stop back to the PM for
+    # a "last word" turn before it stops for real. Each intervention costs ~1 model
+    # call + 1 iteration, so the worst case is bounded by this number. 0 disables
+    # the whole mechanism — every heuristic stop terminates exactly as it does now.
+    last_word_limit: int = 2
+    # SPEC-24: how close to a detector's trip threshold a reading must be before it
+    # is rendered into the PM prompt as observed state (a fraction of the threshold,
+    # so 0.6 = "show it once we're 60% of the way there"). 0.0 disables the whole
+    # `governance_state` segment, restoring today's prompt bytes.
+    governance_proximity: float = 0.6
+    # SPEC-27: run-wide budget for NARROWING rungs (clamp/serialize/defer responses
+    # to a tripped detector, one rung softer than a stop). Bounds the worst case the
+    # ladder can add to a run. 0 disables the ladder entirely — every detector keeps
+    # returning its present stop.
+    narrow_limit: int = 3
+    # SPEC-25: how many BLOCKED turns one worker may emit on one task before the
+    # loop stops treating "blocked" as a legal, progress-bearing answer and routes
+    # the task to the recovery ladder. 0 disables the accounting.
+    blocked_turn_limit: int = 3
+    # SPEC-26: operator overrides for the per-role capability manifest, as
+    # ``{role: {capability: bool}}``. EMPTY (the default) means "derive every
+    # capability exactly as today" — the disable value for this one is `{}`, not 0.
+    # NOTE the dataclass mutable-default rule: a bare `{}` default is a TypeError on
+    # a dataclass field, so this uses `field(default_factory=dict)`. The dataclass is
+    # frozen but the dict is not — treat it as read-only; `policy_from_dict` always
+    # builds a fresh copy so a persisted policy can never alias a caller's dict.
+    capability_overrides: dict[str, Any] = field(default_factory=dict)
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -293,7 +327,29 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "convergence_release_ratio": p.convergence_release_ratio,
         "convergence_release_merge_rate": p.convergence_release_merge_rate,
         "strict_file_partition": p.strict_file_partition,
+        # Spec 22-28 batch (prep PR P0.1) — landed with no consumers, so no
+        # feature branch has to edit this function.
+        "last_word_limit": p.last_word_limit,
+        "governance_proximity": p.governance_proximity,
+        "narrow_limit": p.narrow_limit,
+        "blocked_turn_limit": p.blocked_turn_limit,
+        # Copy: the returned dict is persisted/serialized by callers, and handing
+        # out the policy's own dict would let a caller mutate a frozen policy.
+        "capability_overrides": dict(p.capability_overrides),
     }
+
+
+def _coerce_overrides(raw: Any, default: dict[str, Any]) -> dict[str, Any]:
+    """Spec 22-28 P0.1 — read ``capability_overrides`` off unvalidated JSON.
+
+    Absent -> the dataclass default (a fresh copy, never the shared instance);
+    a non-mapping -> ``{}`` (the disable value), because a malformed knob must
+    degrade to today's behaviour rather than fail the whole policy load."""
+    if raw is None:
+        return dict(default)
+    if not isinstance(raw, dict):
+        return {}
+    return dict(raw)
 
 
 def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
@@ -400,6 +456,24 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # partition. Absent key -> the dataclass default.
         strict_file_partition=bool(
             d.get("strict_file_partition", base.strict_file_partition)),
+        # --- Spec 22-28 batch (prep PR P0.1) ---------------------------------- #
+        # `max(0, …)` — NOT max(1) — on every int, matching the Spec 04/07/10/16
+        # convention: 0 is the DISABLE value and must restore today's behaviour.
+        # Absent key -> the dataclass default.
+        last_word_limit=max(
+            0, int(d.get("last_word_limit", base.last_word_limit))),
+        # A proximity FRACTION, so it clamps to [0, 1] like the GL04 ratios; 0.0
+        # disables the segment.
+        governance_proximity=min(1.0, max(
+            0.0, float(d.get("governance_proximity", base.governance_proximity)))),
+        narrow_limit=max(0, int(d.get("narrow_limit", base.narrow_limit))),
+        blocked_turn_limit=max(
+            0, int(d.get("blocked_turn_limit", base.blocked_turn_limit))),
+        # A mapping, so the disable value is `{}`. Coerced defensively: this dict
+        # comes straight off unvalidated JSON on disk, and a non-mapping there must
+        # degrade to "no overrides" rather than crash policy load for the whole run.
+        capability_overrides=_coerce_overrides(
+            d.get("capability_overrides"), base.capability_overrides),
     )
 
 
@@ -834,6 +908,149 @@ class LoopResult:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
+# --- Spec 22-28 batch (prep PR P0.2) — reserved run_state keys --------------- #
+#
+# ``run_state.json`` is a free-form document (``LedgerStore.get_run_state``
+# merges whatever is on disk over a small default), so a new key needs no
+# migration: it is ADDITIVE and ABSENT->FALSY, exactly like the keys that already
+# live there (``gate_due``, ``convergence_clamped``, ``foundation_status``,
+# ``frozen_paths``). Reserving the names here — one place, before five branches
+# start writing — is what keeps two specs from picking the same key for different
+# shapes. NOTHING in this commit reads or writes them.
+#
+#   detector_state  (SPEC-24) — the published snapshot of every detector's current
+#                   reading vs its threshold, for the governance_state prompt
+#                   segment. Must be CLEARED at run start (a stale snapshot from
+#                   the previous run would be rendered as live).
+#   last_words      (SPEC-23) — how many last-word interventions this run has
+#                   spent, and against which detectors, so the run-wide budget
+#                   survives an `errorta continue`.
+#   narrow_ladder   (SPEC-27) — per-detector narrowing rung state, likewise
+#                   budget-bearing and likewise must survive a resume.
+#   role_closure    (SPEC-26) — the capable/deferred/unclosable verdict per role,
+#                   so the topology advisory can be resolved rather than re-raised.
+RESERVED_RUN_STATE_KEYS = (
+    "detector_state",
+    "last_words",
+    "narrow_ladder",
+    "role_closure",
+)
+
+
+# --- Spec 22-28 batch (prep PR P0.2) — the resume asymmetry ------------------ #
+#
+# THE BUG: ``run_coding_loop`` does ``c = counters or LoopCounters()`` and the one
+# production caller (``CodingRunner.run``) passes none, so every detector window
+# re-arms from zero on `errorta continue` — while the FLAGS those windows bound
+# (``convergence_clamped``, ``frozen_paths``, ``foundation_status``) do survive in
+# run_state. A resumed run therefore gets a clamped, wedged, or stalled state with
+# a brand-new budget: the exact combination that lets a run spin.
+#
+# THE FIX: persist the window-bounding counter fields at both terminal writers and
+# rehydrate them at the resume/continue seam.
+#
+# The line drawn — and it is a deliberate one — is **does the state this window
+# bounds outlive the run?** A window whose subject is durable (a run-state flag or
+# a ledger fact) must not re-arm, because its subject did not reset either:
+#
+#   hot_freeze_stall     <- run_state.frozen_paths  (a freeze that never force-lifts)
+#   foundation_stall     <- run_state.foundation_status
+#   last_gate_*          <- the ledger's test runs / delivery verdict
+#   last_broken_*        <- the open `revise chain broken:` tasks + merged PRs
+#   wedge_streak         <- the todo backlog + dependency graph
+#   delivery_review_rounds <- the recorded delivery reviews on the same head
+#
+# Deliberately NOT persisted:
+#
+# * ``pm_idle`` / ``false_done_streak`` / ``plan_streak`` — these bound the PM's
+#   BEHAVIOUR WITHIN one run, and their subject (a conversation) genuinely does
+#   reset. A continue is an operator intervention, usually carrying an
+#   interjection; rehydrating `pm_idle == pm_idle_limit` would re-stop the run
+#   `no_progress` on its first non-productive turn, which is the failure mode this
+#   whole batch exists to remove. Regression lock 6 still holds: `pm_idle_limit`
+#   bounds genuinely empty turns inside the resumed run.
+# * ``iterations`` / ``model_calls`` / ``since_checkpoint`` — BUDGETS. A continue
+#   is meant to grant a fresh one; carrying them makes every continue an instant
+#   ``budget_exhausted``.
+# * ``last_progress_fp`` / ``last_progress_iter`` — ``_progress_fingerprint``
+#   embeds this run's ladder counters (reassignments, escalations, unproductive
+#   totals), so the fingerprint cannot be restored without also restoring the F127
+#   ladder state — which WOULD change dispatch. Restoring the anchor without the
+#   fingerprint is worthless (the first iteration re-seeds the fingerprint and
+#   resets the window), so `not_converging` stays as it is today. Making it
+#   resume-safe means changing what the fingerprint reads, which is a detector
+#   contract change: SPEC-27's seam, not Phase 0's.
+# * ``unproductive_counts`` / ``member_fail_counts`` — per-member ladder state; a
+#   member one turn from exclusion is a live routing decision, not a window.
+#
+# Iteration-anchored fields are stored as an ELAPSED count, never as an absolute
+# iteration number: the resumed counter restarts ``iterations`` at 0, so a raw
+# ``last_gate_iter=17`` would make ``iterations - last_gate_iter`` NEGATIVE and
+# disarm the detector for 17 iterations — worse than the bug. Storing the elapsed
+# and rehydrating it as a negative anchor preserves the remaining window exactly.
+
+# ``counter field -> persisted key`` for plain, non-iteration-anchored windows.
+_WINDOW_STREAK_FIELDS = {
+    "delivery_review_rounds": "delivery_review_rounds",
+    "wedge_streak": "wedge_streak",
+    "foundation_stall": "foundation_stall",
+    "hot_freeze_stall": "hot_freeze_stall",
+    "last_gate_best": "last_gate_best",
+    "last_broken_count": "last_broken_count",
+    "last_broken_merges": "last_broken_merges",
+}
+
+# ``(iteration-anchor field, persisted elapsed key)`` — stored as
+# ``iterations - anchor`` and rehydrated as ``-elapsed``.
+_WINDOW_ELAPSED_FIELDS = (
+    ("last_gate_iter", "last_gate_stall"),
+    ("last_broken_iter", "last_broken_stall"),
+)
+
+
+def window_counters_to_dict(c: LoopCounters) -> dict[str, Any]:
+    """P0.2 — the detector-window slice of ``LoopCounters``, JSON-safe, for the
+    terminal ``set_run_state(counters=…)`` writers. Ints only; no fingerprints, no
+    budgets, no per-member ladder state (see the block comment above)."""
+    out: dict[str, Any] = {
+        key: int(getattr(c, field_name, 0))
+        for field_name, key in _WINDOW_STREAK_FIELDS.items()
+    }
+    for field_name, key in _WINDOW_ELAPSED_FIELDS:
+        out[key] = max(0, int(c.iterations) - int(getattr(c, field_name, 0)))
+    return out
+
+
+def counters_from_run_state(state: Any) -> Optional[LoopCounters]:
+    """P0.2 — rebuild the detector windows a previous run left behind, for a
+    resume/continue that would otherwise hand a clamped run a fresh budget.
+
+    Returns ``None`` when there is nothing to restore (no ``counters`` block, or a
+    block written before this key existed), so the caller falls through to today's
+    ``LoopCounters()`` and behaves EXACTLY as it does now. Fully guarded: a
+    malformed value can never fail a run start."""
+    try:
+        raw = (state or {}).get("counters") or {}
+        if not isinstance(raw, dict):
+            return None
+        known = set(_WINDOW_STREAK_FIELDS.values()) | {
+            key for _f, key in _WINDOW_ELAPSED_FIELDS}
+        if not (known & set(raw)):
+            return None  # pre-P0.2 counters block — nothing to restore
+        c = LoopCounters()
+        for field_name, key in _WINDOW_STREAK_FIELDS.items():
+            if key in raw:
+                setattr(c, field_name, int(raw[key]))
+        for field_name, key in _WINDOW_ELAPSED_FIELDS:
+            if key in raw:
+                # The fresh counter starts at iterations == 0, so anchor the window
+                # in the negative past: `iterations - anchor` == the elapsed we saved.
+                setattr(c, field_name, -max(0, int(raw[key])))
+        return c
+    except Exception:  # noqa: BLE001 — a run start must never fail on this
+        return None
+
+
 RunTurn = Callable[[Any, Any], TurnOutcome]  # (action, ledger) -> outcome
 
 
@@ -913,23 +1130,80 @@ def run_coding_loop(
     )
 
 
-def _maybe_raise_monitor(ledger: Any, detector: str, reason: str) -> None:
+@dataclass(frozen=True)
+class DetectorEvidence:
+    """Spec 22-28 P0.3 — a detector's reading, as a VALUE.
+
+    Today every detector derives its evidence, formats it into a string, hands the
+    string to ``_maybe_raise_monitor``, and drops it. SPEC-23 needs that evidence
+    for the intervention prompt and SPEC-24 for the ``governance_state`` prompt
+    segment, so without a carrier the same numbers get re-derived in three places
+    and drift (the SPEC-19 "four declarations, two values" shape). The detector
+    builds this ONCE; the monitor call and every future consumer read the same
+    object.
+
+    Fields:
+
+    * ``detector`` — the detector id, matching the stop reason / monitor key.
+    * ``text``     — the human-readable evidence sentence (what used to be the
+      bare ``reason`` argument). This is what the attention Problem records.
+    * ``value``    — the current reading that is compared against ``threshold``
+      (e.g. iterations since the gate last improved). ``None`` when the detector
+      has no scalar reading.
+    * ``threshold``— the configured limit at which the detector trips, so a reader
+      can compute proximity as ``value / threshold`` without knowing the policy.
+    * ``window``   — the size of the window the reading was taken over, when the
+      detector uses one (else ``None``).
+
+    Frozen and JSON-friendly on purpose: a snapshot may be published to run_state
+    and must never be mutated by a reader.
+    """
+    detector: str
+    text: str = ""
+    value: Optional[float] = None
+    threshold: Optional[float] = None
+    window: Optional[int] = None
+
+    @property
+    def reason(self) -> str:
+        """The string the attention Problem is keyed/recorded with — the evidence
+        text, falling back to the detector id (the pre-P0.3 ``reason or detector``
+        behaviour, preserved exactly)."""
+        return self.text or self.detector
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe projection, for a future ``run_state.detector_state``."""
+        return {"detector": self.detector, "text": self.text,
+                "value": self.value, "threshold": self.threshold,
+                "window": self.window}
+
+
+def _maybe_raise_monitor(ledger: Any, detector: str,
+                         reason: "str | DetectorEvidence") -> DetectorEvidence:
     """F117-03 Progress Monitor producer: surface a stuck *governed* run as an
     attention Problem so a human is told, instead of the run just ending opaquely.
 
     Best-effort — wrapped so a signal-store hiccup can never break the run loop.
     Only governed runs (mode != off) have a governance stage to key the Problem on;
     ungoverned runs are skipped.
+
+    Spec 22-28 P0.3: ``reason`` may be a plain string (unchanged behaviour — it is
+    wrapped into a text-only :class:`DetectorEvidence`) or a pre-built evidence
+    value. Either way the evidence is RETURNED rather than discarded, so SPEC-23's
+    intervention and SPEC-24's snapshot can read exactly what was raised instead of
+    re-deriving it. Nothing consumes the return value in this commit.
     """
+    evidence = (reason if isinstance(reason, DetectorEvidence)
+                else DetectorEvidence(detector=detector, text=str(reason or "")))
     try:
         from . import attention
         from .governance import GovernanceStore
         state = GovernanceStore.for_ledger(ledger).load_state()
         if state.mode == "off":
-            return
+            return evidence
         signal = attention.raise_monitor_problem(
             ledger.project_id, stage=state.phase, detector=detector,
-            reason=reason or detector, store=ledger,
+            reason=evidence.reason, store=ledger,
         )
         if not state.block_on_problems:
             signal = signal or attention.find_open_monitor_problem(
@@ -940,6 +1214,7 @@ def _maybe_raise_monitor(ledger: Any, detector: str, reason: str) -> None:
                 attention.auto_resolve(ledger.project_id, signal.id, store=ledger)
     except Exception:  # noqa: BLE001 - producer must never break the run loop
         pass
+    return evidence
 
 
 def _account_foundation_stall(ledger: Any, c: LoopCounters,
@@ -1004,8 +1279,10 @@ def _account_foundation_stall(ledger: Any, c: LoopCounters,
             )
         except Exception:  # noqa: BLE001
             pass
-        _maybe_raise_monitor(ledger, "foundation_not_converging",
-                             "foundation has not merged to master")
+        _maybe_raise_monitor(ledger, "foundation_not_converging", DetectorEvidence(
+            detector="foundation_not_converging",
+            text="foundation has not merged to master",
+            value=c.foundation_stall, threshold=limit))
     except Exception:  # noqa: BLE001
         pass
 
@@ -1022,8 +1299,10 @@ def _account_hot_file_freeze(ledger: Any, c: LoopCounters,
             c.hot_freeze_stall = 0
             return
         c.hot_freeze_stall += 1
-        if c.hot_freeze_stall < max(1, policy.hot_file_freeze_stall_limit):
+        limit = max(1, policy.hot_file_freeze_stall_limit)
+        if c.hot_freeze_stall < limit:
             return
+        stalled = c.hot_freeze_stall  # P0.3: read the evidence BEFORE the reset
         c.hot_freeze_stall = 0
         try:
             ledger.set_run_state(frozen_paths=[])
@@ -1039,8 +1318,10 @@ def _account_hot_file_freeze(ledger: Any, c: LoopCounters,
                            "need to look"))
         except Exception:  # noqa: BLE001
             pass
-        _maybe_raise_monitor(ledger, "hot_file_freeze_stalled",
-                             "a hot-file centralize task did not merge in time")
+        _maybe_raise_monitor(ledger, "hot_file_freeze_stalled", DetectorEvidence(
+            detector="hot_file_freeze_stalled",
+            text="a hot-file centralize task did not merge in time",
+            value=stalled, threshold=limit))
     except Exception:  # noqa: BLE001
         pass
 
@@ -1061,11 +1342,14 @@ def _account_convergence(ledger: Any, c: LoopCounters,
         c.last_progress_fp = fp
         c.last_progress_iter = c.iterations
         return None
-    if c.iterations - c.last_progress_iter < max(1, policy.convergence_stall_limit):
+    limit = max(1, policy.convergence_stall_limit)
+    stalled = c.iterations - c.last_progress_iter
+    if stalled < limit:
         return None
-    _maybe_raise_monitor(
-        ledger, "not_converging",
-        "no merged progress, PR transition, or ladder activity")
+    _maybe_raise_monitor(ledger, "not_converging", DetectorEvidence(
+        detector="not_converging",
+        text="no merged progress, PR transition, or ladder activity",
+        value=stalled, threshold=limit))
     return LoopResult(NOT_CONVERGING, c)
 
 
@@ -1096,7 +1380,8 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
         c.last_gate_best = score
         c.last_gate_iter = c.iterations
         return None
-    if c.iterations - c.last_gate_iter < policy.gate_stall_limit:
+    stalled = c.iterations - c.last_gate_iter
+    if stalled < policy.gate_stall_limit:
         return None
     # Spec 21: a GREEN gate is not a stalled one. The score is "how many commands
     # pass", so a gate with nothing failing sits at its maximum forever and can
@@ -1111,10 +1396,11 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
     # improve — the run should be ended by the definition of done, not by this.
     if not _gate_has_failure(ledger):
         return None
-    _maybe_raise_monitor(
-        ledger, "gate_not_improving",
-        f"acceptance gate has not improved for {policy.gate_stall_limit} "
-        f"iterations (score={score})")
+    _maybe_raise_monitor(ledger, "gate_not_improving", DetectorEvidence(
+        detector="gate_not_improving",
+        text=(f"acceptance gate has not improved for {policy.gate_stall_limit} "
+              f"iterations (score={score})"),
+        value=stalled, threshold=policy.gate_stall_limit))
     return LoopResult(GATE_NOT_IMPROVING, c)
 
 
@@ -1147,6 +1433,39 @@ def _gate_has_failure(ledger: Any) -> bool:
 _CONVERGENCE_RESOLVED = ("merged", "superseded", "blocked", "abandoned")
 
 
+def _convergence_window_stats(
+    ledger: Any, window: int,
+) -> Optional[tuple[float, float, int]]:
+    """Spec 22-28 P0.3 — the windowed churn reading, as ONE computation.
+
+    Returns ``(superseded_ratio, merge_rate, n)`` over the most recent ``window``
+    RESOLVED PRs (merged/superseded/blocked/abandoned), or ``None`` when there is
+    no judgeable reading: the detector is disabled (``window <= 0``), the ledger
+    could not be read, or fewer than ``window`` PRs have resolved (a metric off 2
+    resolved PRs is noise, and an early lone supersession clamping the whole run is
+    exactly the flap the hysteresis exists to avoid).
+
+    Extracted verbatim out of ``_account_convergence_clamp``'s inlined arithmetic
+    so SPEC-24 (which renders this reading) and SPEC-27 (which ladders on it) read
+    the SAME numbers the clamp acts on, instead of each re-deriving them — the
+    "four declarations, two values" failure shape, avoided in advance. Pure and
+    read-only: it never touches run state and never returns a stop."""
+    if window <= 0:
+        return None
+    try:
+        prs = ledger.list_prs()
+    except Exception:  # noqa: BLE001 — a churn metric must never break the loop
+        return None
+    resolved = [p for p in prs if p.get("status") in _CONVERGENCE_RESOLVED]
+    if len(resolved) < window:
+        return None
+    recent = resolved[-window:]
+    n = len(recent)
+    superseded = sum(1 for p in recent if p.get("status") == "superseded")
+    merged = sum(1 for p in recent if p.get("status") == "merged")
+    return (superseded / n, merged / n, n)
+
+
 def _account_convergence_clamp(ledger: Any, c: LoopCounters,
                                policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
     """GL04 (GAP-5): the run-level convergence health brake — one rung SOFTER than
@@ -1168,23 +1487,14 @@ def _account_convergence_clamp(ledger: Any, c: LoopCounters,
     ``convergence_window == 0`` disables it (``max(0, …)`` convention), restoring
     today's fan-out. Fully guarded — a ledger/run-state hiccup never clamps or stops
     the run."""
-    if policy.convergence_window <= 0:
+    # P0.3: the window arithmetic (disabled-check, ledger read, full-window
+    # requirement, ratio + merge-rate) now lives in `_convergence_window_stats` so
+    # this clamp and its future readers share ONE computation. `None` means "no
+    # judgeable reading" — disabled, unreadable, or not yet a full window.
+    stats = _convergence_window_stats(ledger, policy.convergence_window)
+    if stats is None:
         return None
-    try:
-        prs = ledger.list_prs()
-    except Exception:  # noqa: BLE001 — a churn metric must never break the loop
-        return None
-    resolved = [p for p in prs if p.get("status") in _CONVERGENCE_RESOLVED]
-    # Need a FULL window before judging: a metric off 2 resolved PRs is noise, and an
-    # early lone supersession clamping the whole run is exactly the flap to avoid.
-    if len(resolved) < policy.convergence_window:
-        return None
-    window = resolved[-policy.convergence_window:]
-    n = len(window)
-    superseded = sum(1 for p in window if p.get("status") == "superseded")
-    merged = sum(1 for p in window if p.get("status") == "merged")
-    ratio = superseded / n
-    merge_rate = merged / n
+    ratio, merge_rate, n = stats
     try:
         clamped = bool(ledger.get_run_state().get("convergence_clamped"))
     except Exception:  # noqa: BLE001
@@ -1291,12 +1601,14 @@ def _account_revise_livelock(ledger: Any, c: LoopCounters,
         c.last_broken_merges = merges
         c.last_broken_iter = c.iterations
         return None
-    if c.iterations - c.last_broken_iter < policy.revise_livelock_limit:
+    stalled = c.iterations - c.last_broken_iter
+    if stalled < policy.revise_livelock_limit:
         return None
-    _maybe_raise_monitor(
-        ledger, "revise_livelock",
-        f"{broken} revise lineage(s) broke and the run has made no merge progress "
-        f"for {policy.revise_livelock_limit} iterations")
+    _maybe_raise_monitor(ledger, "revise_livelock", DetectorEvidence(
+        detector="revise_livelock",
+        text=(f"{broken} revise lineage(s) broke and the run has made no merge "
+              f"progress for {policy.revise_livelock_limit} iterations"),
+        value=stalled, threshold=policy.revise_livelock_limit))
     return LoopResult(REVISE_LIVELOCK, c)
 
 
@@ -1346,10 +1658,11 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
     if c.plan_streak < policy.plan_streak_limit:
         return None
     depth, distinct = _open_backlog_shape(ledger)
-    _maybe_raise_monitor(
-        ledger, "planning_churn",
-        f"{c.plan_streak} consecutive planning turns with no worker turn "
-        f"(backlog {depth} open task(s) across {distinct} distinct title(s))")
+    _maybe_raise_monitor(ledger, "planning_churn", DetectorEvidence(
+        detector="planning_churn",
+        text=(f"{c.plan_streak} consecutive planning turns with no worker turn "
+              f"(backlog {depth} open task(s) across {distinct} distinct title(s))"),
+        value=c.plan_streak, threshold=policy.plan_streak_limit))
     return LoopResult(PLANNING_CHURN, c)
 
 
@@ -1451,7 +1764,9 @@ def _account_dispatch_wedge(ledger: Any, c: LoopCounters,
     if c.wedge_streak < policy.wedge_stall_limit:
         return None
     summary = _dispatch_wedge_culprits(ledger, todo)
-    _maybe_raise_monitor(ledger, "dispatch_wedged", summary)
+    _maybe_raise_monitor(ledger, "dispatch_wedged", DetectorEvidence(
+        detector="dispatch_wedged", text=summary,
+        value=c.wedge_streak, threshold=policy.wedge_stall_limit))
     return LoopResult(DISPATCH_WEDGED, c, detail={"summary": summary})
 
 
@@ -1878,12 +2193,15 @@ def _run_sequential_loop(
             )
 
         if outcome.hard_blocker:
-            _maybe_raise_monitor(ledger, "hard_blocker", outcome.reason)
+            _maybe_raise_monitor(ledger, "hard_blocker", DetectorEvidence(
+                detector="hard_blocker", text=outcome.reason))
             return LoopResult(HARD_BLOCKER, c, detail={"reason": outcome.reason})
 
         # PM made no progress N times in a row -> nothing left to do.
         if c.pm_idle >= policy.pm_idle_limit:
-            _maybe_raise_monitor(ledger, "no_progress", "PM made no progress")
+            _maybe_raise_monitor(ledger, "no_progress", DetectorEvidence(
+                detector="no_progress", text="PM made no progress",
+                value=c.pm_idle, threshold=policy.pm_idle_limit))
             return LoopResult(NO_PROGRESS, c)
 
         # Spec 07: the PM-only pathology — plan turn after plan turn with no worker
@@ -2266,11 +2584,15 @@ def _run_concurrent_loop(
                         return pending_stop
                     if pending_stop.stop_reason == HARD_BLOCKER:
                         _maybe_raise_monitor(
-                            ledger, "hard_blocker",
-                            (pending_stop.detail or {}).get("reason", ""))
+                            ledger, "hard_blocker", DetectorEvidence(
+                                detector="hard_blocker",
+                                text=str((pending_stop.detail or {})
+                                         .get("reason", "") or "")))
                     return pending_stop
                 if c.pm_idle >= policy.pm_idle_limit:
-                    _maybe_raise_monitor(ledger, "no_progress", "PM made no progress")
+                    _maybe_raise_monitor(ledger, "no_progress", DetectorEvidence(
+                        detector="no_progress", text="PM made no progress",
+                        value=c.pm_idle, threshold=policy.pm_idle_limit))
                     return LoopResult(NO_PROGRESS, c)
                 # Spec 07: PM-only planning churn (mirrors the sequential loop),
                 # checked at this same quiescent point.

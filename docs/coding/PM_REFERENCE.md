@@ -433,6 +433,16 @@ and FastAPI routers. Update the prose and this contract together.
 > the batch in parallel without both editing `CodingAutonomyPolicy`. Each spec
 > documents its own knob when it lands.
 
+> **Spec 22-28 batch, prep PR (P0.1).** Five more `autonomy_defaults` keys below
+> are landed ahead of their features and have **no consumers yet** — setting them
+> changes nothing until the matching spec merges: `last_word_limit` (Spec 23),
+> `governance_proximity` (Spec 24), `blocked_turn_limit` (Spec 25),
+> `capability_overrides` (Spec 26), `narrow_limit` (Spec 27). Same reason as
+> above: five branches build in parallel without racing `CodingAutonomyPolicy`.
+> Each knob's **disable value** — `0` for the ints, `0.0` for
+> `governance_proximity`, `{}` for `capability_overrides` — is required to
+> reproduce today's behaviour exactly, and stays required after its spec lands.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -443,6 +453,8 @@ and FastAPI routers. Update the prose and this contract together.
   "pm_model_modes": ["single"],
   "run_setup_fields": ["block_on_problems", "checkpoint_cadence", "checkpoint_n", "delivery_review_round_limit", "governance_mode", "grounding", "guardrail_enabled", "human_code_approval", "max_iterations", "max_model_calls", "max_parallel_workers", "max_review_rounds", "member_failure_limit", "members", "preflight_enabled", "team_room_id"],
   "autonomy_defaults": {
+    "blocked_turn_limit": 3,
+    "capability_overrides": {},
     "checkpoint_cadence": "per_milestone",
     "checkpoint_n": 5,
     "completion_refused_limit": 2,
@@ -460,14 +472,17 @@ and FastAPI routers. Update the prose and this contract together.
     "gate_bootstrap": true,
     "gate_min_merge_interval": 3,
     "gate_stall_limit": 8,
+    "governance_proximity": 0.6,
     "hot_file_escalation_threshold": 4,
     "hot_file_freeze_stall_limit": 15,
     "hot_file_threshold": 2,
+    "last_word_limit": 2,
     "max_iterations": 200,
     "max_model_calls": null,
     "max_parallel_workers": null,
     "member_failure_limit": 3,
     "model_escalation_limit": 2,
+    "narrow_limit": 3,
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,

@@ -39,6 +39,7 @@ from .autonomy import (
     LoopResult,
     TurnOutcome,
     run_coding_loop,
+    window_counters_to_dict,
 )
 from .completion import pending_completion_work, summarize_open_items
 from .ledger import LedgerStore, Task, format_focus_lines
@@ -147,6 +148,45 @@ _composition_pending = threading.local()
 _COMPOSITION_CLASSES = (
     "role_instructions", "work_request", "project_context", "repo_snapshot",
     "prior_outputs", "pr_diff", "tool_guidance", "transcript",
+    # Spec 12 added `gate_output` and Spec 22-28 P0.4 reserves `governance_state`;
+    # both were already (or are about to be) used as `PromptSegment.class_` values.
+    # This tuple is DOCUMENTATION — nothing validates against it, and
+    # `content_kind_for_class` falls through to "prose" for an unlisted class — so
+    # naming them here is a tidy-up, not a behaviour change. It lives in the prep PR
+    # so two feature branches don't both edit this line.
+    "gate_output", "governance_state",
+)
+
+# --- Spec 22-28 batch (prep PR P0.4) — the prompt segment ORDER contract ----- #
+#
+# Three specs add or edit prompt content in these same builders (SPEC-24's
+# `governance_state` segment, SPEC-25's `_corrective_turn_prompt`, SPEC-23's
+# `_last_word_prompt`). Fixing the ORDER here, before any of them lands, is what
+# keeps their diffs from racing: each spec inserts at an already-reserved site
+# rather than choosing (and defending) a position of its own.
+#
+# The tail of every member prompt runs:
+#
+#     gate_output  ->  governance_state  ->  tool_guidance  ->  standing rules
+#
+# Read as: OBSERVED WORLD first (what the acceptance gate reported, then how close
+# the run is to its own limits), then GUIDANCE (what this role may actually do),
+# then the standing role instructions + envelope schema. The instructions stay
+# LAST so they are the most recent thing the model reads.
+#
+# `gate_output` is already placed in the dev / reviewer / tester builders (Spec 12)
+# and `tool_guidance` in all four (Spec 15 / Spec 17). `governance_state` does not
+# exist yet: its insertion point is reserved by comment at the exact site in
+# `_pm_prompt_segments`, and `tests/coding/test_prompt_segments_golden.py`'s
+# reference builder calls a stub at the same position, so SPEC-24 lands as a
+# one-line diff on each side and the goldens stay byte-identical until it does.
+#
+# NOTE for SPEC-24: this order supersedes that spec's own "Item 5 — Where the
+# segment goes", which places `governance_state` AFTER the capability
+# `tool_guidance` segment. The batch plan's order is the de-conflict authority and
+# both readings keep the standing instructions last.
+PROMPT_TAIL_SEGMENT_ORDER = (
+    "gate_output", "governance_state", "tool_guidance", "role_instructions",
 )
 
 
@@ -1924,11 +1964,22 @@ def _latest_context_response_text(store: LedgerStore, task_id: str, *,
         # `tool_not_allowed` carry-forward repeats that string in prior_outputs —
         # so an exhausted dev was being pointed straight back at the one channel
         # it is forbidden from, which is how it kept walking the ladder.
+        # Spec 22-28 P0.5 (bug 2): the escape hatch used to read "say so in your
+        # summary" — an action the DEV cannot take. `DeveloperToolPlanIntent` has
+        # no `summary` field and `extra="ignore"`, so the field is silently
+        # dropped, and `_corrective_turn_prompt` separately instructs "Drop
+        # unmodeled fields such as summary". Two correct strings assembling a dead
+        # end: an exhausted dev was told to do the one thing the schema erases.
+        # Point it at a shape it can actually emit today instead. (SPEC-25 adds a
+        # real `blocked` intent later; this only stops instructing the impossible.)
         + ("You have NO context requests left — do NOT ask again; implement the "
            "task with the evidence above. This OVERRIDES any earlier instruction "
            "in this prompt to emit a context_request intent: that channel is "
-           "closed for this task. If you truly cannot proceed, say so in your "
-           "summary rather than asking again.\n" if remaining <= 0 else
+           "closed for this task. If you truly cannot proceed, emit "
+           '{"kind": "tool_plan", "task_type": "investigation", "tool_calls": []} '
+           "— an empty investigation is the only 'I am stuck' shape this turn "
+           "accepts. Do NOT add a \"summary\" field: the dev intent has no such "
+           "field and it is discarded.\n" if remaining <= 0 else
            "Ask again ONLY if the answers above genuinely do not contain what you "
            "need; re-asking a question you already asked is treated as a dead end "
            "and spends the whole budget at once.\n"))
@@ -2386,12 +2437,31 @@ def _pm_prompt_segments(store: LedgerStore, *, pin: str,
         # F088-08 boot briefing on the first PM turn; otherwise the F088-07 packet.
         PromptSegment("project_context",
                       _pm_boot_text(store) or _grounding_packet_text("pm", store)),
+        # --- Spec 22-28 P0.4: the reserved tail order starts HERE ------------- #
+        # `PROMPT_TAIL_SEGMENT_ORDER` (top of this module) fixes:
+        #     gate_output -> governance_state -> tool_guidance -> standing rules
+        #
+        # The PM prompt has no `gate_output` segment today; if one is ever added it
+        # goes immediately above this comment.
+        #
+        # >>> SPEC-24 INSERTION POINT — `governance_state` goes exactly here <<<
+        # It renders the live detector/budget readings when something is near a
+        # limit, and must be OMITTED (not an empty labelled block) otherwise, so a
+        # run nowhere near a threshold keeps today's prompt bytes. Expected shape:
+        #
+        #     *([PromptSegment("governance_state", _governance_text)]
+        #       if _governance_text else []),
+        #
+        # `test_prompt_segments_golden.py::_governance_state_for_pm` is the matching
+        # stub in the reference builder — flip both in the same commit.
+        #
         # Spec 15 (Item 1): what each role can actually do, and the rule that no
         # role can run a command from inside a turn — so the PM stops planning
         # "run X and report" tasks no DEV can discharge (the gravity-golf wedge).
         PromptSegment("tool_guidance",
                       _capabilities.pm_capability_segment(store) + "\n"),
-        # The standing PM planning instructions + envelope schema.
+        # The standing PM planning instructions + envelope schema — LAST, always:
+        # the instructions must be the most recent thing the model reads.
         PromptSegment("role_instructions", instructions),
     ]
 
@@ -2414,6 +2484,54 @@ def _pm_assist_prompt(store: LedgerStore, task: Task) -> str:
         '"role":"dev","detail":"Acceptance criteria... Files...",'
         '"depends_on":[]}]}}.'
     )
+
+
+def _pm_turn_made_progress(intent: Any, created: list[Task]) -> bool:
+    """Spec 22-28 P0.5 (bug 1) — did this PM plan turn DO something?
+
+    ``made_progress`` feeds ``pm_idle``, and ``pm_idle_limit`` stops the run. Until
+    now the answer was ``len(created) > 0``, which contradicted Spec 21: that spec
+    legalised the decision-only PM turn ("drop these duplicate HUD tasks, add
+    nothing, not done") precisely because the schema kept rejecting it — but such a
+    turn creates no task, so it still scored no-progress and still fed the idle
+    detector. The 2026-07-26 run stopped `no_progress` with a PM that was answering
+    correctly four turns in a row. A legal turn that did something must count.
+
+    THE TENSION THIS MUST PRESERVE. Spec 08's dedupe (see ``_materialize_pm_tasks``)
+    deliberately keeps a rejected duplicate OUT of ``created`` so that a batch which
+    was ALL duplicates scores ``made_progress=False`` and re-arms the idle detector
+    on a churning PM. That is a real pathology (the PM re-proposing the same job
+    forever) and it must keep tripping.
+
+    THE RULE, and why this one:
+
+        A turn that PROPOSED TASKS is judged ONLY on whether any task was created.
+        A turn that proposed NO tasks is judged on whether it recorded a decision.
+
+    The discriminator is ``intent.tasks`` — what the PM TRIED to do — not
+    ``created``, which is what survived dedupe. So:
+
+    * proposed tasks, all duplicates  -> False. Spec 08 is untouched, and crucially
+      it stays untouched even when the PM attaches a decision to the batch —
+      otherwise "explain yourself" would become a licence to churn forever.
+    * proposed nothing, recorded a decision -> True. This is Spec 21's turn: the PM
+      pruning, deferring, or recording what it is waiting on. It wrote durable
+      project truth to the ledger (``record_decision`` ran above), so it is not
+      idle.
+    * proposed nothing, recorded nothing -> False, and unreachable: ``PMPlanIntent``
+      already refuses an empty not-done turn. Kept explicit so the invariant does
+      not depend on a validator two modules away.
+
+    Regression lock 6 of the batch plan still holds: ``pm_idle_limit`` continues to
+    bound genuinely empty turns, because a turn with neither a created task nor a
+    decision is still no-progress."""
+    if created:
+        return True
+    if getattr(intent, "tasks", None):
+        # Every proposed task was rejected (duplicate / uncreatable): Spec 08 says
+        # this is churn, decisions or not.
+        return False
+    return bool(getattr(intent, "decisions", None))
 
 
 def _materialize_pm_tasks(
@@ -4830,7 +4948,9 @@ def build_run_turn(
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)
-            return TurnOutcome(kind="planned", made_progress=len(created) > 0)
+            return TurnOutcome(
+                kind="planned",
+                made_progress=_pm_turn_made_progress(intent, created))
 
         if isinstance(action, GateRun):
             # Spec 12 (S1): run the acceptance gate on the integrated master tree,
@@ -6373,5 +6493,12 @@ class CodingRunner:
                     "model_escalations": res.counters.model_escalations,
                     "task_reassignments": res.counters.task_reassignments,
                     "pm_assists": res.counters.pm_assists,
+                    # Spec 22-28 P0.2: the detector windows whose SUBJECT outlives
+                    # the run (a frozen path, a red gate, a broken revise lineage).
+                    # Additive keys; `counters_from_run_state` restores them on a
+                    # resume/continue so a window cannot silently re-arm while the
+                    # state it bounds is still there. Every other consumer of this
+                    # block reads by key, so the extra keys are inert for them.
+                    **window_counters_to_dict(res.counters),
                 })
         return res

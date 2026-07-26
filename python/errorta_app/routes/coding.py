@@ -19,11 +19,13 @@ from pydantic import BaseModel, Field
 
 from errorta_app import settings
 from errorta_council.coding.autonomy import (
+    counters_from_run_state,
     load_policy,
     policy_from_dict,
     policy_to_dict,
     policy_with_provenance,
     save_policy,
+    window_counters_to_dict,
 )
 from errorta_council.coding.governance import (
     GovernanceMode,
@@ -2352,6 +2354,23 @@ def _is_transient_gateway_error(exc: BaseException) -> bool:
     return False
 
 
+def _carried_window_counters(state: dict[str, Any]) -> Any:
+    """Spec 22-28 P0.2 — the previous run's detector windows, as a seeded
+    ``LoopCounters``, or ``None`` when there is nothing to carry.
+
+    Only the windows whose SUBJECT survives the run are restored (see the
+    ``autonomy.py`` block comment); budgets and the PM-behaviour streaks are not.
+    Guarded end-to-end: a resume must never fail because a counters block on disk
+    is old or malformed — it just falls back to today's fresh counters."""
+    try:
+        return counters_from_run_state(state)
+    except Exception:  # noqa: BLE001 — never block a start on window carry-over
+        logging.getLogger("errorta.coding").warning(
+            "detector-window carry-over failed; starting with fresh windows",
+            exc_info=True)
+        return None
+
+
 def _start_run(
     project_id: str,
     body: dict[str, Any],
@@ -2492,6 +2511,16 @@ def _start_run(
         # result survive a sidecar restart. Resume starts a fresh worker over the
         # existing ledger/worktree after recovery requeued in-flight tasks.
         previous = state if resume else {}
+        # Spec 22-28 P0.2 — close the resume asymmetry. `set_run_state` below
+        # deliberately clears `counters`, so the previous run's detector windows
+        # must be read from the PRE-CLEAR state here and handed to the loop.
+        # Without this, `run_coding_loop`'s `c = counters or LoopCounters()` gives
+        # a resumed run a brand-new budget for every window while the state those
+        # windows bound (a frozen path, a red gate, a broken revise lineage) is
+        # still exactly where the last run left it. A FRESH start passes None and
+        # therefore behaves exactly as it does today.
+        carried_counters = (
+            _carried_window_counters(state) if (resume or continue_) else None)
         # Clear blocking member-health Problems the current roster has already
         # fixed (e.g. a member switched off a removed Cursor model / off a
         # rate-limited account). They're keyed by (member, reason) and stay open
@@ -2532,7 +2561,8 @@ def _start_run(
                 # The route owns lifecycle (cancel/recovery flags) -> tell the
                 # runner not to also write running/stopped/failed (F087-19 #4).
                 res = runner.run(load_policy(store), should_cancel=_should_cancel,
-                                 manage_lifecycle=False)
+                                 manage_lifecycle=False,
+                                 counters=carried_counters)
                 store.set_run_state(status="stopped", stop_reason=res.stop_reason,
                                     ended_at=_now(), recoverable=False, can_resume=False,
                                     counters={
@@ -2541,6 +2571,12 @@ def _start_run(
                                         "task_reassignments": res.counters.task_reassignments,
                                         "model_escalations": res.counters.model_escalations,
                                         "pm_assists": res.counters.pm_assists,
+                                        # Spec 22-28 P0.2: the detector windows whose
+                                        # subject outlives the run. Mirrors the
+                                        # runner's own terminal writer — both must
+                                        # persist them or a window re-arms on the
+                                        # chain that skipped it.
+                                        **window_counters_to_dict(res.counters),
                                     })
             except BaseException as exc:  # noqa: BLE001
                 # MUST be BaseException, not Exception. A SystemExit-class error
