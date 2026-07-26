@@ -1684,11 +1684,86 @@ def _revalidate_stale_prs(store: LedgerStore, workspace: Any, *,
             _fail_closed_demote(store, p, branch, task_id, reason=str(exc))
 
 
+def _tester_unseated_by_closure(store: LedgerStore) -> bool:
+    """SPEC-26 (S4) — the module-level read of the tester seat check, for the call
+    sites that have no ``RoleClosure`` in scope. The stale-base and conflict
+    revalidators are plain module functions, so they read the snapshot
+    ``_apply_role_closure`` / ``_reevaluate_role_closure`` publish on
+    ``run_state.role_closure`` instead of the live object.
+
+    Absent (every direct test caller, and every pre-SPEC-26 run state) -> ``False``,
+    which is today's behaviour exactly. Guarded: a run-state hiccup can only relax
+    back to today's behaviour, never invent an unseat."""
+    try:
+        state = store.get_run_state().get("role_closure") or {}
+        return TESTER in (state.get("unseated") or [])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _apply_merge_gate(store: LedgerStore, pr_id: str, *,
+                      tester_seated: bool = True) -> None:
+    """THE merge gate, and the only writer of ``status="mergeable"`` in the tree.
+
+    A PR is mergeable only when reviewer-approved AND tests-green for its head — so
+    a blind reviewer can never land a regression (F087-17).
+
+    If the project has NO registered test commands, there is nothing for a tester to
+    run, so the tests-green gate is vacuously satisfied — review approval alone
+    governs the merge. Without this, a greenfield project (which starts with an empty
+    test-command registry) could never advance a PR past ``tests_passed``, so NOTHING
+    ever merged and the team churned forever in a revise loop. When test commands ARE
+    configured the strict reviewer-AND-tests gate is unchanged.
+
+    SPEC-26 (S4): ``tester_seated=False`` is the same situation reached by a
+    different route — the commands exist but capability closure took the TESTER off
+    the board, so holding the PR for a green tester verdict would hold it forever.
+    Default ``True`` means "nothing was unseated", i.e. today's behaviour exactly.
+    """
+    p = store.get_pr(pr_id)
+    # Spec 12 (S1): only UNIT-scoped commands gate a merge. An acceptance command
+    # (in-loop gate / delivery) never blocks a per-PR merge, else bootstrapping one
+    # would wedge every merge on a partial branch.
+    tests_ok = p is not None and (
+        p.get("tests_passed") is True or not store.get_unit_test_commands()
+        or not tester_seated)
+    # F100 PR-B: in strict governance mode a code PR needs the PM's review too
+    # (reviewer AND PM). In off/light, PM review is not required, so this gate is
+    # exactly today's reviewer-AND-tests behavior.
+    pm_ok = p is not None and (
+        not _strict_governance(store) or p.get("pm_reviewer_approved") is True)
+    # F104 S6 review (M1): a PR `blocked` at the conflict-resolve retry cap is
+    # terminal — its stale reviewer_approved/tests_passed must NOT resurrect it to
+    # mergeable without the conflict being resolved (defense-in-depth on the exact
+    # trust boundary this feature protects).
+    if (p and p.get("reviewer_approved") is True and tests_ok and pm_ok
+            and p.get("status") not in ("merged", "conflict", "abandoned", "blocked")):
+        store.update_pr(pr_id, status="mergeable")
+
+
 def _revalidate_one_pr(store: LedgerStore, workspace: Any, p: dict[str, Any],
                        branch: str, task_id: str) -> None:
     res = workspace.update_branch_from_base(task_id, branch)
     if res.get("updated") and not res.get("changed"):
         # Branch already contained this master -> still validly mergeable.
+        return
+    if res.get("updated") and _tester_unseated_by_closure(store):
+        # SPEC-26 (S4): no seated TESTER, so there is nothing to demote INTO — the
+        # `re-test PR:` task below would sit in the backlog forever, and a
+        # non-terminal task blocks the completion claim (`pending_completion_work`),
+        # so a clean integration would end the run `completion_blocked`. The
+        # tests-green gate is already vacuously satisfied for an unseated tester
+        # (`_set_mergeable_if_ready`), so advance the PR to the new integrated head
+        # and leave it mergeable — the same net state the not-applicable tester turn
+        # produces today, minus the turn nobody can take.
+        store.update_pr(p["pr_id"], head=res.get("head", p["head"]))
+        store.record_decision(
+            title=f"stale-base re-test skipped: {branch}", context=f"pr {p['pr_id']}",
+            choice="stale_base_revalidation",
+            rationale="master advanced after another PR merged; no TESTER is seated "
+                      "this run (SPEC-26), so the tests-green gate is vacuous and the "
+                      "PR stays mergeable against the newly integrated head",
+            related_task_ids=[task_id])
         return
     if res.get("updated"):
         # Clean integration with the new master: keep the (unchanged) code
@@ -1732,8 +1807,13 @@ def _fail_closed_demote(store: LedgerStore, p: dict[str, Any], branch: str,
             choice="stale_base_revalidation",
             rationale=f"could not revalidate against new master: {reason}",
             related_task_ids=[task_id])
-        store.add_task(title=f"re-test PR: {branch}", role=TESTER,
-                       pr_id=p["pr_id"], depends_on=[task_id])
+        # SPEC-26 (S4): the demotion stands (this is the fail-closed path — the PR
+        # must NOT stay mergeable against a moved master it could not be checked
+        # against), but a `re-test PR:` task for an unseated TESTER is a phantom: it
+        # can never be dispatched and it blocks the completion claim. Skip it.
+        if not _tester_unseated_by_closure(store):
+            store.add_task(title=f"re-test PR: {branch}", role=TESTER,
+                           pr_id=p["pr_id"], depends_on=[task_id])
     except Exception:  # noqa: BLE001
         logging.getLogger("errorta.coding").warning(
             "coding revalidate: failed to demote stale PR %s (%s)",
@@ -1853,8 +1933,18 @@ def _redispatch_conflict_pr(
             rationale="branch updated from master cleanly; re-testing before merge",
             related_task_ids=[task_id],
         )
-        store.add_task(title=f"re-test PR: {branch}", role=TESTER,
-                       pr_id=pr_id, depends_on=[task_id])
+        # SPEC-26 (S4): with no seated TESTER the `re-test PR:` task can never be
+        # dispatched, and a non-terminal task blocks the completion claim
+        # (`pending_completion_work`) — so spawning it would turn a cleanly rebased
+        # PR into a permanently open item. Re-apply the merge gate instead: the
+        # tests-green half is vacuous for an unseated tester, so a still-approved PR
+        # goes straight back to `mergeable` through the ONE writer, with the strict-
+        # governance and terminal-status checks intact.
+        if _tester_unseated_by_closure(store):
+            _apply_merge_gate(store, pr_id, tester_seated=False)
+        else:
+            store.add_task(title=f"re-test PR: {branch}", role=TESTER,
+                           pr_id=pr_id, depends_on=[task_id])
         return True
 
     store.update_pr(pr_id, status="conflict", conflicts=conflict_paths,
@@ -2381,49 +2471,335 @@ def _detect_tool_confabulation(
             extra={"role": role, "capability": capability, "tool_name": tool_name})
 
 
-def _audit_topology_advisory(
-        store: LedgerStore, member_pairs: list[tuple[str, str]],
-        policy: CodingAutonomyPolicy) -> None:
-    """GL05 (Item 1): score the SEATED council against the role-justification
-    principle at run-setup and surface an ADVISORY (not a hard blocker) for any role
-    that fails it — a TESTER with no executor/gate, an ungrounded REVIEWER: "another
-    ungrounded opinion in the same loop". Records one deduped decision + one
-    non-blocking attention signal per flagged role; grant the missing distinct signal
-    (GL01/GL02) or collapse the role (GL03). PM+DEV-only councils always pass — the
-    single-agent-plus-coordination baseline. Fully guarded: never fails the run."""
-    try:
-        from . import attention, topology_audit
-        manifest = _capabilities.capability_manifest(store, policy)
-        seated = tuple(sorted({role for _mid, role in member_pairs}))
-        advisories = topology_audit.topology_advisories(manifest, seated_roles=seated)
-        if not advisories:
+class RoleClosure:
+    """SPEC-26 — the run-scoped seating consequence of the closure verdicts.
+
+    GL05's topology audit has always been able to SAY that a seated role cannot
+    discharge its duty. It has never been able to DO anything about it, so the same
+    advisory fired on every run and never resolved. This object is the doing half.
+
+    It owns the two roster structures the loop actually reads and keeps them in
+    lockstep — ``member_pairs`` (what ``run_coding_loop`` schedules from) and
+    ``by_role`` (what ``build_run_turn`` resolves a member from). Filtering one and
+    not the other would seat a ghost: a role the scheduler skips but a turn can
+    still resolve a member for, or the reverse.
+
+    Both are held BY REFERENCE and mutated in place, which is what makes mid-run
+    re-seating a one-liner: the sequential and concurrent loops hand the same
+    ``member_pairs`` list object back and forth and re-read it every iteration, and
+    ``build_run_turn`` closes over the same ``by_role`` dict. Nothing in the
+    ``RunTurn`` seam changes.
+
+    The consequence is UNSEAT, never REFUSE. On the shipped defaults a fresh
+    project flags BOTH the TESTER (no unit-scoped command) and the REVIEWER
+    (``reviewer_repo_read`` defaults False), so a binding refusal would refuse the
+    product's own default configuration on every new project. Unseating is free and
+    already correct: ``decide_next``/``plan_next_batch`` skip a role with no seated
+    members and ``_has_open_work`` only counts roles in the seated set."""
+
+    __slots__ = ("store", "policy", "member_pairs", "by_role", "full_pairs",
+                 "full_by_role", "verdicts", "unseated", "indeterminate")
+
+    def __init__(self, store: LedgerStore, policy: Any,
+                 member_pairs: list[tuple[str, str]],
+                 by_role: dict[str, list[dict[str, Any]]]) -> None:
+        self.store = store
+        self.policy = policy
+        self.member_pairs = member_pairs
+        self.by_role = by_role
+        # Pre-closure snapshots: what re-seating restores from. Copies, so a later
+        # unseat can never destroy the roster it would need to re-seat.
+        self.full_pairs: list[tuple[str, str]] = list(member_pairs)
+        self.full_by_role: dict[str, list[dict[str, Any]]] = {
+            role: list(members) for role, members in by_role.items()}
+        self.verdicts: dict[str, _capabilities.ClosureVerdict] = {}
+        self.unseated: dict[str, _capabilities.ClosureVerdict] = {}
+        self.indeterminate = False
+
+    def seated(self, role: str) -> bool:
+        """Is ``role`` in the seated roster for this run? True for a run with no
+        closure applied at all — the disable value is 'today's behaviour'."""
+        return role not in self.unseated
+
+    def unseat(self, verdict: "_capabilities.ClosureVerdict") -> None:
+        role = verdict.role
+        if role in self.unseated:
             return
+        self.unseated[role] = verdict
+        self.member_pairs[:] = [(mid, r) for mid, r in self.member_pairs if r != role]
+        self.by_role.pop(role, None)
+
+    def reseat(self, role: str) -> bool:
+        """Put a previously-unseated role back on the board. Takes effect on the
+        NEXT loop iteration (both loops re-read ``member_pairs`` every pass)."""
+        if role not in self.unseated:
+            return False
+        self.unseated.pop(role, None)
+        members = self.full_by_role.get(role)
+        if members:
+            self.by_role[role] = list(members)
+        have = set(self.member_pairs)
+        for pair in self.full_pairs:
+            if pair[1] == role and pair not in have:
+                self.member_pairs.append(pair)
+        return True
+
+
+def _closure_verdicts(store: LedgerStore, member_pairs: list[tuple[str, str]],
+                      policy: Any) -> list[_capabilities.ClosureVerdict]:
+    """The pure evaluation half of SPEC-26. Deliberately NOT guarded — the caller
+    owns the fail-open, because a swallowed exception here would silently seat an
+    un-capable role while claiming the check ran."""
+    manifest = _capabilities.capability_manifest(store, policy)
+    seated = tuple(sorted({role for _mid, role in member_pairs}))
+    overrides = _capabilities.capability_override_roles(policy)
+    return _capabilities.role_closure(
+        manifest, seated_roles=seated, overrides=overrides)
+
+
+def _publish_role_closure(closure: RoleClosure) -> None:
+    """Publish the verdicts on ``run_state.role_closure`` (the reserved key). The
+    operator surfaces and SPEC-24's snapshot row read this; nothing gates on it."""
+    try:
+        closure.store.set_run_state(role_closure={
+            "verdicts": [v.to_dict() for v in closure.verdicts.values()],
+            "seated": sorted({role for _mid, role in closure.member_pairs}),
+            "unseated": sorted(closure.unseated),
+            "indeterminate": closure.indeterminate,
+        })
+    except Exception:  # noqa: BLE001 — publication is a view, never a gate
+        pass
+
+
+# SPEC-26 Item 2, and the ONE place its central premise has to be checked against
+# the code rather than assumed. The spec justifies unseating with: *"Unseating is
+# free and already correct — an unseated role costs zero dispatches and zero model
+# calls, with no new machinery."* That is true for the TESTER once S4 couples the
+# task spawn and the merge gate to `_tester_seated()`. It is NOT true for every role,
+# and the difference is decidable from the code:
+#
+#   DEV       — `decide_next` falls through to `Plan` forever with no producer
+#               (`topology.py`), so an empty-DEV council cannot generate work at all.
+#               The spec names this one itself as the refusal-shaped case.
+#   REVIEWER  — `_set_mergeable_if_ready` requires `reviewer_approved is True`
+#               UNCONDITIONALLY, and it is the ONLY writer of `status="mergeable"`
+#               in the tree. There is no reviewer-less merge path: a `review PR:`
+#               task is spawned on every PR open, and with nobody to take it every PR
+#               sits at `open` forever and the run ends `completion_blocked` with an
+#               empty master. Unseating the reviewer does not cost "zero dispatches";
+#               it removes the only producer of the merge gate's own precondition.
+#
+# So those two roles are SEATED UNDER PROTEST: the verdict is still computed, still
+# recorded, still paged, and carries its remedy — but the consequence is a loud
+# `role_capability_unclosed` decision rather than an unseat, because an unseat here
+# would trade an unread advisory for a wedged run. Making the ungrounded reviewer
+# genuinely unseatable needs a reviewer-less merge path (auto-approve, or a PM-review
+# fallback) — a product-level trust-boundary decision that belongs in its own change,
+# not smuggled in as a side effect of a capability audit. Recorded as the top
+# follow-up out of this spec.
+_UNSEAT_BREAKS_THE_PIPELINE: dict[str, str] = {
+    DEV: ("a council with no producer never advances — decide_next falls through to "
+          "Plan forever"),
+    REVIEWER: ("_set_mergeable_if_ready requires reviewer_approved and is the only "
+               "writer of `mergeable`, so with no seated reviewer every PR sits at "
+               "`open` forever and the run ends completion_blocked"),
+}
+
+
+def _report_role_closure(closure: RoleClosure) -> None:
+    """Record + page the verdicts. Guarded end to end: a ledger hiccup must not
+    fail a run, and must not undo the seating decision already applied either."""
+    try:
+        from . import attention
         already = {
             str(d.get("title") or "")
-            for d in store.list_decisions()
-            if d.get("choice") == "topology_advisory"
+            for d in closure.store.list_decisions()
+            if d.get("choice") in ("topology_advisory", "role_capability_seated",
+                                   "role_capability_unclosed")
         }
-        for msg in advisories:
-            title = f"topology advisory: {msg[:80]}"
-            if title in already:
+        for verdict in closure.verdicts.values():
+            if verdict.outcome == _capabilities.CAPABLE:
                 continue
-            store.record_decision(
-                title=title, context="run-setup role-justification audit (GL05)",
-                choice="topology_advisory", rationale=msg)
+            msg = verdict.reason
+            # The advisory title/choice are kept VERBATIM from GL05 so the existing
+            # dedupe and any operator tooling keep working; what is new is that it
+            # now names a consequence and carries a resolvable context.
+            title = f"topology advisory: {msg[:80]}"
+            if title not in already:
+                closure.store.record_decision(
+                    title=title,
+                    context="run-setup role-capability closure (SPEC-26)",
+                    choice="topology_advisory",
+                    rationale=f"{msg} [outcome={verdict.outcome}; "
+                              f"{'seated by override' if verdict.overridden else 'role not seated'}"
+                              f"] remedy: {verdict.remedy}")
+                already.add(title)
+            if verdict.overridden:
+                seat_title = f"capability override: {verdict.role} seated anyway"
+                if seat_title not in already:
+                    closure.store.record_decision(
+                        title=seat_title,
+                        context="run-setup role-capability closure (SPEC-26)",
+                        choice="role_capability_seated",
+                        rationale=f"capability_overrides names {verdict.role}; the "
+                                  f"{verdict.capability} gap is recorded and unchanged "
+                                  f"({verdict.outcome}) — the override suppresses the "
+                                  "consequence, never the finding")
+                    already.add(seat_title)
+            elif verdict.role in _UNSEAT_BREAKS_THE_PIPELINE:
+                # Seated under protest — see `_UNSEAT_BREAKS_THE_PIPELINE`. The
+                # finding is louder here, not quieter: the operator gets a second,
+                # differently-keyed decision naming why the role kept its seat and
+                # what would actually close the gap.
+                unclosed_title = f"role capability unclosed: {verdict.role}"
+                if unclosed_title not in already:
+                    closure.store.record_decision(
+                        title=unclosed_title,
+                        context="run-setup role-capability closure (SPEC-26)",
+                        choice="role_capability_unclosed",
+                        rationale=f"{msg} — {verdict.role} is seated anyway because "
+                                  f"unseating it would wedge the run "
+                                  f"({_UNSEAT_BREAKS_THE_PIPELINE[verdict.role]}); "
+                                  f"remedy: {verdict.remedy}")
+                    already.add(unclosed_title)
             try:
-                for s in attention.list_open(store.project_id, store=store):
+                for s in attention.list_open(closure.store.project_id,
+                                             store=closure.store):
                     if (s.kind == "alert" and s.source == "topology_audit"
                             and s.title == title):
                         break
                 else:
                     attention.raise_signal(
-                        store.project_id, kind="alert", source="topology_audit",
-                        stage="development", title=title, summary=msg,
-                        context={"advisory": msg}, store=store)
+                        closure.store.project_id, kind="alert",
+                        source="topology_audit", stage="development",
+                        title=title, summary=msg,
+                        # SPEC-26 Item 3: the context must key a RESOLUTION. The old
+                        # `{"advisory": msg}` could not — a title prefix is not a key.
+                        context={"role": verdict.role,
+                                 "capability": verdict.capability,
+                                 "outcome": verdict.outcome,
+                                 "remedy": verdict.remedy,
+                                 "advisory": msg},
+                        store=closure.store)
             except Exception:  # noqa: BLE001 — the signal is advisory, never fatal
                 pass
-    except Exception:  # noqa: BLE001 — a run-setup advisory must never fail the run
+    except Exception:  # noqa: BLE001 — reporting must never fail the run
         pass
+
+
+def _apply_role_closure(
+        store: LedgerStore, member_pairs: list[tuple[str, str]],
+        by_role: dict[str, list[dict[str, Any]]],
+        policy: CodingAutonomyPolicy) -> RoleClosure:
+    """SPEC-26 Item 2 — score the seated council and give the verdict a consequence.
+
+    Replaces GL05's `_audit_topology_advisory`, which computed the same verdict and
+    then let the run proceed exactly as if the audit had not run. For every seated
+    role: ``duty ⊆ capability``, or the role is NOT SEATED, or ``capability_overrides``
+    names it. There is no fourth state.
+
+    Mutates ``member_pairs`` and ``by_role`` in place and returns the live
+    ``RoleClosure`` so the caller can hand it to ``build_run_turn`` (which needs the
+    seated set for the tester-spawn / merge-gate coupling) and so a deferred role can
+    be re-seated mid-run.
+
+    Fail-open, never silent: if the EVALUATION raises, the full roster is seated —
+    today's behaviour — and a ``role_capability_indeterminate`` decision records that
+    the check did not run. The temptation on a check whose purpose is to refuse
+    things is to fail closed; that would let a ledger hiccup empty a council."""
+    closure = RoleClosure(store, policy, member_pairs, by_role)
+    try:
+        verdicts = _closure_verdicts(store, member_pairs, policy)
+    except Exception as exc:  # noqa: BLE001 — fail OPEN on the roster, loudly
+        closure.indeterminate = True
+        try:
+            store.record_decision(
+                title="role capability closure indeterminate",
+                context="run-setup role-capability closure (SPEC-26)",
+                choice="role_capability_indeterminate",
+                rationale=f"could not evaluate role capability closure ({exc}); "
+                          "the full roster is seated, exactly as before SPEC-26")
+        except Exception:  # noqa: BLE001
+            pass
+        _publish_role_closure(closure)
+        return closure
+    closure.verdicts = {v.role: v for v in verdicts}
+    for verdict in verdicts:
+        # PM is category (a) and always capable. DEV and REVIEWER are seated under
+        # protest even when un-capable, because unseating THEM is not free — it
+        # removes a structural precondition of the pipeline itself
+        # (`_UNSEAT_BREAKS_THE_PIPELINE` states each one against the code). Every
+        # other role that cannot discharge its duty, and is not overridden, loses its
+        # seat for this run.
+        if verdict.seatable or verdict.role in _UNSEAT_BREAKS_THE_PIPELINE:
+            continue
+        closure.unseat(verdict)
+    _report_role_closure(closure)
+    _publish_role_closure(closure)
+    return closure
+
+
+def _reevaluate_role_closure(closure: Optional[RoleClosure]) -> None:
+    """SPEC-26 Item 3 — a ``deferred`` verdict is a claim about NOW, so re-check it
+    at the one quiescent moment the runner already re-derives gate state: after a
+    merge advances master (``_arm_gate_after_merge``, right after the bootstrap
+    re-attempt).
+
+    When a deferred role has become capable: re-seat it, dismiss the open advisory
+    (the half that has never happened in this codebase), and record one
+    ``role_capability_closed`` decision. The original ``topology_advisory`` decision
+    is left verbatim — the ledger is append-only and the pair *(advisory at
+    iteration 0, closed at iteration N)* is the trace that proves the loop works.
+
+    Bound, stated rather than hidden: a mid-run ``PUT /test-commands`` on a LIVE run
+    is picked up at the next merge, not instantly. The loop has no config-watch seam
+    and a second poll for a rare operator action is not worth an iteration hook."""
+    if closure is None or not closure.unseated:
+        return
+    try:
+        verdicts = {
+            v.role: v for v in _closure_verdicts(
+                closure.store, closure.full_pairs, closure.policy)
+        }
+    except Exception:  # noqa: BLE001 — re-evaluation must never fail a merge
+        return
+    for role in list(closure.unseated):
+        verdict = verdicts.get(role)
+        if verdict is None or verdict.outcome != _capabilities.CAPABLE:
+            continue
+        closure.verdicts[role] = verdict
+        if not closure.reseat(role):
+            continue
+        try:
+            from . import attention
+            attention.resolve_closed_capability(
+                closure.store.project_id, role, verdict.capability,
+                store=closure.store)
+        except Exception:  # noqa: BLE001 — resolution is a view, never a gate
+            pass
+        try:
+            closure.store.record_decision(
+                title=f"role capability closed: {role}",
+                context="mid-run role-capability closure (SPEC-26)",
+                choice="role_capability_closed",
+                rationale=f"{role} now has the {verdict.capability} capability its "
+                          f"duty demands ({_closure_evidence(closure.store, role)}); "
+                          "re-seated for the remainder of the run")
+        except Exception:  # noqa: BLE001
+            pass
+    _publish_role_closure(closure)
+
+
+def _closure_evidence(store: LedgerStore, role: str) -> str:
+    """One legible phrase naming WHAT closed the gap, for the decision row."""
+    if role == TESTER:
+        try:
+            ids = sorted(store.get_unit_test_commands())
+        except Exception:  # noqa: BLE001
+            ids = []
+        return ("unit-scoped test command(s) registered: " + ", ".join(ids)
+                if ids else "unit-scoped test command registered")
+    return "capability granted"
 
 
 def _capability_gap_note(store: LedgerStore) -> str:
@@ -4247,24 +4623,32 @@ def _merge_is_gate_relevant(changed: list[str]) -> bool:
 
 
 def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
-                          changed: list[str], head: str) -> None:
+                          changed: list[str], head: str,
+                          closure: Optional["RoleClosure"] = None) -> None:
     """Spec 12 (S1): after a merge advances master, (1) acquire a gate if the
     project has none, then (2) count a gate-relevant merge and arm ``gate_due``
     once ``gate_min_merge_interval`` such merges have accumulated — so a later
     mechanical GateRun executes the suite off this (merge) turn. Fully guarded:
-    a failure here never fails the merge that already landed."""
+    a failure here never fails the merge that already landed.
+
+    SPEC-26 (Item 3): this is also the one quiescent moment a ``deferred``
+    capability can have arrived, so the closure verdicts are re-evaluated here —
+    after the bootstrap re-attempt, and unconditionally, including on the paths that
+    return without arming anything."""
     try:
         from .autonomy import load_policy
         policy = load_policy(store)
     except Exception:  # noqa: BLE001
+        policy = None
+    if policy is not None and getattr(policy, "gate_bootstrap", True):
+        try:
+            from . import gate_bootstrap
+            gate_bootstrap.maybe_bootstrap(store, workspace, policy)
+        except Exception:  # noqa: BLE001 — bootstrap is best-effort
+            pass
+    _reevaluate_role_closure(closure)
+    if policy is None or not getattr(policy, "gate_bootstrap", True):
         return
-    if not getattr(policy, "gate_bootstrap", True):
-        return
-    try:
-        from . import gate_bootstrap
-        gate_bootstrap.maybe_bootstrap(store, workspace, policy)
-    except Exception:  # noqa: BLE001 — bootstrap is best-effort
-        pass
     # Only arm when the GateRun will actually EXECUTE something. Spec 12 Item 5
     # landed the runtime-probe arm, so `_run_gate(probe_runtime=True)` now executes
     # on registered COMMANDS or a runnable managed_local runtime profile — arm on
@@ -4462,6 +4846,7 @@ def build_run_turn(
     dev_repo_read: bool = False,
     reviewer_repo_read: bool = False,
     review_min_latency_ms: int = 0,
+    role_closure_state: Optional["RoleClosure"] = None,
 ) -> Callable[[Any, Any], TurnOutcome]:
     """Construct the ``run_turn`` the autonomy loop drives.
 
@@ -4471,6 +4856,12 @@ def build_run_turn(
     production ``CodingRunner.run`` passes ``policy.dev_repo_read`` (default OFF;
     the dataclass field in ``autonomy.py`` is the single source of truth — see the
     Spec 12-18 prep P0.3 note there).
+
+    SPEC-26 (S4): ``role_closure_state`` carries the live seated roster so the two
+    sites that can WEDGE a run on an unseated TESTER — the ``test PR:`` task spawn
+    and ``_set_mergeable_if_ready``'s tests-green gate — read the same predicate the
+    capability audit does. ``None`` (every direct test caller) means "no role was
+    unseated", which is today's behaviour exactly.
     """
     import logging
     import time
@@ -4540,6 +4931,18 @@ def build_run_turn(
         _cap["usage"] = _merge_call_usage(_cap.get("usage"),
                                           getattr(_usage_sink, "last", None))
         return resp
+
+    def _tester_seated() -> bool:
+        """SPEC-26 (S4) — is a TESTER actually on the board right now?
+
+        THE coupling that makes unseating safe. Without it, unseating a TESTER on a
+        project that HAS a unit command would wedge every approved PR: the spawn
+        below creates a ``test PR:`` task without checking that anyone can take it,
+        and ``_set_mergeable_if_ready`` then holds the PR until ``tests_passed is
+        True``. Trading an unread advisory for a wedge is not a fix, so both sites
+        and the audit read one predicate. Re-checked on every call, not captured:
+        a deferred TESTER can be re-seated mid-run (Item 3)."""
+        return role_closure_state is None or role_closure_state.seated(TESTER)
 
     def _member(role: str, member_id: str | None = None) -> dict[str, Any]:
         # F087-3 fix: honor the scheduler's chosen member so same-role work
@@ -4615,34 +5018,11 @@ def build_run_turn(
         return parsed
 
     def _set_mergeable_if_ready(pr_id: str) -> None:
-        # A PR is mergeable only when reviewer-approved AND tests-green for its
-        # head — so a blind reviewer can never land a regression (F087-17).
-        #
-        # If the project has NO registered test commands, there is nothing for a
-        # tester to run, so the tests-green gate is vacuously satisfied — review
-        # approval alone governs the merge. Without this, a greenfield project
-        # (which starts with an empty test-command registry) could never advance a
-        # PR past `tests_passed`, so NOTHING ever merged and the team churned
-        # forever in a revise loop. When test commands ARE configured the strict
-        # reviewer-AND-tests gate is unchanged.
-        p = store.get_pr(pr_id)
-        # Spec 12 (S1): only UNIT-scoped commands gate a merge. An acceptance
-        # command (in-loop gate / delivery) never blocks a per-PR merge, else
-        # bootstrapping one would wedge every merge on a partial branch.
-        tests_ok = p is not None and (
-            p.get("tests_passed") is True or not store.get_unit_test_commands())
-        # F100 PR-B: in strict governance mode a code PR needs the PM's review
-        # too (reviewer AND PM). In off/light, PM review is not required, so this
-        # gate is exactly today's reviewer-AND-tests behavior.
-        pm_ok = p is not None and (
-            not _strict_governance(store) or p.get("pm_reviewer_approved") is True)
-        # F104 S6 review (M1): a PR `blocked` at the conflict-resolve retry cap is
-        # terminal — its stale reviewer_approved/tests_passed must NOT resurrect it
-        # to mergeable without the conflict being resolved (defense-in-depth on the
-        # exact trust boundary this feature protects).
-        if (p and p.get("reviewer_approved") is True and tests_ok and pm_ok
-                and p.get("status") not in ("merged", "conflict", "abandoned", "blocked")):
-            store.update_pr(pr_id, status="mergeable")
+        # Thin wrapper: the gate itself is module-level (`_apply_merge_gate`) so the
+        # stale-base / conflict revalidators, which are plain module functions with
+        # no turn closure in scope, can apply the SAME gate instead of open-coding a
+        # second writer of `status="mergeable"`.
+        _apply_merge_gate(store, pr_id, tester_seated=_tester_seated())
 
     def _execute(action: Any, ledger: Any) -> TurnOutcome:
         if isinstance(action, GovernancePlan):
@@ -5296,7 +5676,8 @@ def build_run_turn(
                 # itself runs off THIS turn (a later GateRun), so the suite never
                 # serializes the merge critical section.
                 _arm_gate_after_merge(store, workspace, changed=list(_changed),
-                                      head=res.get("head", pr["head"]))
+                                      head=res.get("head", pr["head"]),
+                                      closure=role_closure_state)
                 # F159: the shared-contract owner landed → lift the hot-file freeze
                 # (the canonical module is now on master; parallel edits are safe).
                 try:
@@ -5851,11 +6232,12 @@ def build_run_turn(
                     extra={"reviewed_head": pr["head"], "pr_id": pr["pr_id"]})
                 store.update_task(task.task_id, state="done")
                 if approved:
-                    # Only queue a tester when there's something to run. With no
-                    # registered test commands the PR is already mergeable on
-                    # approval (see _set_mergeable_if_ready) — spawning a tester
-                    # task would just starve in the backlog forever.
-                    if store.get_unit_test_commands():
+                    # Only queue a tester when there's something to run AND somebody
+                    # to run it. With no registered test commands — or (SPEC-26) no
+                    # seated TESTER — the PR is already mergeable on approval (see
+                    # _set_mergeable_if_ready); spawning a tester task would just
+                    # starve in the backlog forever.
+                    if store.get_unit_test_commands() and _tester_seated():
                         store.add_task(title=f"test PR: {pr['branch']}", role=TESTER,
                                        pr_id=pr["pr_id"], depends_on=[task.task_id])
                     # F100 PR-B: strict mode is a DUAL review — the PM must review
@@ -6751,8 +7133,20 @@ class CodingRunner:
         by_role = members_by_coding_role(self.members)
         member_pairs = [(m["id"], coding_role_of(m)) for m in self.members
                         if m.get("enabled", True)]
-        # GL05 (Item 1): role-justification audit — advisory only, at run-setup.
-        _audit_topology_advisory(self.store, member_pairs, policy)
+        # SPEC-26 (Item 2): role-capability closure. GL05's audit scored the same
+        # council and did nothing with the answer; this SEATS the consequence —
+        # every seated role discharges its duty, or it is not seated, or
+        # `capability_overrides` names it. Never a refused run: the shipped defaults
+        # flag both the TESTER and the REVIEWER on a fresh project, so a refusal
+        # would refuse the product's own default config. Mutates `member_pairs` and
+        # `by_role` in place (both must be filtered — filtering one seats a ghost).
+        # Evaluated HERE rather than in the confirm route so `resume`/`continue`,
+        # which both come through `CodingRunner.run`, re-derive against current state.
+        role_closure_state = _apply_role_closure(
+            self.store, member_pairs, by_role, policy)
+        # The pre-closure roster: the concurrent pool is sized from it so a role
+        # re-seated mid-run (Item 3) cannot silently serialize behind a full pool.
+        pool_members = list(role_closure_state.full_pairs)
         # F127: member tier ranks so the escalate-up ladder reassigns a task a
         # weak member can't do to a stronger one.
         from .model_tier import member_rank
@@ -6765,12 +7159,14 @@ class CodingRunner:
             should_cancel=should_cancel,
             dev_repo_read=bool(getattr(policy, "dev_repo_read", False)),
             reviewer_repo_read=bool(getattr(policy, "reviewer_repo_read", False)),
-            review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)))
+            review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)),
+            role_closure_state=role_closure_state)
         try:
             res = run_coding_loop(self.store, member_pairs, policy,
                                   run_turn=run_turn, counters=counters,
                                   should_cancel=should_cancel,
                                   member_tiers=member_tiers,
+                                  pool_members=pool_members,
                                   delivery_review=getattr(
                                       run_turn, "delivery_review", None))
         except Exception as exc:

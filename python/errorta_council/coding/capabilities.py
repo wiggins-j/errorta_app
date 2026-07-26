@@ -44,12 +44,19 @@ class RoleCapability:
     can_execute: bool        # can this role run a command from inside a turn?
     gate_available: bool     # is there an acceptance gate that CAN produce evidence?
     summary: str             # one-line "can / cannot"
+    # SPEC-26: can a TESTER turn actually be DISPATCHED this run? Uniform across
+    # roles (like ``gate_available``) because it describes a project-level registry,
+    # not a per-role grant — see ``tester_dispatchable`` for why this is a different
+    # question from ``gate_available``. Defaults False so a hand-built manifest in a
+    # test keeps constructing; ``capability_manifest`` always populates it.
+    can_dispatch: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
             "role": self.role, "tools": list(self.tools),
             "repo_read": self.repo_read, "can_execute": self.can_execute,
             "gate_available": self.gate_available, "summary": self.summary,
+            "can_dispatch": self.can_dispatch,
         }
 
 
@@ -67,6 +74,31 @@ def _repo_read_for(role: str, policy) -> bool:
     if role == REVIEWER:
         return bool(getattr(policy, "reviewer_repo_read", False))
     return False
+
+
+def tester_dispatchable(store) -> bool:
+    """SPEC-26 — THE single definition of *"a TESTER can actually be dispatched"*.
+
+    Read by three sites that must never disagree: the grant-or-delete audit's
+    TESTER arm, the ``test PR:`` task spawn, and the merge gate's tests-green
+    disjunct. All three already obey ``get_unit_test_commands()``; this names it.
+
+    Deliberately NOT ``gate_state.gate_available``. That predicate is true when the
+    project has ANY test command (including acceptance-scoped) *or* a registered
+    runtime profile with a ``start`` argv. A ``managed_local`` profile registered by
+    ``gate_bootstrap`` after the first ``index.html`` merge is a **launch probe for
+    the engine**, not a command for the tester — the tester's turn chooses only from
+    ``get_unit_test_commands()`` and its task is only ever created when that registry
+    is non-empty. Reading ``gate_available`` here would resolve the TESTER's
+    capability gap on a signal that has nothing to do with the TESTER: a false
+    resolve, which is strictly worse than never resolving.
+
+    Fails closed (``False``) on a store hiccup: an indeterminate registry must not
+    claim a dispatchable tester."""
+    try:
+        return bool(store.get_unit_test_commands())
+    except Exception:  # noqa: BLE001 — a capability probe must never fail a turn
+        return False
 
 
 def _summary_for(role: str, tools: tuple[str, ...], repo_read: bool,
@@ -100,6 +132,7 @@ def capability_manifest(store, policy=None) -> dict[str, RoleCapability]:
         gate = gate_state.gate_available(store)
     except Exception:  # noqa: BLE001 — a manifest must never fail a turn
         gate = False
+    dispatch = tester_dispatchable(store)
     manifest: dict[str, RoleCapability] = {}
     for role in (PM, DEV, REVIEWER, TESTER):
         tools = tuple(allowed_tools_for_role(role))
@@ -107,7 +140,8 @@ def capability_manifest(store, policy=None) -> dict[str, RoleCapability]:
         manifest[role] = RoleCapability(
             role=role, tools=tools, repo_read=repo_read,
             can_execute=_CAN_EXECUTE.get(role, False), gate_available=gate,
-            summary=_summary_for(role, tools, repo_read, gate))
+            summary=_summary_for(role, tools, repo_read, gate),
+            can_dispatch=dispatch)
     return manifest
 
 
@@ -333,18 +367,25 @@ def audit_grant_or_delete(
 
     For every DISPATCHED role, its manifest entry must grant a capability
     sufficient for its stated duty:
-    * TESTER — duty demands execution -> needs gate/executor availability;
+    * TESTER — duty demands execution -> needs a DISPATCHABLE executor;
     * REVIEWER — duty demands verification -> needs read (or execute) capability;
     * DEV — duty demands authoring -> needs a write tool.
     A role absent from ``dispatched_roles`` is the DELETE half — not audited. PM
-    plans via its intent (no tool), so it is always satisfied."""
+    plans via its intent (no tool), so it is always satisfied.
+
+    SPEC-26: the TESTER arm reads ``can_dispatch``, NOT ``gate_available``. The
+    audit previously asked the ENGINE's question ("is there an acceptance gate?")
+    and reported the answer as the TESTER's, so a ``managed_local`` runtime profile
+    detected after the first merge flipped the TESTER to 'capable' while its turn
+    remained undispatchable. See ``tester_dispatchable``. Message text unchanged —
+    it is the single source consumed by ``topology_audit`` and ``role_closure``."""
     dispatched = (set(dispatched_roles) if dispatched_roles is not None
                   else set(manifest))
     violations: list[str] = []
     for role, cap in manifest.items():
         if role not in dispatched:
             continue
-        if role == TESTER and not (cap.can_execute or cap.gate_available):
+        if role == TESTER and not (cap.can_execute or cap.can_dispatch):
             violations.append(
                 "role TESTER's duty demands execution but its manifest grants no "
                 "gate/executor capability — grant it (SPEC-12) or delete the role")
@@ -359,9 +400,146 @@ def audit_grant_or_delete(
     return violations
 
 
+# --------------------------------------------------------------------------- #
+# SPEC-26 Item 1 — the closure verdict. ``audit_grant_or_delete`` returns
+# ``list[str]``: a message, or nothing. That shape cannot distinguish "this
+# REVIEWER will never be grounded without an operator edit" from "this TESTER has
+# no dispatchable command YET", and that distinction is the whole of SPEC-26 — it
+# is what decides whether the RUN can still close the gap or only the OPERATOR can.
+# So: compose the audit (its text stays the single source), then classify.
+# --------------------------------------------------------------------------- #
+
+# Outcomes. Exactly three, and the split is not a severity judgement — it is a
+# statement about WHO CAN STILL ACT.
+CAPABLE = "capable"        # duty ⊆ capability, right now
+DEFERRED = "deferred"      # the RUN can still close this gap (re-evaluated on merge)
+UNCLOSABLE = "unclosable"  # only the OPERATOR can close it; no run event will
+
+# role -> (capability name, outcome when the capability is ABSENT). The drift lock
+# (SPEC-26 Item 5) asserts every key ``capability_manifest`` produces appears here,
+# so a fifth role cannot be added without a capability story.
+CLOSURE_TABLE: dict[str, tuple[str, str]] = {
+    # Category (a) coordination: PM plans via its intent and holds no tool, so
+    # ``audit_grant_or_delete`` can never flag it. Always capable.
+    PM: ("coordination", CAPABLE),
+    # ``_ROLE_TOOLS[DEV] == ("code_write",)`` is a module constant — if it is ever
+    # empty, no amount of running restores it.
+    DEV: ("authoring", UNCLOSABLE),
+    # ``policy.reviewer_repo_read`` is a persisted policy field read once per
+    # manifest; no run event changes it.
+    REVIEWER: ("verification", UNCLOSABLE),
+    # The unit-command registry is writable mid-run (``PUT /test-commands``), so
+    # this gap can close without restarting — and IS re-checked after every merge.
+    TESTER: ("execution", DEFERRED),
+}
+
+_REMEDIES: dict[str, str] = {
+    DEV: ("grant it — restore a write tool for DEV in turn_controller._ROLE_TOOLS "
+          "(this is a regression tripwire, not an operator setting)"),
+    REVIEWER: ("grant it — set `reviewer_repo_read: true` in the project's autonomy "
+               "policy (SPEC-14); or unseat it — `errorta team disable reviewer`; or "
+               "seat it anyway — `capability_overrides: {\"reviewer\": true}`"),
+    TESTER: ("grant it — register a UNIT-scoped test command (`errorta test-commands "
+             "set`); an acceptance command or a runtime profile does NOT arm the "
+             "tester. Or seat it anyway — `capability_overrides: {\"tester\": true}`"),
+}
+
+
+@dataclass(frozen=True)
+class ClosureVerdict:
+    """One seated role's capability-closure verdict (SPEC-26 Item 1)."""
+
+    role: str
+    outcome: str        # "capable" | "deferred" | "unclosable"
+    capability: str     # "execution" | "verification" | "authoring" | "coordination"
+    reason: str         # one legible line — the audit_grant_or_delete text, verbatim
+    remedy: str         # the one action that closes it ("" when already capable)
+    # An override suppresses the CONSEQUENCE (unseating), never the FINDING: the
+    # verdict below is computed and recorded identically either way.
+    overridden: bool = False
+
+    @property
+    def seatable(self) -> bool:
+        """May this role take a seat? Capable, or explicitly overridden."""
+        return self.outcome == CAPABLE or self.overridden
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "role": self.role, "outcome": self.outcome,
+            "capability": self.capability, "reason": self.reason,
+            "remedy": self.remedy, "overridden": self.overridden,
+        }
+
+
+def capability_override_roles(policy) -> frozenset[str]:
+    """Normalise ``policy.capability_overrides`` into a set of overridden role names.
+
+    The persisted field (Spec 22-28 prep P0.1) is a mapping — ``{role: bool}`` or
+    ``{role: {capability: bool}}`` — and EMPTY is the disable value that reproduces
+    today's behaviour exactly. A bare list is accepted too, because the spec's own
+    JSON example writes one and an operator hand-editing the policy will. Anything
+    else degrades to "no overrides" rather than failing the run."""
+    raw = getattr(policy, "capability_overrides", None) or {}
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        items = [(role, True) for role in raw]
+    else:
+        return frozenset()
+    out: set[str] = set()
+    for role, value in items:
+        name = str(role or "").strip().lower()
+        if not name:
+            continue
+        if isinstance(value, dict):
+            if any(bool(v) for v in value.values()):
+                out.add(name)
+        elif bool(value):
+            out.add(name)
+    return frozenset(out)
+
+
+def role_closure(
+    manifest: dict[str, "RoleCapability"],
+    *,
+    seated_roles: tuple[str, ...],
+    overrides: frozenset[str] = frozenset(),
+) -> list[ClosureVerdict]:
+    """One closure verdict per SEATED role. Pure — no ledger, no I/O.
+
+    Composes ``audit_grant_or_delete`` scoped to a single role (the same call shape
+    ``topology_audit.audit_topology`` uses) so the enforcement TEXT keeps living in
+    one place, then classifies the violation through ``CLOSURE_TABLE`` into
+    ``capable`` / ``deferred`` / ``unclosable``.
+
+    A role with no ``CLOSURE_TABLE`` entry is reported ``capable`` — fail-open on
+    the roster, because an unknown role must never be silently unseated. The drift
+    lock (Item 5) is what turns that hole red at build time."""
+    out: list[ClosureVerdict] = []
+    for role in seated_roles:
+        cap = manifest.get(role)
+        if cap is None:
+            continue
+        capability, absent = CLOSURE_TABLE.get(role, ("", CAPABLE))
+        violations = audit_grant_or_delete(manifest, dispatched_roles=(role,))
+        overridden = role in overrides
+        if not violations or absent == CAPABLE:
+            out.append(ClosureVerdict(
+                role=role, outcome=CAPABLE, capability=capability,
+                reason=f"{role} discharges its duty ({capability}) — capable",
+                remedy="", overridden=overridden))
+            continue
+        out.append(ClosureVerdict(
+            role=role, outcome=absent, capability=capability,
+            reason=violations[0], remedy=_REMEDIES.get(role, ""),
+            overridden=overridden))
+    return out
+
+
 __all__ = [
     "RoleCapability", "capability_manifest", "pm_capability_segment",
     "classify_task_text", "routed_execution_task", "GATE_FIX_TITLE",
     "ConfabulationSignal", "confabulation_from_failure", "GAP_ESCALATION_THRESHOLD",
-    "audit_grant_or_delete",
+    "audit_grant_or_delete", "tester_dispatchable", "ClosureVerdict", "role_closure",
+    "capability_override_roles", "CLOSURE_TABLE", "CAPABLE", "DEFERRED", "UNCLOSABLE",
 ]

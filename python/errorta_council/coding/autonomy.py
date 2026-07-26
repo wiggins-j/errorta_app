@@ -1136,6 +1136,7 @@ def run_coding_loop(
     policy_provider: Optional[Callable[[], CodingAutonomyPolicy]] = None,
     member_tiers: Optional[dict[str, int]] = None,
     delivery_review: Optional[Callable[[Any], Any]] = None,
+    pool_members: Optional[list[tuple[str, str]]] = None,
 ) -> LoopResult:
     """Run the autonomous coding loop until a stop condition. Resumable: pass the
     returned ``counters`` back in to continue after a checkpoint/pause. If
@@ -1148,7 +1149,15 @@ def run_coding_loop(
     semantics exactly (decide_next, one turn per iteration).
 
     F146 Slice B: ``delivery_review`` (optional; None keeps the pre-F146 behavior)
-    verifies the integrated delivered head before a ``project_done`` is accepted."""
+    verifies the integrated delivered head before a ``project_done`` is accepted.
+
+    SPEC-26 (Item 3): ``pool_members`` is the PRE-CLOSURE roster, used for THREAD-POOL
+    SIZING only. The concurrent loop sizes its pool once, before the loop, but a role
+    unseated by capability closure can be re-seated mid-run — which would raise
+    ``runtime_cap`` above a pool sized for the filtered roster and silently serialize
+    dispatch behind a full pool. The pool is an upper bound only, so widening it is
+    strictly safe; ``None`` (every caller but ``CodingRunner.run``) sizes from
+    ``members`` exactly as before."""
     rec = reconciler or CodingReconciler(ledger)
     c = counters or LoopCounters()
 
@@ -1158,11 +1167,13 @@ def run_coding_loop(
             ledger, members, effective, run_turn=run_turn, rec=rec,
             should_cancel=should_cancel, c=c, policy_provider=policy_provider,
             member_tiers=member_tiers, delivery_review=delivery_review,
+            pool_members=pool_members,
         )
     return _run_sequential_loop(
         ledger, members, policy, run_turn=run_turn, rec=rec,
         should_cancel=should_cancel, c=c, policy_provider=policy_provider,
         member_tiers=member_tiers, delivery_review=delivery_review,
+        pool_members=pool_members,
     )
 
 
@@ -2176,6 +2187,7 @@ def _run_sequential_loop(
     policy_provider: Optional[Callable[[], CodingAutonomyPolicy]],
     member_tiers: Optional[dict[str, int]] = None,
     delivery_review: Optional[Callable[[Any], Any]] = None,
+    pool_members: Optional[list[tuple[str, str]]] = None,
 ) -> LoopResult:
     """The original one-action-per-iteration loop (max_parallel_workers <= 1)."""
     while True:
@@ -2192,7 +2204,8 @@ def _run_sequential_loop(
             return _run_concurrent_loop(
                 ledger, members, policy, run_turn=run_turn, rec=rec,
                 should_cancel=should_cancel, c=c, policy_provider=policy_provider,
-                member_tiers=member_tiers, delivery_review=delivery_review)
+                member_tiers=member_tiers, delivery_review=delivery_review,
+                pool_members=pool_members)
         if should_cancel is not None and should_cancel():
             return LoopResult(CANCELLED, c)
 
@@ -2422,6 +2435,7 @@ def _run_concurrent_loop(
     policy_provider: Optional[Callable[[], CodingAutonomyPolicy]],
     member_tiers: Optional[dict[str, int]] = None,
     delivery_review: Optional[Callable[[Any], Any]] = None,
+    pool_members: Optional[list[tuple[str, str]]] = None,
 ) -> LoopResult:
     """F087-3 continuous pipeline. Keeps every idle worker member saturated: each
     iteration we re-plan for the members NOT currently in flight and dispatch
@@ -2438,7 +2452,12 @@ def _run_concurrent_loop(
     # The pool is sized to the STATIC ceiling; runtime_cap may clamp `cap` lower
     # (foundation gate / ramp) but never above the static parallelism, so the pool
     # is always large enough. (+2 headroom for a deferred Merge + a PM turn.)
-    pool = ThreadPoolExecutor(max_workers=effective_parallelism(policy, members) + 2)
+    # SPEC-26 (Item 3): size from the PRE-CLOSURE roster when one was supplied, so a
+    # role re-seated mid-run cannot push `runtime_cap` above the pool and silently
+    # serialize dispatch. The pool is an upper bound only (see the note above), so a
+    # wider pool changes nothing for a run with no deferred roles.
+    pool = ThreadPoolExecutor(
+        max_workers=effective_parallelism(policy, pool_members or members) + 2)
     in_flight: dict[Any, Any] = {}   # future -> action
     busy: set[str] = set()           # member_ids currently running a turn
     model_in_flight = 0              # non-merge turns in flight (cap + budget)
@@ -2465,7 +2484,8 @@ def _run_concurrent_loop(
                 return _run_sequential_loop(
                     ledger, members, policy, run_turn=run_turn, rec=rec,
                     should_cancel=should_cancel, c=c, policy_provider=policy_provider,
-                    member_tiers=member_tiers, delivery_review=delivery_review)
+                    member_tiers=member_tiers, delivery_review=delivery_review,
+                    pool_members=pool_members)
 
             if pending_stop is None and should_cancel is not None and should_cancel():
                 pending_stop = LoopResult(CANCELLED, c)

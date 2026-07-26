@@ -87,11 +87,63 @@ The governing invariant, audited by `capabilities.audit_grant_or_delete`:
 > signal (SPEC-12 gave the TESTER the in-loop gate; SPEC-14 gave the REVIEWER
 > repo-read); delete when it adds no distinct signal even with the capability.
 
-GL03 does not delete any role — SPEC-12/14 already chose *grant* for the two live
-cases; the audit exists so that choice cannot silently regress. Note the honest
-framing: the confabulation→gap link is *inferred* from ACI results, not directly
-studied, so the detector is an advisory heuristic tuned conservatively — it pages
-the PM, it never blocks the run.
+The confabulation→gap link is *inferred* from ACI results, not directly studied, so
+that **detector** stays an advisory heuristic tuned conservatively — it pages the PM,
+it never blocks the run.
+
+The **audit** is not advisory any more. SPEC-26 gives its verdict a consequence at
+seat time, in exactly three outcomes:
+
+| Outcome | Meaning | What happens |
+|---|---|---|
+| `capable` | duty ⊆ capability, right now | the role is seated |
+| `deferred` | the **run** can still close this gap | the role is **not seated**, and is re-checked after every merge — when the capability arrives it is re-seated, the open advisory is dismissed, and a `role_capability_closed` decision records what closed it |
+| `unclosable` | only the **operator** can close it | the role is **not seated** for this run; the recorded remedy names the one action that would change that |
+
+> For every role seated in a run, the manifest grants a capability sufficient for
+> that role's duty — **or the role is not seated, or a `capability_overrides` entry
+> naming it is recorded on the autonomy policy.** There is no fourth state.
+
+The consequence is **unseat, never refuse**. On the shipped defaults a fresh project
+flags two roles — the REVIEWER (`reviewer_repo_read` defaults `false`) and the TESTER
+— so a run that refused to start would refuse the product's own default
+configuration on every new project. Unseating is cheap where the loop can absorb it:
+the scheduler already skips a role with no seated members, and an unseated role
+cannot keep a finished project alive either.
+
+**Two roles are seated under protest instead**, because unseating them would not cost
+"zero dispatches" — it would remove a structural precondition of the pipeline:
+
+* **DEV** — a council with no producer never advances (unreachable today; a
+  regression tripwire, not a feature).
+* **REVIEWER** — the merge gate requires reviewer approval and is the *only* writer
+  of a mergeable PR, and there is no reviewer-less merge path. With no seated
+  reviewer every PR would sit at `open` forever and the run would end
+  `completion_blocked` with an empty master.
+
+For those two the finding gets *louder*, not quieter: the advisory is recorded and
+paged as usual, plus a second `role_capability_unclosed` decision naming why the role
+kept its seat and what would actually close the gap. Making the ungrounded reviewer
+genuinely unseatable needs a reviewer-less merge path (auto-approve, or a PM-review
+fallback) — a product trust-boundary decision, not a side effect of a capability
+audit. The TESTER is the one role that is genuinely free to unseat, and only because
+the tester-spawn and merge-gate predicates were coupled to the same seat check.
+
+**The TESTER fact, stated plainly.** No engine path can register a *unit-scoped* test
+command: `gate_bootstrap` deliberately registers acceptance scope only, and the
+unit registry is written only by the app UI and `errorta test-commands set`. So a
+headless autonomous run **cannot arm its own tester**, and the seat stays `deferred`
+until a unit-scoped command is registered. That is why the tester's capability is
+measured by "is there a unit-scoped command?" and not by "does the engine have an
+acceptance gate?" — an acceptance command, or a detected runtime profile, gives the
+*engine* a gate while leaving the *tester* undispatchable, and resolving the seat on
+that signal would launder an unclosed gap into a green check.
+
+**Want an idle tester on the board anyway?** Set `capability_overrides` on the
+project's autonomy policy (e.g. `{"tester": true}`). The role is seated regardless of
+its verdict; the verdict is still computed, still recorded, and still rendered — an
+override suppresses the *consequence*, never the *finding*. The empty default (`{}`)
+reproduces pre-SPEC-26 behaviour for every role.
 
 ---
 

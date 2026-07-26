@@ -150,6 +150,15 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
 2. No run ends on a heuristic stop without a recorded PM intervention that was
    given a real chance to continue.
 3. Any `500` or turn rejection leaves a traceback and a correlation id.
-4. The topology advisory either resolves or the role is not seated.
+4. The topology advisory either resolves or the role is not seated. **(SPEC-26 —
+   landed, and mechanically checkable.** Two honest readings, recorded rather than
+   glossed. For the TESTER the answer on a headless greenfield run is *not seated*,
+   because no engine path can register a unit-scoped test command — correct until
+   `gate_bootstrap` gains a unit-scoped arm. For the ungrounded REVIEWER the answer
+   is *seated under protest*: unseating it wedges every run, because the merge gate
+   demands reviewer approval and the engine has no reviewer-less merge path.
+   **Follow-up, and the top one out of this spec:** give the engine a reviewer-less
+   merge path so the 26–92% false-rejection seat can actually be taken off the
+   board.)
 5. The count of ways to *recover* is no longer an order of magnitude smaller than
    the count of ways to *die*.

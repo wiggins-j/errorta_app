@@ -55,10 +55,16 @@ def _assigns(batch) -> list[Assign]:
 
 
 def _cap(role, *, repo_read=False, can_execute=False, gate_available=False,
-         tools=("code_write",)) -> RoleCapability:
+         tools=("code_write",), can_dispatch=None) -> RoleCapability:
+    # SPEC-26: the TESTER's justifying signal is now `can_dispatch` (is there a
+    # UNIT-scoped command a tester turn could actually run?), not `gate_available`
+    # (does the ENGINE have an acceptance gate?). `can_dispatch` defaults to
+    # `gate_available` here so every pre-existing case in this file keeps meaning
+    # what it meant; the cases that pull them apart pass it explicitly.
     return RoleCapability(
         role=role, tools=tuple(tools), repo_read=repo_read,
-        can_execute=can_execute, gate_available=gate_available, summary="")
+        can_execute=can_execute, gate_available=gate_available, summary="",
+        can_dispatch=gate_available if can_dispatch is None else can_dispatch)
 
 
 def _manifest(overrides: dict | None = None) -> dict[str, RoleCapability]:
