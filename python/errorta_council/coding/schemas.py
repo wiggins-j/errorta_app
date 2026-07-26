@@ -382,8 +382,129 @@ class TesterPlanIntent(BaseModel):
         return self
 
 
+_BLOCKED_REASONS = (
+    "missing_capability", "missing_context", "contradictory_instruction",
+    "waiting_on_other_work", "cannot_express_intent", "other",
+)
+
+
+class CapabilityAsk(BaseModel):
+    """Spec 25 (Item 2): the typed, bounded ask that rides on a ``BlockedIntent``.
+
+    Modelled on :class:`DeveloperContextRequestIntent` — the one negotiation
+    channel in the system that already works: a CLOSED enum (not prose), so the
+    ask can be matched against the capability manifest mechanically, plus two
+    free-text fields for the human/PM reading it. It is OPTIONAL on the block:
+    an agent that cannot name what it needs must still be able to say it is
+    blocked, so nothing here can make the escape shape unsatisfiable."""
+    model_config = {"extra": "ignore"}
+    capability: Literal[
+        "execution", "repo_read", "context", "write_scope", "other"
+    ] = "other"
+    what: str = ""
+    why: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_capability(cls, data: Any) -> Any:
+        # `"needs": "execution"` (a bare string) is what a model writes about as
+        # often as the object form. Accept it rather than failing the block.
+        if isinstance(data, str):
+            return {"capability": data, "what": data}
+        return data
+
+    @field_validator("capability", mode="before")
+    @classmethod
+    def _normalize_capability(cls, value: Any) -> str:
+        # An unknown capability label degrades to "other" — the ask still lands,
+        # with `what`/`why` carrying the agent's own words. Failing here would
+        # make the block itself unsatisfiable over a vocabulary mismatch, which
+        # is the bug class this whole spec closes.
+        text = str(value or "").strip().lower()
+        aliases = {
+            "run": "execution", "execute": "execution", "exec": "execution",
+            "tests": "execution", "test": "execution", "shell": "execution",
+            "read": "repo_read", "repo": "repo_read", "file_read": "repo_read",
+            "grounding": "context", "information": "context", "info": "context",
+            "write": "write_scope", "scope": "write_scope", "tools": "write_scope",
+        }
+        if text in ("execution", "repo_read", "context", "write_scope", "other"):
+            return text
+        return aliases.get(text, "other")
+
+
+class BlockedIntent(BaseModel):
+    """Spec 25 (Item 1) — the always-legal turn, accepted for EVERY role.
+
+    THE INVARIANT THIS EXISTS TO CARRY: no reachable state may leave an agent
+    with no legal turn. Every other intent in this module carries a
+    ``model_validator(mode="after")`` asserting a RELATIONSHIP between fields
+    (a plan needs a task or a decision, an implementation needs a tool call, a
+    rejection needs a finding, a test plan needs a command), and every such
+    relationship is a state some run eventually lands in — which is how four
+    unsatisfiable-constraint bugs shipped and were fixed one at a time.
+
+    So this model has exactly ONE rule: ``detail`` is non-empty. There is no
+    cross-field constraint another state could contradict, which is what makes
+    "I am blocked" constructible from ANY state a model can be in. Keep it that
+    way: a new cross-field validator here re-opens the whole bug class (and
+    ``tests/coding/test_spec25_expressibility.py`` fails the build if one
+    appears)."""
+    model_config = {"extra": "ignore"}
+    kind: Literal["blocked"]
+    reason: Literal[
+        "missing_capability", "missing_context", "contradictory_instruction",
+        "waiting_on_other_work", "cannot_express_intent", "other",
+    ] = "other"
+    detail: str
+    needs: Optional[CapabilityAsk] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_detail_synonyms(cls, data: Any) -> Any:
+        """A model told to "say what you cannot do" writes that sentence under
+        whatever key its prompt suggested. With ``extra="ignore"`` the wrong key
+        is dropped silently and the ONE always-legal turn fails on ``detail``
+        missing — which would recreate, inside the escape hatch itself, the
+        exact failure mode the escape hatch exists to remove (bug #5: a dev told
+        to explain itself in a field the schema throws away). Fold the obvious
+        synonyms instead."""
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        if not str(d.get("detail") or "").strip():
+            for alias in ("summary", "reason_detail", "message", "explanation",
+                          "why", "notes", "question"):
+                if str(d.get(alias) or "").strip():
+                    d["detail"] = str(d[alias])
+                    break
+        # `reason` is a closed enum, but a model writes prose there roughly as
+        # often as a label. Prose must not fail the ONE always-legal turn: keep
+        # the words (as `detail`, if that is still empty) and fall back to
+        # "other" — the enum is a routing hint, never the payload.
+        raw_reason = str(d.get("reason") or "").strip()
+        if raw_reason and raw_reason not in _BLOCKED_REASONS:
+            folded = raw_reason.lower().replace(" ", "_").replace("-", "_")
+            if folded in _BLOCKED_REASONS:
+                d["reason"] = folded
+            else:
+                if not str(d.get("detail") or "").strip():
+                    d["detail"] = raw_reason
+                d["reason"] = "other"
+        return d
+
+    @model_validator(mode="after")
+    def _detail_required(self) -> "BlockedIntent":
+        if not self.detail.strip():
+            raise ValueError(
+                "blocked requires a non-empty detail (one or two sentences "
+                "saying what you cannot do and why)")
+        return self
+
+
 RoleIntent = Union[
-    PMPlanIntent, DeveloperToolPlanIntent, ReviewerVerdictIntent, TesterPlanIntent
+    PMPlanIntent, DeveloperToolPlanIntent, ReviewerVerdictIntent, TesterPlanIntent,
+    BlockedIntent,
 ]
 
 _INTENT_BY_ROLE: dict[str, type[BaseModel]] = {
@@ -392,6 +513,97 @@ _INTENT_BY_ROLE: dict[str, type[BaseModel]] = {
     "reviewer": ReviewerVerdictIntent,
     "tester": TesterPlanIntent,
 }
+
+
+# --- Spec 25 (Item 4/5) — the minimal-valid-example table -------------------- #
+#
+# ONE table, TWO consumers: `_corrective_turn_prompt` teaches these strings to a
+# model whose turn was rejected, and `test_spec25_expressibility.py` round-trips
+# every one of them through `parse_coding_turn`. That coupling is the point (the
+# repo's standing anti-drift idiom — Spec 19's version mirrors, Spec 15's derived
+# manifest, the F145 policy canary): a corrective prompt that teaches a shape the
+# validator no longer accepts is WORSE than the raw Pydantic dump it replaced,
+# because the model now has a confident wrong answer instead of a confusing one.
+# Add a role or an intent kind, and its example belongs here or the build fails.
+_MINIMAL_INTENT_EXAMPLES: dict[tuple[str, str], dict[str, Any]] = {
+    ("pm", "plan"): {
+        "kind": "plan", "done": False,
+        "tasks": [{"title": "Add the score HUD", "role": "dev",
+                   "detail": "Acceptance criteria... In-scope files..."}],
+    },
+    # Spec 21's turn, kept in the table because Item 3(b) now depends on it: a
+    # not-done turn that creates NOTHING and records a decision is legal.
+    ("pm", "plan_decision_only"): {
+        "kind": "plan", "done": False,
+        "decisions": [{"title": "Waiting on the open HUD PR",
+                       "choice": "defer",
+                       "rationale": "Two PRs are in review; adding work now duplicates them."}],
+    },
+    ("pm", "plan_done"): {
+        "kind": "plan", "done": True,
+        "completion_summary": "Every North Star requirement is merged on master.",
+    },
+    ("dev", "tool_plan"): {
+        "kind": "tool_plan", "task_type": "implementation",
+        "tool_calls": [{"tool": "code_write",
+                        "args": {"path": "src/hud.py", "content": "..."}}],
+    },
+    ("dev", "context_request"): {
+        "kind": "context_request", "reason": "missing_api_contract",
+        "question": "What is the signature of render_hud() in src/hud.py?",
+    },
+    ("reviewer", "review_verdict"): {
+        "kind": "review_verdict", "reviewed_head": "<the PR head shown above>",
+        "approved": True,
+    },
+    ("tester", "test_plan"): {
+        "kind": "test_plan", "command_ids": ["<a registered command id>"],
+        "scope": "changed_files",
+    },
+}
+
+# The kind a role is normally asked for — the example a corrective prompt shows
+# when the rejected turn named no usable kind at all.
+_DEFAULT_INTENT_KIND: dict[str, str] = {
+    "pm": "plan", "dev": "tool_plan",
+    "reviewer": "review_verdict", "tester": "test_plan",
+}
+
+BLOCKED_EXAMPLE_INTENT: dict[str, Any] = {
+    "kind": "blocked", "reason": "missing_capability",
+    "detail": "<what you cannot do, and why, in one or two sentences>",
+}
+
+
+def minimal_valid_example(role: str, kind: Optional[str] = None, *,
+                          task_id: Optional[str] = "<the assigned task_id>") -> str:
+    """Spec 25 (Item 4): the SMALLEST envelope that passes ``parse_coding_turn``
+    for ``(role, kind)``, as a single-line JSON string.
+
+    ``kind`` may be any key of the example table (including ``"blocked"``, which
+    is legal for every role); an unknown kind falls back to the role's default,
+    and an unknown role falls back to the blocked shape — a corrective prompt
+    must never have nothing to teach. ``task_id`` is stamped for every role but
+    the PM, whose plan turn is not bound to one task."""
+    if kind == "blocked" or role not in _DEFAULT_INTENT_KIND:
+        intent = dict(BLOCKED_EXAMPLE_INTENT)
+    else:
+        wanted = kind or _DEFAULT_INTENT_KIND[role]
+        intent = dict(
+            _MINIMAL_INTENT_EXAMPLES.get((role, wanted))
+            or _MINIMAL_INTENT_EXAMPLES[(role, _DEFAULT_INTENT_KIND[role])])
+    envelope: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "role": role}
+    if role != "pm":
+        envelope["task_id"] = task_id
+    envelope["intent"] = intent
+    return json.dumps(envelope, ensure_ascii=False)
+
+
+def blocked_example(role: str, *,
+                    task_id: Optional[str] = "<the assigned task_id>") -> str:
+    """The escape shape for ``role``, verbatim — what a prompt shows when it
+    tells an agent that "I am blocked" is always accepted."""
+    return minimal_valid_example(role, "blocked", task_id=task_id)
 
 
 @dataclass(frozen=True)
@@ -598,9 +810,18 @@ def parse_coding_turn(
     if intent_cls is None:
         return TurnParseError(TurnErrorCode.turn_schema_mismatch,
                               f"unknown role {role!r}")
+    # Spec 25 (Item 1): the `blocked` escape shape is discriminated for EVERY
+    # role, BEFORE the per-role lookup and before the dev's context_request
+    # relabelling. Same mechanism the dev union already used, one indent level
+    # out — so whatever seat an agent is in, "I cannot proceed, and here is why"
+    # is a turn it can always emit.
+    blocked_turn = (isinstance(envelope.intent, dict)
+                    and envelope.intent.get("kind") == "blocked")
+    if blocked_turn:
+        intent_cls = BlockedIntent
     # F088-09: the dev intent is a kind-discriminated union — a read-only
     # context_request routes to its own model (else the default tool_plan).
-    if role == "dev" and isinstance(envelope.intent, dict):
+    elif role == "dev" and isinstance(envelope.intent, dict):
         kind = envelope.intent.get("kind")
         if kind == "context_request":
             intent_cls = DeveloperContextRequestIntent
@@ -628,4 +849,8 @@ __all__ = [
     "ContextRequestScope", "ReviewerVerdictIntent", "TesterPlanIntent",
     "PMTask", "ToolCall", "Finding", "ParsedTurn", "TurnParseError",
     "TurnErrorCode", "parse_coding_turn",
+    # Spec 25 — the always-legal turn, its typed ask, and the example table the
+    # corrective prompts teach from (and the invariant test enumerates).
+    "BlockedIntent", "CapabilityAsk", "BLOCKED_EXAMPLE_INTENT",
+    "blocked_example", "minimal_valid_example",
 ]

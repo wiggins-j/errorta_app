@@ -44,7 +44,14 @@ from .autonomy import (
 from .completion import pending_completion_work, summarize_open_items
 from .ledger import LedgerStore, Task, format_focus_lines
 from .orientation import build_orientation_packet
-from .schemas import TurnErrorCode, TurnParseError, parse_coding_turn
+from .schemas import (
+    BlockedIntent,
+    TurnErrorCode,
+    TurnParseError,
+    blocked_example,
+    minimal_valid_example,
+    parse_coding_turn,
+)
 from .skills import primary_skill, record_turn_skill
 from .testing import (
     TestRunResult,
@@ -1283,16 +1290,79 @@ _RETRYABLE_TURN_ERRORS = {
 }
 
 
+# --- Spec 25 — the blocked turn ---------------------------------------------- #
+#
+# How much of the agent's own words ride on the ledger row / the TurnOutcome
+# reason. Bounded for the same reason `_CONTEXT_QUESTION_CAP` is: the reason
+# string is rendered into the PM's backlog view, and an essay there crowds out
+# everything else the PM needs to read.
+_BLOCKED_DETAIL_CAP = 400
+
+
+def _blocked_reason_text(intent: Any) -> str:
+    """Render a ``BlockedIntent`` as the one-line reason recorded on the task.
+
+    The agent's own words, verbatim (bounded) — never a paraphrase. A block is a
+    QUESTION addressed to the PM, and the PM can only answer the question that
+    was actually asked."""
+    reason = str(getattr(intent, "reason", "") or "other")
+    detail = " ".join(str(getattr(intent, "detail", "") or "").split())
+    text = f"{reason}: {detail[:_BLOCKED_DETAIL_CAP]}"
+    needs = getattr(intent, "needs", None)
+    if needs is not None:
+        what = " ".join(str(getattr(needs, "what", "") or "").split())
+        text += (f" [needs {getattr(needs, 'capability', 'other')}"
+                 + (f": {what[:_BLOCKED_DETAIL_CAP]}" if what else "") + "]")
+    return text
+
+
+def _record_capability_ask(store: LedgerStore, intent: Any, *, role: str,
+                           task: Task | None, context: str) -> None:
+    """Spec 25 (Item 2): a `needs` block on a `blocked` turn is recorded as its
+    own `capability_ask` decision, beside the `blocked` one.
+
+    Two records, not one, because they answer different questions: the block
+    says *this task cannot move*, the ask says *this ROLE lacks this
+    capability* — the second outlives the task and is the input a human (or
+    SPEC-26's role-closure pass) reads. Nothing here grants anything: enforcement
+    stays in `allowed_tools_for_role` / `execute_dev_turn`, exactly as the
+    spec's non-goal requires. Best-effort — a telemetry write must never fail a
+    turn that was otherwise legal."""
+    needs = getattr(intent, "needs", None)
+    if needs is None:
+        return
+    try:
+        store.record_decision(
+            title=f"capability ask ({role}): {getattr(needs, 'capability', 'other')}",
+            context=context, choice="capability_ask",
+            rationale=(f"{str(getattr(needs, 'what', '') or '')[:_BLOCKED_DETAIL_CAP]}"
+                       + (f" — {str(getattr(needs, 'why', '') or '')[:_BLOCKED_DETAIL_CAP]}"
+                          if str(getattr(needs, "why", "") or "").strip() else "")),
+            related_task_ids=[task.task_id] if task is not None else [],
+            extra={"role": role,
+                   "capability": str(getattr(needs, "capability", "other")),
+                   "blocked_reason": str(getattr(intent, "reason", "other"))},
+        )
+    except Exception:  # noqa: BLE001 — a recorded ask is telemetry, not control
+        pass
+
+
 def _governance_corrective_prompt(prompt: str, code: str, detail: str, *,
                                   retry: int, max_retries: int) -> str:
     # F100 bugfix (2026-06-22): mirror _corrective_turn_prompt for governance
     # turns. A rejected governance turn gets a bounded re-prompt that restates
     # the exact required schema + the validation detail, so a normalizable-but-
     # imperfect reviewer/PM can self-correct instead of dead-ending the run.
+    # Spec 25 (Item 4): the same treatment as `_corrective_turn_prompt` — this
+    # function already hand-rolls half of it (it restates the verdict schema
+    # inline), which is evidence the idea is right AND evidence that
+    # hand-rolling it per call site drifts. The validator dump is humanised
+    # here too; the raw one still lands on the recorded decision.
     return (
         f"{prompt}\n\n"
         "Your previous governance_turn.v1 response was rejected "
-        f"({retry}/{max_retries} corrective retry): {code}: {detail}\n"
+        f"({retry}/{max_retries} corrective retry): "
+        f"{_humanize_parse_detail(code, detail)}\n"
         "Reply with ONLY a valid governance_turn.v1 JSON envelope for the same "
         "role. For an artifact review, \"verdict\" MUST be one of "
         '"approved" | "request_changes" | "blocked"; each finding MUST be an '
@@ -1302,13 +1372,86 @@ def _governance_corrective_prompt(prompt: str, code: str, detail: str, *,
     )
 
 
+_PYDANTIC_MSG_RE = re.compile(r"'msg': '((?:\\.|[^'\\])*)'")
+_PYDANTIC_LOC_RE = re.compile(r"'loc': \(([^)]*)\)")
+_CODE_PLAIN_REASON = {
+    TurnErrorCode.turn_non_json.value:
+        "your response contained no JSON envelope",
+    TurnErrorCode.turn_tool_markup_only.value:
+        "your response was tool-call markup instead of a JSON envelope",
+    TurnErrorCode.turn_schema_mismatch.value:
+        "your JSON envelope did not match the turn schema",
+    TurnErrorCode.role_mismatch.value:
+        "the envelope named a different role than the one you are seated in",
+    TurnErrorCode.task_mismatch.value:
+        "the envelope named a different task_id than the one assigned to you",
+}
+
+
+def _humanize_parse_detail(code: str, detail: str) -> str:
+    """Spec 25 (Item 4): turn a validator dump into a sentence a MODEL can act on.
+
+    ``parse_coding_turn`` returns ``f"invalid {role} intent: {exc.errors()[:3]}"``
+    — a repr of Pydantic's error dicts, complete with ``'loc'``, ``'input'``, and
+    an ``errors.pydantic.dev`` URL — and that string used to be spliced verbatim
+    into the retry prompt. It names what is FORBIDDEN and never what is ACCEPTED,
+    and with one corrective retry for the PM there is exactly one attempt to
+    guess the difference. Extract the human-readable ``msg`` (paired with its
+    field path, which is what makes "Field required" actionable) and drop
+    everything else; the raw dump is still recorded on the
+    ``{role} turn corrective retry`` decision, where an operator — who CAN read
+    it — will find it."""
+    msgs: list[str] = []
+    locs = [(m.start(), m.group(1)) for m in _PYDANTIC_LOC_RE.finditer(detail or "")]
+    for match in _PYDANTIC_MSG_RE.finditer(detail or ""):
+        text = match.group(1).replace("\\'", "'").replace('\\"', '"')
+        text = text.replace("\\n", " ").strip()
+        if text.startswith("Value error, "):
+            text = text[len("Value error, "):]
+        prior = [raw for pos, raw in locs if pos < match.start()]
+        field = ""
+        if prior:
+            parts = [p.strip().strip("'\"") for p in prior[-1].split(",")
+                     if p.strip()]
+            for part in parts:
+                field += f"[{part}]" if part.isdigit() else (
+                    f".{part}" if field else part)
+        msgs.append(f"{field}: {text}" if field else text)
+        if len(msgs) >= 3:
+            break
+    plain = _CODE_PLAIN_REASON.get(code, "your response was not a valid turn")
+    if not msgs:
+        return plain
+    return f"{plain} — " + "; ".join(" ".join(m.split()) for m in msgs)
+
+
 def _corrective_turn_prompt(prompt: str, parsed: TurnParseError, *,
-                            retry: int, max_retries: int) -> str:
+                            retry: int, max_retries: int,
+                            role: str = "", task_id: str | None = None) -> str:
+    """Spec 25 (Item 4): a rejection must TEACH THE ACCEPTED SHAPE.
+
+    Order, deliberately: (1) what was wrong, in plain language; (2) the minimal
+    valid envelope for the seat being re-prompted; (3) the escape shape, with the
+    standing promise that it is always accepted. (3) is not decoration — the turn
+    being corrected may be one the schema genuinely cannot express, and without a
+    legal way to SAY that, the only remaining moves are to guess again or to go
+    silent, both of which are scored as failure."""
+    example = minimal_valid_example(role, task_id=task_id) if role else ""
+    escape = blocked_example(role, task_id=task_id) if role else ""
+    teach = ""
+    if example:
+        teach = (
+            f"A minimal VALID turn for your role looks exactly like this:\n{example}\n"
+            "If you genuinely cannot proceed — a capability you do not have, a "
+            "contradiction, or something this schema cannot express — this shape "
+            f"is ALWAYS accepted, from any role, and is never counted against you:\n"
+            f"{escape}\n")
     return (
         f"{prompt}\n\n"
         "Your previous coding_turn.v1 response was rejected "
         f"({retry}/{max_retries} corrective retry): "
-        f"{parsed.code.value}: {parsed.detail}\n"
+        f"{_humanize_parse_detail(parsed.code.value, parsed.detail)}\n"
+        f"{teach}"
         # F127: weaker CLI-backed models slip into agent mode and emit tool-call
         # markup instead of the envelope — forbid it explicitly and bluntly.
         "Reply with ONLY a single valid coding_turn.v1 JSON object for the same "
@@ -1316,7 +1459,7 @@ def _corrective_turn_prompt(prompt: str, parsed: TurnParseError, *,
         "<function_calls>/<invoke>/<parameter> markup or a sub-agent. Output the "
         "JSON object and nothing else. If you are implementing, emit at least one "
         "tool_call for implementation/test_only/refactor work. Drop unmodeled "
-        "fields such as summary. Reviewer findings must be objects, not bare strings."
+        "fields. Reviewer findings must be objects, not bare strings."
     )
 
 
@@ -1967,19 +2110,23 @@ def _latest_context_response_text(store: LedgerStore, task_id: str, *,
         # Spec 22-28 P0.5 (bug 2): the escape hatch used to read "say so in your
         # summary" — an action the DEV cannot take. `DeveloperToolPlanIntent` has
         # no `summary` field and `extra="ignore"`, so the field is silently
-        # dropped, and `_corrective_turn_prompt` separately instructs "Drop
+        # dropped, and `_corrective_turn_prompt` separately instructed "Drop
         # unmodeled fields such as summary". Two correct strings assembling a dead
         # end: an exhausted dev was told to do the one thing the schema erases.
-        # Point it at a shape it can actually emit today instead. (SPEC-25 adds a
-        # real `blocked` intent later; this only stops instructing the impossible.)
+        # Spec 25 finishes the repair BY CONSTRUCTION: the exhausted dev is now
+        # pointed at the `blocked` intent — a real, typed, always-accepted shape
+        # that lands on the `task_blocked` transition and is NOT counted as an
+        # unproductive turn — instead of at an empty investigation, which parses
+        # but then scores `no_net_change` and feeds the escalation ladder anyway.
+        # Locked by `test_spec25_expressibility.py` (the text must name the
+        # blocked intent and must never name an unmodeled field).
         + ("You have NO context requests left — do NOT ask again; implement the "
            "task with the evidence above. This OVERRIDES any earlier instruction "
            "in this prompt to emit a context_request intent: that channel is "
-           "closed for this task. If you truly cannot proceed, emit "
-           '{"kind": "tool_plan", "task_type": "investigation", "tool_calls": []} '
-           "— an empty investigation is the only 'I am stuck' shape this turn "
-           "accepts. Do NOT add a \"summary\" field: the dev intent has no such "
-           "field and it is discarded.\n" if remaining <= 0 else
+           "closed for this task. If you truly cannot proceed, say so with the "
+           "blocked intent — it is always accepted, it is not held against you, "
+           "and it hands the problem to the PM with your own words:\n"
+           + blocked_example(DEV, task_id=task_id) + "\n" if remaining <= 0 else
            "Ask again ONLY if the answers above genuinely do not contain what you "
            "need; re-asking a question you already asked is treated as a dead end "
            "and spends the whole budget at once.\n"))
@@ -2486,7 +2633,10 @@ def _pm_assist_prompt(store: LedgerStore, task: Task) -> str:
     )
 
 
-def _pm_turn_made_progress(intent: Any, created: list[Task]) -> bool:
+def _pm_turn_made_progress(
+    intent: Any, created: list[Task],
+    prior_decision_titles: Optional[set[str]] = None,
+) -> bool:
     """Spec 22-28 P0.5 (bug 1) — did this PM plan turn DO something?
 
     ``made_progress`` feeds ``pm_idle``, and ``pm_idle_limit`` stops the run. Until
@@ -2524,14 +2674,30 @@ def _pm_turn_made_progress(intent: Any, created: list[Task]) -> bool:
 
     Regression lock 6 of the batch plan still holds: ``pm_idle_limit`` continues to
     bound genuinely empty turns, because a turn with neither a created task nor a
-    decision is still no-progress."""
+    decision is still no-progress.
+
+    SPEC-25 (Item 3b) adds the NOVELTY gate this rule needs to be safe. Counting
+    any decision as progress makes "explain yourself" a licence to idle: a PM that
+    re-emits the same decision every turn would reset ``pm_idle`` forever. So a
+    decision-only turn counts only when it recorded something NOT already on the
+    ledger. ``prior_decision_titles`` is the caller's snapshot of the PM decisions
+    already recorded for this project, taken BEFORE this turn's are written;
+    ``None`` (the default) keeps the pre-Spec-25 behaviour for callers that cannot
+    take one, so no existing call site changes meaning by accident."""
     if created:
         return True
     if getattr(intent, "tasks", None):
         # Every proposed task was rejected (duplicate / uncreatable): Spec 08 says
         # this is churn, decisions or not.
         return False
-    return bool(getattr(intent, "decisions", None))
+    decisions = list(getattr(intent, "decisions", None) or [])
+    if not decisions:
+        return False
+    if prior_decision_titles is None:
+        return True
+    known = {str(t).strip().lower() for t in prior_decision_titles}
+    return any(str(getattr(d, "title", "") or "").strip().lower() not in known
+               for d in decisions)
 
 
 def _materialize_pm_tasks(
@@ -4425,7 +4591,8 @@ def build_run_turn(
                 extra={"retry": retries, "max_retries": max_retries},
             )
             prompt = _corrective_turn_prompt(
-                prompt, parsed, retry=retries, max_retries=max_retries)
+                prompt, parsed, retry=retries, max_retries=max_retries,
+                role=role, task_id=task_id)
             parsed = parse_coding_turn(role, task_id, caller(member, prompt))
         _cap["parse_ok"] = not isinstance(parsed, TurnParseError)
         _cap["parse_retries"] = retries
@@ -4800,6 +4967,16 @@ def build_run_turn(
             invalid_reason = ""
             if isinstance(parsed, TurnParseError):
                 invalid_reason = f"{parsed.code.value}: {parsed.detail}"
+            elif isinstance(parsed.intent, BlockedIntent):
+                # Spec 25: a PM that cannot re-scope this task says so. It rides the
+                # EXISTING bounded pm-assist rung (recorded, counted against
+                # `pm_assist_limit`) rather than blocking the task from under the
+                # ladder that is already handling it — the task is mid-recovery, and
+                # two mechanisms mutating its state in the same turn is how a
+                # stranded `doing` task happens.
+                invalid_reason = f"pm assist blocked — {_blocked_reason_text(parsed.intent)}"
+                _record_capability_ask(store, parsed.intent, role=PM, task=task,
+                                       context=f"task {task.task_id}")
             elif parsed.intent.done:
                 invalid_reason = "PM assist cannot declare the project done"
             if invalid_reason:
@@ -4909,14 +5086,48 @@ def build_run_turn(
                     title="pm turn rejected", context="plan",
                     choice="pm_turn_rejected",
                     rationale=f"{parsed.code.value}: {parsed.detail}")
-                return TurnOutcome(kind="planned", made_progress=False)
+                # Spec 25 (Item 3a): a turn rejected for SHAPE is not a turn that
+                # made no PROGRESS. Trying to comply used to accelerate
+                # termination — four rejected PM turns walked `pm_idle` straight
+                # into `no_progress` with two PRs open and nothing recorded about
+                # why. The counters are separated here and bounded separately in
+                # `_apply_outcome` (`schema_reject_limit`).
+                return TurnOutcome(kind="planned", made_progress=False,
+                                   schema_rejected=True)
             # F087-07-E: the interjections were delivered to (and accepted by) the
             # PM this turn — mark them consumed (read-once) only now.
             store.mark_interjections_consumed()
             intent = parsed.intent
+            # Spec 25 (Item 1): the PM's own blocked turn. Unlike a worker's, this
+            # DOES count toward `pm_idle`: a PM saying "there is nothing I can add"
+            # IS the idle state, and this spec does not make runs immortal — it
+            # makes the idle state LEGIBLE. Where the run used to stop after four
+            # rejected turns with no recorded reason, it now stops after
+            # `pm_idle_limit` honest ones with the PM's reason on the ledger.
+            if isinstance(intent, BlockedIntent):
+                store.record_decision(
+                    title="pm blocked", context="plan", choice="blocked",
+                    rationale=_blocked_reason_text(intent))
+                _record_capability_ask(store, intent, role=PM, task=None,
+                                       context="plan")
+                return TurnOutcome(kind="planned", made_progress=False)
             # F088-04: PM decisions are durable project truth — persist them so
             # the grounding layer can promote them (previously dropped on the
             # floor). The ledger remains the source; grounding derives from it.
+            #
+            # Spec 25 (Item 3b): snapshot the ALREADY-recorded decision titles
+            # BEFORE writing this turn's, so the progress judgement below can tell
+            # a new decision from one the PM is re-emitting. Taken here (not in the
+            # scorer) because after this loop the ledger no longer knows which
+            # decisions arrived on this turn. Best-effort: an unreadable ledger
+            # degrades to the pre-Spec-25 rule (every decision counts) rather than
+            # failing a legal turn.
+            try:
+                prior_decision_titles = {
+                    str(d.get("title") or "") for d in store.list_decisions()
+                    if d.get("choice") == "pm_decision"}
+            except Exception:  # noqa: BLE001 — scoring input, never control
+                prior_decision_titles = None
             for dec in intent.decisions:
                 store.record_decision(
                     title=dec.title, context="pm_decision",
@@ -4950,7 +5161,8 @@ def build_run_turn(
             created = _materialize_pm_tasks(store, intent)
             return TurnOutcome(
                 kind="planned",
-                made_progress=_pm_turn_made_progress(intent, created))
+                made_progress=_pm_turn_made_progress(
+                    intent, created, prior_decision_titles))
 
         if isinstance(action, GateRun):
             # Spec 12 (S1): run the acceptance gate on the integrated master tree,
@@ -5246,6 +5458,33 @@ def build_run_turn(
                         member_role=DEV, member_route=str(member.get("gateway_route_id", "")),
                         reason=parsed.code.value)
                 intent = parsed.intent
+                # Spec 25 (Item 1/S2): the dev says it cannot proceed. Every OTHER
+                # dev dead end below returns `unproductive=True` and feeds the F127
+                # escalate-up ladder — so honesty and failure were the same signal,
+                # and a dev with nothing legal left to emit was punished for saying
+                # so. This routes to the `task_blocked` transition that has existed
+                # in `_apply_outcome`/`topology.block_task` all along and that NO
+                # turn shape could reach: the task goes `blocked` with the dev's own
+                # words on the ledger, `pm_idle`/`plan_streak` reset, and the PM
+                # picks it up. `unproductive` is deliberately NOT set — that is the
+                # entire behavioural change. Bounded by `blocked_turn_limit`
+                # (autonomy.py) so the escape shape cannot become a way to idle.
+                if isinstance(intent, BlockedIntent):
+                    _record_capability_ask(store, intent, role=DEV, task=task,
+                                           context=f"task {task.task_id}")
+                    # The turn wrote nothing, so the branch opened above holds no
+                    # commits — drop it exactly as the no-net-change path does,
+                    # rather than accumulating an empty branch per blocked turn.
+                    if workspace is not None and branch is not None:
+                        try:
+                            workspace.delete_branch(branch)
+                        except Exception:  # noqa: BLE001 — cleanup is best-effort
+                            pass
+                    return TurnOutcome(
+                        kind="task_blocked", task=task,
+                        member_id=str(member.get("id", "")), member_role=DEV,
+                        member_route=str(member.get("gateway_route_id", "")),
+                        reason=_blocked_reason_text(intent))
                 # F088-09: a read-only context request — answer from grounding,
                 # record it, and re-queue the task so the dev acts on the answer.
                 # No file writes, no durable mutation. Spec 20 bounds it below.
@@ -5508,6 +5747,24 @@ def build_run_turn(
                         related_task_ids=[task.task_id])
 
                 parsed = _review_once()
+                # Spec 25 (Item 1): a reviewer that cannot review — no diff it can
+                # read, a demand it cannot satisfy, a contradiction between the task
+                # and the PR — blocks the REVIEW task with its own words instead of
+                # being forced to invent a verdict. The PR is left exactly as it is
+                # (not approved, not rejected): a block is a question for the PM,
+                # and fabricating either verdict here is precisely the failure this
+                # spec exists to stop. Checked before the grounding heuristics
+                # below, none of which apply to a non-verdict intent.
+                if (not isinstance(parsed, TurnParseError)
+                        and isinstance(parsed.intent, BlockedIntent)):
+                    _record_capability_ask(store, parsed.intent, role=REVIEWER,
+                                           task=task,
+                                           context=f"task {task.task_id}")
+                    return TurnOutcome(
+                        kind="task_blocked", task=task,
+                        member_id=str(member.get("id", "")), member_role=REVIEWER,
+                        member_route=str(member.get("gateway_route_id", "")),
+                        reason=_blocked_reason_text(parsed.intent))
                 # Spec 14 (Item 4/5): grounding check. `num_turns > 1` means the
                 # reviewer actually ran Read/Grep before deciding; `== 1` (or, for a
                 # vendor that doesn't report it, a sub-floor latency) on an EMPTY
@@ -5647,6 +5904,23 @@ def build_run_turn(
 
                 if isinstance(parsed, TurnParseError):
                     return _changes_requested(parsed.code.value, "tester_turn_rejected")
+                # Spec 25 (Item 1): a tester that cannot test says so instead of
+                # naming a command it knows will not exercise the slice. This must
+                # NOT go through `_changes_requested` — that marks the PR
+                # tests-failed and spawns a "fix tests" dev task, i.e. it converts
+                # "I cannot answer" into "the code is broken", which is the same
+                # fabrication the reviewer branch above refuses. The test task
+                # blocks; the PR's tests_passed is left untouched (still ungated),
+                # and the PM decides.
+                if isinstance(parsed.intent, BlockedIntent):
+                    _record_capability_ask(store, parsed.intent, role=TESTER,
+                                           task=task,
+                                           context=f"task {task.task_id}")
+                    return TurnOutcome(
+                        kind="task_blocked", task=task,
+                        member_id=str(member.get("id", "")), member_role=TESTER,
+                        member_route=str(member.get("gateway_route_id", "")),
+                        reason=_blocked_reason_text(parsed.intent))
                 command_ids = list(parsed.intent.command_ids)
                 # F142 WS-C: applicability gate. The tester may declare that no
                 # registered command exercises this slice (project not yet
@@ -5763,6 +6037,21 @@ def build_run_turn(
                         context=f"task {task.task_id}", choice="pm_review_turn_rejected",
                         rationale=f"{parsed.code.value}: {parsed.detail}",
                         related_task_ids=[task.task_id])
+                    approved = False
+                elif isinstance(parsed.intent, BlockedIntent):
+                    # Spec 25: the PM half of the strict-mode dual review could not
+                    # be given. Recorded with its reason; NOT approved — the gate
+                    # stays unsatisfied rather than passing on a non-verdict. The
+                    # review task itself blocks below only for a worker reviewer;
+                    # here the PM review task completes so the dual-review gate can
+                    # be re-driven by an ordinary plan turn.
+                    store.record_decision(
+                        title=f"pm review blocked: {task.title}",
+                        context=f"task {task.task_id}", choice="blocked",
+                        rationale=_blocked_reason_text(parsed.intent),
+                        related_task_ids=[task.task_id])
+                    _record_capability_ask(store, parsed.intent, role=PM, task=task,
+                                           context=f"task {task.task_id}")
                     approved = False
                 elif parsed.intent.reviewed_head != pr["head"]:
                     store.record_decision(
@@ -6094,6 +6383,17 @@ def build_run_turn(
                 title="delivery review rejected (unparseable)",
                 context="delivery_review", choice="review_rejected",
                 rationale=f"{parsed.code.value}: {parsed.detail}",
+                extra={"reviewed_head": head})
+            approved = False
+        elif isinstance(parsed.intent, BlockedIntent):
+            # Spec 25: the delivery reviewer said it could not review the delivered
+            # head. Recorded as a NON-verdict (the same fail-closed treatment as a
+            # stale head): `done` does not stick, and nothing is fabricated in
+            # either direction.
+            store.record_decision(
+                title="delivery review blocked",
+                context="delivery_review", choice="blocked",
+                rationale=_blocked_reason_text(parsed.intent),
                 extra={"reviewed_head": head})
             approved = False
         elif parsed.intent.reviewed_head != head:

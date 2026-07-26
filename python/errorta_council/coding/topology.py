@@ -634,7 +634,25 @@ class CodingReconciler:
         return done
 
     def block_task(self, task: Task, *, reason: str) -> Task:
-        """A task cannot proceed -> mark blocked + record why (PM picks it up)."""
+        """A task cannot proceed -> mark blocked + record why (PM picks it up).
+
+        Spec 25 made this reachable from a member turn (the `blocked` intent), so
+        it can now race a task's completion: in the concurrent loop a worker's
+        block may land after that task was already finished or dropped by another
+        turn. Blocking a TERMINAL task would be a state regression — a done task
+        would silently re-enter the backlog — so the transition is skipped and
+        only the reason is recorded, the same discipline `_requeue_stranded`
+        applies on the noop path. The decision is written either way: the agent
+        said something, and it is not thrown away."""
+        current = next((t for t in self.ledger.list_tasks()
+                        if t.task_id == task.task_id), task)
+        if str(getattr(current, "state", "")) in ("done", "dropped"):
+            self.ledger.record_decision(
+                title=f"blocked (task already {current.state}): {task.title}",
+                context=f"task {task.task_id}", choice="blocked",
+                rationale=reason, related_task_ids=[task.task_id],
+            )
+            return current
         blocked = self.ledger.update_task(task.task_id, state="blocked")
         self.ledger.record_decision(
             title=f"blocked: {task.title}", context=f"task {task.task_id}",

@@ -274,6 +274,18 @@ class CodingAutonomyPolicy:
     # loop stops treating "blocked" as a legal, progress-bearing answer and routes
     # the task to the recovery ladder. 0 disables the accounting.
     blocked_turn_limit: int = 3
+    # SPEC-25 (Item 3a): how many consecutive PM turns rejected for SHAPE are
+    # absorbed before they resume counting as idleness. A rejected turn is not an
+    # idle turn — the PM tried to say something and the schema refused it — so
+    # charging `pm_idle` for it made "trying to comply" accelerate termination
+    # (four rejections, `pm_idle_limit=2`, a healthy run stopped `no_progress`
+    # with two PRs open). Past this many the run must still be able to end, so the
+    # rejections start counting again and the existing `no_progress` stop lands:
+    # a schema the PM cannot satisfy is a bug in the SCHEMA, and the recorded
+    # `pm turn rejected` decisions carry the validator dump to file it with.
+    # 0 disables the split — every shape rejection counts as idle, exactly as it
+    # does today.
+    schema_reject_limit: int = 3
     # SPEC-26: operator overrides for the per-role capability manifest, as
     # ``{role: {capability: bool}}``. EMPTY (the default) means "derive every
     # capability exactly as today" — the disable value for this one is `{}`, not 0.
@@ -333,6 +345,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "governance_proximity": p.governance_proximity,
         "narrow_limit": p.narrow_limit,
         "blocked_turn_limit": p.blocked_turn_limit,
+        "schema_reject_limit": p.schema_reject_limit,
         # Copy: the returned dict is persisted/serialized by callers, and handing
         # out the policy's own dict would let a caller mutate a frozen policy.
         "capability_overrides": dict(p.capability_overrides),
@@ -469,6 +482,8 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         narrow_limit=max(0, int(d.get("narrow_limit", base.narrow_limit))),
         blocked_turn_limit=max(
             0, int(d.get("blocked_turn_limit", base.blocked_turn_limit))),
+        schema_reject_limit=max(
+            0, int(d.get("schema_reject_limit", base.schema_reject_limit))),
         # A mapping, so the disable value is `{}`. Coerced defensively: this dict
         # comes straight off unvalidated JSON on disk, and a non-mapping there must
         # degrade to "no overrides" rather than crash policy load for the whole run.
@@ -817,6 +832,13 @@ class TurnOutcome:
     # from a member_failure (gateway). Drives the escalate-up reassignment ladder.
     unproductive: bool = False
     repairs: int = 0
+    # Spec 25 (Item 3a): this turn was refused by the SCHEMA — it never parsed, so
+    # it is not a plan that made no progress, it is a sentence the validator would
+    # not accept. Kept distinct from `unproductive` (a worker that connected and
+    # produced nothing usable) because they have different cures: one is fixed by
+    # routing around a member, the other by fixing a model. Consumed only by
+    # `_apply_outcome`'s PM accounting; `schema_reject_limit` bounds it.
+    schema_rejected: bool = False
 
 
 @dataclass
@@ -893,6 +915,20 @@ class LoopCounters:
     # planning_churn before implementation tasks ever exist). At plan_streak_limit
     # the run stops `planning_churn`.
     plan_streak: int = 0
+    # Spec 25 (Item 3a): consecutive PM turns rejected for SHAPE (the turn never
+    # parsed). Absorbed instead of charged to `pm_idle` while under
+    # `schema_reject_limit`; RESET to 0 by any turn that parsed, so a transient
+    # malformed response costs nothing. Past the limit the rejections resume
+    # counting as idle and the ordinary `no_progress` stop lands — bounded, with
+    # no new stop reason (batch regression lock 1).
+    schema_rejects: int = 0
+    # Spec 25 (Item 1): blocked turns per (member_id, task_id). "I am blocked" is
+    # a legal, progress-bearing answer — and therefore has to be bounded, or it
+    # becomes a way to idle forever. At `blocked_turn_limit` the turn is ALSO
+    # marked unproductive so the existing F127 recovery ladder (escalate the
+    # model, reassign, PM-assist) takes the task, instead of the same member
+    # blocking the same task on every re-open.
+    blocked_counts: dict[tuple[str, str], int] = field(default_factory=dict)
     # Spec 10: consecutive iterations observed WEDGED — a `wedge_min_tasks`+ todo
     # backlog with no dispatchable worker head. Incremented in
     # `_account_dispatch_wedge`; reset to 0 the moment any dispatchable work
@@ -1825,6 +1861,44 @@ _CONTEXT_BUDGET_REARM = {
 }
 
 
+def _account_blocked_turn(c: LoopCounters, policy: CodingAutonomyPolicy,
+                          action: Any, outcome: TurnOutcome) -> None:
+    """Spec 25 (Item 1) — bound the escape shape.
+
+    A worker's `blocked` turn is legal, is progress-bearing (it resets `pm_idle`
+    and `plan_streak` via `_apply_outcome`), and is deliberately NOT
+    `unproductive` — that is the behavioural change the spec exists for. Which
+    means, just as deliberately, it needs its own bound: without one, "blocked"
+    is a turn an agent could emit forever while the run reports motion.
+
+    The bound is per ``(member_id, task_id)`` and counts across re-opens (the
+    task returns to the backlog when the PM acts on it, so the same member
+    blocking the same task again is exactly the pathology). At
+    ``blocked_turn_limit`` the turn is additionally marked ``unproductive``, which
+    hands it to the EXISTING F127 recovery ladder — escalate the model, reassign
+    the task, PM-assist — rather than inventing a second mechanism or a new stop
+    reason. ``blocked_turn_limit=0`` disables the accounting entirely (and, since
+    nothing else reads these counters, restores the pre-Spec-25 trace for a run
+    whose agents never block).
+
+    Mutates ``outcome`` in place: both loops call this BEFORE their
+    ``outcome.unproductive`` branch, so the flag is read in the same iteration."""
+    if outcome.kind != "task_blocked":
+        return
+    limit = max(0, int(policy.blocked_turn_limit))
+    if limit <= 0:
+        return
+    member_id = str(getattr(action, "member_id", "") or outcome.member_id or "")
+    task_id = str(getattr(action, "task_id", "") or "")
+    if not (member_id and task_id):
+        return
+    key = (member_id, task_id)
+    c.blocked_counts[key] = c.blocked_counts.get(key, 0) + 1
+    if c.blocked_counts[key] >= limit:
+        outcome.unproductive = True
+        outcome.reason = f"blocked_turn_limit: {outcome.reason}"[:400]
+
+
 def _handle_unproductive(
     ledger: Any, action: Any, outcome: TurnOutcome, c: LoopCounters,
     policy: CodingAutonomyPolicy, members: list[tuple[str, str]],
@@ -2143,7 +2217,8 @@ def _run_sequential_loop(
         if isinstance(action, PMAssist):
             c.pm_assists += 1
 
-        milestone = _apply_outcome(rec, ledger, action, outcome, c, delivery_review)
+        milestone = _apply_outcome(rec, ledger, action, outcome, c, delivery_review,
+                                   policy)
 
         # F155: the delivery review kept rejecting the integrated head. A filed
         # finding counts as progress (resets pm_idle) and changes the head, so
@@ -2174,6 +2249,10 @@ def _run_sequential_loop(
                 MEMBER_UNHEALTHY, c,
                 detail={"member_id": member_id, "reason": failure.status,
                         "attempts": attempts})
+
+        # Spec 25: bound the blocked turn — past `blocked_turn_limit` for this
+        # (member, task) it is ALSO unproductive, so the ladder below takes it.
+        _account_blocked_turn(c, policy, action, outcome)
 
         # F127: a worker that keeps producing unusable turns gets its task
         # reassigned to a different/stronger member; if every member has failed it,
@@ -2520,7 +2599,8 @@ def _run_concurrent_loop(
                     _requeue_crashed(ledger, action, outcome)
                     continue
                 milestone = _apply_outcome(
-                    rec, ledger, action, outcome, c, delivery_review) or milestone
+                    rec, ledger, action, outcome, c, delivery_review,
+                    policy) or milestone
                 # F155: cap delivery-review reject rounds (mirrors the sequential
                 # loop). A filed finding resets pm_idle + changes the head, so
                 # no_progress / not_converging never trip — stop truthfully instead
@@ -2547,6 +2627,10 @@ def _run_concurrent_loop(
                         detail={"member_id": member_id, "reason": failure.status,
                                 "attempts": attempts, "role": role, "route": route,
                                 "_failure": failure})
+                # Spec 25: bound the blocked turn here TOO — regression lock 5 of
+                # the batch plan (a hook in only one loop chain is dead code
+                # exactly where real fanned-out runs live).
+                _account_blocked_turn(c, policy, action, outcome)
                 # F127: reassign-up an unproductive worker turn; drain-stop with a
                 # blocking Problem only if every member of the role has failed it.
                 if outcome.unproductive:
@@ -2638,14 +2722,39 @@ def _run_concurrent_loop(
 
 def _apply_outcome(rec: CodingReconciler, ledger: Any, action: Any,
                    outcome: TurnOutcome, c: LoopCounters,
-                   delivery_review: Optional[Callable[[Any], Any]] = None) -> bool:
+                   delivery_review: Optional[Callable[[Any], Any]] = None,
+                   policy: Optional[CodingAutonomyPolicy] = None) -> bool:
     """Apply the reconciler mutation for a turn's outcome. Returns whether this
     turn was a milestone (a fully-validated unit / project completion).
 
     F146 Slice B: ``delivery_review`` (when provided) verifies the INTEGRATED
     delivered head as a unit before a ``project_done`` is allowed to stick."""
     milestone = False
+    # Spec 25 (Item 3a): a turn that PARSED clears the shape-rejection window,
+    # whatever else it did — the window bounds consecutive rejections, so one
+    # malformed response between good ones must cost nothing.
+    if not outcome.schema_rejected:
+        c.schema_rejects = 0
     if outcome.kind in {"planned", "governance_progress"}:
+        # Spec 25 (Item 3a): SHAPE and PROGRESS are accounted separately. A PM
+        # turn the validator refused is not a PM sitting idle: it tried to say
+        # something and the schema would not let it, and charging `pm_idle` for
+        # that made compliance ACCELERATE termination (the gravity-golf run:
+        # four rejected turns, `pm_idle_limit=2`, stopped `no_progress` with two
+        # PRs open and no recorded reason). `plan_streak` is likewise untouched —
+        # a turn that never parsed is not a plan.
+        #
+        # THE BOUND, so this can never become an infinite retry: only
+        # `schema_reject_limit` consecutive rejections are absorbed. Past it they
+        # count as idle again and the ordinary `no_progress` stop lands, with the
+        # `pm turn rejected` decisions on the ledger naming the validator — the
+        # diagnostic the old accounting destroyed. `schema_reject_limit=0`
+        # reproduces today's trace exactly (every rejection counts as idle).
+        if outcome.schema_rejected:
+            c.schema_rejects += 1
+            reject_limit = max(0, (policy or CodingAutonomyPolicy()).schema_reject_limit)
+            if c.schema_rejects <= reject_limit:
+                return milestone
         if outcome.made_progress:
             c.pm_idle = 0
         else:

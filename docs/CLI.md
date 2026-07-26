@@ -560,6 +560,14 @@ different one. Reach for the right one instead of scrolling everything:
   prompt). This is the deepest observability pull.
 - **`board`** / **`tasks`** — the backlog. `board` shows todo/doing/blocked/done
   columns; `tasks` is a compact one-line-per-task table.
+  A task in **`blocked`** may be there because the worker *said so*: since Spec 25
+  every role can answer "I cannot proceed, and here is why" instead of guessing,
+  going silent, or inventing a verdict. Read those as **questions, not errors** —
+  the run is telling you what it cannot do. The reason is the agent's own words;
+  `decisions --kind blocked` shows them, and `decisions --kind capability_ask`
+  shows the typed "I need X" asks that ride along with them. The answer is an
+  ordinary re-plan (re-scope, register a test command so a gate exists, split, or
+  drop) — a capability is never granted from inside a turn.
 - **`tokens`** — the usage rollup by role / route / member, with an honest
   measured-vs-estimated meter so you can trust the numbers.
 - **`prs`** / **`pr`** — pull-request state and a single PR's diff.

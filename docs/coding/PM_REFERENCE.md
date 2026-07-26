@@ -215,6 +215,42 @@ vendors that don't report a turn count. `review_screenshot` (default off) is a P
 follow-up (attach a headless screenshot of the running head to visual-DoD
 reviews) — **not yet implemented**.
 
+**Spec 25 — the `blocked` turn, and what it means for you.** Every role can now
+emit one always-legal intent:
+
+```json
+{"kind": "blocked",
+ "reason": "missing_capability | missing_context | contradictory_instruction | waiting_on_other_work | cannot_express_intent | other",
+ "detail": "what you cannot do and why, in one or two sentences",
+ "needs": {"capability": "execution | repo_read | context | write_scope | other",
+           "what": "a way to run pytest and see the output", "why": ""}}
+```
+
+Its only requirement is a non-empty `detail`. That is deliberate: every other
+intent carries a rule relating two fields, and each such rule is a state some run
+eventually lands in with nothing legal left to say — the failure mode that stopped
+three healthy runs. A **worker's** block marks its task `blocked` with the agent's
+own words on the ledger and is *not* counted as an unproductive turn; the **PM's**
+block still counts toward `pm_idle` (a PM with nothing to add *is* the idle state
+— it is now merely legible). New decision choices to look for:
+`blocked` and `capability_ask`.
+
+**You answer a capability ask by re-planning, never by granting a tool.** Nothing
+in the engine lets a plan turn widen a role's tool surface (`_ROLE_TOOLS` is
+static). The real answers are: re-scope the task to what the role can do, register
+a test command so an acceptance gate exists (the honest answer to
+`capability: "execution"`), split the work, or drop it.
+
+**Knobs.** `blocked_turn_limit` (3) — how many times one member may block the same
+task before the task is routed to the F127 recovery ladder instead (`0` disables
+the accounting). `schema_reject_limit` (3) — how many consecutive PM turns
+rejected *for shape* are absorbed before they count as idleness again. A rejected
+turn is not an idle turn: the PM tried to say something and the validator refused
+it, and charging `pm_idle` for that made compliance accelerate termination. Past
+the limit the rejections resume feeding `pm_idle` and the run ends `no_progress`
+as before — with the `pm turn rejected` decisions carrying the validator dump, so
+you can file it as the **schema bug** it is. `0` restores the old accounting.
+
 **F159 — hot files.** A file that appears in `hot_file_threshold` PRs' merge
 conflicts is "hot": parallel edits to it are serialized (only one task holds it
 until that task's PR merges), so parallel devs stop thrashing on a shared file.
@@ -492,6 +528,7 @@ and FastAPI routers. Update the prose and this contract together.
     "reviewer_repo_read": false,
     "revise_chain_limit": 3,
     "revise_livelock_limit": 5,
+    "schema_reject_limit": 3,
     "strict_file_partition": true,
     "task_reassignment_limit": 2,
     "web_probe": true,
