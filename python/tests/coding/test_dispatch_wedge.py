@@ -128,7 +128,7 @@ def test_wedge_trips_after_the_sustained_window_and_names_the_culprit(
         stop = _account_dispatch_wedge(store, c, policy)
         if i < policy.wedge_stall_limit:
             assert stop is None, f"tripped early after {i} iteration(s)"
-    assert stop is not None and stop.stop_reason == DISPATCH_WEDGED
+    assert stop is not None and stop.reason == DISPATCH_WEDGED
     assert c.wedge_streak == policy.wedge_stall_limit
     # The monitor was raised, naming the stranded prerequisite id + its block count.
     assert raised and raised[-1][0] == "dispatch_wedged"

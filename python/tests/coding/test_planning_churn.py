@@ -19,9 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from errorta_council.coding.autonomy import (
+    NARROW_CLAMP_PLANNING,
     PLANNING_CHURN,
     CodingAutonomyPolicy,
     LoopCounters,
+    Narrow,
     TurnOutcome,
     _account_planning_churn,
     _apply_outcome,
@@ -210,8 +212,11 @@ def test_trips_exactly_at_the_limit_not_before() -> None:
         stop = _account_planning_churn(led, c, policy)
         if i < limit:
             assert stop is None, f"tripped early after {i} plan turn(s)"
-    assert stop is not None and stop.stop_reason == PLANNING_CHURN
-    assert stop.counters is c and c.plan_streak == limit
+    # SPEC-27: the trip's first rung is a NARROW (`clamp_planning`), not the stop.
+    # The stop reason is unchanged and lands once the ladder is exhausted — see
+    # `test_spec27_convergence_control.py` for the full ladder walk.
+    assert isinstance(stop, Narrow) and stop.detector == PLANNING_CHURN
+    assert stop.action == NARROW_CLAMP_PLANNING and c.plan_streak == limit
 
 
 def test_a_worker_turn_before_the_limit_prevents_the_trip() -> None:
@@ -244,7 +249,7 @@ def test_a_bare_ledger_never_breaks_the_detector() -> None:
     policy = CodingAutonomyPolicy(plan_streak_limit=2)
     c = LoopCounters(plan_streak=5)
     stop = _account_planning_churn(Bare(), c, policy)
-    assert stop is not None and stop.stop_reason == PLANNING_CHURN
+    assert isinstance(stop, Narrow) and stop.detector == PLANNING_CHURN
 
 
 # --------------------------------------------------------------------------- #

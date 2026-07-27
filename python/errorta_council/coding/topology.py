@@ -374,6 +374,8 @@ def plan_next_batch(
     frozen: set[str] | None = None,           # F159: centralize-frozen paths
     frozen_owner_task_id: str | None = None,  # F159: the only task allowed to touch frozen
     owned_paths: set[str] | None = None,      # GL05: a-priori file-ownership partition
+    integration_only: bool = False,           # SPEC-27: drain, don't fan out
+    planning_clamped: bool = False,           # SPEC-27: find a worker turn first
 ) -> list[CodingAction]:
     """F087 Slice 1 — the concurrent planner: return ALL runnable actions for the
     idle members this tick (vs ``decide_next``'s single action). READ-ONLY.
@@ -393,6 +395,24 @@ def plan_next_batch(
     * The PM plans only when no worker could be assigned this tick (mirrors
       ``decide_next``: plan when the pipeline is dry), so it doesn't spam plan
       turns while devs are busy.
+
+    SPEC-27 (Item 2) adds two NARROWING keywords, threaded exactly like
+    ``hot_paths`` / ``frozen`` / ``owned_paths``. Both default ``False``, so every
+    pre-spec caller — including the whole ``max_parallel_workers <= 1`` path, which
+    uses ``decide_next`` and is unchanged — plans byte-identically. Both obey the
+    non-wedge invariant: neither can make an otherwise-dispatchable task
+    non-dispatchable.
+
+    * ``integration_only`` — engaged only while a PR is ``mergeable`` (i.e. while
+      the exclusive ``Merge`` branch above is provably reachable). It caps the
+      worker fan-out at ONE assign per tick, so approved work drains serially
+      instead of the run opening more fronts against a moving base. It REDUCES
+      concurrency; it never blocks the last dispatchable task.
+    * ``planning_clamped`` — the PM's plan turn is already gated on "no worker
+      could be assigned", so the only honest way to FORCE a worker turn is to look
+      harder for one: this widens the ready-task over-fetch so a role whose head
+      tasks are all excluded/gated finds a dispatchable task behind them. Strictly
+      ADDITIVE to dispatchability.
     """
     try:
         project = ledger.get_project()
@@ -473,7 +493,11 @@ def plan_next_batch(
         # from the first-ready ones (F127 reassignment). F159: when the hot/frozen
         # gate is active, fetch extra headroom so a gated task doesn't starve an
         # idle member of the non-colliding work behind it.
-        want = len(ids) + (32 if (hot or frozen_set or partition_on) else 0)
+        # SPEC-27 `planning_clamped`: widen the window so a head-of-line-blocked
+        # role finds the dispatchable task BEHIND its gated heads, instead of
+        # falling through to yet another PM plan turn (the churn being narrowed).
+        want = len(ids) + (32 if (hot or frozen_set or partition_on
+                                  or planning_clamped) else 0)
         tasks = ledger.next_tasks(role, want, exclude=chosen_tasks)
         for task in tasks:
             # F159: serialize hot-file / frozen-file contention. A task that would
@@ -532,6 +556,14 @@ def plan_next_batch(
             # file; cross-tick holds arrive via `owned_paths`.
             if partition_on and tp:
                 owned |= tp
+            # SPEC-27 `integration_only`: serial drain. One assign this tick, so
+            # the run narrows to integrating what it has instead of fanning out
+            # against a base that is about to move. Non-wedge invariant 1 holds by
+            # construction — the assign is MADE, only the second one is deferred.
+            if integration_only:
+                break
+        if integration_only and worker_assigned:
+            break
 
     # PM plans only when the worker pipeline was dry this tick (and not merging).
     if pm_ids and not worker_assigned:

@@ -6,7 +6,7 @@ two."*
 **Target version:** v0.1 (engine — `python/errorta_council/coding/autonomy.py`)
 **Depends on:** [SPEC-23](SPEC-23-continue-by-default.md) (the last-word turn is
 where this spec escalates *to*)
-**Status:** proposed
+**Status:** implemented
 **Owner:** wiggins-j
 
 ---

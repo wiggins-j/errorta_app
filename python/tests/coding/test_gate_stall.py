@@ -114,7 +114,7 @@ def test_identical_result_trips_after_limit() -> None:
         stop = _account_gate_stall(led, c, policy)
         if i <= limit:
             assert stop is None, f"tripped early at iter {i}"
-    assert stop is not None and stop.stop_reason == GATE_NOT_IMPROVING
+    assert stop is not None and stop.reason == GATE_NOT_IMPROVING
     assert c.iterations - c.last_gate_iter >= limit
 
 
@@ -139,7 +139,7 @@ def test_rising_pass_count_resets_window() -> None:
         stop = _account_gate_stall(led, c, policy)
         if stop is not None:
             break
-    assert stop is not None and stop.stop_reason == GATE_NOT_IMPROVING
+    assert stop is not None and stop.reason == GATE_NOT_IMPROVING
     assert c.iterations - 4 >= limit
 
 
@@ -165,7 +165,7 @@ def test_head_churn_same_score_still_trips() -> None:
         stop = _account_gate_stall(led, c, policy)
         if stop is not None:
             break
-    assert stop is not None and stop.stop_reason == GATE_NOT_IMPROVING
+    assert stop is not None and stop.reason == GATE_NOT_IMPROVING
 
 
 def test_reshuffled_failset_same_score_still_trips() -> None:
@@ -183,7 +183,7 @@ def test_reshuffled_failset_same_score_still_trips() -> None:
         stop = _account_gate_stall(led, c, policy)
         if stop is not None:
             break
-    assert stop is not None and stop.stop_reason == GATE_NOT_IMPROVING
+    assert stop is not None and stop.reason == GATE_NOT_IMPROVING
 
 
 def test_no_signal_never_trips() -> None:

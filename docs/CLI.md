@@ -755,6 +755,23 @@ distinction matters when you are reading a failed pipeline:
 A run with `last_word_limit: 0`, or one that never tripped a heuristic stop,
 prints exactly what it printed before.
 
+**Interventions on the record (Spec 27).** Asking the PM is the *last* rung, not
+the first. Before a heuristic stop lands, the engine tries the cheap mechanical
+answers to it — clamp fan-out to serial, force integration so approved work drains
+before more is opened, clamp planning so the next turn is a worker turn — and only
+then spends a turn asking. So a stopped run's `errorta log` may now carry
+`narrow_*` decisions naming the interventions that were tried, in the order they
+were tried, before it stopped.
+
+**The stop reason and the exit code are unchanged.** A run that exhausts its
+ladder stops with exactly the reason and exactly the code it stopped with before;
+the decisions are additive evidence, not a new outcome. The narrowing rungs make
+no model calls of their own and can extend a run by at most
+`narrow_limit x narrow_drain_iters` (15 by default) iterations, drawn from the
+run's existing `max_iterations` / `max_model_calls` budget — both of which are
+still checked before any detector runs. Set `narrow_limit: 0` to turn the whole
+ladder off.
+
 ### One sidecar, one owner
 
 The CLI and the desktop app share the **same store on disk**, but exactly **one

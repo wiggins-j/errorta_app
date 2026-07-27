@@ -177,4 +177,19 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
    merge path so the 26–92% false-rejection seat can actually be taken off the
    board.)
 5. The count of ways to *recover* is no longer an order of magnitude smaller than
-   the count of ways to *die*.
+   the count of ways to *die*. **(SPEC-27 — landed.** The detector return contract
+   is now four-valued — `None` / `Narrow` / `Escalate` / `Stop` — and every
+   heuristic stop reason carries an ordered, bounded intervention ladder instead of
+   a single early return. `not_converging` forces integration, then clamps
+   fan-out, then asks the PM, then stops; `planning_churn` clamps planning first;
+   `delivery_review_stalled` drains its merges first; the wedge and the red gate
+   get no mechanical rung, by construction, because narrowing either makes it
+   worse. GL04's clamp was folded in rather than rewritten, and SPEC-23's
+   `_intervene` is the one and only escalation path. Recovery count goes from 2 to
+   2 + one bounded ladder per heuristic reason. Nothing the CLI reads moved: no
+   stop-reason string, no exit code, and a run that exhausts its ladder stops
+   exactly as it did. Bounded at `narrow_limit * narrow_drain_iters` = 15 extra
+   iterations and ZERO extra model calls; `narrow_limit=0` restores today's trace.
+   What it is *not* yet: the rung orders are fixed and honest, not optimal, and a
+   PM whose correct answer to an escalation is "the drain is working, do nothing"
+   still reads as an abstention until SPEC-25's typed no-op lands everywhere.)

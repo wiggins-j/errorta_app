@@ -7283,7 +7283,15 @@ class CodingRunner:
         # `counters` — keeps it, because the budget it belongs to is carried too.
         if counters is None:
             try:
-                self.store.set_run_state(last_words=None)
+                # SPEC-27 rides the SAME rule for the SAME reason: the narrowing
+                # ladder (and the narrowing FLAGS it engaged) belong to the run
+                # whose budget carried them. A fresh start must not inherit a
+                # mid-ladder rung map or a still-engaged clamp from the last run;
+                # a resume/continue keeps both, because `counters_from_run_state`
+                # carried the budget that bounds them.
+                self.store.set_run_state(
+                    last_words=None, narrow_ladder=None,
+                    integration_only=False, planning_clamped=False)
             except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
                 pass
         # SPEC-24 (Item 1 / Edge cases): clear the published detector snapshot

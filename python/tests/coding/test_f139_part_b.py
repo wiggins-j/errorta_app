@@ -10,6 +10,7 @@ from errorta_council.coding.autonomy import (
     NOT_CONVERGING,
     CodingAutonomyPolicy,
     LoopCounters,
+    Narrow,
     _account_convergence,
     _account_foundation_stall,
     effective_parallelism,
@@ -173,7 +174,10 @@ def test_convergence_stops_when_nothing_moves(
         stop = _account_convergence(s, c, policy)
         if stop is not None:
             break
-    assert stop is not None and stop.stop_reason == NOT_CONVERGING
+    # SPEC-27: the trip's FIRST rung is a NARROW (`force_integration`), not the
+    # stop. The reason is unchanged and lands once the ladder is exhausted — see
+    # `test_spec27_convergence_control.py` for the full ladder walk.
+    assert isinstance(stop, Narrow) and stop.detector == NOT_CONVERGING
     assert c.iterations - c.last_progress_iter >= 5
 
 

@@ -233,7 +233,8 @@ result instead of looping to budget), `hot_file_threshold` (2) /
 F159 hot-file serializer, `revise_chain_limit` (3) / `revise_livelock_limit` (5,
 Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below),
 `last_word_limit` (2, Spec 23 — see below), `governance_proximity` (0.6, Spec 24
-— see below).
+— see below), `narrow_limit` (3) / `narrow_drain_iters` (5, Spec 27 — see
+below).
 
 **Spec 16 — revise chains are bounded.** A revise chain that keeps getting the
 **same** finding class is non-progressive churn. After `revise_chain_limit` (3)
@@ -307,6 +308,39 @@ today's prompt bytes exactly. Reading is not negotiation: there is no turn shape
 by which the PM can raise a limit, reset a window, or suppress a reading — the one
 override channel is Spec 23's bounded last-word turn, which renders this same
 block focused on the detector that tripped.
+
+**Spec 27 — `narrow_limit` / `narrow_drain_iters`: convergence is a CONTROL, not
+a kill.** Every detector above used to have exactly two things it could say —
+"continue" or "die". Each one now has an ordered, bounded **intervention ladder**,
+and the default answer to a tripped threshold is to **narrow the run**, not end
+it. The ladders, in rung order:
+
+| Detector | Rungs |
+|---|---|
+| `not_converging` | force integration → clamp fan-out → last word → stop |
+| `planning_churn` | clamp planning → last word → stop |
+| `delivery_review_stalled` | force integration → last word → stop |
+| `gate_not_improving`, `dispatch_wedged`, `revise_livelock`, `no_progress`, an exhausted F127 ladder | last word → stop |
+| `no_actionable_work` | last word **only when open work remains** → stop |
+| `completion_blocked` | stop (F128 already re-prompts the PM) |
+| `budget_exhausted`, `cancelled`, `checkpoint`, `hard_blocker`, `member_unhealthy` | *none — hard stops are never narrowed* |
+
+From your seat, a narrowed run looks like: fan-out clamped to serial, integration
+forced (drain and merge what is approved before opening new fronts), a re-plan
+requested. **None of that is a punishment** — it is the engine buying the run a
+chance to drain before a stop lands underneath it, and every rung is recorded as a
+ledger decision so you can see which were tried.
+
+Narrowing rungs cost **zero model calls** and defer a stop by exactly one
+iteration each. A ladder resets only on real **progress**: a merged PR, or the
+convergence window recovering past its release band. `narrow_limit` (3) caps the
+narrowings one run may engage, run-wide, and is **persisted** so it does not
+re-arm on `errorta continue`; `narrow_drain_iters` (5) force-lifts a narrowing
+whose release condition never arrives (a narrowing that never releases is itself a
+wedge) and multiplies into the hard ceiling on extra iterations —
+`narrow_limit × narrow_drain_iters` = **15**, against a 200-iteration budget. A
+run that exhausts its ladder stops with **exactly** today's stop reason and exit
+code. Set `narrow_limit=0` to disable the ladder entirely.
 
 **Spec 11 — `dev_repo_read`.** When `true` (opt-in; default `false`) a DEV turn can READ its task
 worktree in-turn: the `claude_cli` vendor runs with cwd set to the worktree and a
@@ -588,10 +622,11 @@ and FastAPI routers. Update the prose and this contract together.
 > **Spec 22-28 batch, prep PR (P0.1).** Five more `autonomy_defaults` keys below
 > are landed ahead of their features and have **no consumers yet** — setting them
 > changes nothing until the matching spec merges:
-> `blocked_turn_limit` (Spec 25), `capability_overrides` (Spec 26),
-> `narrow_limit` (Spec 27).
-> (`last_word_limit` is now **live** — see "Spec 23" below; and
-> `governance_proximity` is now **live** — see "Spec 24" below.) Same reason as
+> `blocked_turn_limit` (Spec 25), `capability_overrides` (Spec 26).
+> (`last_word_limit` is now **live** — see "Spec 23" below;
+> `governance_proximity` is now **live** — see "Spec 24" below; and
+> `narrow_limit` / `narrow_drain_iters` are now **live** — see "Spec 27"
+> below.) Same reason as
 > above: five branches build in parallel without racing `CodingAutonomyPolicy`.
 > Each knob's **disable value** — `0` for the ints, `0.0` for
 > `governance_proximity`, `{}` for `capability_overrides` — is required to
@@ -636,6 +671,7 @@ and FastAPI routers. Update the prose and this contract together.
     "max_parallel_workers": null,
     "member_failure_limit": 3,
     "model_escalation_limit": 2,
+    "narrow_drain_iters": 5,
     "narrow_limit": 3,
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,

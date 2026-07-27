@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from . import detector_state as _detector_state
 from . import paths as _paths
@@ -336,6 +336,19 @@ class CodingAutonomyPolicy:
     # ladder can add to a run. 0 disables the ladder entirely — every detector keeps
     # returning its present stop.
     narrow_limit: int = 3
+    # SPEC-27 (Item 4, bounds 2 + 2'): the drain cap. TWO uses, deliberately the
+    # same number so the worst case is one product and not a sum:
+    #   * how many iterations a NARROWING FLAG (`integration_only`,
+    #     `planning_clamped`) may stay engaged before it FORCE-LIFTS with a
+    #     decision + monitor signal — the `_account_hot_file_freeze` pattern, so a
+    #     narrowing whose release condition never arrives can never become the
+    #     wedge it was diagnosing;
+    #   * the per-narrow multiplier on the run-wide deferral cap
+    #     (`narrow_limit * narrow_drain_iters` — 15 by default), which is the HARD
+    #     ceiling on extra iterations this whole spec can add to a run.
+    # 0 disables the drain cap the same way `narrow_limit == 0` disables the
+    # ladder: no rung may defer a stop at all.
+    narrow_drain_iters: int = 5
     # SPEC-25: how many BLOCKED turns one worker may emit on one task before the
     # loop stops treating "blocked" as a legal, progress-bearing answer and routes
     # the task to the recovery ladder. 0 disables the accounting.
@@ -410,6 +423,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "last_word_limit": p.last_word_limit,
         "governance_proximity": p.governance_proximity,
         "narrow_limit": p.narrow_limit,
+        "narrow_drain_iters": p.narrow_drain_iters,
         "blocked_turn_limit": p.blocked_turn_limit,
         "schema_reject_limit": p.schema_reject_limit,
         # Copy: the returned dict is persisted/serialized by callers, and handing
@@ -546,6 +560,8 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         governance_proximity=min(1.0, max(
             0.0, float(d.get("governance_proximity", base.governance_proximity)))),
         narrow_limit=max(0, int(d.get("narrow_limit", base.narrow_limit))),
+        narrow_drain_iters=max(
+            0, int(d.get("narrow_drain_iters", base.narrow_drain_iters))),
         blocked_turn_limit=max(
             0, int(d.get("blocked_turn_limit", base.blocked_turn_limit))),
         schema_reject_limit=max(
@@ -1030,6 +1046,34 @@ class LoopCounters:
     # Deliberately NOT persisted: it is a within-run routing decision, and a
     # continue is an operator intervention that may well have changed the situation.
     last_word_by_detector: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # --- SPEC-27 (Items 2-4) — the intervention ladder, as state -------------- #
+    # `detector -> rung index into _DETECTOR_LADDERS[detector]`. Advances on every
+    # trip; reset to 0 for EVERY detector on PROGRESS (`_ladder_progress`), which
+    # requires a merged PR or a recovered GL04 window — i.e. the run actually
+    # integrated something. PERSISTED via `run_state["narrow_ladder"]` so a
+    # checkpoint/resume cycle cannot hand a mid-ladder run a fresh ladder.
+    narrow_rungs: dict[str, int] = field(default_factory=dict)
+    # Bound 3: CHARGED narrowing engagements, run-wide, across all detectors and
+    # all ladder resets. Capped by `policy.narrow_limit`. Monotone — a ladder reset
+    # never refunds it, which is what makes the budget a budget. A narrow that was
+    # already satisfied (the flag is up) or whose mechanism is disabled by policy
+    # is a recorded NO-OP: the rung advances and this is NOT charged.
+    narrows_used: int = 0
+    # Bound 2': every narrowing rung defers a stop by EXACTLY ONE iteration (the
+    # detector re-trips next iteration and takes the next rung), so this counts the
+    # extra iterations the ladder has bought — charged rungs and no-op rungs alike.
+    # Capped at `narrow_limit * narrow_drain_iters` (15 by default). Monotone and
+    # never reset, so it is the hard ceiling on the run-length cost of this spec —
+    # the number the boundedness test asserts. No-ops are counted here precisely
+    # because they are NOT counted by `narrows_used`, and an uncharged rung still
+    # costs an iteration.
+    narrow_deferrals: int = 0
+    # `M₀` — the merged-PR count the current ladder generation was anchored at
+    # (-1 = never anchored). PROGRESS is `merged_pr_count > M₀`, the exact signal
+    # `_account_revise_livelock` and SPEC-23's bound 2 already trust.
+    narrow_anchor_merges: int = -1
+    # `narrow action -> the iteration it was engaged at`, for the force-lift cap.
+    narrow_engaged_at: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -1037,6 +1081,147 @@ class LoopResult:
     stop_reason: str
     counters: LoopCounters
     detail: dict[str, Any] = field(default_factory=dict)
+
+
+# --- SPEC-27 (Item 1) — the detector outcome contract ----------------------- #
+#
+# THE DEFECT: seven `_account_*` detectors shared the signature
+# ``(ledger, c, policy) -> Optional[LoopResult]``, whose entire vocabulary is
+# "continue" or "DIE". A detector that wanted to say *"clamp concurrency and keep
+# going"* had to reach around its own contract and mutate run state as a side
+# effect while returning ``None`` — which is exactly what
+# `_account_convergence_clamp` does. It works, but it is INVISIBLE to the caller:
+# the loop cannot tell "nothing happened" from "I just narrowed the run", so it
+# cannot count interventions and therefore cannot BOUND them.
+#
+# THE CONTRACT — a strict GENERALISATION of today's control flow, not a
+# replacement:
+#
+#   | outcome    | loop action                                  | model calls | short-circuits? |
+#   |------------|----------------------------------------------|-------------|-----------------|
+#   | None       | nothing                                      | 0           | no  (today)     |
+#   | Narrow     | engage the action, record it, advance the rung| 0           | NO              |
+#   | Escalate   | hand to SPEC-23's `_intervene`               | <=1 (23's)  | yes             |
+#   | Stop       | `LoopResult(reason, c, detail)`              | 0           | yes (today)     |
+#
+# Mapping ``None -> fall through`` and ``Stop -> return`` reproduces the existing
+# early-return chain EXACTLY, so a chain in which every detector returns `None` or
+# `Stop` executes the instruction sequence it executes today. `Narrow` falling
+# through is also already the shape of the code: `_account_convergence_clamp` is a
+# pure-`Narrow` detector wired BEFORE Spec 16's stop in both chains and
+# deliberately does not short-circuit.
+
+# The narrowing actions. Each is an EXISTING mechanism made legible, not a new one.
+NARROW_CLAMP_FANOUT = "clamp_fanout"            # GL04's existing convergence clamp
+NARROW_FORCE_INTEGRATION = "force_integration"  # drain: merge-first + serial dispatch
+NARROW_CLAMP_PLANNING = "clamp_planning"        # dig deeper for a worker turn first
+NARROW_FORCE_LIFT = "force_lift"                # F159's existing freeze force-lift
+NARROW_ALERT_ONLY = "alert_only"                # F139 WS-A's existing stall heartbeat
+
+# The two non-narrowing rungs, named so `_DETECTOR_LADDERS` is one flat table.
+RUNG_ESCALATE = "escalate"   # SPEC-23's last-word PM turn, unchanged
+RUNG_STOP = "stop"           # `LoopResult(reason, c, detail)`, byte-identical
+
+
+@dataclass(frozen=True)
+class Narrow:
+    """A detector's diagnosis answered by NARROWING the run instead of ending it.
+
+    Falls through: the loop engages ``action``, records it, advances that
+    detector's rung, and CONTINUES the detector chain — a `Narrow` is not a
+    verdict on the iteration, it is a change of strategy within it."""
+    action: str                    # one of the NARROW_* constants
+    detector: str                  # the stop reason this ladder is deferring
+    evidence: str = ""             # the string `_maybe_raise_monitor` already gets
+    detail: dict[str, Any] = field(default_factory=dict)
+    # True when the DETECTOR already performed the side effect itself (F139 WS-A's
+    # alert, F159's force-lift). The loop records it for legibility and charges
+    # nothing — these are not ladder rungs, they are the detector's own permanent
+    # behaviour, reported so the contract is visibly TOTAL.
+    self_applied: bool = False
+
+
+@dataclass(frozen=True)
+class Escalate:
+    """The stop that WOULD have fired, routed to SPEC-23's last-word PM turn first.
+
+    This spec does not re-plumb the intervention: `_apply_detector_outcome` lowers
+    an `Escalate` to the same `LoopResult` the detector used to return and hands it
+    to `_intervene`, so `last_word_limit`, the same-detector-once rule and the
+    non-recursion snapshot all apply unchanged. There is exactly ONE intervention
+    path in this module and it is SPEC-23's."""
+    reason: str
+    detector: str
+    evidence: str = ""
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Stop:
+    """The terminal rung — byte-identical to today's stop: same reason, same detail
+    keys, same exit code. Exhausting a ladder is not a new outcome."""
+    reason: str
+    detector: str
+    evidence: str = ""
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+DetectorOutcome = Optional[Union[Narrow, Escalate, Stop]]
+
+# --- SPEC-27 (Item 3) — the per-detector rung table -------------------------- #
+#
+# THE TABLE *IS* THE SPEC. The machinery is uniform; the rung LISTS are not,
+# because narrowing a wedge makes it worse while narrowing a churning fan-out
+# fixes it. Ordering principle (F127's, and GL04's, already): cheap mechanical
+# zero-model-call narrowing first, the judgement-heavy run-scoped escalation next,
+# the stop last.
+#
+# `test_spec27_convergence_control.py` asserts this covers EXACTLY the reasons
+# SPEC-23 classes HEURISTIC (plus the one it deferred here), that no HARD reason
+# appears, and that the last rung of every tuple is `RUNG_STOP`.
+_DETECTOR_LADDERS: dict[str, tuple[str, ...]] = {
+    # Quiescence with approved-but-unmerged work is the cheapest recoverable
+    # shape, so integration is tried before a turn is spent. The clamp follows so a
+    # re-armed run cannot immediately re-fan-out into the same stasis.
+    NOT_CONVERGING: (NARROW_FORCE_INTEGRATION, NARROW_CLAMP_FANOUT,
+                     RUNG_ESCALATE, RUNG_STOP),
+    # Fan-out is not the problem — a RED GATE is. Nothing mechanical helps; the
+    # escalation carries the failing gate output the detector already computed.
+    GATE_NOT_IMPROVING: (RUNG_ESCALATE, RUNG_STOP),
+    # The detector's own diagnosis is "PM plan turns with zero interleaved worker
+    # turns", so forcing the next turn to be a worker turn IS the remedy.
+    PLANNING_CHURN: (NARROW_CLAMP_PLANNING, RUNG_ESCALATE, RUNG_STOP),
+    # NO narrowing rung BY CONSTRUCTION — narrowing a graph with nothing
+    # dispatchable makes it strictly worse. Escalate with the named culprit deps.
+    DISPATCH_WEDGED: (RUNG_ESCALATE, RUNG_STOP),
+    # GL04's clamp is ALREADY the rung below this stop in both chains (it is wired
+    # immediately before `_account_revise_livelock`), so this spec adds only the
+    # escalate rung and does not re-implement the clamp.
+    REVISE_LIVELOCK: (RUNG_ESCALATE, RUNG_STOP),
+    # A delivery review judges the INTEGRATED head, so draining pending merges
+    # changes the thing under review before anyone is asked about it.
+    DELIVERY_REVIEW_STALLED: (NARROW_FORCE_INTEGRATION, RUNG_ESCALATE, RUNG_STOP),
+    # SPEC-23's rung, unchanged. No mechanical narrowing applies to an idle PM.
+    NO_PROGRESS: (RUNG_ESCALATE, RUNG_STOP),
+    # F127's four task-scoped rungs run BEFORE this reason is ever produced, and
+    # SPEC-23 already appended the escalate rung. Recorded here so a reader sees
+    # F127 as an INSTANCE of the general pattern, not an exception to it.
+    WORKER_UNPRODUCTIVE: (RUNG_ESCALATE, RUNG_STOP),
+    # F128 already re-prompts the PM with the open item set `completion_refused_limit`
+    # times; a second intervention asks the same party the same question.
+    COMPLETION_BLOCKED: (RUNG_STOP,),
+    # SPEC-23 Item 1 deferred this reason to this spec explicitly. It is CLI
+    # SUCCESS-class, so it escalates ONLY when the ledger still holds open work —
+    # i.e. when it is a wedge wearing a success label. A refused escalation returns
+    # `no_actionable_work` unchanged, still EXIT_OK (Item 5).
+    NO_ACTIONABLE_WORK: (RUNG_ESCALATE, RUNG_STOP),
+}
+
+# The two pure-`Narrow` detectors. They have no ladder because they have no stop:
+# they narrow FOREVER (the foundation heartbeat) or force-lift once (F159). Listed
+# so the contract is visibly total and so `_apply_detector_outcome` can charge
+# nothing for them.
+_SELF_APPLIED_NARROWS = frozenset({NARROW_ALERT_ONLY, NARROW_FORCE_LIFT})
 
 
 # --- Spec 22-28 batch (prep PR P0.2) — reserved run_state keys --------------- #
@@ -1134,7 +1319,21 @@ _WINDOW_STREAK_FIELDS = {
     # outlives the process, so re-arming it on `errorta continue` would make
     # Item 3's bound fiction: three continues would buy six interventions.
     "last_words": "last_words",
+    # SPEC-27 (Item 4, bound 3 + the resume edge case): the narrowing budget and
+    # the deferral ceiling. Same reason as `last_words`, and it is LOAD-BEARING:
+    # the narrowing FLAGS live in run state (`convergence_clamped`,
+    # `integration_only`, `planning_clamped`) and therefore already survive a
+    # resume, so without this a checkpoint/resume cycle would hand a narrowed run a
+    # brand-new `narrow_limit` — and bound 3 would be fiction.
+    "narrows_used": "narrows_used",
+    "narrow_deferrals": "narrow_deferrals",
 }
+
+# SPEC-27: the per-detector rung map rides the P0.2-reserved `narrow_ladder`
+# run-state key rather than the counters block, because it is a MAP (the counters
+# block is ints by contract) and because it doubles as the operator-visible ladder
+# state. Written live by `_publish_narrow_ladder`; read back here.
+NARROW_LADDER_KEY = "narrow_ladder"
 
 # ``(iteration-anchor field, persisted elapsed key)`` — stored as
 # ``iterations - anchor`` and rehydrated as ``-elapsed``.
@@ -1168,10 +1367,13 @@ def counters_from_run_state(state: Any) -> Optional[LoopCounters]:
     try:
         raw = (state or {}).get("counters") or {}
         if not isinstance(raw, dict):
-            return None
+            raw = {}
+        ladder = (state or {}).get(NARROW_LADDER_KEY) or {}
+        if not isinstance(ladder, dict):
+            ladder = {}
         known = set(_WINDOW_STREAK_FIELDS.values()) | {
             key for _f, key in _WINDOW_ELAPSED_FIELDS}
-        if not (known & set(raw)):
+        if not (known & set(raw)) and not ladder:
             return None  # pre-P0.2 counters block — nothing to restore
         c = LoopCounters()
         for field_name, key in _WINDOW_STREAK_FIELDS.items():
@@ -1182,6 +1384,17 @@ def counters_from_run_state(state: Any) -> Optional[LoopCounters]:
                 # The fresh counter starts at iterations == 0, so anchor the window
                 # in the negative past: `iterations - anchor` == the elapsed we saved.
                 setattr(c, field_name, -max(0, int(raw[key])))
+        # SPEC-27: the rung map, off the reserved `narrow_ladder` key. Only the
+        # rung indices carry — the anchor is re-derived on the first trip and the
+        # engaged-at marks are per-process (a resumed run re-evaluates every
+        # narrowing flag's release band on its first quiescent point, exactly as it
+        # re-evaluates GL04's).
+        rungs = ladder.get("rungs")
+        if isinstance(rungs, dict):
+            c.narrow_rungs = {
+                str(k): max(0, int(v)) for k, v in rungs.items()
+                if isinstance(v, (int, float))
+            }
         return c
     except Exception:  # noqa: BLE001 — a run start must never fail on this
         return None
@@ -1380,16 +1593,22 @@ def _stop_with_evidence(reason: str, c: LoopCounters,
 
 
 def _account_foundation_stall(ledger: Any, c: LoopCounters,
-                              policy: CodingAutonomyPolicy) -> None:
+                              policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """F139 WS-A: while the foundation is pending, count clamped iterations; at
     ``foundation_stall_limit`` surface a `foundation_not_converging` signal ONCE
     (the run keeps going, clamped to 1, so a human can guide the PM). Reset when
-    the foundation merges. Best-effort — never breaks the loop."""
+    the foundation merges. Best-effort — never breaks the loop.
+
+    SPEC-27 Item 1: this detector was ALREADY a pure narrow — it alerts and the run
+    continues, clamped, by design. It now SAYS so, returning
+    ``Narrow(NARROW_ALERT_ONLY, self_applied=True)`` on the iteration it raises.
+    Its side effects are unchanged and it charges no budget; only the return value
+    becomes legible to the caller, which is what makes the contract total."""
     try:
         if not foundation_pending(ledger):
             c.foundation_stall = 0
             c.foundation_alerted = False
-            return
+            return None
         c.foundation_stall += 1
         limit = max(1, policy.foundation_stall_limit)
         # Re-alert every `limit` clamped iterations (a heartbeat), not once: a run
@@ -1398,7 +1617,7 @@ def _account_foundation_stall(ledger: Any, c: LoopCounters,
         # missed. `_maybe_raise_monitor` dedups an already-open signal, so this
         # re-raises only after a prior one resolved.
         if c.foundation_stall % limit != 0:
-            return
+            return None
         c.foundation_alerted = True
         # Spec 13 (Item 2): for a web-only tree the runner persists which specific
         # Item-1 condition is failing (`foundation_stall_reason`); lead the
@@ -1441,29 +1660,42 @@ def _account_foundation_stall(ledger: Any, c: LoopCounters,
             )
         except Exception:  # noqa: BLE001
             pass
-        _maybe_raise_monitor(ledger, "foundation_not_converging", DetectorEvidence(
-            detector="foundation_not_converging",
-            text="foundation has not merged to master",
-            value=c.foundation_stall, threshold=limit))
+        evidence = _maybe_raise_monitor(
+            ledger, "foundation_not_converging", DetectorEvidence(
+                detector="foundation_not_converging",
+                text="foundation has not merged to master",
+                value=c.foundation_stall, threshold=limit))
+        # SPEC-27: the alert-only rung, forever. `self_applied` — the side effect
+        # above IS the narrowing, so the loop records nothing further and charges
+        # no budget.
+        return Narrow(action=NARROW_ALERT_ONLY,
+                      detector="foundation_not_converging",
+                      evidence=evidence.reason, self_applied=True)
     except Exception:  # noqa: BLE001
         pass
+    return None
 
 
 def _account_hot_file_freeze(ledger: Any, c: LoopCounters,
-                             policy: CodingAutonomyPolicy) -> None:
+                             policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """F159 never-lift guard: a hot-file freeze normally lifts when the centralize
     owner's PR merges (runner). If that PR never lands, the file would stay frozen
     forever — so count iterations under an active freeze and force-lift at
     ``hot_file_freeze_stall_limit`` (with a decision + monitor), so the file's work
-    resumes and a human is told. Best-effort — never breaks the loop."""
+    resumes and a human is told. Best-effort — never breaks the loop.
+
+    SPEC-27 Item 1: already a pure narrow, and the PRECEDENT for every force-lift
+    in this spec — a narrowing that never releases is a wedge, so it is capped and
+    lifted with a decision + monitor. It now returns
+    ``Narrow(NARROW_FORCE_LIFT, self_applied=True)`` on the iteration it lifts."""
     try:
         if not frozen_paths(ledger):
             c.hot_freeze_stall = 0
-            return
+            return None
         c.hot_freeze_stall += 1
         limit = max(1, policy.hot_file_freeze_stall_limit)
         if c.hot_freeze_stall < limit:
-            return
+            return None
         stalled = c.hot_freeze_stall  # P0.3: read the evidence BEFORE the reset
         c.hot_freeze_stall = 0
         try:
@@ -1480,22 +1712,31 @@ def _account_hot_file_freeze(ledger: Any, c: LoopCounters,
                            "need to look"))
         except Exception:  # noqa: BLE001
             pass
-        _maybe_raise_monitor(ledger, "hot_file_freeze_stalled", DetectorEvidence(
-            detector="hot_file_freeze_stalled",
-            text="a hot-file centralize task did not merge in time",
-            value=stalled, threshold=limit))
+        evidence = _maybe_raise_monitor(
+            ledger, "hot_file_freeze_stalled", DetectorEvidence(
+                detector="hot_file_freeze_stalled",
+                text="a hot-file centralize task did not merge in time",
+                value=stalled, threshold=limit))
+        return Narrow(action=NARROW_FORCE_LIFT, detector="hot_file_freeze_stalled",
+                      evidence=evidence.reason, self_applied=True)
     except Exception:  # noqa: BLE001
         pass
+    return None
 
 
 def _account_convergence(ledger: Any, c: LoopCounters,
-                         policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+                         policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """F139 WS-E: detect a run where NOTHING is moving. Compares a cheap progress
     fingerprint (merged heads + PR states + ladder activity) against the last one;
     if it has not changed for ``convergence_stall_limit`` iterations, stop
     `not_converging`. Resets on any motion, so a normal review/rework/self-heal
     cycle (which keeps opening/transitioning PRs or running the ladder) never trips
-    it. Returns a stop result or None."""
+    it.
+
+    SPEC-27 Item 3 — ladder ``FORCE_INTEGRATION -> CLAMP_FANOUT -> ESCALATE ->
+    STOP``: quiescence with approved-but-unmerged work is the cheapest recoverable
+    shape, so integration is tried before a turn is spent; the clamp follows so a
+    re-armed run cannot immediately re-fan-out into the same stasis."""
     try:
         fp = _progress_fingerprint(ledger, c)
     except Exception:  # noqa: BLE001
@@ -1515,11 +1756,11 @@ def _account_convergence(ledger: Any, c: LoopCounters,
         text="no merged progress, PR transition, or ladder activity",
         value=stalled, threshold=limit)
     _maybe_raise_monitor(ledger, "not_converging", evidence)
-    return _stop_with_evidence(NOT_CONVERGING, c, evidence)
+    return _trip(ledger, c, policy, NOT_CONVERGING, evidence)
 
 
 def _account_gate_stall(ledger: Any, c: LoopCounters,
-                        policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+                        policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """Spec 04: detect a run whose ACCEPTANCE GATE RESULT hasn't IMPROVED for
     ``gate_stall_limit`` iterations, and stop `gate_not_improving`.
 
@@ -1567,7 +1808,10 @@ def _account_gate_stall(ledger: Any, c: LoopCounters,
               f"iterations (score={score})"),
         value=stalled, threshold=policy.gate_stall_limit)
     _maybe_raise_monitor(ledger, "gate_not_improving", evidence)
-    return _stop_with_evidence(GATE_NOT_IMPROVING, c, evidence)
+    # SPEC-27 Item 3 — ladder `ESCALATE -> STOP`. Fan-out is not the problem here;
+    # a RED gate is, so no narrowing rung applies and the escalation carries the
+    # evidence (per-command exit codes / delivery verdict) the detector just built.
+    return _trip(ledger, c, policy, GATE_NOT_IMPROVING, evidence)
 
 
 def _gate_has_failure(ledger: Any) -> bool:
@@ -1633,7 +1877,7 @@ def _convergence_window_stats(
 
 
 def _account_convergence_clamp(ledger: Any, c: LoopCounters,
-                               policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+                               policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """GL04 (GAP-5): the run-level convergence health brake — one rung SOFTER than
     Spec 16's lineage-scoped ``revise_livelock`` hard stop, wired BEFORE it in both
     loops. Spec 16's detector is blind to aggregate churn: a run can be below the
@@ -1652,7 +1896,14 @@ def _account_convergence_clamp(ledger: Any, c: LoopCounters,
 
     ``convergence_window == 0`` disables it (``max(0, …)`` convention), restoring
     today's fan-out. Fully guarded — a ledger/run-state hiccup never clamps or stops
-    the run."""
+    the run.
+
+    SPEC-27 Item 1: this is the detector that PROVED the softer shape works in this
+    codebase, and it is FOLDED INTO the new contract rather than rewritten — it now
+    returns ``Narrow(NARROW_CLAMP_FANOUT, self_applied=True)`` on the engage
+    transition, so the caller can finally tell "nothing happened" from "I just
+    narrowed the run". Bands, hysteresis, decision and alert are untouched, and it
+    still never produces a `Stop`."""
     # P0.3: the window arithmetic (disabled-check, ledger read, full-window
     # requirement, ratio + merge-rate) now lives in `_convergence_window_stats` so
     # this clamp and its future readers share ONE computation. `None` means "no
@@ -1669,6 +1920,11 @@ def _account_convergence_clamp(ledger: Any, c: LoopCounters,
         if ratio >= policy.convergence_clamp_ratio \
                 or merge_rate <= policy.convergence_clamp_merge_rate:
             _engage_convergence_clamp(ledger, ratio=ratio, merge_rate=merge_rate, n=n)
+            return Narrow(
+                action=NARROW_CLAMP_FANOUT, detector="convergence_clamp",
+                evidence=(f"windowed superseded-ratio {ratio:.0%} / merge-rate "
+                          f"{merge_rate:.0%} over {n} resolved PRs"),
+                self_applied=True)
     else:
         if ratio <= policy.convergence_release_ratio \
                 and merge_rate >= policy.convergence_release_merge_rate:
@@ -1729,8 +1985,492 @@ def _release_convergence_clamp(ledger: Any, *, ratio: float, merge_rate: float,
         pass
 
 
+# --- SPEC-27 (Items 2-4) — the intervention ladder --------------------------- #
+#
+# THE NON-WEDGE INVARIANT, generalised from GL04's clamp (*"it never makes a
+# dispatchable task non-dispatchable — a clamped run with one ready task still
+# dispatches, serially"*). EVERY `NARROW_*` action inherits all three parts, and
+# each has its own test:
+#
+#   1. It may only REDUCE CONCURRENCY or DEFER NEW WORK. A run under any narrowing
+#      that has one dispatchable task still dispatches it, serially.
+#   2. It must carry a RELEASE CONDITION — GL04's hysteretic band, "nothing left
+#      to merge", or "a worker turn ran".
+#   3. It must FORCE-LIFT at a cap even if its release condition never arrives,
+#      with a decision and a monitor signal — `_account_hot_file_freeze`'s
+#      existing pattern. A narrowing that never releases IS a wedge.
+#
+# `NARROW_FORCE_INTEGRATION` is the one that could violate (1) if written
+# carelessly: refusing dispatch while nothing was mergeable would go quiescent and
+# manufacture a `dispatch_wedged` out of a churn alarm. So it ENGAGES ONLY when at
+# least one PR is `mergeable` — i.e. only when a `Merge` action is provably
+# available to `decide_next` / `plan_next_batch` — and releases the moment that
+# stops being true.
+#
+# Δ NOTE ON WHAT THESE ACTIONS ACTUALLY DO IN *THIS* ENGINE. Both planners are
+# ALREADY merge-first (`decide_next` step 0 / `plan_next_batch`'s exclusive
+# `Merge` batch) and the sequential loop is already serial, so "force integration"
+# cannot mean "put merges first" — that is not a change. What it can mean, and
+# what it does mean here, is: while a merge is available, the CONCURRENT planner
+# stops fanning out and hands out at most one worker assign per tick, so approved
+# work drains instead of the run opening more fronts against a moving base. Same
+# discipline for `NARROW_CLAMP_PLANNING`: `plan_next_batch` already prefers a
+# worker assign over a `Plan`, so the only honest way to *force* a worker turn is
+# to look HARDER for one — the clamp widens the ready-task over-fetch so a role
+# whose head tasks are all gated/excluded finds a dispatchable task behind them
+# instead of handing the PM another plan turn. Both are strictly ADDITIVE to
+# dispatchability or strictly concurrency-reducing, which is invariant (1).
+
+_NARROW_TITLES = {
+    NARROW_CLAMP_FANOUT: "fan-out clamped",
+    NARROW_FORCE_INTEGRATION: "integration forced",
+    NARROW_CLAMP_PLANNING: "planning clamped",
+}
+
+# The two run-state flags this spec adds. `convergence_clamped` is GL04's and is
+# NOT re-declared here — `NARROW_CLAMP_FANOUT` engages GL04's own path.
+_NARROW_FLAG_KEY = {
+    NARROW_FORCE_INTEGRATION: "integration_only",
+    NARROW_CLAMP_PLANNING: "planning_clamped",
+}
+
+# `_engage_narrow` outcomes.
+_NARROW_ENGAGED = "engaged"      # the flag went up — charges `narrow_limit`
+_NARROW_SATISFIED = "satisfied"  # already in effect — recorded, NOT charged
+_NARROW_NOOP = "noop"            # the mechanism is disabled or inapplicable
+
+
+def narrow_flags(ledger: Any) -> dict[str, bool]:
+    """The narrowing flags the DISPATCH phase reads, as one guarded read.
+
+    Returned as plain bools so a `None`/absent key is falsy and pre-spec run state
+    dispatches byte-identically. Never raises: an unreadable run state means "no
+    narrowing", which is the permissive direction."""
+    try:
+        state = ledger.get_run_state() or {}
+    except Exception:  # noqa: BLE001 — dispatch must never break on a state read
+        return {"integration_only": False, "planning_clamped": False}
+    return {"integration_only": bool(state.get("integration_only")),
+            "planning_clamped": bool(state.get("planning_clamped"))}
+
+
+def _mergeable_pr_count(ledger: Any) -> int:
+    """PRs sitting at `mergeable` — reviewer-approved AND tests-green, i.e. the
+    exact state both planners turn into a `Merge` action. This is the ENGAGE
+    PRECONDITION for `NARROW_FORCE_INTEGRATION` (non-wedge invariant 1): the
+    narrowing only exists while integration is provably available."""
+    try:
+        return sum(1 for p in ledger.list_prs() if p.get("status") == "mergeable")
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _ladder_progress(ledger: Any, c: LoopCounters,
+                     policy: CodingAutonomyPolicy) -> bool:
+    """PROGRESS — the ONE condition that resets a ladder. Defined by reusing what
+    already exists; no new notion of progress is introduced:
+
+    **(a)** ``merged_pr_count > M₀`` — the exact signal `_account_revise_livelock`
+    already trusts to reset its own window (*"any merge anywhere is progress"*),
+    and the one SPEC-23's bound 2 keys on; or
+    **(b)** GL04's window has RECOVERED past the release band
+    (``superseded_ratio <= convergence_release_ratio`` **and** ``merge_rate >=
+    convergence_release_merge_rate``) over the last ``convergence_window`` resolved
+    PRs. Clause (b) is the sharper signal once a full window has resolved; clause
+    (a) covers the pre-window case, where GL04's metric deliberately abstains.
+
+    On PROGRESS every ladder's RUNG INDEX resets to 0 and ``M₀`` is re-anchored.
+    **Narrowing FLAGS are not cleared by a ladder reset** — each keeps its own
+    release condition (GL04's hysteresis; the drain/planning clears in
+    `_release_narrow_flags`). Two release paths for one flag is how a clamp starts
+    flapping, and hysteresis is the entire reason GL04's bands are separate.
+
+    Neither budget (`narrows_used`, `narrow_deferrals`) is refunded — a reset gives
+    the run new STRATEGY, never new BUDGET, which is what keeps bound 3 a bound."""
+    merges = _merged_pr_count(ledger)
+    if c.narrow_anchor_merges < 0:
+        c.narrow_anchor_merges = merges
+        return False
+    progressed = merges > c.narrow_anchor_merges
+    if not progressed:
+        stats = _convergence_window_stats(ledger, policy.convergence_window)
+        if stats is not None:
+            ratio, merge_rate, _n = stats
+            progressed = (ratio <= policy.convergence_release_ratio
+                          and merge_rate >= policy.convergence_release_merge_rate)
+    if progressed:
+        c.narrow_anchor_merges = merges
+        if c.narrow_rungs:
+            c.narrow_rungs = {}
+    return progressed
+
+
+def _narrow_deferral_cap(policy: CodingAutonomyPolicy) -> int:
+    """Bound 2' — the HARD ceiling on extra iterations this spec can add to a run.
+
+    Every narrowing rung defers a stop by AT MOST one iteration — the detector
+    re-trips next iteration and takes the next rung, and several detectors narrowing
+    in the SAME iteration (a `Narrow` falls through) share that one iteration — so
+    ``extra iterations <= narrow_deferrals <= cap``. ``narrow_limit *
+    narrow_drain_iters`` = 3 * 5 = **15** by default, against a `max_iterations` of
+    200: a <=7.5% ceiling on run length.
+
+    A ceiling, not a cost. The ladder itself makes ZERO model calls — no narrowing
+    rung dispatches anything, and the only turn-spending rung is SPEC-23's, drawn
+    from `last_word_limit`. The iterations bought here run the run's OWN next turns
+    against the run's OWN unchanged `max_iterations` / `max_model_calls` budgets,
+    both of which are HARD and checked BEFORE any detector runs."""
+    return max(0, policy.narrow_limit) * max(0, policy.narrow_drain_iters)
+
+
+def _ladder_rung(ledger: Any, c: LoopCounters, policy: CodingAutonomyPolicy,
+                 detector: str) -> str:
+    """Which rung this detector's trip lands on — the ONE place the table is read.
+
+    ``narrow_limit == 0`` collapses every ladder to its escalate/stop TAIL, which
+    is exactly the pre-spec control flow (SPEC-23's `_intervene`, which has its own
+    `0` disable). Bounds 2' and 3 collapse it the same way once they are spent, so
+    an exhausted budget degrades to today's behaviour rather than to a new one."""
+    ladder = _DETECTOR_LADDERS.get(detector)
+    if not ladder:
+        return RUNG_STOP
+    tail = RUNG_ESCALATE if RUNG_ESCALATE in ladder else RUNG_STOP
+    if policy.narrow_limit <= 0:
+        return tail
+    _ladder_progress(ledger, c, policy)
+    idx = min(int(c.narrow_rungs.get(detector, 0)), len(ladder) - 1)
+    rung = ladder[idx]
+    if rung in (RUNG_ESCALATE, RUNG_STOP):
+        return rung
+    # A narrowing rung, but only if the run can still afford one. Bound 3 caps
+    # CHARGED engagements; bound 2' caps deferrals whether charged or not (a no-op
+    # rung still costs the iteration it defers, and is deliberately not charged to
+    # bound 3 — so without 2' a permanently-inapplicable rung would be free).
+    if c.narrows_used >= max(0, policy.narrow_limit):
+        return tail
+    if c.narrow_deferrals >= _narrow_deferral_cap(policy):
+        return tail
+    return rung
+
+
+def _trip(ledger: Any, c: LoopCounters, policy: CodingAutonomyPolicy,
+          reason: str, evidence: "DetectorEvidence | str",
+          **detail: Any) -> DetectorOutcome:
+    """A tripped threshold -> the outcome its ladder prescribes.
+
+    The `detail` payload is built EXACTLY as `_stop_with_evidence` builds it, so a
+    `Stop` lowered by `_apply_detector_outcome` produces a `LoopResult` that is
+    byte-identical to the one the detector returned before this spec."""
+    d = dict(detail)
+    if isinstance(evidence, DetectorEvidence):
+        d["evidence"] = evidence.to_dict()
+        text = evidence.reason
+    else:
+        text = str(evidence or reason)
+    rung = _ladder_rung(ledger, c, policy, reason)
+    if rung == RUNG_STOP:
+        return Stop(reason=reason, detector=reason, evidence=text, detail=d)
+    if rung == RUNG_ESCALATE:
+        return Escalate(reason=reason, detector=reason, evidence=text, detail=d)
+    return Narrow(action=rung, detector=reason, evidence=text, detail=d)
+
+
+def _advance_rung(ledger: Any, c: LoopCounters, policy: CodingAutonomyPolicy,
+                  detector: str) -> None:
+    """Monotone rung advance (bound 1). Inert when the ladder is disabled, so
+    ``narrow_limit == 0`` writes no counter and no run state — the byte-for-byte
+    lock."""
+    if policy.narrow_limit <= 0:
+        return
+    ladder = _DETECTOR_LADDERS.get(detector)
+    if not ladder:
+        return
+    c.narrow_rungs[detector] = min(
+        int(c.narrow_rungs.get(detector, 0)) + 1, len(ladder) - 1)
+    _publish_narrow_ladder(ledger, c)
+
+
+def _publish_narrow_ladder(ledger: Any, c: LoopCounters) -> None:
+    """Write the ladder to the P0.2-reserved ``narrow_ladder`` run-state key.
+
+    Two jobs, one write: it is what `counters_from_run_state` rehydrates on
+    `errorta continue` (without it a checkpoint/resume cycle hands a narrowed run a
+    fresh ladder and bound 3 is fiction), and it is the operator-visible "you are
+    on rung 2 of 4 for not_converging". Best-effort in every direction."""
+    try:
+        ledger.set_run_state(**{NARROW_LADDER_KEY: {
+            "rungs": {k: int(v) for k, v in sorted(c.narrow_rungs.items())},
+            "narrows_used": int(c.narrows_used),
+            "deferrals": int(c.narrow_deferrals),
+        }})
+    except Exception:  # noqa: BLE001 — telemetry must never break the run loop
+        pass
+
+
+def _record_narrow(ledger: Any, out: "Narrow", status: str,
+                   rationale: str) -> None:
+    """One ledger decision per rung transition (Item 2's acceptance: *"rung
+    transitions are ledger decisions"*). Best-effort."""
+    try:
+        ledger.record_decision(
+            title=f"{_NARROW_TITLES.get(out.action, out.action)}: {out.detector}",
+            context=f"narrow:{out.detector}",
+            choice=f"narrow_{out.action}_{status}",
+            rationale=rationale[:2000],
+            extra={"detector": out.detector, "action": out.action,
+                   "status": status, "evidence": out.evidence[:500]})
+    except Exception:  # noqa: BLE001 — recording must never break the run loop
+        pass
+
+
+def _engage_narrow_action(ledger: Any, c: LoopCounters,
+                          policy: CodingAutonomyPolicy, out: "Narrow") -> str:
+    """Engage one narrowing action. Returns `engaged` / `satisfied` / `noop`.
+
+    `satisfied` (the narrowing is already in effect — e.g. a second detector asking
+    for a clamp GL04 already engaged) and `noop` (the mechanism is disabled by
+    policy, or its engage precondition is absent) both ADVANCE the rung and are
+    both recorded, but NEITHER charges `narrow_limit`: charging twice for one flag
+    would let two detectors spend the whole budget on a single state change."""
+    action = out.action
+    if action == NARROW_CLAMP_FANOUT:
+        # GL04's OWN engage path — not a second implementation of it, and not a
+        # second release path either: the clamp continues to release only through
+        # `_account_convergence_clamp`'s tighter hysteretic band.
+        stats = _convergence_window_stats(ledger, policy.convergence_window)
+        if stats is None:
+            return _NARROW_NOOP  # disabled (`convergence_window == 0`) or no window
+        try:
+            if bool((ledger.get_run_state() or {}).get("convergence_clamped")):
+                return _NARROW_SATISFIED
+        except Exception:  # noqa: BLE001
+            return _NARROW_NOOP
+        ratio, merge_rate, n = stats
+        _engage_convergence_clamp(ledger, ratio=ratio, merge_rate=merge_rate, n=n)
+        return _NARROW_ENGAGED
+    if action == NARROW_FORCE_INTEGRATION and _mergeable_pr_count(ledger) <= 0:
+        # Non-wedge invariant 1: with nothing mergeable there is nothing to drain,
+        # and deferring dispatch would manufacture the wedge this rung is meant to
+        # avoid. A recorded no-op that advances the rung, exactly as the spec's
+        # "requested with nothing mergeable" acceptance requires.
+        return _NARROW_NOOP
+    key = _NARROW_FLAG_KEY.get(action)
+    if key is None:
+        return _NARROW_NOOP
+    if policy.narrow_drain_iters <= 0:
+        return _NARROW_NOOP  # the force-lift cap is the flag's only hard release
+    try:
+        if bool((ledger.get_run_state() or {}).get(key)):
+            return _NARROW_SATISFIED
+        ledger.set_run_state(**{key: True})
+    except Exception:  # noqa: BLE001 — a run-state hiccup narrows nothing
+        return _NARROW_NOOP
+    c.narrow_engaged_at[action] = c.iterations
+    return _NARROW_ENGAGED
+
+
+def _engage_narrow(ledger: Any, c: LoopCounters, policy: CodingAutonomyPolicy,
+                   out: "Narrow") -> str:
+    """Apply a `Narrow`: engage it, record it, advance the rung, charge the bounds.
+
+    A `self_applied` narrow (F139 WS-A's heartbeat, F159's force-lift) is the
+    DETECTOR's own permanent behaviour, already performed — it has no ladder, is
+    recorded nowhere new, and charges nothing. Those two are reported as `Narrow`
+    only so the contract is visibly TOTAL and so every detector's answer is
+    countable."""
+    if out.self_applied or out.action in _SELF_APPLIED_NARROWS:
+        return _NARROW_SATISFIED
+    status = _engage_narrow_action(ledger, c, policy, out)
+    # Bound 2': the deferral is charged whatever the engage result, because the
+    # STOP was deferred by an iteration either way.
+    c.narrow_deferrals += 1
+    if status == _NARROW_ENGAGED:
+        c.narrows_used += 1
+    _advance_rung(ledger, c, policy, out.detector)
+    _record_narrow(
+        ledger, out, status,
+        rationale=(
+            f"{out.detector} tripped ({out.evidence}); answered by narrowing the "
+            f"run ({out.action}, {status}) instead of ending it — rung "
+            f"{c.narrow_rungs.get(out.detector, 0)} of "
+            f"{len(_DETECTOR_LADDERS.get(out.detector, ()))}, "
+            f"{c.narrows_used}/{policy.narrow_limit} narrowings used"))
+    return status
+
+
+def _lift_narrow(ledger: Any, c: LoopCounters, action: str, *,
+                 forced: bool, rationale: str) -> None:
+    """Clear one narrowing flag. `forced` is invariant 3 — the cap lifted it
+    although its release condition never arrived, so a human is told."""
+    key = _NARROW_FLAG_KEY[action]
+    try:
+        ledger.set_run_state(**{key: False})
+    except Exception:  # noqa: BLE001
+        return
+    c.narrow_engaged_at.pop(action, None)
+    try:
+        ledger.record_decision(
+            title=f"{_NARROW_TITLES.get(action, action)} lifted",
+            context=f"narrow:{action}",
+            choice=f"narrow_{action}_{'force_lifted' if forced else 'released'}",
+            rationale=rationale[:2000])
+    except Exception:  # noqa: BLE001
+        pass
+    if forced:
+        _maybe_raise_monitor(ledger, f"narrow_{action}_stalled", DetectorEvidence(
+            detector=f"narrow_{action}_stalled", text=rationale))
+
+
+def _release_narrow_flags(ledger: Any, c: LoopCounters,
+                          policy: CodingAutonomyPolicy) -> None:
+    """Non-wedge invariants 2 and 3, evaluated at the quiescent point in BOTH
+    chains: release each narrowing flag on its own condition, and FORCE-LIFT it at
+    ``narrow_drain_iters`` if that condition never arrives.
+
+    Release conditions, one per action, deliberately distinct from the engage
+    conditions (hysteresis — a shared boundary is how a clamp flaps):
+
+    * ``integration_only`` — nothing is `mergeable` any more, so there is nothing
+      left to drain;
+    * ``planning_clamped`` — a worker turn ran (``plan_streak == 0``, which every
+      worker branch of `_apply_outcome` already sets).
+
+    GL04's ``convergence_clamped`` is deliberately ABSENT: it keeps its own
+    hysteretic release inside `_account_convergence_clamp`. Two release paths for
+    one flag is exactly the flap the bands exist to prevent.
+
+    Reads the FLAGS, not just this process's engage marks: `narrow_engaged_at` is
+    per-process while the flags live in run state and survive `errorta continue`,
+    so a resumed run must be able to lift a narrowing it did not itself engage —
+    otherwise the resume is the wedge. An orphan flag is re-anchored at the current
+    iteration, i.e. the resumed run gets one fresh drain window, never none.
+    Skipped entirely (no run-state read) for a run that has never narrowed."""
+    if not c.narrow_engaged_at and c.narrows_used <= 0:
+        return
+    live = narrow_flags(ledger)
+    engaged = [a for a, key in _NARROW_FLAG_KEY.items() if live.get(key)]
+    for action in list(c.narrow_engaged_at):
+        if action not in engaged:
+            c.narrow_engaged_at.pop(action, None)
+    cap = max(0, policy.narrow_drain_iters)
+    for action in engaged:
+        if action not in c.narrow_engaged_at:
+            c.narrow_engaged_at[action] = c.iterations
+        since = c.iterations - int(c.narrow_engaged_at.get(action, c.iterations))
+        released = (
+            _mergeable_pr_count(ledger) <= 0
+            if action == NARROW_FORCE_INTEGRATION else c.plan_streak == 0)
+        if released:
+            _lift_narrow(ledger, c, action, forced=False,
+                         rationale=("the narrowing's release condition was met "
+                                    f"after {since} iteration(s); restoring normal "
+                                    "dispatch"))
+        elif since >= cap:
+            _lift_narrow(ledger, c, action, forced=True,
+                         rationale=(
+                             f"the {action} narrowing did not release within "
+                             f"{cap} iterations; force-lifting so dispatch resumes "
+                             "— a narrowing that never releases is itself a wedge, "
+                             "and a human may need to look"))
+
+
+def _open_work_remains(ledger: Any) -> bool:
+    """Does the ledger still hold open tasks or unresolved PRs?
+
+    The guard on the ONE success-class rung (`no_actionable_work`): that reason is
+    CLI SUCCESS-class, so it may only be escalated when it is a WEDGE WEARING A
+    SUCCESS LABEL. Guarded read; silence means "no open work", i.e. leave the run
+    exactly as it is today."""
+    try:
+        if any(str(getattr(t, "state", "") or "") in task_dedupe.OPEN_STATES
+               for t in ledger.list_tasks()):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return any(p.get("status") not in _CONVERGENCE_RESOLVED
+                   for p in ledger.list_prs())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _no_actionable_escalation(ledger: Any, c: LoopCounters,
+                              policy: CodingAutonomyPolicy,
+                              reason: str) -> Optional[Escalate]:
+    """SPEC-27 Item 3 — the rung SPEC-23 Item 1 deferred here explicitly.
+
+    Returns an `Escalate` only when `no_actionable_work` is a wedge wearing a
+    success label: the ladder is enabled, the ledger still holds open work, and
+    this detector has not already spent its escalate rung. Otherwise `None`, and
+    the caller returns the stop exactly as it does today.
+
+    Δ Item 5 — this CANNOT flip an exit code. A refused or abstaining escalation
+    returns `LoopResult(NO_ACTIONABLE_WORK, …)` unchanged, which `classify_exit`
+    still maps to `EXIT_OK`; there is no path here that converts a success-class
+    reason into a failure-class one."""
+    if reason != NO_ACTIONABLE_WORK or policy.narrow_limit <= 0:
+        return None
+    if _ladder_rung(ledger, c, policy, reason) != RUNG_ESCALATE:
+        return None
+    if not _open_work_remains(ledger):
+        return None
+    return Escalate(
+        reason=NO_ACTIONABLE_WORK, detector=NO_ACTIONABLE_WORK,
+        evidence=("nothing is dispatchable but the ledger still holds open work — "
+                  "a wedge wearing a success label"),
+        detail={"evidence": DetectorEvidence(
+            detector=NO_ACTIONABLE_WORK,
+            text=("nothing is dispatchable but open tasks or PRs remain"),
+        ).to_dict()})
+
+
+def _apply_detector_outcome(
+    ledger: Any,
+    members: list[tuple[str, str]],
+    policy: CodingAutonomyPolicy,
+    c: LoopCounters,
+    out: "DetectorOutcome | LoopResult",
+    *,
+    run_turn: RunTurn,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    rec: Optional[CodingReconciler] = None,
+    delivery_review: Optional[Callable[[Any], Any]] = None,
+) -> Optional[LoopResult]:
+    """SPEC-27 Item 6 — the ONE application point, called from both chains.
+
+    ``None`` back means KEEP GOING (nothing fired, a `Narrow` was engaged, or
+    SPEC-23's PM proposed something actionable); a :class:`LoopResult` back is the
+    result to return from the loop.
+
+    Note the asymmetry the caller must honour and only the caller can: a `Narrow`
+    does NOT short-circuit the detector chain (the remaining detectors still run
+    this iteration), while an `Escalate`/`Stop` does — that is what makes the new
+    contract a strict generalisation of today's early-return chain. Callers express
+    it as ``if not isinstance(out, Narrow): continue``.
+
+    A bare :class:`LoopResult` is accepted and handed straight to `_intervene`,
+    which is byte-for-byte the pre-spec `_last_word` path — that is how the stop
+    sites with no `_account_*` producer (hard blocker, member health, cancel,
+    budget, F127's ladder) keep working untouched."""
+    if out is None:
+        return None
+    if isinstance(out, Narrow):
+        _engage_narrow(ledger, c, policy, out)
+        return None  # falls through — the chain continues
+    if isinstance(out, Stop):
+        # Byte-identical to today's stop: same reason, same detail keys.
+        return LoopResult(out.reason, c, detail=dict(out.detail))
+    if isinstance(out, Escalate):
+        _advance_rung(ledger, c, policy, out.detector)
+        out = LoopResult(out.reason, c, detail=dict(out.detail))
+    # SPEC-23 owns the intervention. There is no second path.
+    return _intervene(ledger, members, policy, c, out, run_turn=run_turn,
+                      should_cancel=should_cancel, rec=rec,
+                      delivery_review=delivery_review)
+
+
 def _account_revise_livelock(ledger: Any, c: LoopCounters,
-                             policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+                             policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """Spec 16 (Phase 3): make the revise-chain livelock visible to the loop. The
     Phase 2 breaker blocks a wedged lineage and hands it to the PM — but if the
     PM's re-plan ALSO fails to make progress, the run would otherwise burn to the
@@ -1776,7 +2516,11 @@ def _account_revise_livelock(ledger: Any, c: LoopCounters,
               f"progress for {policy.revise_livelock_limit} iterations"),
         value=stalled, threshold=policy.revise_livelock_limit)
     _maybe_raise_monitor(ledger, "revise_livelock", evidence)
-    return _stop_with_evidence(REVISE_LIVELOCK, c, evidence)
+    # SPEC-27 Item 3 — ladder `ESCALATE -> STOP`, and NOTHING ELSE: GL04's clamp is
+    # ALREADY the rung below this stop in both chains (wired immediately before this
+    # detector), so re-implementing a narrowing here would be a second clamp with a
+    # second release path — the flap the hysteretic bands exist to prevent.
+    return _trip(ledger, c, policy, REVISE_LIVELOCK, evidence)
 
 
 def _open_backlog_shape(ledger: Any) -> tuple[int, int]:
@@ -1804,7 +2548,7 @@ def _open_backlog_shape(ledger: Any) -> tuple[int, int]:
 
 
 def _account_planning_churn(ledger: Any, c: LoopCounters,
-                            policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+                            policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """Spec 07: detect a run that has degenerated into PM-ONLY planning — N
     consecutive plan turns with ZERO interleaved worker turns — and stop
     `planning_churn`.
@@ -1831,7 +2575,10 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
               f"(backlog {depth} open task(s) across {distinct} distinct title(s))"),
         value=c.plan_streak, threshold=policy.plan_streak_limit)
     _maybe_raise_monitor(ledger, "planning_churn", evidence)
-    return _stop_with_evidence(PLANNING_CHURN, c, evidence)
+    # SPEC-27 Item 3 — ladder `CLAMP_PLANNING -> ESCALATE -> STOP`. The detector's
+    # own diagnosis is "PM plan turns with zero interleaved worker turns", so
+    # making the next turn a worker turn IS the remedy, and it costs nothing.
+    return _trip(ledger, c, policy, PLANNING_CHURN, evidence)
 
 
 def _dispatch_wedge_culprits(ledger: Any, todo: list[Task]) -> str:
@@ -1896,7 +2643,7 @@ def _dispatch_wedge_culprits(ledger: Any, todo: list[Task]) -> str:
 
 
 def _account_dispatch_wedge(ledger: Any, c: LoopCounters,
-                            policy: CodingAutonomyPolicy) -> Optional[LoopResult]:
+                            policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """Spec 10 — detect a WEDGED graph and stop `dispatch_wedged` after naming the
     culprit deps.
 
@@ -1936,7 +2683,11 @@ def _account_dispatch_wedge(ledger: Any, c: LoopCounters,
         detector="dispatch_wedged", text=summary,
         value=c.wedge_streak, threshold=policy.wedge_stall_limit)
     _maybe_raise_monitor(ledger, "dispatch_wedged", evidence)
-    return _stop_with_evidence(DISPATCH_WEDGED, c, evidence, summary=summary)
+    # SPEC-27 Item 3 — ladder `ESCALATE -> STOP`, with NO narrowing rung BY
+    # CONSTRUCTION: narrowing a graph with nothing dispatchable makes it strictly
+    # worse. The escalation carries `_dispatch_wedge_culprits`, which already names
+    # the blocking dep ids and how many todo tasks each transitively blocks.
+    return _trip(ledger, c, policy, DISPATCH_WEDGED, evidence, summary=summary)
 
 
 # --- SPEC-24 (Items 1-3) — the published detector snapshot ------------------ #
@@ -2901,22 +3652,25 @@ def _run_sequential_loop(
 ) -> LoopResult:
     """The original one-action-per-iteration loop (max_parallel_workers <= 1)."""
 
-    def _last_word(stop: Optional[LoopResult]) -> Optional[LoopResult]:
-        """SPEC-23 — route a stop through the intervention hook. ``None`` back
-        means the PM proposed something actionable and the run CONTINUES; anything
-        else is the result to return as-is. Reads the enclosing ``policy``, which
+    def _last_word(stop: "DetectorOutcome | LoopResult") -> Optional[LoopResult]:
+        """SPEC-23 + SPEC-27 — route a detector outcome through the ONE apply
+        point. ``None`` back means the run CONTINUES (nothing fired, a `Narrow`
+        was engaged, or the PM proposed something actionable); anything else is the
+        result to return as-is. Reads the enclosing ``policy``, which
         `policy_provider` may have re-read this iteration.
 
-        Every caller answers ``None`` with ``continue``, never fall-through. That
-        is deliberate and it costs nothing: each of these sites RETURNS today, so
-        `continue` skips exactly what the return already skips — while
-        fall-through would run code the stopping path has never reached (e.g. the
-        `pm_assist_exhausted` outcome also carries ``hard_blocker``, so falling
-        through would swap `worker_unproductive` for `hard_blocker` and break
-        batch regression lock 1). The intervention IS this iteration's work."""
-        return _intervene(ledger, members, policy, c, stop, run_turn=run_turn,
-                          should_cancel=should_cancel, rec=rec,
-                          delivery_review=delivery_review)
+        A caller answers ``None`` with ``continue`` UNLESS the outcome was a
+        `Narrow`, which by contract does not short-circuit the chain (SPEC-27
+        Item 1). For everything else `continue` is deliberate and costs nothing:
+        each of these sites RETURNS today, so `continue` skips exactly what the
+        return already skips — while fall-through would run code the stopping path
+        has never reached (e.g. the `pm_assist_exhausted` outcome also carries
+        ``hard_blocker``, so falling through would swap `worker_unproductive` for
+        `hard_blocker` and break batch regression lock 1)."""
+        return _apply_detector_outcome(
+            ledger, members, policy, c, stop, run_turn=run_turn,
+            should_cancel=should_cancel, rec=rec,
+            delivery_review=delivery_review)
 
     while True:
         if policy_provider is not None:
@@ -2939,6 +3693,16 @@ def _run_sequential_loop(
 
         action = decide_next(ledger, members, member_tiers)
         if isinstance(action, Complete):
+            # SPEC-27 Item 3: `no_actionable_work` is SUCCESS-class, so it gets one
+            # escalate rung and ONLY when open work remains — a wedge wearing a
+            # success label. `definition_of_done` and every other reason fall
+            # straight through to today's return.
+            na = _no_actionable_escalation(ledger, c, policy, action.reason)
+            if na is not None:
+                na_stop = _last_word(na)
+                if na_stop is not None:
+                    return na_stop
+                continue
             return LoopResult(action.reason, c)  # definition_of_done / no_actionable_work
 
         # Budget caps (always a stop).
@@ -2966,8 +3730,12 @@ def _run_sequential_loop(
         # no_progress / not_converging never trip — cap the rejected rounds here so
         # a persistently-failing delivery ends truthfully, not at budget_exhausted.
         if c.delivery_review_rounds >= policy.delivery_review_round_limit:
-            dr_stop = _last_word(_stop_with_evidence(
-                DELIVERY_REVIEW_STALLED, c, _delivery_review_evidence(c, policy)))
+            # SPEC-27 Item 3 — ladder `FORCE_INTEGRATION -> ESCALATE -> STOP`: a
+            # delivery review judges the INTEGRATED head, so draining the pending
+            # merges changes the thing under review before anyone is asked.
+            dr_stop = _last_word(_trip(
+                ledger, c, policy, DELIVERY_REVIEW_STALLED,
+                _delivery_review_evidence(c, policy)))
             if dr_stop is not None:
                 return dr_stop
             continue
@@ -3036,61 +3804,75 @@ def _run_sequential_loop(
                 value=c.pm_idle, threshold=policy.pm_idle_limit)
             _maybe_raise_monitor(ledger, "no_progress", np_evidence)
             np_stop = _last_word(
-                _stop_with_evidence(NO_PROGRESS, c, np_evidence))
+                _trip(ledger, c, policy, NO_PROGRESS, np_evidence))
             if np_stop is not None:
                 return np_stop
             continue
+
+        # SPEC-27 Item 6, invariants 2+3: release or force-lift the narrowing flags
+        # BEFORE the chain re-reads its windows, so a narrowing whose condition was
+        # met never survives into the iteration that judges it.
+        _release_narrow_flags(ledger, c, policy)
 
         # Spec 07: the PM-only pathology — plan turn after plan turn with no worker
         # ever running. Checked beside NO_PROGRESS because it is the same class of
         # stop (the PM is the only thing moving), just the case where each plan turn
         # looks productive so pm_idle never climbs.
-        churn_stop = _account_planning_churn(ledger, c, policy)
-        if churn_stop is not None:
-            churn_stop = _last_word(churn_stop)
+        churn_out = _account_planning_churn(ledger, c, policy)
+        if churn_out is not None:
+            churn_stop = _last_word(churn_out)
             if churn_stop is not None:
                 return churn_stop
-            continue
+            # SPEC-27 Item 1: a `Narrow` FALLS THROUGH to the next detector; an
+            # `Escalate`/`Stop` the PM accepted short-circuits, exactly as today.
+            if not isinstance(churn_out, Narrow):
+                continue
 
         # F139 WS-A/WS-E: surface a stuck foundation, and stop a run where nothing
         # is moving anywhere (distinct from NO_PROGRESS, which is a PM-idle stop).
-        _account_foundation_stall(ledger, c, policy)
-        _account_hot_file_freeze(ledger, c, policy)
-        conv_stop = _account_convergence(ledger, c, policy)
-        if conv_stop is not None:
-            conv_stop = _last_word(conv_stop)
+        # Both are pure-`Narrow` detectors: they apply their own side effect and the
+        # run continues, so their outcome is recorded, never returned.
+        _last_word(_account_foundation_stall(ledger, c, policy))
+        _last_word(_account_hot_file_freeze(ledger, c, policy))
+        conv_out = _account_convergence(ledger, c, policy)
+        if conv_out is not None:
+            conv_stop = _last_word(conv_out)
             if conv_stop is not None:
                 return conv_stop
-            continue
+            if not isinstance(conv_out, Narrow):
+                continue
         # Spec 04: stop a run whose acceptance gate result keeps repeating without
         # improving (the 6/12-with-a-churning-head loop). Keyed on the gate result,
         # so it catches churn that `not_converging` (progress fingerprint) misses.
-        gate_stop = _account_gate_stall(ledger, c, policy)
-        if gate_stop is not None:
-            gate_stop = _last_word(gate_stop)
+        gate_out = _account_gate_stall(ledger, c, policy)
+        if gate_out is not None:
+            gate_stop = _last_word(gate_out)
             if gate_stop is not None:
                 return gate_stop
-            continue
+            if not isinstance(gate_out, Narrow):
+                continue
         # GL04 (GAP-5): the run-level convergence brake — SOFT (clamp fan-out to
         # serial, releasable) and wired BEFORE Spec 16's hard livelock stop, so the
         # run gets a chance to drain before the stop lands underneath. Never returns
         # a stop; only sets/clears the clamp flag `runtime_cap` reads.
-        _account_convergence_clamp(ledger, c, policy)
+        _last_word(_account_convergence_clamp(ledger, c, policy))
         # Spec 16: a revise-chain livelock the breaker couldn't unstick.
-        livelock_stop = _account_revise_livelock(ledger, c, policy)
-        if livelock_stop is not None:
-            livelock_stop = _last_word(livelock_stop)
+        livelock_out = _account_revise_livelock(ledger, c, policy)
+        if livelock_out is not None:
+            livelock_stop = _last_word(livelock_out)
             if livelock_stop is not None:
                 return livelock_stop
-            continue
+            if not isinstance(livelock_out, Narrow):
+                continue
         # Spec 10: a wedged graph — a large todo backlog with nothing dispatchable —
         # named and stopped instead of silently converted into PM plan turns.
-        wedge_stop = _account_dispatch_wedge(ledger, c, policy)
-        if wedge_stop is not None:
-            wedge_stop = _last_word(wedge_stop)
+        wedge_out = _account_dispatch_wedge(ledger, c, policy)
+        if wedge_out is not None:
+            wedge_stop = _last_word(wedge_out)
             if wedge_stop is not None:
                 return wedge_stop
-            continue
+            if not isinstance(wedge_out, Narrow):
+                continue
 
         # SPEC-24: the quiescent point — every detector above has just computed its
         # reading against its threshold, so this is where the snapshot the PM's
@@ -3228,17 +4010,22 @@ def _run_concurrent_loop(
     in_flight: dict[Any, Any] = {}   # future -> action
     busy: set[str] = set()           # member_ids currently running a turn
     model_in_flight = 0              # non-merge turns in flight (cap + budget)
-    pending_stop: Optional[LoopResult] = None
+    # SPEC-27 Item 6: this stages an OUTCOME, not only a `LoopResult`. The apply
+    # phase may run while other futures are still in flight, so a staged outcome is
+    # only APPLIED at a drain point — a `Narrow` that mutated dispatch state
+    # mid-batch would change the rules under live futures.
+    pending_stop: "DetectorOutcome | LoopResult" = None
     milestone = False
 
-    def _last_word(stop: Optional[LoopResult]) -> Optional[LoopResult]:
-        """SPEC-23 — route a stop through the intervention hook (see the
-        sequential loop's twin). Wiring BOTH chains is the dead-code lock: real
-        fanned-out runs live HERE once Spec 13 lifts the foundation clamp, so a
+    def _last_word(stop: "DetectorOutcome | LoopResult") -> Optional[LoopResult]:
+        """SPEC-23 + SPEC-27 — route a detector outcome through the ONE apply point
+        (see the sequential loop's twin). Wiring BOTH chains is the dead-code lock:
+        real fanned-out runs live HERE once Spec 13 lifts the foundation clamp, so a
         hook only in the sequential path would never fire where it is needed."""
-        return _intervene(ledger, members, policy, c, stop, run_turn=run_turn,
-                          should_cancel=should_cancel, rec=rec,
-                          delivery_review=delivery_review)
+        return _apply_detector_outcome(
+            ledger, members, policy, c, stop, run_turn=run_turn,
+            should_cancel=should_cancel, rec=rec,
+            delivery_review=delivery_review)
 
     def _over_budget() -> bool:
         if c.iterations + len(in_flight) >= policy.max_iterations:
@@ -3285,6 +4072,12 @@ def _run_concurrent_loop(
                 _owned = (inflight_owned_paths(ledger)
                           if policy.strict_file_partition else None)
                 _frozen = frozen_paths(ledger)
+                # SPEC-27 Item 2: the narrowing flags the dispatch phase honours.
+                # Read ONCE per iteration beside the hot/frozen picture, at the
+                # same seam `hot_paths` / `frozen` / `owned_paths` already use.
+                # Both are absent->falsy, so a pre-spec run state dispatches
+                # byte-identically.
+                _narrow = narrow_flags(ledger)
                 _frozen_owner = None
                 if _frozen:
                     try:
@@ -3297,7 +4090,9 @@ def _run_concurrent_loop(
                         ledger, _idle_members(members, busy), member_tiers,
                         hot_paths=_hot_paths, hot_blocked=_hot_blocked,
                         frozen=_frozen, frozen_owner_task_id=_frozen_owner,
-                        owned_paths=_owned)
+                        owned_paths=_owned,
+                        integration_only=_narrow["integration_only"],
+                        planning_clamped=_narrow["planning_clamped"])
                     if not batch:
                         break
                     if len(batch) == 1 and isinstance(batch[0], Complete):
@@ -3386,9 +4181,25 @@ def _run_concurrent_loop(
                     continue
                 action = decide_next(ledger, members, member_tiers)
                 if isinstance(action, Complete):
+                    na = _no_actionable_escalation(ledger, c, policy, action.reason)
+                    if na is not None:
+                        na_stop = _last_word(na)
+                        if na_stop is not None:
+                            return na_stop
+                        continue
                     return LoopResult(action.reason, c)
                 if _over_budget():
                     return LoopResult(BUDGET_EXHAUSTED, c)
+                # SPEC-27 Item 3: nothing is running, `decide_next` DID name an
+                # action, and the dispatch phase placed none of it — a wedge
+                # wearing a success label. One escalate rung; a refused escalation
+                # returns this exact reason and still exits EXIT_OK.
+                na = _no_actionable_escalation(ledger, c, policy, NO_ACTIONABLE_WORK)
+                if na is not None:
+                    na_stop = _last_word(na)
+                    if na_stop is not None:
+                        return na_stop
+                    continue
                 return LoopResult(NO_ACTIONABLE_WORK, c)
 
             # --- wait for the next turn to finish, apply its outcome --------
@@ -3416,8 +4227,11 @@ def _run_concurrent_loop(
                 # of looping to budget_exhausted. Drain-stop like the other caps.
                 if (c.delivery_review_rounds >= policy.delivery_review_round_limit
                         and pending_stop is None):
-                    pending_stop = _stop_with_evidence(
-                        DELIVERY_REVIEW_STALLED, c,
+                    # SPEC-27: STAGED as an outcome and applied only at the drain
+                    # point below — a `FORCE_INTEGRATION` engaged mid-batch would
+                    # change dispatch under live futures.
+                    pending_stop = _trip(
+                        ledger, c, policy, DELIVERY_REVIEW_STALLED,
                         _delivery_review_evidence(c, policy))
                 # F128: a refused PM done-claim escalates to a blocking
                 # completion_blocked Problem if the PM keeps falsely claiming done;
@@ -3499,59 +4313,69 @@ def _run_concurrent_loop(
                         value=c.pm_idle, threshold=policy.pm_idle_limit)
                     _maybe_raise_monitor(ledger, "no_progress", np_evidence)
                     np_stop = _last_word(
-                        _stop_with_evidence(NO_PROGRESS, c, np_evidence))
+                        _trip(ledger, c, policy, NO_PROGRESS, np_evidence))
                     if np_stop is not None:
                         return np_stop
                     continue
+                # SPEC-27 Item 6 — the same release/force-lift pass as the
+                # sequential chain, at the IDENTICAL position. This is the loop a
+                # wide fanned-out run lives on, so a lift-check in only one chain
+                # would leave a narrowing engaged exactly where it bites hardest.
+                _release_narrow_flags(ledger, c, policy)
                 # Spec 07: PM-only planning churn (mirrors the sequential loop),
                 # checked at this same quiescent point.
-                churn_stop = _account_planning_churn(ledger, c, policy)
-                if churn_stop is not None:
-                    churn_stop = _last_word(churn_stop)
+                churn_out = _account_planning_churn(ledger, c, policy)
+                if churn_out is not None:
+                    churn_stop = _last_word(churn_out)
                     if churn_stop is not None:
                         return churn_stop
-                    continue
+                    if not isinstance(churn_out, Narrow):
+                        continue
                 # F139 WS-A/WS-E: foundation-stall surfacing + convergence stop,
                 # checked at this quiescent (in-flight empty) point so a resume
                 # continues cleanly.
-                _account_foundation_stall(ledger, c, policy)
-                _account_hot_file_freeze(ledger, c, policy)
-                conv_stop = _account_convergence(ledger, c, policy)
-                if conv_stop is not None:
-                    conv_stop = _last_word(conv_stop)
+                _last_word(_account_foundation_stall(ledger, c, policy))
+                _last_word(_account_hot_file_freeze(ledger, c, policy))
+                conv_out = _account_convergence(ledger, c, policy)
+                if conv_out is not None:
+                    conv_stop = _last_word(conv_out)
                     if conv_stop is not None:
                         return conv_stop
-                    continue
+                    if not isinstance(conv_out, Narrow):
+                        continue
                 # Spec 04: gate-repeat stall stop, at this same quiescent point.
-                gate_stop = _account_gate_stall(ledger, c, policy)
-                if gate_stop is not None:
-                    gate_stop = _last_word(gate_stop)
+                gate_out = _account_gate_stall(ledger, c, policy)
+                if gate_out is not None:
+                    gate_stop = _last_word(gate_out)
                     if gate_stop is not None:
                         return gate_stop
-                    continue
+                    if not isinstance(gate_out, Narrow):
+                        continue
                 # GL04 (GAP-5): the run-level convergence brake, wired BEFORE Spec
                 # 16's livelock in the CONCURRENT loop too — this is the very loop a
                 # wide, churning fan-out runs on once Spec 13 lifts the foundation
                 # clamp, so the metric would be dead code exactly where it's needed if
                 # it lived only in the sequential path. Soft (clamp, never a stop).
-                _account_convergence_clamp(ledger, c, policy)
+                _last_word(_account_convergence_clamp(ledger, c, policy))
                 # Spec 16: revise-chain livelock probe (mirrors the sequential loop);
                 # wiring BOTH chains is the dead-code lock — Spec 13 lifts the clamp
                 # and real runs go concurrent, so a detector only in the sequential
                 # path would never fire where it's needed.
-                livelock_stop = _account_revise_livelock(ledger, c, policy)
-                if livelock_stop is not None:
-                    livelock_stop = _last_word(livelock_stop)
+                livelock_out = _account_revise_livelock(ledger, c, policy)
+                if livelock_out is not None:
+                    livelock_stop = _last_word(livelock_out)
                     if livelock_stop is not None:
                         return livelock_stop
-                    continue
+                    if not isinstance(livelock_out, Narrow):
+                        continue
                 # Spec 10: wedged-graph probe (mirrors the sequential loop).
-                wedge_stop = _account_dispatch_wedge(ledger, c, policy)
-                if wedge_stop is not None:
-                    wedge_stop = _last_word(wedge_stop)
+                wedge_out = _account_dispatch_wedge(ledger, c, policy)
+                if wedge_out is not None:
+                    wedge_stop = _last_word(wedge_out)
                     if wedge_stop is not None:
                         return wedge_stop
-                    continue
+                    if not isinstance(wedge_out, Narrow):
+                        continue
                 # SPEC-24: publish at the IDENTICAL position in this chain too.
                 # A publisher in one chain only is dead code exactly where it
                 # matters — this is the loop a wide, fanned-out run lives on once

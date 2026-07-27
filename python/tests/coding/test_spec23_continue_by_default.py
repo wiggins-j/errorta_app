@@ -474,8 +474,14 @@ def test_both_loop_chains_contain_an_intervene_call() -> None:
     conc = text.index("def _run_concurrent_loop(")
     sequential_body = text[seq:conc]
     concurrent_body = text[conc:text.index("def _apply_outcome(", conc)]
-    assert "_intervene(" in sequential_body, "no intervention hook in the sequential loop"
-    assert "_intervene(" in concurrent_body, "no intervention hook in the concurrent loop"
+    # SPEC-27 generalised this seam: both chains now route every detector outcome
+    # through `_apply_detector_outcome`, which is the ONLY caller of `_intervene`.
+    # The lock is unchanged in substance — a chain missing the apply point is a
+    # chain with no intervention hook.
+    assert "_apply_detector_outcome(" in sequential_body, \
+        "no intervention hook in the sequential loop"
+    assert "_apply_detector_outcome(" in concurrent_body, \
+        "no intervention hook in the concurrent loop"
     # Both staged-`pending_stop` return points in the concurrent loop are hooked.
     assert concurrent_body.count("_last_word(pending_stop)") == 2, (
         "a staged stop can escape un-intervened: hook BOTH pending_stop returns")
