@@ -156,7 +156,15 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
    worst case 2 extra iterations and 2 extra model calls. What it is *not* yet: an
    unparsed intervention still cannot be retried, and a PM whose correct answer is
    "wait for the in-flight PRs" reads as an abstention until a no-op-with-reason
-   plan shape exists.)
+   plan shape exists. **SPEC-24 — landed**, and it is this criterion's
+   *precondition*: an intervention is only a real chance to continue if the PM
+   could see what it is arguing about. Both loop chains now publish a
+   `run_state.detector_state` snapshot at the quiescent point, the PM prompt
+   renders it as a bounded GOVERNANCE STATE block whenever a reading is within
+   `governance_proximity` of its window, and the last-word prompt renders the same
+   block focused on the detector that tripped — one renderer, so the numbers in the
+   standing prompt and the intervention prompt cannot drift. Absent, not empty,
+   when nothing is near; `governance_proximity=0.0` restores today's prompt bytes.)
 3. Any `500` or turn rejection leaves a traceback and a correlation id.
 4. The topology advisory either resolves or the role is not seated. **(SPEC-26 —
    landed, and mechanically checkable.** Two honest readings, recorded rather than

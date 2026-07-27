@@ -31,6 +31,7 @@ from collections import Counter
 from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
+from . import detector_state as _detector_state
 from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
@@ -2948,6 +2949,9 @@ def _pm_prompt_segments(store: LedgerStore, *, pin: str,
         'Set done=true ONLY when the North Star is fully met and nothing remains '
         "(then include a non-empty \"completion_summary\" and omit tasks)."
     )
+    # SPEC-24 (Item 5): computed once — the segment is included only when it has
+    # something to say, and `""` is the ABSENCE contract, not a convenience.
+    _governance_text = _detector_state.prompt_text(store)
     return [
         # CURRENT FOCUS / authoritative user direction — the operative scope.
         PromptSegment("work_request", pin),
@@ -2968,16 +2972,14 @@ def _pm_prompt_segments(store: LedgerStore, *, pin: str,
         # The PM prompt has no `gate_output` segment today; if one is ever added it
         # goes immediately above this comment.
         #
-        # >>> SPEC-24 INSERTION POINT — `governance_state` goes exactly here <<<
-        # It renders the live detector/budget readings when something is near a
-        # limit, and must be OMITTED (not an empty labelled block) otherwise, so a
-        # run nowhere near a threshold keeps today's prompt bytes. Expected shape:
-        #
-        #     *([PromptSegment("governance_state", _governance_text)]
-        #       if _governance_text else []),
-        #
-        # `test_prompt_segments_golden.py::_governance_state_for_pm` is the matching
-        # stub in the reference builder — flip both in the same commit.
+        # SPEC-24 (Items 3 + 5) — `governance_state`, at the reserved position.
+        # The live detector/budget readings, rendered ONLY when something is near a
+        # limit; OMITTED entirely (never an empty labelled block) otherwise, so a
+        # run nowhere near a threshold keeps today's prompt bytes and
+        # `test_prompt_segments_golden.py` stays byte-locked. `_governance_text` is
+        # computed ONCE above and is `""` for every quiet run.
+        *([PromptSegment("governance_state", _governance_text)]
+          if _governance_text else []),
         #
         # Spec 15 (Item 1): what each role can actually do, and the rule that no
         # role can run a command from inside a turn — so the PM stops planning
@@ -3027,16 +3029,34 @@ def _last_word_prompt(store: LedgerStore, action: Any) -> str:
     demand, stated as a binary. Plus the standing orientation so the proposal is
     grounded.
 
-    SPEC-24 will render live detector state into every PM prompt; when it lands,
-    this prompt should CALL that renderer rather than growing its own copy."""
+    SPEC-24 (Item 6) — the governance block below is the SHARED renderer, focused
+    on the tripped detector, NOT a second copy of it. `_detector_state.render`
+    owns every threshold phrasing in the tree, so the numbers in the standing PM
+    prompt and the numbers in this intervention prompt cannot drift apart; a
+    second evidence renderer living beside that one is the exact duplication this
+    batch keeps paying for. `focus` renders the tripped reading first and
+    unconditionally (proximity is moot once it has tripped) and swaps the header,
+    and every OTHER near reading still follows — a PM asked to propose an
+    alternative should see the rest of the board, which is precisely the "same
+    model, radically less information" defect this spec exists to close."""
     detector = str(getattr(action, "detector", "") or "the run")
     evidence = str(getattr(action, "evidence", "") or detector)
+    governance = _detector_state.prompt_text(
+        store, focus=detector, focus_evidence=evidence)
+    if not governance:
+        # Degradation only (the renderer is fully guarded and returns "" solely on
+        # an internal failure): never send a last-word turn that does not name what
+        # tripped. NOT a second rendering — no threshold, no window phrasing.
+        governance = f"A guard called `{detector}` has tripped: {evidence}.\n"
     return (
         f"{_skill_line(PM)} You are the PM of an autonomous coding team, and this "
         "run is about to STOP.\n"
         f"Project state: {_orientation_text(store)}\n"
-        f"A guard called `{detector}` has tripped: {evidence}.\n"
-        "That guard is a heuristic computed between turns from the ledger alone — "
+        f"{governance}"
+        # SPEC-24 (S4): the antecedent moved into the block above, which now names
+        # the guard, so it is named again here rather than referred to as "that".
+        f"The `{detector}` guard is a heuristic computed between turns from the "
+        "ledger alone — "
         "it can be wrong, and it cannot see what you know. This is your last word "
         "before the run ends.\n"
         "Answer ONE of two ways.\n"
@@ -7266,6 +7286,12 @@ class CodingRunner:
                 self.store.set_run_state(last_words=None)
             except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
                 pass
+        # SPEC-24 (Item 1 / Edge cases): clear the published detector snapshot
+        # UNCONDITIONALLY, resume included. Every detector window re-arms on
+        # `errorta continue` (`c = counters or LoopCounters()`), so a surviving
+        # snapshot would have the resumed run's first PM turn reading windows that
+        # no longer exist. The loop republishes at its first quiescent point.
+        _detector_state.clear(self.store)
         # F087-15 M2: persist a worktree fingerprint so resume can verify the
         # worktree wasn't deleted/reset between interruption and resume.
         if self.workspace is not None:

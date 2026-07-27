@@ -576,6 +576,15 @@ different one. Reach for the right one instead of scrolling everything:
 - **`status`** — the one-glance summary: sidecar health, run `state`, last
   `stop_reason`, and any blockers.
 
+> **Debugging "why did it stop?" while the run is still in flight (Spec 24).**
+> The project's `run_state.json` now carries a `detector_state` key: every
+> detector reading that is close to its threshold, with its current value, its
+> live limit, the run budget, and any open attention signals — republished at each
+> iteration's quiescent point and cleared when nothing is near. It is the same
+> snapshot the PM sees rendered as its GOVERNANCE STATE prompt block, so an
+> operator gets the **pre-stop** telemetry rather than only the post-mortem
+> `counters` written after the loop returns. `status` does not render it yet.
+
 ### Steering a run mid-flight
 
 You don't have to stop a run to redirect it. All of these apply live:

@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from . import detector_state as _detector_state
 from . import paths as _paths
 from . import task_dedupe
 from .ledger import Task
@@ -1938,6 +1939,277 @@ def _account_dispatch_wedge(ledger: Any, c: LoopCounters,
     return _stop_with_evidence(DISPATCH_WEDGED, c, evidence, summary=summary)
 
 
+# --- SPEC-24 (Items 1-3) — the published detector snapshot ------------------ #
+#
+# THE GAP: every reading above dies in its own stack frame. Each `_account_*`
+# computes a value, compares it to a threshold, and has exactly ONE export path —
+# the evidence string handed to `_maybe_raise_monitor`, which writes an attention
+# signal, i.e. a HUMAN surface no prompt builder ever reads. So the PM, whose next
+# plan turn is the only thing that could have changed the outcome, is never told
+# that a detector is 6 iterations into an 8-iteration window.
+#
+# THE SEAM: the state the PM needs is SPLIT. Half of it (`pm_idle`, `plan_streak`,
+# `wedge_streak`, the `last_*_iter` marks) is per-process window state that exists
+# ONLY in `LoopCounters`; half is ledger-derived. The prompt is composed in
+# `runner.py`, which has the ledger and does NOT have `LoopCounters`. So the loop
+# publishes a compact, immutable snapshot into `run_state["detector_state"]` at the
+# quiescent point, and `runner` reads it back from the store it already holds.
+#
+# WHY NOT thread `LoopCounters` through `build_run_turn` — three reasons, any one
+# sufficient. (1) `RunTurn` is typed `Callable[[Any, Any], TurnOutcome]` and the
+# factory has ~50 direct test callers. (2) It would not work: `build_run_turn` is
+# invoked once at run start, BEFORE `run_coding_loop` creates or receives the
+# counters, so the closure could only capture a mutable reference. (3) That
+# reference would then be read from pool worker threads while the main thread
+# mutates it in the apply phase — the exact hazard the per-turn capture scratch was
+# made thread-local to avoid. A snapshot written at a quiescent point cannot race.
+#
+# WHY NOT recompute in `runner` at prompt time — half the readings have no ledger
+# representation at all, so a second, partial implementation of every threshold
+# would sit next to the first (the SPEC-19 "four declarations, two values" shape),
+# and the prompt would eventually say 4-of-8 while the detector says 6-of-8.
+
+# The rows the snapshot carries, in the FIXED order they render in (Item 2's
+# table). Order is part of the contract: the block must be stable under re-render
+# for unchanged inputs.
+_SNAPSHOT_DETECTORS = (
+    NO_PROGRESS,
+    NOT_CONVERGING,
+    GATE_NOT_IMPROVING,
+    PLANNING_CHURN,
+    DISPATCH_WEDGED,
+    REVISE_LIVELOCK,
+    DELIVERY_REVIEW_STALLED,
+    WORKER_UNPRODUCTIVE,
+    COMPLETION_BLOCKED,
+    MEMBER_UNHEALTHY,
+)
+
+# Deliberately NOT rendered, recorded so a reader sees a DECISION rather than an
+# oversight — and so the drift canary (`test_spec24_governance_visibility.py`) can
+# assert that every stop reason is either published or explicitly excluded. A
+# detector added later without a decision fails the build; invisibility is exactly
+# how this gap happened the first time.
+_SNAPSHOT_NOT_RENDERED = {
+    DEFINITION_OF_DONE: "the DONE outcome — not a window and not an approach",
+    NO_ACTIONABLE_WORK: (
+        "an event from `decide_next` returning `Complete`, not a detector window; "
+        "SPEC-27 owns it"),
+    CANCELLED: "a human said stop — there is no countdown to observe",
+    CHECKPOINT: "the operator's own cadence knob, resumable via `continue`",
+    HARD_BLOCKER: "a member declared it in a turn — an event, not an approach",
+    BUDGET_EXHAUSTED: (
+        "rendered as the always-present budget line rather than as a near row, so "
+        "iteration/model-call spend is visible whenever the block is"),
+}
+
+
+def _snapshot_row(detector: str, label: str, current: Any, threshold: Any,
+                  unit: str, reading: str, ratio: float,
+                  detail: Optional[Callable[[], str]] = None,
+                  ) -> Optional[dict[str, Any]]:
+    """One row, or ``None`` when the reading is not near its window.
+
+    ``detail`` is a CALLABLE and is invoked only once the cheap counter reading has
+    already passed the proximity test — that is the cost control: every counter
+    field is free (already in memory), and the ledger-derived enrichments
+    (`_dispatch_wedge_culprits` in particular, which walks the whole `depends_on`
+    closure) are computed only for readings that are actually going to be rendered.
+    A quiet run therefore adds no backlog or dependency reads at all."""
+    if not _detector_state.is_near(current, threshold, ratio):
+        return None
+    extra = ""
+    if detail is not None:
+        try:
+            extra = str(detail() or "")
+        except Exception:  # noqa: BLE001 — an enrichment hiccup loses the detail only
+            extra = ""
+    return {"detector": detector, "label": label, "current": int(current),
+            "threshold": int(threshold), "unit": unit, "reading": reading,
+            "detail": extra}
+
+
+def _detector_snapshot(ledger: Any, c: LoopCounters,
+                       policy: CodingAutonomyPolicy) -> Optional[dict[str, Any]]:
+    """Build the snapshot, or ``None`` when there is nothing to say.
+
+    THE ABSENCE RULE (Item 3): ``None`` — and therefore no `run_state` key, no
+    prompt segment, and a byte-identical PM prompt — when ALL of: no reading is
+    near, the GL04 clamp is not engaged, and there are no open attention signals.
+    This is verbatim the contract Spec 12 established for `gate_output`, and it is
+    why a healthy run's prompt does not change by one byte.
+
+    A DISABLED detector (`gate_stall_limit=0`, `wedge_stall_limit=0`, … — all this
+    module's "0 disables" knobs) is never rendered: telling a PM about a window
+    that cannot fire is pure noise. `trigger()` returns 0 for those.
+    """
+    ratio = float(getattr(policy, "governance_proximity", 0.0) or 0.0)
+    if ratio <= 0:
+        return None  # the kill switch: today's prompt bytes, near or not
+
+    rows: list[Optional[dict[str, Any]]] = []
+    rows.append(_snapshot_row(
+        NO_PROGRESS, "PM progress", c.pm_idle, policy.pm_idle_limit, "iterations",
+        f"{c.pm_idle} consecutive PM turn(s) recorded no progress", ratio))
+    rows.append(_snapshot_row(
+        NOT_CONVERGING, "run motion", c.iterations - c.last_progress_iter,
+        max(1, policy.convergence_stall_limit), "iterations",
+        (f"no merged progress, PR transition, or ladder activity for "
+         f"{c.iterations - c.last_progress_iter} iteration(s)"), ratio))
+    if c.last_gate_best >= 0:
+        # A score < 0 is the no-signal sentinel: `_account_gate_stall` never trips
+        # on it, so there is no window to report.
+        rows.append(_snapshot_row(
+            GATE_NOT_IMPROVING, "acceptance gate",
+            c.iterations - c.last_gate_iter, policy.gate_stall_limit, "iterations",
+            (f"score {c.last_gate_best}, unchanged for "
+             f"{c.iterations - c.last_gate_iter} iteration(s)"), ratio,
+            detail=lambda: ("The gate currently has failing commands."
+                            if _gate_has_failure(ledger)
+                            else "The gate currently reports nothing failing.")))
+    rows.append(_snapshot_row(
+        PLANNING_CHURN, "planning", c.plan_streak, policy.plan_streak_limit,
+        "iterations",
+        f"{c.plan_streak} consecutive plan turn(s) with no worker turn", ratio,
+        detail=lambda: "Backlog: %d open task(s) across %d distinct title(s)."
+                       % _open_backlog_shape(ledger)))
+    rows.append(_snapshot_row(
+        DISPATCH_WEDGED, "dispatch", c.wedge_streak, policy.wedge_stall_limit,
+        "iterations",
+        (f"{c.wedge_streak} iteration(s) with a todo backlog of at least "
+         f"{policy.wedge_min_tasks} and nothing dispatchable"), ratio,
+        detail=lambda: _dispatch_wedge_culprits(
+            ledger, ledger.list_tasks(state="todo")) + "."))
+    if c.last_broken_count > 0:
+        rows.append(_snapshot_row(
+            REVISE_LIVELOCK, "revise lineages", c.iterations - c.last_broken_iter,
+            policy.revise_livelock_limit, "iterations",
+            (f"{c.last_broken_count} open broken revise lineage(s) and no merge "
+             f"for {c.iterations - c.last_broken_iter} iteration(s)"), ratio))
+    rows.append(_snapshot_row(
+        DELIVERY_REVIEW_STALLED, "delivery review", c.delivery_review_rounds,
+        policy.delivery_review_round_limit, "rounds",
+        (f"{c.delivery_review_rounds} consecutive rejection(s) of the integrated "
+         f"head"), ratio))
+    worst_unproductive = max(c.unproductive_counts.values(), default=0)
+    rows.append(_snapshot_row(
+        WORKER_UNPRODUCTIVE, "worker productivity", worst_unproductive,
+        policy.worker_unproductive_limit, "turns",
+        f"{worst_unproductive} consecutive unusable turn(s) on one task", ratio,
+        detail=lambda: (
+            f"Ladder spent: {c.task_reassignments} of "
+            f"{policy.task_reassignment_limit} reassignment(s), "
+            f"{c.model_escalations} of {policy.model_escalation_limit} "
+            f"escalation(s), {c.pm_assists} of {policy.pm_assist_limit} PM "
+            f"assist(s).")))
+    rows.append(_snapshot_row(
+        COMPLETION_BLOCKED, "completion claims", c.false_done_streak,
+        policy.completion_refused_limit, "claims",
+        (f"{c.false_done_streak} done-claim(s) refused because open work "
+         f"remained"), ratio))
+    worst_member = max(c.member_fail_counts.values(), default=0)
+    rows.append(_snapshot_row(
+        MEMBER_UNHEALTHY, "member health", worst_member,
+        policy.member_failure_limit, "calls",
+        f"{worst_member} consecutive call failure(s) by one member", ratio))
+    near = [r for r in rows if r is not None]
+
+    # GL04's clamp is the sharpest case in the whole spec: it does not stop the
+    # run, it CHANGES HOW THE RUN BEHAVES (forced serial integration), and nothing
+    # in the PM's prompt said so — a PM planning a wide batch into a clamped run is
+    # planning against a machine it cannot see. It renders whenever it is ENGAGED
+    # (a state, not a countdown) or when the superseded ratio has reached
+    # `governance_proximity * convergence_clamp_ratio` over a full window. The
+    # merge-rate is reported alongside but never triggers on its own: a
+    # "lower is worse" floor does not compose with a fraction-of-threshold rule.
+    clamped = False
+    clamp_reading = ""
+    try:
+        clamped = bool(ledger.get_run_state().get("convergence_clamped"))
+    except Exception:  # noqa: BLE001
+        clamped = False
+    stats = _convergence_window_stats(ledger, policy.convergence_window)
+    if stats is not None:
+        sup, merge_rate, n = stats
+        if clamped or sup >= ratio * policy.convergence_clamp_ratio:
+            clamp_reading = (
+                f"{sup:.0%} of the last {n} resolved PRs were superseded and "
+                f"{merge_rate:.0%} merged (the clamp band is "
+                f"{policy.convergence_clamp_ratio:.0%} superseded).")
+
+    signals: list[dict[str, Any]] = []
+    residual = 0
+    try:
+        from . import attention
+        open_signals = attention.list_open(
+            str(getattr(ledger, "project_id", "") or ""), store=ledger)
+        residual = max(0, len(open_signals) - _detector_state._SIGNAL_CAP)
+        signals = [{"title": str(s.title or ""), "blocking": bool(s.blocking)}
+                   for s in open_signals[:_detector_state._SIGNAL_CAP]]
+    except Exception:  # noqa: BLE001 — a signal-store hiccup reports no signals
+        signals, residual = [], 0
+
+    # The run budget is rendered as a LINE rather than as a `near` row (it is
+    # context, and it is free), but it still has to be able to summon the block on
+    # its own — Item 3's table puts `budget_exhausted`'s first render at iteration
+    # 120 of 200. `max_model_calls=None` has no proximity, so only the iteration
+    # cap can trigger.
+    budget_near = _detector_state.is_near(
+        c.iterations, policy.max_iterations, ratio) or (
+        policy.max_model_calls is not None
+        and _detector_state.is_near(c.model_calls, policy.max_model_calls, ratio))
+
+    if not near and not clamped and not clamp_reading and not signals \
+            and not budget_near:
+        return None
+
+    budget_left = (policy.max_model_calls is None
+                   or c.model_calls < policy.max_model_calls)
+    return {
+        "iteration": c.iterations,
+        "model_calls": c.model_calls,
+        "near": near,
+        "clamped": clamped,
+        "clamp_reading": clamp_reading,
+        "budget": {"iterations": c.iterations,
+                   "max_iterations": policy.max_iterations,
+                   "model_calls": c.model_calls,
+                   "max_model_calls": policy.max_model_calls},
+        "signals": signals,
+        "signals_residual": residual,
+        # Item 4, rule 4: the closing line must name the mechanism that is actually
+        # live. With SPEC-23's budget spent (or the knob at 0) the PM is NOT going
+        # to be consulted, and saying otherwise is worse than the truth.
+        "last_word_available": bool(
+            policy.last_word_limit > 0
+            and c.last_words < policy.last_word_limit
+            and c.iterations < policy.max_iterations
+            and budget_left),
+    }
+
+
+def publish_detector_state(ledger: Any, c: LoopCounters,
+                           policy: CodingAutonomyPolicy) -> None:
+    """SPEC-24 Item 1 — publish this iteration's readings for the PM to read.
+
+    Called from BOTH loop chains at the quiescent point immediately after the
+    detector chain, for the reason the tree already states at the concurrent
+    loop's own detector block: *a hook in only one chain is dead code exactly
+    where it is needed* — Spec 13 lifts the foundation clamp and real fanned-out
+    runs go concurrent.
+
+    Best-effort in every direction: a ledger failure inside leaves the run
+    completely unaffected (the previous snapshot survives, and the iteration it
+    states makes the staleness visible). Publishes ``None`` — i.e. clears the key —
+    whenever nothing is near a threshold, which is what keeps a healthy run's PM
+    prompt byte-identical to today's.
+    """
+    try:
+        _detector_state.write(ledger, _detector_snapshot(ledger, c, policy))
+    except Exception:  # noqa: BLE001 — telemetry must never break the run loop
+        pass
+
+
 def _maybe_raise_member_health(
     ledger: Any, member_id: str, role: str, route: str,
     failure: Any, attempts: int,
@@ -2820,6 +3092,13 @@ def _run_sequential_loop(
                 return wedge_stop
             continue
 
+        # SPEC-24: the quiescent point — every detector above has just computed its
+        # reading against its threshold, so this is where the snapshot the PM's
+        # next prompt renders is published. Writes only on change (a quiet run,
+        # whose snapshot is `None` iteration after iteration, writes nothing) and
+        # never raises.
+        publish_detector_state(ledger, c, policy)
+
         # Checkpoint AFTER making progress on a unit; resume continues cleanly.
         if _checkpoint_due(policy, c, milestone):
             c.since_checkpoint = 0
@@ -3273,6 +3552,12 @@ def _run_concurrent_loop(
                     if wedge_stop is not None:
                         return wedge_stop
                     continue
+                # SPEC-24: publish at the IDENTICAL position in this chain too.
+                # A publisher in one chain only is dead code exactly where it
+                # matters — this is the loop a wide, fanned-out run lives on once
+                # Spec 13 lifts the foundation clamp, i.e. the runs whose PM most
+                # needs to see the countdown.
+                publish_detector_state(ledger, c, policy)
                 if _checkpoint_due(policy, c, milestone):
                     c.since_checkpoint = 0
                     return LoopResult(CHECKPOINT, c)

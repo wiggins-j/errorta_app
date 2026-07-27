@@ -232,7 +232,8 @@ result instead of looping to budget), `hot_file_threshold` (2) /
 `hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
 F159 hot-file serializer, `revise_chain_limit` (3) / `revise_livelock_limit` (5,
 Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below),
-`last_word_limit` (2, Spec 23 — see below).
+`last_word_limit` (2, Spec 23 — see below), `governance_proximity` (0.6, Spec 24
+— see below).
 
 **Spec 16 — revise chains are bounded.** A revise chain that keeps getting the
 **same** finding class is non-progressive churn. After `revise_chain_limit` (3)
@@ -271,6 +272,41 @@ Hard stops are never intervened on: `budget_exhausted`, `cancelled`,
 turn itself is excluded from detector accounting so an intervention can never
 trigger another. Worst case: 2 extra iterations and 2 extra model calls.
 `last_word_limit=0` disables the whole mechanism.
+
+**Spec 24 — `governance_proximity`, and what the GOVERNANCE STATE block is.** You
+cannot course-correct against a threshold you cannot observe. The detectors above
+compute between turns and terminate; nothing in the PM's prompt used to say that
+one of them was six iterations into an eight-iteration window. Each iteration the
+loop now publishes a compact snapshot of every detector's current reading against
+its live threshold into `run_state.detector_state`, and the PM prompt renders the
+ones that are close as a **GOVERNANCE STATE** block.
+
+Four properties define it, and each is locked by a test:
+
+* **It is a reading, not an instruction.** Every line is a noun phrase and a
+  number. It never carries a remedy — "re-plan", "split the task", "consider
+  finishing" are the standing planning instructions' job.
+* **A window is stated as a window, never as a deadline.** *"unchanged for 5
+  iterations; the window is 8"*, never *"3 iterations before the run is killed"*.
+  The block also carries an explicit sentence that nothing in it is a reason to
+  declare the project done — a model told it is about to be punished for not
+  finishing has an obvious cheap escape, and that is the one failure mode this
+  wording exists to prevent.
+* **It is absent when it has nothing to say.** No reading near its window, no
+  convergence clamp engaged, and no open attention signals ⇒ no key, no segment,
+  and a prompt byte-identical to a run without the feature.
+* **It is bounded**, and it is PM-only: a dev turn cannot act on `plan_streak`.
+
+`governance_proximity` (0.6) is how close is close: a reading renders once it
+reaches `min(threshold - 1, max(1, ceil(0.6 × threshold)))` — so a gate stall
+(window 8) first appears at 5, planning churn (6) at 4, PM idleness (2) at 1, and
+the run budget (200) at iteration 120. The `threshold - 1` clamp is what gives a
+small window a warning band at all. Raise the ratio for a quieter prompt, lower it
+for an earlier one, and set it to **`0.0`** to disable the whole block and restore
+today's prompt bytes exactly. Reading is not negotiation: there is no turn shape
+by which the PM can raise a limit, reset a window, or suppress a reading — the one
+override channel is Spec 23's bounded last-word turn, which renders this same
+block focused on the detector that tripped.
 
 **Spec 11 — `dev_repo_read`.** When `true` (opt-in; default `false`) a DEV turn can READ its task
 worktree in-turn: the `claude_cli` vendor runs with cwd set to the worktree and a
@@ -552,9 +588,10 @@ and FastAPI routers. Update the prose and this contract together.
 > **Spec 22-28 batch, prep PR (P0.1).** Five more `autonomy_defaults` keys below
 > are landed ahead of their features and have **no consumers yet** — setting them
 > changes nothing until the matching spec merges:
-> `governance_proximity` (Spec 24), `blocked_turn_limit` (Spec 25),
-> `capability_overrides` (Spec 26), `narrow_limit` (Spec 27).
-> (`last_word_limit` is now **live** — see "Spec 23" below.) Same reason as
+> `blocked_turn_limit` (Spec 25), `capability_overrides` (Spec 26),
+> `narrow_limit` (Spec 27).
+> (`last_word_limit` is now **live** — see "Spec 23" below; and
+> `governance_proximity` is now **live** — see "Spec 24" below.) Same reason as
 > above: five branches build in parallel without racing `CodingAutonomyPolicy`.
 > Each knob's **disable value** — `0` for the ints, `0.0` for
 > `governance_proximity`, `{}` for `capability_overrides` — is required to

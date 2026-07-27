@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 from errorta_council.coding import capabilities
+from errorta_council.coding import detector_state as _detector_state
 from errorta_council.coding.gate_state import gate_available, latest_gate_text
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
@@ -68,22 +69,24 @@ from errorta_council.coding.turn_controller import tool_catalog_text
 #     gate_output -> governance_state -> tool_guidance -> standing rules
 #
 # so SPEC-23 / SPEC-24 / SPEC-25 cannot race each other over where their content
-# goes. `governance_state` has no renderer yet, so the PM reference builder below
-# calls the `_governance_state_for_pm` STUB at the reserved position. When SPEC-24
-# lands, that stub body becomes the real renderer call and the live builder gains
-# its segment at the matching marked site in `_pm_prompt_segments` — a one-line
-# diff on each side, with this golden still byte-locking everything else.
+# goes. SPEC-24 has now LANDED, so `_governance_state_for_pm` below calls its real
+# renderer at the reserved position — exactly the P0.5 seam pattern, and the
+# reason this byte-lock survived the insertion unmodified in shape: no fixture
+# here publishes a `detector_state` snapshot, so the renderer returns "" and the
+# assertion is unchanged.
 # --------------------------------------------------------------------------- #
 
 
 def _governance_state_for_pm(store: LedgerStore) -> str:
-    """SPEC-24 seam (reserved by Spec 22-28 P0.4).
+    """SPEC-24's `governance_state` renderer, called at the reserved position.
 
-    Returns "" until SPEC-24 lands its `governance_state` renderer; then this body
-    becomes that renderer call. "" is not a placeholder convenience — it is the
-    contract: a run with nothing near a threshold must render NO segment at all,
-    so today's prompt bytes survive SPEC-24 unchanged."""
-    return ""
+    "" is not a placeholder convenience — it is the contract: a run with nothing
+    near a threshold must render NO segment at all, so today's prompt bytes
+    survive SPEC-24 unchanged. Every fixture in this file publishes no snapshot,
+    so this returns "" for all of them; a fixture that DID publish one would see
+    the same bytes on both sides, which is what makes this a real lock rather than
+    a tautology."""
+    return _detector_state.prompt_text(store)
 
 
 def _project(pid: str, *, north: str = "build a game",
@@ -460,7 +463,10 @@ def test_prompt_tail_order_is_the_reserved_contract(tmp_errorta_home: Path) -> N
 
     assert PROMPT_TAIL_SEGMENT_ORDER == (
         "gate_output", "governance_state", "tool_guidance", "role_instructions")
-    # `governance_state` is reserved, not rendered: nothing emits it yet.
+    # SPEC-24 has landed, and this fixture publishes no `detector_state` snapshot —
+    # so the ABSENCE contract applies and no `governance_state` segment is emitted
+    # at all (not an empty one). That is the byte-identity guarantee, asserted here
+    # as a structural property rather than inferred from the golden.
     _project("tail0")
     segs = _pm_prompt_segments(LedgerStore("tail0"), pin="", done_gate="")
     assert [s.class_ for s in segs][-2:] == ["tool_guidance", "role_instructions"]
