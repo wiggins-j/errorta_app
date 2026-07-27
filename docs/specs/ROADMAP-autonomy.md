@@ -147,6 +147,24 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
 ## How we will know it worked
 
 1. A run ends `definition_of_done` with a playable artifact (SPEC-28 asserts it).
+   **(SPEC-28 — landed, and this criterion is now executable.** A buildless-web
+   fixture runs through the real `CodingRunner` → `build_run_turn` →
+   `run_coding_loop` — real git, real branches, real PRs, real merge gate, a real
+   `python -m http.server` child — to `definition_of_done`, with GL01's `web:probe`
+   firing from a loop-driven run for the first time and bound to the delivered
+   head. Criterion 2 is executable in its "no heuristic stop, no intervention was
+   even requested" form; criterion 4 in part (the run records the advisory and
+   seats/unseats accordingly). Criteria 3 and 5 remain prose here. Determinism:
+   the model is the only seam scripted, keyed on *(role, ledger state)*.
+   **What it is *not*:** Tier 1 seams the browser, so it proves the probe arm is
+   *reached* and *decides*, not that pixels rendered — Tier 1b (skipif-gated, real
+   Chromium) is the tier that asserts pixels, and Tier 2 (`-m live`, never gating)
+   is the only tier that says anything about a real team. **And it found one:** the
+   canonical run pins `max_parallel_workers=1` because GL05's strict file-ownership
+   partition cannot dispatch a `revise:` task whose reviewer finding cites a path —
+   the PR it supersedes still owns that path until the revise merges. Pinned by
+   `test_concurrent_fanout_wedges_a_path_citing_revise`; the fix is the top
+   follow-up out of this spec.)
 2. No run ends on a heuristic stop without a recorded PM intervention that was
    given a real chance to continue. **(SPEC-23 — landed.** Every heuristic stop
    now routes through `autonomy._intervene` at all four loop hook sites, and each
