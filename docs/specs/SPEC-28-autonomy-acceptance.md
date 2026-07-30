@@ -5,7 +5,7 @@ only item that can prove the roadmap worked"* — and the roadmap's flat admissi
 *"no run has ever completed."*
 **Target version:** v0.1 (test suite + `python/pyproject.toml`; **no engine
 change**)
-**Status:** proposed
+**Status:** implemented
 **Owner:** wiggins-j
 
 ---

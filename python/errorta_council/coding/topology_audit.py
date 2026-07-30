@@ -15,11 +15,20 @@ and surfaces an advisory for a role that fails — reusing GL03's grant-or-delet
 framing (``capabilities.audit_grant_or_delete``, *composed* not duplicated): grant
 the missing signal or collapse the role.
 
-It is **advisory, not a hard blocker** on run start (the task's ruling over the
-spec's stricter "refuse at run-setup"): a seated role that fails the principle is
-surfaced by the runner as a decision + a non-blocking attention signal, never a
-refused run. The PM+DEV baseline — single-agent-plus-coordination — always passes;
-that is the very topology the RQ5 principle defends.
+This module itself is still **advisory** — it scores and phrases, it does not act.
+What CHANGED (SPEC-26) is what happens to its verdict. It used to be the whole
+story: the runner wrote a decision, raised a non-blocking Alert, and ran the
+un-capable role anyway, so the same advisory fired on every run and never
+resolved. SPEC-26 layers ``capabilities.role_closure`` on top of the very same
+``audit_grant_or_delete`` text this module composes, classifies each violation as
+``capable``/``deferred``/``unclosable``, and gives it a consequence at seat time:
+the role is **UNSEATED** for the run (not refused — a refusal would refuse the
+product's own shipped defaults on every new project), unless
+``policy.capability_overrides`` names it. A ``deferred`` role is re-evaluated after
+every merge and re-seated — and this module's Alert dismissed — when its capability
+actually arrives. The PM+DEV baseline — single-agent-plus-coordination — always
+passes; that is the very topology the RQ5 principle defends, and SPEC-26 must never
+make a PM+DEV run ask the operator anything.
 
 Pure and read-only: it consumes a manifest dict + a seated-role set and returns
 verdicts / messages. The runner owns the ledger writes and the attention signal.

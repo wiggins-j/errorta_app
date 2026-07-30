@@ -391,7 +391,7 @@ in place.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `status` | Sidecar health + the bound project's run state (`state`, last `stop_reason`, counters). From an **unbound** directory it instead lists active projects and how to target one (see below). | |
+| `status` | Sidecar health, the sidecar **log path**, and the bound project's run state (`state`, last `stop_reason`, counters). From an **unbound** directory it instead lists active projects and how to target one (see below). | |
 | `log` | Team Log narrative, colorized by role. | `--role`, `--member`, `--grep`, `--watch` |
 | `decisions` | Decision event stream (`--kind` supports globs, e.g. `pr_*`). | `--kind`, `--watch` |
 | `turns` | Per-turn transcript (role / route / outcome / tokens). | `--limit`, `--watch` |
@@ -560,6 +560,14 @@ different one. Reach for the right one instead of scrolling everything:
   prompt). This is the deepest observability pull.
 - **`board`** / **`tasks`** — the backlog. `board` shows todo/doing/blocked/done
   columns; `tasks` is a compact one-line-per-task table.
+  A task in **`blocked`** may be there because the worker *said so*: since Spec 25
+  every role can answer "I cannot proceed, and here is why" instead of guessing,
+  going silent, or inventing a verdict. Read those as **questions, not errors** —
+  the run is telling you what it cannot do. The reason is the agent's own words;
+  `decisions --kind blocked` shows them, and `decisions --kind capability_ask`
+  shows the typed "I need X" asks that ride along with them. The answer is an
+  ordinary re-plan (re-scope, register a test command so a gate exists, split, or
+  drop) — a capability is never granted from inside a turn.
 - **`tokens`** — the usage rollup by role / route / member, with an honest
   measured-vs-estimated meter so you can trust the numbers.
 - **`prs`** / **`pr`** — pull-request state and a single PR's diff.
@@ -567,6 +575,15 @@ different one. Reach for the right one instead of scrolling everything:
   launch or test session (distinct from the team log).
 - **`status`** — the one-glance summary: sidecar health, run `state`, last
   `stop_reason`, and any blockers.
+
+> **Debugging "why did it stop?" while the run is still in flight (Spec 24).**
+> The project's `run_state.json` now carries a `detector_state` key: every
+> detector reading that is close to its threshold, with its current value, its
+> live limit, the run budget, and any open attention signals — republished at each
+> iteration's quiescent point and cleared when nothing is near. It is the same
+> snapshot the PM sees rendered as its GOVERNANCE STATE prompt block, so an
+> operator gets the **pre-stop** telemetry rather than only the post-mortem
+> `counters` written after the loop returns. `status` does not render it yet.
 
 ### Steering a run mid-flight
 
@@ -720,6 +737,41 @@ the PM re-plan didn't recover; the run stops instead of looping to the iteration
 cap). The unknown-reason default is also a failure (fail-closed), so a new engine
 stop reason the CLI hasn't learned still gates CI correctly.
 
+**A second summary line (Spec 23).** Most failure-class reasons are *heuristics* —
+a detector's opinion that the run is stuck. Before one lands, the engine gives the
+PM one bounded turn to propose a different approach or confirm the halt, so a
+terminal summary may carry an extra line saying what the PM answered. No stop
+reason and no exit code changes: a run that was asked and stopped anyway exits
+exactly as it did before. The two wordings mean different things and the
+distinction matters when you are reading a failed pipeline:
+
+* *"the PM was asked about `X` and confirmed the halt: …"* — the team agrees the
+  run should stop, and its reasoning is in the line.
+* *"the PM was asked about `X` and could not be read — the halt was NOT
+  confirmed"* — the intervention turn failed to parse. Nobody agreed to anything;
+  the run stopped on the detector's evidence alone, and this is usually worth
+  investigating (`errorta log` shows the rejected turn).
+
+A run with `last_word_limit: 0`, or one that never tripped a heuristic stop,
+prints exactly what it printed before.
+
+**Interventions on the record (Spec 27).** Asking the PM is the *last* rung, not
+the first. Before a heuristic stop lands, the engine tries the cheap mechanical
+answers to it — clamp fan-out to serial, force integration so approved work drains
+before more is opened, clamp planning so the next turn is a worker turn — and only
+then spends a turn asking. So a stopped run's `errorta log` may now carry
+`narrow_*` decisions naming the interventions that were tried, in the order they
+were tried, before it stopped.
+
+**The stop reason and the exit code are unchanged.** A run that exhausts its
+ladder stops with exactly the reason and exactly the code it stopped with before;
+the decisions are additive evidence, not a new outcome. The narrowing rungs make
+no model calls of their own and can extend a run by at most
+`narrow_limit x narrow_drain_iters` (15 by default) iterations, drawn from the
+run's existing `max_iterations` / `max_model_calls` budget — both of which are
+still checked before any detector runs. Set `narrow_limit: 0` to turn the whole
+ladder off.
+
 ### One sidecar, one owner
 
 The CLI and the desktop app share the **same store on disk**, but exactly **one
@@ -761,6 +813,24 @@ prints a compatibility warning (behavior may differ) — update so both sides ma
 `PATH`. For the single binary, `mv ./errorta /usr/local/bin/errorta`. For a
 checkout, symlink the dev launcher:
 `ln -sf "$PWD/scripts/dev-errorta" /usr/local/bin/errorta`.
+
+**A command fails with `sidecar returned 500: … (error id: e-…)`.** That id is
+the whole point: the sidecar logged the full traceback under it. Grep the log —
+`errorta status` prints its path, and it is `${ERRORTA_HOME}/logs/sidecar.log`
+(`~/.errorta/logs/sidecar.log` by default):
+
+```bash
+grep -A 40 e-0123456789ab ~/.errorta/logs/sidecar.log
+```
+
+The log is the merged stdout+stderr of the CLI-spawned sidecar plus its
+structured, **redacted** log lines. It is capped at 8 MB with one previous
+generation kept as `sidecar.log.1`, and is rotated when a new sidecar is
+spawned. A `500` from an older sidecar carries no id; the error string is then
+unchanged from before.
+
+**The sidecar exited during startup.** The message names the log file. The
+child's traceback is at the end of it: `tail -50 ~/.errorta/logs/sidecar.log`.
 
 **`run` says setup is required (exit code 12).** A fresh project must confirm the
 readiness gate first: `errorta setup --confirm --yes`, then `errorta run --yes`.

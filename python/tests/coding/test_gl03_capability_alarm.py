@@ -31,18 +31,26 @@ _NOT_ALLOWED = TurnErrorCode.tool_not_allowed.value
 # Manifest builders (RoleCapability constructed directly — the detector is pure).
 # --------------------------------------------------------------------------- #
 
-def _cap(role, *, tools=(), repo_read=False, can_execute=False, gate=False):
+def _cap(role, *, tools=(), repo_read=False, can_execute=False, gate=False,
+         dispatch=None):
+    # SPEC-26: `dispatch` (a UNIT-scoped test command exists) is what the audit's
+    # TESTER arm now reads; `gate` (an acceptance gate exists) is what the
+    # confabulation detector still reads. They default together so every existing
+    # case here keeps its meaning; the tests that separate them say so.
     return capabilities.RoleCapability(
         role=role, tools=tools, repo_read=repo_read, can_execute=can_execute,
-        gate_available=gate, summary="")
+        gate_available=gate, summary="",
+        can_dispatch=gate if dispatch is None else dispatch)
 
 
-def _manifest(*, dev_read=False, reviewer_read=False, gate=False):
+def _manifest(*, dev_read=False, reviewer_read=False, gate=False, dispatch=None):
     return {
-        PM: _cap(PM, gate=gate),
-        DEV: _cap(DEV, tools=("code_write",), repo_read=dev_read, gate=gate),
-        REVIEWER: _cap(REVIEWER, repo_read=reviewer_read, gate=gate),
-        TESTER: _cap(TESTER, gate=gate),
+        PM: _cap(PM, gate=gate, dispatch=dispatch),
+        DEV: _cap(DEV, tools=("code_write",), repo_read=dev_read, gate=gate,
+                  dispatch=dispatch),
+        REVIEWER: _cap(REVIEWER, repo_read=reviewer_read, gate=gate,
+                       dispatch=dispatch),
+        TESTER: _cap(TESTER, gate=gate, dispatch=dispatch),
     }
 
 

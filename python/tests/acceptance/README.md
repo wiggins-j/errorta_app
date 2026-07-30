@@ -10,6 +10,18 @@ do not replace the full pytest/vitest matrix; they prove representative
 integrated paths a real user walks and leave specialized invariants at their
 native layer when that produces a stronger test.
 
+## The Coding Council's end-to-end journey lives elsewhere
+
+Spec 28's autonomy acceptance fixture — one autonomous run driven to
+`definition_of_done` on a buildless-web target, with the friction (a rejected
+review, a revise, a duplicate task, a context request) that makes the convergence
+detectors reachable — is **`python/tests/coding/test_spec28_autonomy_acceptance.py`**,
+not this directory. It is sited there deliberately: `tests/coding/conftest.py`
+pins `$ERRORTA_HOME`/`$HOME` under `tmp_path` autouse, which is what keeps a run
+that builds real git workspaces out of the developer's real `~/.errorta`. The live
+(non-gating) tier is `test_spec28_live_smoke.py`, driven by
+`scripts/live-acceptance.sh`. Neither claims a `TC-NN.M` id.
+
 ## Conventions
 
 - One file per suite: `test_tsNN_<slug>.py`.

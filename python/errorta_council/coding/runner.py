@@ -31,6 +31,7 @@ from collections import Counter
 from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
+from . import detector_state as _detector_state
 from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
@@ -39,11 +40,19 @@ from .autonomy import (
     LoopResult,
     TurnOutcome,
     run_coding_loop,
+    window_counters_to_dict,
 )
 from .completion import pending_completion_work, summarize_open_items
 from .ledger import LedgerStore, Task, format_focus_lines
 from .orientation import build_orientation_packet
-from .schemas import TurnErrorCode, TurnParseError, parse_coding_turn
+from .schemas import (
+    BlockedIntent,
+    TurnErrorCode,
+    TurnParseError,
+    blocked_example,
+    minimal_valid_example,
+    parse_coding_turn,
+)
 from .skills import primary_skill, record_turn_skill
 from .testing import (
     TestRunResult,
@@ -61,6 +70,7 @@ from .topology import (
     GovernanceMaterialize,
     GovernancePlan,
     GovernanceReview,
+    LastWord,
     Merge,
     Plan,
     PMAssist,
@@ -147,6 +157,45 @@ _composition_pending = threading.local()
 _COMPOSITION_CLASSES = (
     "role_instructions", "work_request", "project_context", "repo_snapshot",
     "prior_outputs", "pr_diff", "tool_guidance", "transcript",
+    # Spec 12 added `gate_output` and Spec 22-28 P0.4 reserves `governance_state`;
+    # both were already (or are about to be) used as `PromptSegment.class_` values.
+    # This tuple is DOCUMENTATION — nothing validates against it, and
+    # `content_kind_for_class` falls through to "prose" for an unlisted class — so
+    # naming them here is a tidy-up, not a behaviour change. It lives in the prep PR
+    # so two feature branches don't both edit this line.
+    "gate_output", "governance_state",
+)
+
+# --- Spec 22-28 batch (prep PR P0.4) — the prompt segment ORDER contract ----- #
+#
+# Three specs add or edit prompt content in these same builders (SPEC-24's
+# `governance_state` segment, SPEC-25's `_corrective_turn_prompt`, SPEC-23's
+# `_last_word_prompt`). Fixing the ORDER here, before any of them lands, is what
+# keeps their diffs from racing: each spec inserts at an already-reserved site
+# rather than choosing (and defending) a position of its own.
+#
+# The tail of every member prompt runs:
+#
+#     gate_output  ->  governance_state  ->  tool_guidance  ->  standing rules
+#
+# Read as: OBSERVED WORLD first (what the acceptance gate reported, then how close
+# the run is to its own limits), then GUIDANCE (what this role may actually do),
+# then the standing role instructions + envelope schema. The instructions stay
+# LAST so they are the most recent thing the model reads.
+#
+# `gate_output` is already placed in the dev / reviewer / tester builders (Spec 12)
+# and `tool_guidance` in all four (Spec 15 / Spec 17). `governance_state` does not
+# exist yet: its insertion point is reserved by comment at the exact site in
+# `_pm_prompt_segments`, and `tests/coding/test_prompt_segments_golden.py`'s
+# reference builder calls a stub at the same position, so SPEC-24 lands as a
+# one-line diff on each side and the goldens stay byte-identical until it does.
+#
+# NOTE for SPEC-24: this order supersedes that spec's own "Item 5 — Where the
+# segment goes", which places `governance_state` AFTER the capability
+# `tool_guidance` segment. The batch plan's order is the de-conflict authority and
+# both readings keep the standing instructions last.
+PROMPT_TAIL_SEGMENT_ORDER = (
+    "gate_output", "governance_state", "tool_guidance", "role_instructions",
 )
 
 
@@ -1243,16 +1292,79 @@ _RETRYABLE_TURN_ERRORS = {
 }
 
 
+# --- Spec 25 — the blocked turn ---------------------------------------------- #
+#
+# How much of the agent's own words ride on the ledger row / the TurnOutcome
+# reason. Bounded for the same reason `_CONTEXT_QUESTION_CAP` is: the reason
+# string is rendered into the PM's backlog view, and an essay there crowds out
+# everything else the PM needs to read.
+_BLOCKED_DETAIL_CAP = 400
+
+
+def _blocked_reason_text(intent: Any) -> str:
+    """Render a ``BlockedIntent`` as the one-line reason recorded on the task.
+
+    The agent's own words, verbatim (bounded) — never a paraphrase. A block is a
+    QUESTION addressed to the PM, and the PM can only answer the question that
+    was actually asked."""
+    reason = str(getattr(intent, "reason", "") or "other")
+    detail = " ".join(str(getattr(intent, "detail", "") or "").split())
+    text = f"{reason}: {detail[:_BLOCKED_DETAIL_CAP]}"
+    needs = getattr(intent, "needs", None)
+    if needs is not None:
+        what = " ".join(str(getattr(needs, "what", "") or "").split())
+        text += (f" [needs {getattr(needs, 'capability', 'other')}"
+                 + (f": {what[:_BLOCKED_DETAIL_CAP]}" if what else "") + "]")
+    return text
+
+
+def _record_capability_ask(store: LedgerStore, intent: Any, *, role: str,
+                           task: Task | None, context: str) -> None:
+    """Spec 25 (Item 2): a `needs` block on a `blocked` turn is recorded as its
+    own `capability_ask` decision, beside the `blocked` one.
+
+    Two records, not one, because they answer different questions: the block
+    says *this task cannot move*, the ask says *this ROLE lacks this
+    capability* — the second outlives the task and is the input a human (or
+    SPEC-26's role-closure pass) reads. Nothing here grants anything: enforcement
+    stays in `allowed_tools_for_role` / `execute_dev_turn`, exactly as the
+    spec's non-goal requires. Best-effort — a telemetry write must never fail a
+    turn that was otherwise legal."""
+    needs = getattr(intent, "needs", None)
+    if needs is None:
+        return
+    try:
+        store.record_decision(
+            title=f"capability ask ({role}): {getattr(needs, 'capability', 'other')}",
+            context=context, choice="capability_ask",
+            rationale=(f"{str(getattr(needs, 'what', '') or '')[:_BLOCKED_DETAIL_CAP]}"
+                       + (f" — {str(getattr(needs, 'why', '') or '')[:_BLOCKED_DETAIL_CAP]}"
+                          if str(getattr(needs, "why", "") or "").strip() else "")),
+            related_task_ids=[task.task_id] if task is not None else [],
+            extra={"role": role,
+                   "capability": str(getattr(needs, "capability", "other")),
+                   "blocked_reason": str(getattr(intent, "reason", "other"))},
+        )
+    except Exception:  # noqa: BLE001 — a recorded ask is telemetry, not control
+        pass
+
+
 def _governance_corrective_prompt(prompt: str, code: str, detail: str, *,
                                   retry: int, max_retries: int) -> str:
     # F100 bugfix (2026-06-22): mirror _corrective_turn_prompt for governance
     # turns. A rejected governance turn gets a bounded re-prompt that restates
     # the exact required schema + the validation detail, so a normalizable-but-
     # imperfect reviewer/PM can self-correct instead of dead-ending the run.
+    # Spec 25 (Item 4): the same treatment as `_corrective_turn_prompt` — this
+    # function already hand-rolls half of it (it restates the verdict schema
+    # inline), which is evidence the idea is right AND evidence that
+    # hand-rolling it per call site drifts. The validator dump is humanised
+    # here too; the raw one still lands on the recorded decision.
     return (
         f"{prompt}\n\n"
         "Your previous governance_turn.v1 response was rejected "
-        f"({retry}/{max_retries} corrective retry): {code}: {detail}\n"
+        f"({retry}/{max_retries} corrective retry): "
+        f"{_humanize_parse_detail(code, detail)}\n"
         "Reply with ONLY a valid governance_turn.v1 JSON envelope for the same "
         "role. For an artifact review, \"verdict\" MUST be one of "
         '"approved" | "request_changes" | "blocked"; each finding MUST be an '
@@ -1262,13 +1374,86 @@ def _governance_corrective_prompt(prompt: str, code: str, detail: str, *,
     )
 
 
+_PYDANTIC_MSG_RE = re.compile(r"'msg': '((?:\\.|[^'\\])*)'")
+_PYDANTIC_LOC_RE = re.compile(r"'loc': \(([^)]*)\)")
+_CODE_PLAIN_REASON = {
+    TurnErrorCode.turn_non_json.value:
+        "your response contained no JSON envelope",
+    TurnErrorCode.turn_tool_markup_only.value:
+        "your response was tool-call markup instead of a JSON envelope",
+    TurnErrorCode.turn_schema_mismatch.value:
+        "your JSON envelope did not match the turn schema",
+    TurnErrorCode.role_mismatch.value:
+        "the envelope named a different role than the one you are seated in",
+    TurnErrorCode.task_mismatch.value:
+        "the envelope named a different task_id than the one assigned to you",
+}
+
+
+def _humanize_parse_detail(code: str, detail: str) -> str:
+    """Spec 25 (Item 4): turn a validator dump into a sentence a MODEL can act on.
+
+    ``parse_coding_turn`` returns ``f"invalid {role} intent: {exc.errors()[:3]}"``
+    — a repr of Pydantic's error dicts, complete with ``'loc'``, ``'input'``, and
+    an ``errors.pydantic.dev`` URL — and that string used to be spliced verbatim
+    into the retry prompt. It names what is FORBIDDEN and never what is ACCEPTED,
+    and with one corrective retry for the PM there is exactly one attempt to
+    guess the difference. Extract the human-readable ``msg`` (paired with its
+    field path, which is what makes "Field required" actionable) and drop
+    everything else; the raw dump is still recorded on the
+    ``{role} turn corrective retry`` decision, where an operator — who CAN read
+    it — will find it."""
+    msgs: list[str] = []
+    locs = [(m.start(), m.group(1)) for m in _PYDANTIC_LOC_RE.finditer(detail or "")]
+    for match in _PYDANTIC_MSG_RE.finditer(detail or ""):
+        text = match.group(1).replace("\\'", "'").replace('\\"', '"')
+        text = text.replace("\\n", " ").strip()
+        if text.startswith("Value error, "):
+            text = text[len("Value error, "):]
+        prior = [raw for pos, raw in locs if pos < match.start()]
+        field = ""
+        if prior:
+            parts = [p.strip().strip("'\"") for p in prior[-1].split(",")
+                     if p.strip()]
+            for part in parts:
+                field += f"[{part}]" if part.isdigit() else (
+                    f".{part}" if field else part)
+        msgs.append(f"{field}: {text}" if field else text)
+        if len(msgs) >= 3:
+            break
+    plain = _CODE_PLAIN_REASON.get(code, "your response was not a valid turn")
+    if not msgs:
+        return plain
+    return f"{plain} — " + "; ".join(" ".join(m.split()) for m in msgs)
+
+
 def _corrective_turn_prompt(prompt: str, parsed: TurnParseError, *,
-                            retry: int, max_retries: int) -> str:
+                            retry: int, max_retries: int,
+                            role: str = "", task_id: str | None = None) -> str:
+    """Spec 25 (Item 4): a rejection must TEACH THE ACCEPTED SHAPE.
+
+    Order, deliberately: (1) what was wrong, in plain language; (2) the minimal
+    valid envelope for the seat being re-prompted; (3) the escape shape, with the
+    standing promise that it is always accepted. (3) is not decoration — the turn
+    being corrected may be one the schema genuinely cannot express, and without a
+    legal way to SAY that, the only remaining moves are to guess again or to go
+    silent, both of which are scored as failure."""
+    example = minimal_valid_example(role, task_id=task_id) if role else ""
+    escape = blocked_example(role, task_id=task_id) if role else ""
+    teach = ""
+    if example:
+        teach = (
+            f"A minimal VALID turn for your role looks exactly like this:\n{example}\n"
+            "If you genuinely cannot proceed — a capability you do not have, a "
+            "contradiction, or something this schema cannot express — this shape "
+            f"is ALWAYS accepted, from any role, and is never counted against you:\n"
+            f"{escape}\n")
     return (
         f"{prompt}\n\n"
         "Your previous coding_turn.v1 response was rejected "
         f"({retry}/{max_retries} corrective retry): "
-        f"{parsed.code.value}: {parsed.detail}\n"
+        f"{_humanize_parse_detail(parsed.code.value, parsed.detail)}\n"
+        f"{teach}"
         # F127: weaker CLI-backed models slip into agent mode and emit tool-call
         # markup instead of the envelope — forbid it explicitly and bluntly.
         "Reply with ONLY a single valid coding_turn.v1 JSON object for the same "
@@ -1276,7 +1461,7 @@ def _corrective_turn_prompt(prompt: str, parsed: TurnParseError, *,
         "<function_calls>/<invoke>/<parameter> markup or a sub-agent. Output the "
         "JSON object and nothing else. If you are implementing, emit at least one "
         "tool_call for implementation/test_only/refactor work. Drop unmodeled "
-        "fields such as summary. Reviewer findings must be objects, not bare strings."
+        "fields. Reviewer findings must be objects, not bare strings."
     )
 
 
@@ -1501,11 +1686,86 @@ def _revalidate_stale_prs(store: LedgerStore, workspace: Any, *,
             _fail_closed_demote(store, p, branch, task_id, reason=str(exc))
 
 
+def _tester_unseated_by_closure(store: LedgerStore) -> bool:
+    """SPEC-26 (S4) — the module-level read of the tester seat check, for the call
+    sites that have no ``RoleClosure`` in scope. The stale-base and conflict
+    revalidators are plain module functions, so they read the snapshot
+    ``_apply_role_closure`` / ``_reevaluate_role_closure`` publish on
+    ``run_state.role_closure`` instead of the live object.
+
+    Absent (every direct test caller, and every pre-SPEC-26 run state) -> ``False``,
+    which is today's behaviour exactly. Guarded: a run-state hiccup can only relax
+    back to today's behaviour, never invent an unseat."""
+    try:
+        state = store.get_run_state().get("role_closure") or {}
+        return TESTER in (state.get("unseated") or [])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _apply_merge_gate(store: LedgerStore, pr_id: str, *,
+                      tester_seated: bool = True) -> None:
+    """THE merge gate, and the only writer of ``status="mergeable"`` in the tree.
+
+    A PR is mergeable only when reviewer-approved AND tests-green for its head — so
+    a blind reviewer can never land a regression (F087-17).
+
+    If the project has NO registered test commands, there is nothing for a tester to
+    run, so the tests-green gate is vacuously satisfied — review approval alone
+    governs the merge. Without this, a greenfield project (which starts with an empty
+    test-command registry) could never advance a PR past ``tests_passed``, so NOTHING
+    ever merged and the team churned forever in a revise loop. When test commands ARE
+    configured the strict reviewer-AND-tests gate is unchanged.
+
+    SPEC-26 (S4): ``tester_seated=False`` is the same situation reached by a
+    different route — the commands exist but capability closure took the TESTER off
+    the board, so holding the PR for a green tester verdict would hold it forever.
+    Default ``True`` means "nothing was unseated", i.e. today's behaviour exactly.
+    """
+    p = store.get_pr(pr_id)
+    # Spec 12 (S1): only UNIT-scoped commands gate a merge. An acceptance command
+    # (in-loop gate / delivery) never blocks a per-PR merge, else bootstrapping one
+    # would wedge every merge on a partial branch.
+    tests_ok = p is not None and (
+        p.get("tests_passed") is True or not store.get_unit_test_commands()
+        or not tester_seated)
+    # F100 PR-B: in strict governance mode a code PR needs the PM's review too
+    # (reviewer AND PM). In off/light, PM review is not required, so this gate is
+    # exactly today's reviewer-AND-tests behavior.
+    pm_ok = p is not None and (
+        not _strict_governance(store) or p.get("pm_reviewer_approved") is True)
+    # F104 S6 review (M1): a PR `blocked` at the conflict-resolve retry cap is
+    # terminal — its stale reviewer_approved/tests_passed must NOT resurrect it to
+    # mergeable without the conflict being resolved (defense-in-depth on the exact
+    # trust boundary this feature protects).
+    if (p and p.get("reviewer_approved") is True and tests_ok and pm_ok
+            and p.get("status") not in ("merged", "conflict", "abandoned", "blocked")):
+        store.update_pr(pr_id, status="mergeable")
+
+
 def _revalidate_one_pr(store: LedgerStore, workspace: Any, p: dict[str, Any],
                        branch: str, task_id: str) -> None:
     res = workspace.update_branch_from_base(task_id, branch)
     if res.get("updated") and not res.get("changed"):
         # Branch already contained this master -> still validly mergeable.
+        return
+    if res.get("updated") and _tester_unseated_by_closure(store):
+        # SPEC-26 (S4): no seated TESTER, so there is nothing to demote INTO — the
+        # `re-test PR:` task below would sit in the backlog forever, and a
+        # non-terminal task blocks the completion claim (`pending_completion_work`),
+        # so a clean integration would end the run `completion_blocked`. The
+        # tests-green gate is already vacuously satisfied for an unseated tester
+        # (`_set_mergeable_if_ready`), so advance the PR to the new integrated head
+        # and leave it mergeable — the same net state the not-applicable tester turn
+        # produces today, minus the turn nobody can take.
+        store.update_pr(p["pr_id"], head=res.get("head", p["head"]))
+        store.record_decision(
+            title=f"stale-base re-test skipped: {branch}", context=f"pr {p['pr_id']}",
+            choice="stale_base_revalidation",
+            rationale="master advanced after another PR merged; no TESTER is seated "
+                      "this run (SPEC-26), so the tests-green gate is vacuous and the "
+                      "PR stays mergeable against the newly integrated head",
+            related_task_ids=[task_id])
         return
     if res.get("updated"):
         # Clean integration with the new master: keep the (unchanged) code
@@ -1549,8 +1809,13 @@ def _fail_closed_demote(store: LedgerStore, p: dict[str, Any], branch: str,
             choice="stale_base_revalidation",
             rationale=f"could not revalidate against new master: {reason}",
             related_task_ids=[task_id])
-        store.add_task(title=f"re-test PR: {branch}", role=TESTER,
-                       pr_id=p["pr_id"], depends_on=[task_id])
+        # SPEC-26 (S4): the demotion stands (this is the fail-closed path — the PR
+        # must NOT stay mergeable against a moved master it could not be checked
+        # against), but a `re-test PR:` task for an unseated TESTER is a phantom: it
+        # can never be dispatched and it blocks the completion claim. Skip it.
+        if not _tester_unseated_by_closure(store):
+            store.add_task(title=f"re-test PR: {branch}", role=TESTER,
+                           pr_id=p["pr_id"], depends_on=[task_id])
     except Exception:  # noqa: BLE001
         logging.getLogger("errorta.coding").warning(
             "coding revalidate: failed to demote stale PR %s (%s)",
@@ -1670,8 +1935,18 @@ def _redispatch_conflict_pr(
             rationale="branch updated from master cleanly; re-testing before merge",
             related_task_ids=[task_id],
         )
-        store.add_task(title=f"re-test PR: {branch}", role=TESTER,
-                       pr_id=pr_id, depends_on=[task_id])
+        # SPEC-26 (S4): with no seated TESTER the `re-test PR:` task can never be
+        # dispatched, and a non-terminal task blocks the completion claim
+        # (`pending_completion_work`) — so spawning it would turn a cleanly rebased
+        # PR into a permanently open item. Re-apply the merge gate instead: the
+        # tests-green half is vacuous for an unseated tester, so a still-approved PR
+        # goes straight back to `mergeable` through the ONE writer, with the strict-
+        # governance and terminal-status checks intact.
+        if _tester_unseated_by_closure(store):
+            _apply_merge_gate(store, pr_id, tester_seated=False)
+        else:
+            store.add_task(title=f"re-test PR: {branch}", role=TESTER,
+                           pr_id=pr_id, depends_on=[task_id])
         return True
 
     store.update_pr(pr_id, status="conflict", conflicts=conflict_paths,
@@ -1924,11 +2199,26 @@ def _latest_context_response_text(store: LedgerStore, task_id: str, *,
         # `tool_not_allowed` carry-forward repeats that string in prior_outputs —
         # so an exhausted dev was being pointed straight back at the one channel
         # it is forbidden from, which is how it kept walking the ladder.
+        # Spec 22-28 P0.5 (bug 2): the escape hatch used to read "say so in your
+        # summary" — an action the DEV cannot take. `DeveloperToolPlanIntent` has
+        # no `summary` field and `extra="ignore"`, so the field is silently
+        # dropped, and `_corrective_turn_prompt` separately instructed "Drop
+        # unmodeled fields such as summary". Two correct strings assembling a dead
+        # end: an exhausted dev was told to do the one thing the schema erases.
+        # Spec 25 finishes the repair BY CONSTRUCTION: the exhausted dev is now
+        # pointed at the `blocked` intent — a real, typed, always-accepted shape
+        # that lands on the `task_blocked` transition and is NOT counted as an
+        # unproductive turn — instead of at an empty investigation, which parses
+        # but then scores `no_net_change` and feeds the escalation ladder anyway.
+        # Locked by `test_spec25_expressibility.py` (the text must name the
+        # blocked intent and must never name an unmodeled field).
         + ("You have NO context requests left — do NOT ask again; implement the "
            "task with the evidence above. This OVERRIDES any earlier instruction "
            "in this prompt to emit a context_request intent: that channel is "
-           "closed for this task. If you truly cannot proceed, say so in your "
-           "summary rather than asking again.\n" if remaining <= 0 else
+           "closed for this task. If you truly cannot proceed, say so with the "
+           "blocked intent — it is always accepted, it is not held against you, "
+           "and it hands the problem to the PM with your own words:\n"
+           + blocked_example(DEV, task_id=task_id) + "\n" if remaining <= 0 else
            "Ask again ONLY if the answers above genuinely do not contain what you "
            "need; re-asking a question you already asked is treated as a dead end "
            "and spends the whole budget at once.\n"))
@@ -2183,49 +2473,334 @@ def _detect_tool_confabulation(
             extra={"role": role, "capability": capability, "tool_name": tool_name})
 
 
-def _audit_topology_advisory(
-        store: LedgerStore, member_pairs: list[tuple[str, str]],
-        policy: CodingAutonomyPolicy) -> None:
-    """GL05 (Item 1): score the SEATED council against the role-justification
-    principle at run-setup and surface an ADVISORY (not a hard blocker) for any role
-    that fails it — a TESTER with no executor/gate, an ungrounded REVIEWER: "another
-    ungrounded opinion in the same loop". Records one deduped decision + one
-    non-blocking attention signal per flagged role; grant the missing distinct signal
-    (GL01/GL02) or collapse the role (GL03). PM+DEV-only councils always pass — the
-    single-agent-plus-coordination baseline. Fully guarded: never fails the run."""
-    try:
-        from . import attention, topology_audit
-        manifest = _capabilities.capability_manifest(store, policy)
-        seated = tuple(sorted({role for _mid, role in member_pairs}))
-        advisories = topology_audit.topology_advisories(manifest, seated_roles=seated)
-        if not advisories:
+class RoleClosure:
+    """SPEC-26 — the run-scoped seating consequence of the closure verdicts.
+
+    GL05's topology audit has always been able to SAY that a seated role cannot
+    discharge its duty. It has never been able to DO anything about it, so the same
+    advisory fired on every run and never resolved. This object is the doing half.
+
+    It owns the two roster structures the loop actually reads and keeps them in
+    lockstep — ``member_pairs`` (what ``run_coding_loop`` schedules from) and
+    ``by_role`` (what ``build_run_turn`` resolves a member from). Filtering one and
+    not the other would seat a ghost: a role the scheduler skips but a turn can
+    still resolve a member for, or the reverse.
+
+    Both are held BY REFERENCE and mutated in place, which is what makes mid-run
+    re-seating a one-liner: the sequential and concurrent loops hand the same
+    ``member_pairs`` list object back and forth and re-read it every iteration, and
+    ``build_run_turn`` closes over the same ``by_role`` dict. Nothing in the
+    ``RunTurn`` seam changes.
+
+    The consequence is UNSEAT, never REFUSE. On the shipped defaults a fresh
+    project flags BOTH the TESTER (no unit-scoped command) and the REVIEWER
+    (``reviewer_repo_read`` defaults False), so a binding refusal would refuse the
+    product's own default configuration on every new project. Unseating is free and
+    already correct: ``decide_next``/``plan_next_batch`` skip a role with no seated
+    members and ``_has_open_work`` only counts roles in the seated set."""
+
+    __slots__ = ("store", "policy", "member_pairs", "by_role", "full_pairs",
+                 "full_by_role", "verdicts", "unseated", "indeterminate")
+
+    def __init__(self, store: LedgerStore, policy: Any,
+                 member_pairs: list[tuple[str, str]],
+                 by_role: dict[str, list[dict[str, Any]]]) -> None:
+        self.store = store
+        self.policy = policy
+        self.member_pairs = member_pairs
+        self.by_role = by_role
+        # Pre-closure snapshots: what re-seating restores from. Copies, so a later
+        # unseat can never destroy the roster it would need to re-seat.
+        self.full_pairs: list[tuple[str, str]] = list(member_pairs)
+        self.full_by_role: dict[str, list[dict[str, Any]]] = {
+            role: list(members) for role, members in by_role.items()}
+        self.verdicts: dict[str, _capabilities.ClosureVerdict] = {}
+        self.unseated: dict[str, _capabilities.ClosureVerdict] = {}
+        self.indeterminate = False
+
+    def seated(self, role: str) -> bool:
+        """Is ``role`` present in the run's current seated roster?"""
+        return any(seated_role == role for _, seated_role in self.member_pairs)
+
+    def unseat(self, verdict: "_capabilities.ClosureVerdict") -> None:
+        role = verdict.role
+        if role in self.unseated:
             return
+        self.unseated[role] = verdict
+        self.member_pairs[:] = [(mid, r) for mid, r in self.member_pairs if r != role]
+        self.by_role.pop(role, None)
+
+    def reseat(self, role: str) -> bool:
+        """Put a previously-unseated role back on the board. Takes effect on the
+        NEXT loop iteration (both loops re-read ``member_pairs`` every pass)."""
+        if role not in self.unseated:
+            return False
+        self.unseated.pop(role, None)
+        members = self.full_by_role.get(role)
+        if members:
+            self.by_role[role] = list(members)
+        have = set(self.member_pairs)
+        for pair in self.full_pairs:
+            if pair[1] == role and pair not in have:
+                self.member_pairs.append(pair)
+        return True
+
+
+def _closure_verdicts(store: LedgerStore, member_pairs: list[tuple[str, str]],
+                      policy: Any) -> list[_capabilities.ClosureVerdict]:
+    """The pure evaluation half of SPEC-26. Deliberately NOT guarded — the caller
+    owns the fail-open, because a swallowed exception here would silently seat an
+    un-capable role while claiming the check ran."""
+    manifest = _capabilities.capability_manifest(store, policy)
+    seated = tuple(sorted({role for _mid, role in member_pairs}))
+    overrides = _capabilities.capability_override_roles(policy)
+    return _capabilities.role_closure(
+        manifest, seated_roles=seated, overrides=overrides)
+
+
+def _publish_role_closure(closure: RoleClosure) -> None:
+    """Publish the verdicts on ``run_state.role_closure`` (the reserved key). The
+    operator surfaces and SPEC-24's snapshot row read this; nothing gates on it."""
+    try:
+        closure.store.set_run_state(role_closure={
+            "verdicts": [v.to_dict() for v in closure.verdicts.values()],
+            "seated": sorted({role for _mid, role in closure.member_pairs}),
+            "unseated": sorted(closure.unseated),
+            "indeterminate": closure.indeterminate,
+        })
+    except Exception:  # noqa: BLE001 — publication is a view, never a gate
+        pass
+
+
+# SPEC-26 Item 2, and the ONE place its central premise has to be checked against
+# the code rather than assumed. The spec justifies unseating with: *"Unseating is
+# free and already correct — an unseated role costs zero dispatches and zero model
+# calls, with no new machinery."* That is true for the TESTER once S4 couples the
+# task spawn and the merge gate to `_tester_seated()`. It is NOT true for every role,
+# and the difference is decidable from the code:
+#
+#   DEV       — `decide_next` falls through to `Plan` forever with no producer
+#               (`topology.py`), so an empty-DEV council cannot generate work at all.
+#               The spec names this one itself as the refusal-shaped case.
+#   REVIEWER  — `_set_mergeable_if_ready` requires `reviewer_approved is True`
+#               UNCONDITIONALLY, and it is the ONLY writer of `status="mergeable"`
+#               in the tree. There is no reviewer-less merge path: a `review PR:`
+#               task is spawned on every PR open, and with nobody to take it every PR
+#               sits at `open` forever and the run ends `completion_blocked` with an
+#               empty master. Unseating the reviewer does not cost "zero dispatches";
+#               it removes the only producer of the merge gate's own precondition.
+#
+# So those two roles are SEATED UNDER PROTEST: the verdict is still computed, still
+# recorded, still paged, and carries its remedy — but the consequence is a loud
+# `role_capability_unclosed` decision rather than an unseat, because an unseat here
+# would trade an unread advisory for a wedged run. Making the ungrounded reviewer
+# genuinely unseatable needs a reviewer-less merge path (auto-approve, or a PM-review
+# fallback) — a product-level trust-boundary decision that belongs in its own change,
+# not smuggled in as a side effect of a capability audit. Recorded as the top
+# follow-up out of this spec.
+_UNSEAT_BREAKS_THE_PIPELINE: dict[str, str] = {
+    DEV: ("a council with no producer never advances — decide_next falls through to "
+          "Plan forever"),
+    REVIEWER: ("_set_mergeable_if_ready requires reviewer_approved and is the only "
+               "writer of `mergeable`, so with no seated reviewer every PR sits at "
+               "`open` forever and the run ends completion_blocked"),
+}
+
+
+def _report_role_closure(closure: RoleClosure) -> None:
+    """Record + page the verdicts. Guarded end to end: a ledger hiccup must not
+    fail a run, and must not undo the seating decision already applied either."""
+    try:
+        from . import attention
         already = {
             str(d.get("title") or "")
-            for d in store.list_decisions()
-            if d.get("choice") == "topology_advisory"
+            for d in closure.store.list_decisions()
+            if d.get("choice") in ("topology_advisory", "role_capability_seated",
+                                   "role_capability_unclosed")
         }
-        for msg in advisories:
-            title = f"topology advisory: {msg[:80]}"
-            if title in already:
+        for verdict in closure.verdicts.values():
+            if verdict.outcome == _capabilities.CAPABLE:
                 continue
-            store.record_decision(
-                title=title, context="run-setup role-justification audit (GL05)",
-                choice="topology_advisory", rationale=msg)
+            msg = verdict.reason
+            # The advisory title/choice are kept VERBATIM from GL05 so the existing
+            # dedupe and any operator tooling keep working; what is new is that it
+            # now names a consequence and carries a resolvable context.
+            title = f"topology advisory: {msg[:80]}"
+            if title not in already:
+                closure.store.record_decision(
+                    title=title,
+                    context="run-setup role-capability closure (SPEC-26)",
+                    choice="topology_advisory",
+                    rationale=f"{msg} [outcome={verdict.outcome}; "
+                              f"{'seated by override' if verdict.overridden else 'role not seated'}"
+                              f"] remedy: {verdict.remedy}")
+                already.add(title)
+            if verdict.overridden:
+                seat_title = f"capability override: {verdict.role} seated anyway"
+                if seat_title not in already:
+                    closure.store.record_decision(
+                        title=seat_title,
+                        context="run-setup role-capability closure (SPEC-26)",
+                        choice="role_capability_seated",
+                        rationale=f"capability_overrides names {verdict.role}; the "
+                                  f"{verdict.capability} gap is recorded and unchanged "
+                                  f"({verdict.outcome}) — the override suppresses the "
+                                  "consequence, never the finding")
+                    already.add(seat_title)
+            elif verdict.role in _UNSEAT_BREAKS_THE_PIPELINE:
+                # Seated under protest — see `_UNSEAT_BREAKS_THE_PIPELINE`. The
+                # finding is louder here, not quieter: the operator gets a second,
+                # differently-keyed decision naming why the role kept its seat and
+                # what would actually close the gap.
+                unclosed_title = f"role capability unclosed: {verdict.role}"
+                if unclosed_title not in already:
+                    closure.store.record_decision(
+                        title=unclosed_title,
+                        context="run-setup role-capability closure (SPEC-26)",
+                        choice="role_capability_unclosed",
+                        rationale=f"{msg} — {verdict.role} is seated anyway because "
+                                  f"unseating it would wedge the run "
+                                  f"({_UNSEAT_BREAKS_THE_PIPELINE[verdict.role]}); "
+                                  f"remedy: {verdict.remedy}")
+                    already.add(unclosed_title)
             try:
-                for s in attention.list_open(store.project_id, store=store):
+                for s in attention.list_open(closure.store.project_id,
+                                             store=closure.store):
                     if (s.kind == "alert" and s.source == "topology_audit"
                             and s.title == title):
                         break
                 else:
                     attention.raise_signal(
-                        store.project_id, kind="alert", source="topology_audit",
-                        stage="development", title=title, summary=msg,
-                        context={"advisory": msg}, store=store)
+                        closure.store.project_id, kind="alert",
+                        source="topology_audit", stage="development",
+                        title=title, summary=msg,
+                        # SPEC-26 Item 3: the context must key a RESOLUTION. The old
+                        # `{"advisory": msg}` could not — a title prefix is not a key.
+                        context={"role": verdict.role,
+                                 "capability": verdict.capability,
+                                 "outcome": verdict.outcome,
+                                 "remedy": verdict.remedy,
+                                 "advisory": msg},
+                        store=closure.store)
             except Exception:  # noqa: BLE001 — the signal is advisory, never fatal
                 pass
-    except Exception:  # noqa: BLE001 — a run-setup advisory must never fail the run
+    except Exception:  # noqa: BLE001 — reporting must never fail the run
         pass
+
+
+def _apply_role_closure(
+        store: LedgerStore, member_pairs: list[tuple[str, str]],
+        by_role: dict[str, list[dict[str, Any]]],
+        policy: CodingAutonomyPolicy) -> RoleClosure:
+    """SPEC-26 Item 2 — score the seated council and give the verdict a consequence.
+
+    Replaces GL05's `_audit_topology_advisory`, which computed the same verdict and
+    then let the run proceed exactly as if the audit had not run. For every seated
+    role: ``duty ⊆ capability``, or the role is NOT SEATED, or ``capability_overrides``
+    names it. There is no fourth state.
+
+    Mutates ``member_pairs`` and ``by_role`` in place and returns the live
+    ``RoleClosure`` so the caller can hand it to ``build_run_turn`` (which needs the
+    seated set for the tester-spawn / merge-gate coupling) and so a deferred role can
+    be re-seated mid-run.
+
+    Fail-open, never silent: if the EVALUATION raises, the full roster is seated —
+    today's behaviour — and a ``role_capability_indeterminate`` decision records that
+    the check did not run. The temptation on a check whose purpose is to refuse
+    things is to fail closed; that would let a ledger hiccup empty a council."""
+    closure = RoleClosure(store, policy, member_pairs, by_role)
+    try:
+        verdicts = _closure_verdicts(store, member_pairs, policy)
+    except Exception as exc:  # noqa: BLE001 — fail OPEN on the roster, loudly
+        closure.indeterminate = True
+        try:
+            store.record_decision(
+                title="role capability closure indeterminate",
+                context="run-setup role-capability closure (SPEC-26)",
+                choice="role_capability_indeterminate",
+                rationale=f"could not evaluate role capability closure ({exc}); "
+                          "the full roster is seated, exactly as before SPEC-26")
+        except Exception:  # noqa: BLE001
+            pass
+        _publish_role_closure(closure)
+        return closure
+    closure.verdicts = {v.role: v for v in verdicts}
+    for verdict in verdicts:
+        # PM is category (a) and always capable. DEV and REVIEWER are seated under
+        # protest even when un-capable, because unseating THEM is not free — it
+        # removes a structural precondition of the pipeline itself
+        # (`_UNSEAT_BREAKS_THE_PIPELINE` states each one against the code). Every
+        # other role that cannot discharge its duty, and is not overridden, loses its
+        # seat for this run.
+        if verdict.seatable or verdict.role in _UNSEAT_BREAKS_THE_PIPELINE:
+            continue
+        closure.unseat(verdict)
+    _report_role_closure(closure)
+    _publish_role_closure(closure)
+    return closure
+
+
+def _reevaluate_role_closure(closure: Optional[RoleClosure]) -> None:
+    """SPEC-26 Item 3 — a ``deferred`` verdict is a claim about NOW, so re-check it
+    at the one quiescent moment the runner already re-derives gate state: after a
+    merge advances master (``_arm_gate_after_merge``, right after the bootstrap
+    re-attempt).
+
+    When a deferred role has become capable: re-seat it, dismiss the open advisory
+    (the half that has never happened in this codebase), and record one
+    ``role_capability_closed`` decision. The original ``topology_advisory`` decision
+    is left verbatim — the ledger is append-only and the pair *(advisory at
+    iteration 0, closed at iteration N)* is the trace that proves the loop works.
+
+    Bound, stated rather than hidden: a mid-run ``PUT /test-commands`` on a LIVE run
+    is picked up at the next merge, not instantly. The loop has no config-watch seam
+    and a second poll for a rare operator action is not worth an iteration hook."""
+    if closure is None or not closure.unseated:
+        return
+    try:
+        verdicts = {
+            v.role: v for v in _closure_verdicts(
+                closure.store, closure.full_pairs, closure.policy)
+        }
+    except Exception:  # noqa: BLE001 — re-evaluation must never fail a merge
+        return
+    for role in list(closure.unseated):
+        verdict = verdicts.get(role)
+        if verdict is None or verdict.outcome != _capabilities.CAPABLE:
+            continue
+        closure.verdicts[role] = verdict
+        if not closure.reseat(role):
+            continue
+        try:
+            from . import attention
+            attention.resolve_closed_capability(
+                closure.store.project_id, role, verdict.capability,
+                store=closure.store)
+        except Exception:  # noqa: BLE001 — resolution is a view, never a gate
+            pass
+        try:
+            closure.store.record_decision(
+                title=f"role capability closed: {role}",
+                context="mid-run role-capability closure (SPEC-26)",
+                choice="role_capability_closed",
+                rationale=f"{role} now has the {verdict.capability} capability its "
+                          f"duty demands ({_closure_evidence(closure.store, role)}); "
+                          "re-seated for the remainder of the run")
+        except Exception:  # noqa: BLE001
+            pass
+    _publish_role_closure(closure)
+
+
+def _closure_evidence(store: LedgerStore, role: str) -> str:
+    """One legible phrase naming WHAT closed the gap, for the decision row."""
+    if role == TESTER:
+        try:
+            ids = sorted(store.get_unit_test_commands())
+        except Exception:  # noqa: BLE001
+            ids = []
+        return ("unit-scoped test command(s) registered: " + ", ".join(ids)
+                if ids else "unit-scoped test command registered")
+    return "capability granted"
 
 
 def _capability_gap_note(store: LedgerStore) -> str:
@@ -2373,6 +2948,9 @@ def _pm_prompt_segments(store: LedgerStore, *, pin: str,
         'Set done=true ONLY when the North Star is fully met and nothing remains '
         "(then include a non-empty \"completion_summary\" and omit tasks)."
     )
+    # SPEC-24 (Item 5): computed once — the segment is included only when it has
+    # something to say, and `""` is the ABSENCE contract, not a convenience.
+    _governance_text = _detector_state.prompt_text(store)
     return [
         # CURRENT FOCUS / authoritative user direction — the operative scope.
         PromptSegment("work_request", pin),
@@ -2386,12 +2964,29 @@ def _pm_prompt_segments(store: LedgerStore, *, pin: str,
         # F088-08 boot briefing on the first PM turn; otherwise the F088-07 packet.
         PromptSegment("project_context",
                       _pm_boot_text(store) or _grounding_packet_text("pm", store)),
+        # --- Spec 22-28 P0.4: the reserved tail order starts HERE ------------- #
+        # `PROMPT_TAIL_SEGMENT_ORDER` (top of this module) fixes:
+        #     gate_output -> governance_state -> tool_guidance -> standing rules
+        #
+        # The PM prompt has no `gate_output` segment today; if one is ever added it
+        # goes immediately above this comment.
+        #
+        # SPEC-24 (Items 3 + 5) — `governance_state`, at the reserved position.
+        # The live detector/budget readings, rendered ONLY when something is near a
+        # limit; OMITTED entirely (never an empty labelled block) otherwise, so a
+        # run nowhere near a threshold keeps today's prompt bytes and
+        # `test_prompt_segments_golden.py` stays byte-locked. `_governance_text` is
+        # computed ONCE above and is `""` for every quiet run.
+        *([PromptSegment("governance_state", _governance_text)]
+          if _governance_text else []),
+        #
         # Spec 15 (Item 1): what each role can actually do, and the rule that no
         # role can run a command from inside a turn — so the PM stops planning
         # "run X and report" tasks no DEV can discharge (the gravity-golf wedge).
         PromptSegment("tool_guidance",
                       _capabilities.pm_capability_segment(store) + "\n"),
-        # The standing PM planning instructions + envelope schema.
+        # The standing PM planning instructions + envelope schema — LAST, always:
+        # the instructions must be the most recent thing the model reads.
         PromptSegment("role_instructions", instructions),
     ]
 
@@ -2414,6 +3009,140 @@ def _pm_assist_prompt(store: LedgerStore, task: Task) -> str:
         '"role":"dev","detail":"Acceptance criteria... Files...",'
         '"depends_on":[]}]}}.'
     )
+
+
+def _last_word_prompt(store: LedgerStore, action: Any) -> str:
+    """SPEC-23 (Item 2) — the intervention prompt: the run is about to stop on a
+    HEURISTIC detector; propose a concrete next action, or confirm the halt.
+
+    Deliberately mirrors ``_pm_assist_prompt`` above, and just as deliberately asks
+    a DIFFERENT question. PM assist asks a TASK question ("split or re-scope this
+    task") and is structurally forbidden from doing anything else. This asks a RUN
+    question, and its answer may legitimately be to abandon a task entirely and
+    attack the North Star another way — a move rung 4 cannot make. That is why the
+    two compose instead of duplicating each other.
+
+    Carries three things and nothing else: the detector and its threshold, the
+    evidence the detector actually computed (the same string its attention Problem
+    was raised with — the last word is that string's first real consumer), and the
+    demand, stated as a binary. Plus the standing orientation so the proposal is
+    grounded.
+
+    SPEC-24 (Item 6) — the governance block below is the SHARED renderer, focused
+    on the tripped detector, NOT a second copy of it. `_detector_state.render`
+    owns every threshold phrasing in the tree, so the numbers in the standing PM
+    prompt and the numbers in this intervention prompt cannot drift apart; a
+    second evidence renderer living beside that one is the exact duplication this
+    batch keeps paying for. `focus` renders the tripped reading first and
+    unconditionally (proximity is moot once it has tripped) and swaps the header,
+    and every OTHER near reading still follows — a PM asked to propose an
+    alternative should see the rest of the board, which is precisely the "same
+    model, radically less information" defect this spec exists to close."""
+    detector = str(getattr(action, "detector", "") or "the run")
+    evidence = str(getattr(action, "evidence", "") or detector)
+    governance = _detector_state.prompt_text(
+        store, focus=detector, focus_evidence=evidence)
+    if not governance:
+        # Degradation only (the renderer is fully guarded and returns "" solely on
+        # an internal failure): never send a last-word turn that does not name what
+        # tripped. NOT a second rendering — no threshold, no window phrasing.
+        governance = f"A guard called `{detector}` has tripped: {evidence}.\n"
+    return (
+        f"{_skill_line(PM)} You are the PM of an autonomous coding team, and this "
+        "run is about to STOP.\n"
+        f"Project state: {_orientation_text(store)}\n"
+        f"{governance}"
+        # SPEC-24 (S4): the antecedent moved into the block above, which now names
+        # the guard, so it is named again here rather than referred to as "that".
+        f"The `{detector}` guard is a heuristic computed between turns from the "
+        "ledger alone — "
+        "it can be wrong, and it cannot see what you know. This is your last word "
+        "before the run ends.\n"
+        "Answer ONE of two ways.\n"
+        "(1) PROPOSE A CONCRETE NEXT ACTION — a different route to the North Star, "
+        "not a restatement of work already queued. Reply with a coding_turn.v1 PM "
+        "plan envelope carrying at least one NEW dev task; each task needs explicit "
+        "acceptance criteria and the exact files/interfaces in scope. A duplicate of "
+        "an already-open task is rejected and reads as (2), so change the approach "
+        "rather than repeating it. If the work really is finished, set done=true "
+        "with a non-empty completion_summary — it is checked against the open "
+        "backlog like any other completion claim.\n"
+        "(2) CONFIRM THE HALT — if stopping is genuinely right, say so in a decision "
+        "and add no tasks. The run will end with the reason above and your rationale "
+        "on the record.\n"
+        "Reply with ONLY a coding_turn.v1 PM envelope: "
+        '{"schema_version":"coding_turn.v1","role":"pm","intent":'
+        '{"kind":"plan","done":false,"tasks":[{"title":"...",'
+        '"role":"dev","detail":"Acceptance criteria... Files...",'
+        '"depends_on":[]}],"decisions":[{"title":"...","rationale":"..."}]}}.'
+    )
+
+
+def _pm_turn_made_progress(
+    intent: Any, created: list[Task],
+    prior_decision_titles: Optional[set[str]] = None,
+) -> bool:
+    """Spec 22-28 P0.5 (bug 1) — did this PM plan turn DO something?
+
+    ``made_progress`` feeds ``pm_idle``, and ``pm_idle_limit`` stops the run. Until
+    now the answer was ``len(created) > 0``, which contradicted Spec 21: that spec
+    legalised the decision-only PM turn ("drop these duplicate HUD tasks, add
+    nothing, not done") precisely because the schema kept rejecting it — but such a
+    turn creates no task, so it still scored no-progress and still fed the idle
+    detector. The 2026-07-26 run stopped `no_progress` with a PM that was answering
+    correctly four turns in a row. A legal turn that did something must count.
+
+    THE TENSION THIS MUST PRESERVE. Spec 08's dedupe (see ``_materialize_pm_tasks``)
+    deliberately keeps a rejected duplicate OUT of ``created`` so that a batch which
+    was ALL duplicates scores ``made_progress=False`` and re-arms the idle detector
+    on a churning PM. That is a real pathology (the PM re-proposing the same job
+    forever) and it must keep tripping.
+
+    THE RULE, and why this one:
+
+        A turn that PROPOSED TASKS is judged ONLY on whether any task was created.
+        A turn that proposed NO tasks is judged on whether it recorded a decision.
+
+    The discriminator is ``intent.tasks`` — what the PM TRIED to do — not
+    ``created``, which is what survived dedupe. So:
+
+    * proposed tasks, all duplicates  -> False. Spec 08 is untouched, and crucially
+      it stays untouched even when the PM attaches a decision to the batch —
+      otherwise "explain yourself" would become a licence to churn forever.
+    * proposed nothing, recorded a decision -> True. This is Spec 21's turn: the PM
+      pruning, deferring, or recording what it is waiting on. It wrote durable
+      project truth to the ledger (``record_decision`` ran above), so it is not
+      idle.
+    * proposed nothing, recorded nothing -> False, and unreachable: ``PMPlanIntent``
+      already refuses an empty not-done turn. Kept explicit so the invariant does
+      not depend on a validator two modules away.
+
+    Regression lock 6 of the batch plan still holds: ``pm_idle_limit`` continues to
+    bound genuinely empty turns, because a turn with neither a created task nor a
+    decision is still no-progress.
+
+    SPEC-25 (Item 3b) adds the NOVELTY gate this rule needs to be safe. Counting
+    any decision as progress makes "explain yourself" a licence to idle: a PM that
+    re-emits the same decision every turn would reset ``pm_idle`` forever. So a
+    decision-only turn counts only when it recorded something NOT already on the
+    ledger. ``prior_decision_titles`` is the caller's snapshot of the PM decisions
+    already recorded for this project, taken BEFORE this turn's are written;
+    ``None`` (the default) keeps the pre-Spec-25 behaviour for callers that cannot
+    take one, so no existing call site changes meaning by accident."""
+    if created:
+        return True
+    if getattr(intent, "tasks", None):
+        # Every proposed task was rejected (duplicate / uncreatable): Spec 08 says
+        # this is churn, decisions or not.
+        return False
+    decisions = list(getattr(intent, "decisions", None) or [])
+    if not decisions:
+        return False
+    if prior_decision_titles is None:
+        return True
+    known = {str(t).strip().lower() for t in prior_decision_titles}
+    return any(str(getattr(d, "title", "") or "").strip().lower() not in known
+               for d in decisions)
 
 
 def _materialize_pm_tasks(
@@ -3963,24 +4692,32 @@ def _merge_is_gate_relevant(changed: list[str]) -> bool:
 
 
 def _arm_gate_after_merge(store: LedgerStore, workspace: Any, *,
-                          changed: list[str], head: str) -> None:
+                          changed: list[str], head: str,
+                          closure: Optional["RoleClosure"] = None) -> None:
     """Spec 12 (S1): after a merge advances master, (1) acquire a gate if the
     project has none, then (2) count a gate-relevant merge and arm ``gate_due``
     once ``gate_min_merge_interval`` such merges have accumulated — so a later
     mechanical GateRun executes the suite off this (merge) turn. Fully guarded:
-    a failure here never fails the merge that already landed."""
+    a failure here never fails the merge that already landed.
+
+    SPEC-26 (Item 3): this is also the one quiescent moment a ``deferred``
+    capability can have arrived, so the closure verdicts are re-evaluated here —
+    after the bootstrap re-attempt, and unconditionally, including on the paths that
+    return without arming anything."""
     try:
         from .autonomy import load_policy
         policy = load_policy(store)
     except Exception:  # noqa: BLE001
+        policy = None
+    if policy is not None and getattr(policy, "gate_bootstrap", True):
+        try:
+            from . import gate_bootstrap
+            gate_bootstrap.maybe_bootstrap(store, workspace, policy)
+        except Exception:  # noqa: BLE001 — bootstrap is best-effort
+            pass
+    _reevaluate_role_closure(closure)
+    if policy is None or not getattr(policy, "gate_bootstrap", True):
         return
-    if not getattr(policy, "gate_bootstrap", True):
-        return
-    try:
-        from . import gate_bootstrap
-        gate_bootstrap.maybe_bootstrap(store, workspace, policy)
-    except Exception:  # noqa: BLE001 — bootstrap is best-effort
-        pass
     # Only arm when the GateRun will actually EXECUTE something. Spec 12 Item 5
     # landed the runtime-probe arm, so `_run_gate(probe_runtime=True)` now executes
     # on registered COMMANDS or a runnable managed_local runtime profile — arm on
@@ -4178,6 +4915,7 @@ def build_run_turn(
     dev_repo_read: bool = False,
     reviewer_repo_read: bool = False,
     review_min_latency_ms: int = 0,
+    role_closure_state: Optional["RoleClosure"] = None,
 ) -> Callable[[Any, Any], TurnOutcome]:
     """Construct the ``run_turn`` the autonomy loop drives.
 
@@ -4187,6 +4925,12 @@ def build_run_turn(
     production ``CodingRunner.run`` passes ``policy.dev_repo_read`` (default OFF;
     the dataclass field in ``autonomy.py`` is the single source of truth — see the
     Spec 12-18 prep P0.3 note there).
+
+    SPEC-26 (S4): ``role_closure_state`` carries the live seated roster so the two
+    sites that can WEDGE a run on an unseated TESTER — the ``test PR:`` task spawn
+    and ``_set_mergeable_if_ready``'s tests-green gate — read the same predicate the
+    capability audit does. ``None`` (every direct test caller) means "no role was
+    unseated", which is today's behaviour exactly.
     """
     import logging
     import time
@@ -4257,6 +5001,18 @@ def build_run_turn(
                                           getattr(_usage_sink, "last", None))
         return resp
 
+    def _tester_seated() -> bool:
+        """SPEC-26 (S4) — is a TESTER actually on the board right now?
+
+        THE coupling that makes unseating safe. Without it, unseating a TESTER on a
+        project that HAS a unit command would wedge every approved PR: the spawn
+        below creates a ``test PR:`` task without checking that anyone can take it,
+        and ``_set_mergeable_if_ready`` then holds the PR until ``tests_passed is
+        True``. Trading an unread advisory for a wedge is not a fix, so both sites
+        and the audit read one predicate. Re-checked on every call, not captured:
+        a deferred TESTER can be re-seated mid-run (Item 3)."""
+        return role_closure_state is None or role_closure_state.seated(TESTER)
+
     def _member(role: str, member_id: str | None = None) -> dict[str, Any]:
         # F087-3 fix: honor the scheduler's chosen member so same-role work
         # actually spreads across the team (e.g. dev1 AND dev2), instead of
@@ -4307,7 +5063,8 @@ def build_run_turn(
                 extra={"retry": retries, "max_retries": max_retries},
             )
             prompt = _corrective_turn_prompt(
-                prompt, parsed, retry=retries, max_retries=max_retries)
+                prompt, parsed, retry=retries, max_retries=max_retries,
+                role=role, task_id=task_id)
             parsed = parse_coding_turn(role, task_id, caller(member, prompt))
         _cap["parse_ok"] = not isinstance(parsed, TurnParseError)
         _cap["parse_retries"] = retries
@@ -4330,34 +5087,11 @@ def build_run_turn(
         return parsed
 
     def _set_mergeable_if_ready(pr_id: str) -> None:
-        # A PR is mergeable only when reviewer-approved AND tests-green for its
-        # head — so a blind reviewer can never land a regression (F087-17).
-        #
-        # If the project has NO registered test commands, there is nothing for a
-        # tester to run, so the tests-green gate is vacuously satisfied — review
-        # approval alone governs the merge. Without this, a greenfield project
-        # (which starts with an empty test-command registry) could never advance a
-        # PR past `tests_passed`, so NOTHING ever merged and the team churned
-        # forever in a revise loop. When test commands ARE configured the strict
-        # reviewer-AND-tests gate is unchanged.
-        p = store.get_pr(pr_id)
-        # Spec 12 (S1): only UNIT-scoped commands gate a merge. An acceptance
-        # command (in-loop gate / delivery) never blocks a per-PR merge, else
-        # bootstrapping one would wedge every merge on a partial branch.
-        tests_ok = p is not None and (
-            p.get("tests_passed") is True or not store.get_unit_test_commands())
-        # F100 PR-B: in strict governance mode a code PR needs the PM's review
-        # too (reviewer AND PM). In off/light, PM review is not required, so this
-        # gate is exactly today's reviewer-AND-tests behavior.
-        pm_ok = p is not None and (
-            not _strict_governance(store) or p.get("pm_reviewer_approved") is True)
-        # F104 S6 review (M1): a PR `blocked` at the conflict-resolve retry cap is
-        # terminal — its stale reviewer_approved/tests_passed must NOT resurrect it
-        # to mergeable without the conflict being resolved (defense-in-depth on the
-        # exact trust boundary this feature protects).
-        if (p and p.get("reviewer_approved") is True and tests_ok and pm_ok
-                and p.get("status") not in ("merged", "conflict", "abandoned", "blocked")):
-            store.update_pr(pr_id, status="mergeable")
+        # Thin wrapper: the gate itself is module-level (`_apply_merge_gate`) so the
+        # stale-base / conflict revalidators, which are plain module functions with
+        # no turn closure in scope, can apply the SAME gate instead of open-coding a
+        # second writer of `status="mergeable"`.
+        _apply_merge_gate(store, pr_id, tester_seated=_tester_seated())
 
     def _execute(action: Any, ledger: Any) -> TurnOutcome:
         if isinstance(action, GovernancePlan):
@@ -4682,6 +5416,16 @@ def build_run_turn(
             invalid_reason = ""
             if isinstance(parsed, TurnParseError):
                 invalid_reason = f"{parsed.code.value}: {parsed.detail}"
+            elif isinstance(parsed.intent, BlockedIntent):
+                # Spec 25: a PM that cannot re-scope this task says so. It rides the
+                # EXISTING bounded pm-assist rung (recorded, counted against
+                # `pm_assist_limit`) rather than blocking the task from under the
+                # ladder that is already handling it — the task is mid-recovery, and
+                # two mechanisms mutating its state in the same turn is how a
+                # stranded `doing` task happens.
+                invalid_reason = f"pm assist blocked — {_blocked_reason_text(parsed.intent)}"
+                _record_capability_ask(store, parsed.intent, role=PM, task=task,
+                                       context=f"task {task.task_id}")
             elif parsed.intent.done:
                 invalid_reason = "PM assist cannot declare the project done"
             if invalid_reason:
@@ -4771,6 +5515,101 @@ def build_run_turn(
             )
             return TurnOutcome(kind="planned", made_progress=False)
 
+        if isinstance(action, LastWord):
+            # SPEC-23 (Item 2) — the last word. The loop injected this turn at the
+            # exact moment a HEURISTIC stop would have been returned; the PM is
+            # asked to propose a concrete next action or confirm the halt.
+            #
+            # The runner CLASSIFIES the answer because only it can see what
+            # survived materialization: "a task the engine can act on" (not "a
+            # response arrived") is the reset condition, or the intervention is a
+            # licence to loop. The verdict rides back on `TurnOutcome.last_word`;
+            # `autonomy._intervene` applies the reset map and records the outcome.
+            member = _member(PM, action.member_id)
+            record_turn_skill(store, member_id=member.get("id", "m-pm"),
+                              task_id="last-word", role=PM)
+            parsed = _parse_member_turn(
+                PM, None, member, _last_word_prompt(store, action),
+                context=f"last_word:{action.detector}")
+            if isinstance(parsed, TurnParseError):
+                # UNHEARD, never agreement. This is the Spec 21 lesson in its
+                # purest form — repeated schema rejection was read as PM idleness
+                # and terminated a healthy run. The run still stops (the original
+                # reason, unchanged), but the record must say the PM was not heard
+                # rather than that it agreed.
+                store.record_decision(
+                    title="pm last word rejected",
+                    context=f"last_word:{action.detector}",
+                    choice="pm_turn_rejected",
+                    rationale=f"{parsed.code.value}: {parsed.detail}")
+                return TurnOutcome(
+                    kind="noop", made_progress=False,
+                    reason=f"last_word_unparsed: {parsed.code.value}",
+                    last_word={
+                        "outcome": "unparsed",
+                        "rationale": f"{parsed.code.value}: {parsed.detail}"})
+            intent = parsed.intent
+            if isinstance(intent, BlockedIntent):
+                # Spec 25's typed "I am blocked". An honest answer, and an honest
+                # ABSTENTION: the PM has no next action to propose, so the halt
+                # stands — with its reason on the record instead of nothing.
+                reason = _blocked_reason_text(intent)
+                store.record_decision(
+                    title="pm last word blocked",
+                    context=f"last_word:{action.detector}", choice="blocked",
+                    rationale=reason)
+                _record_capability_ask(store, intent, role=PM, task=None,
+                                       context=f"last_word:{action.detector}")
+                return TurnOutcome(
+                    kind="noop", made_progress=False,
+                    last_word={"outcome": "confirmed",
+                               "rationale": f"the PM answered blocked — {reason}"})
+            for dec in intent.decisions:
+                store.record_decision(
+                    title=dec.title, context="pm_decision",
+                    choice="pm_decision", rationale=dec.rationale)
+            said = "; ".join(
+                f"{d.title}: {d.rationale}".strip(": ") for d in intent.decisions)
+            if intent.done:
+                # No special authority to declare victory: the F128 completion gate
+                # judges this claim exactly as it judges any other.
+                open_items = pending_completion_work(store)
+                if open_items:
+                    store.record_decision(
+                        title="last word completion refused: open work remains",
+                        context=f"last_word:{action.detector}",
+                        choice="pm_completion_refused",
+                        rationale=summarize_open_items(open_items))
+                    return TurnOutcome(
+                        kind="noop", made_progress=False,
+                        last_word={
+                            "outcome": "confirmed",
+                            "rationale": ("the PM claimed done, but open work "
+                                          "remains: "
+                                          f"{summarize_open_items(open_items)}")})
+                store.set_completion(intent.completion_summary)
+                return TurnOutcome(
+                    kind="project_done",
+                    last_word={"outcome": "done",
+                               "rationale": intent.completion_summary})
+            created = _materialize_pm_tasks(store, intent)
+            if created:
+                return TurnOutcome(
+                    kind="planned", made_progress=True,
+                    last_word={
+                        "outcome": "accepted",
+                        "rationale": said or "proposed new work",
+                        "task_ids": [t.task_id for t in created]})
+            # Decisions only, or every proposed task rejected as a duplicate /
+            # unexecutable. Nothing materialized, so there is nothing for the loop
+            # to act on — an abstention, and the halt stands. Deliberately STRICTER
+            # than Spec 21's "a decisions-only turn is legal" rule: legal for a
+            # routine turn, not sufficient to reset a detector window.
+            return TurnOutcome(
+                kind="planned", made_progress=False,
+                last_word={"outcome": "confirmed",
+                           "rationale": said or "the PM proposed nothing new"})
+
         if isinstance(action, Plan):
             if _redispatch_conflicted_prs(store, workspace):
                 return TurnOutcome(kind="planned", model_calls=0)
@@ -4791,14 +5630,48 @@ def build_run_turn(
                     title="pm turn rejected", context="plan",
                     choice="pm_turn_rejected",
                     rationale=f"{parsed.code.value}: {parsed.detail}")
-                return TurnOutcome(kind="planned", made_progress=False)
+                # Spec 25 (Item 3a): a turn rejected for SHAPE is not a turn that
+                # made no PROGRESS. Trying to comply used to accelerate
+                # termination — four rejected PM turns walked `pm_idle` straight
+                # into `no_progress` with two PRs open and nothing recorded about
+                # why. The counters are separated here and bounded separately in
+                # `_apply_outcome` (`schema_reject_limit`).
+                return TurnOutcome(kind="planned", made_progress=False,
+                                   schema_rejected=True)
             # F087-07-E: the interjections were delivered to (and accepted by) the
             # PM this turn — mark them consumed (read-once) only now.
             store.mark_interjections_consumed()
             intent = parsed.intent
+            # Spec 25 (Item 1): the PM's own blocked turn. Unlike a worker's, this
+            # DOES count toward `pm_idle`: a PM saying "there is nothing I can add"
+            # IS the idle state, and this spec does not make runs immortal — it
+            # makes the idle state LEGIBLE. Where the run used to stop after four
+            # rejected turns with no recorded reason, it now stops after
+            # `pm_idle_limit` honest ones with the PM's reason on the ledger.
+            if isinstance(intent, BlockedIntent):
+                store.record_decision(
+                    title="pm blocked", context="plan", choice="blocked",
+                    rationale=_blocked_reason_text(intent))
+                _record_capability_ask(store, intent, role=PM, task=None,
+                                       context="plan")
+                return TurnOutcome(kind="planned", made_progress=False)
             # F088-04: PM decisions are durable project truth — persist them so
             # the grounding layer can promote them (previously dropped on the
             # floor). The ledger remains the source; grounding derives from it.
+            #
+            # Spec 25 (Item 3b): snapshot the ALREADY-recorded decision titles
+            # BEFORE writing this turn's, so the progress judgement below can tell
+            # a new decision from one the PM is re-emitting. Taken here (not in the
+            # scorer) because after this loop the ledger no longer knows which
+            # decisions arrived on this turn. Best-effort: an unreadable ledger
+            # degrades to the pre-Spec-25 rule (every decision counts) rather than
+            # failing a legal turn.
+            try:
+                prior_decision_titles = {
+                    str(d.get("title") or "") for d in store.list_decisions()
+                    if d.get("choice") == "pm_decision"}
+            except Exception:  # noqa: BLE001 — scoring input, never control
+                prior_decision_titles = None
             for dec in intent.decisions:
                 store.record_decision(
                     title=dec.title, context="pm_decision",
@@ -4830,7 +5703,10 @@ def build_run_turn(
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)
-            return TurnOutcome(kind="planned", made_progress=len(created) > 0)
+            return TurnOutcome(
+                kind="planned",
+                made_progress=_pm_turn_made_progress(
+                    intent, created, prior_decision_titles))
 
         if isinstance(action, GateRun):
             # Spec 12 (S1): run the acceptance gate on the integrated master tree,
@@ -4964,7 +5840,8 @@ def build_run_turn(
                 # itself runs off THIS turn (a later GateRun), so the suite never
                 # serializes the merge critical section.
                 _arm_gate_after_merge(store, workspace, changed=list(_changed),
-                                      head=res.get("head", pr["head"]))
+                                      head=res.get("head", pr["head"]),
+                                      closure=role_closure_state)
                 # F159: the shared-contract owner landed → lift the hot-file freeze
                 # (the canonical module is now on master; parallel edits are safe).
                 try:
@@ -5126,6 +6003,33 @@ def build_run_turn(
                         member_role=DEV, member_route=str(member.get("gateway_route_id", "")),
                         reason=parsed.code.value)
                 intent = parsed.intent
+                # Spec 25 (Item 1/S2): the dev says it cannot proceed. Every OTHER
+                # dev dead end below returns `unproductive=True` and feeds the F127
+                # escalate-up ladder — so honesty and failure were the same signal,
+                # and a dev with nothing legal left to emit was punished for saying
+                # so. This routes to the `task_blocked` transition that has existed
+                # in `_apply_outcome`/`topology.block_task` all along and that NO
+                # turn shape could reach: the task goes `blocked` with the dev's own
+                # words on the ledger, `pm_idle`/`plan_streak` reset, and the PM
+                # picks it up. `unproductive` is deliberately NOT set — that is the
+                # entire behavioural change. Bounded by `blocked_turn_limit`
+                # (autonomy.py) so the escape shape cannot become a way to idle.
+                if isinstance(intent, BlockedIntent):
+                    _record_capability_ask(store, intent, role=DEV, task=task,
+                                           context=f"task {task.task_id}")
+                    # The turn wrote nothing, so the branch opened above holds no
+                    # commits — drop it exactly as the no-net-change path does,
+                    # rather than accumulating an empty branch per blocked turn.
+                    if workspace is not None and branch is not None:
+                        try:
+                            workspace.delete_branch(branch)
+                        except Exception:  # noqa: BLE001 — cleanup is best-effort
+                            pass
+                    return TurnOutcome(
+                        kind="task_blocked", task=task,
+                        member_id=str(member.get("id", "")), member_role=DEV,
+                        member_route=str(member.get("gateway_route_id", "")),
+                        reason=_blocked_reason_text(intent))
                 # F088-09: a read-only context request — answer from grounding,
                 # record it, and re-queue the task so the dev acts on the answer.
                 # No file writes, no durable mutation. Spec 20 bounds it below.
@@ -5388,6 +6292,24 @@ def build_run_turn(
                         related_task_ids=[task.task_id])
 
                 parsed = _review_once()
+                # Spec 25 (Item 1): a reviewer that cannot review — no diff it can
+                # read, a demand it cannot satisfy, a contradiction between the task
+                # and the PR — blocks the REVIEW task with its own words instead of
+                # being forced to invent a verdict. The PR is left exactly as it is
+                # (not approved, not rejected): a block is a question for the PM,
+                # and fabricating either verdict here is precisely the failure this
+                # spec exists to stop. Checked before the grounding heuristics
+                # below, none of which apply to a non-verdict intent.
+                if (not isinstance(parsed, TurnParseError)
+                        and isinstance(parsed.intent, BlockedIntent)):
+                    _record_capability_ask(store, parsed.intent, role=REVIEWER,
+                                           task=task,
+                                           context=f"task {task.task_id}")
+                    return TurnOutcome(
+                        kind="task_blocked", task=task,
+                        member_id=str(member.get("id", "")), member_role=REVIEWER,
+                        member_route=str(member.get("gateway_route_id", "")),
+                        reason=_blocked_reason_text(parsed.intent))
                 # Spec 14 (Item 4/5): grounding check. `num_turns > 1` means the
                 # reviewer actually ran Read/Grep before deciding; `== 1` (or, for a
                 # vendor that doesn't report it, a sub-floor latency) on an EMPTY
@@ -5474,11 +6396,12 @@ def build_run_turn(
                     extra={"reviewed_head": pr["head"], "pr_id": pr["pr_id"]})
                 store.update_task(task.task_id, state="done")
                 if approved:
-                    # Only queue a tester when there's something to run. With no
-                    # registered test commands the PR is already mergeable on
-                    # approval (see _set_mergeable_if_ready) — spawning a tester
-                    # task would just starve in the backlog forever.
-                    if store.get_unit_test_commands():
+                    # Only queue a tester when there's something to run AND somebody
+                    # to run it. With no registered test commands — or (SPEC-26) no
+                    # seated TESTER — the PR is already mergeable on approval (see
+                    # _set_mergeable_if_ready); spawning a tester task would just
+                    # starve in the backlog forever.
+                    if store.get_unit_test_commands() and _tester_seated():
                         store.add_task(title=f"test PR: {pr['branch']}", role=TESTER,
                                        pr_id=pr["pr_id"], depends_on=[task.task_id])
                     # F100 PR-B: strict mode is a DUAL review — the PM must review
@@ -5527,6 +6450,23 @@ def build_run_turn(
 
                 if isinstance(parsed, TurnParseError):
                     return _changes_requested(parsed.code.value, "tester_turn_rejected")
+                # Spec 25 (Item 1): a tester that cannot test says so instead of
+                # naming a command it knows will not exercise the slice. This must
+                # NOT go through `_changes_requested` — that marks the PR
+                # tests-failed and spawns a "fix tests" dev task, i.e. it converts
+                # "I cannot answer" into "the code is broken", which is the same
+                # fabrication the reviewer branch above refuses. The test task
+                # blocks; the PR's tests_passed is left untouched (still ungated),
+                # and the PM decides.
+                if isinstance(parsed.intent, BlockedIntent):
+                    _record_capability_ask(store, parsed.intent, role=TESTER,
+                                           task=task,
+                                           context=f"task {task.task_id}")
+                    return TurnOutcome(
+                        kind="task_blocked", task=task,
+                        member_id=str(member.get("id", "")), member_role=TESTER,
+                        member_route=str(member.get("gateway_route_id", "")),
+                        reason=_blocked_reason_text(parsed.intent))
                 command_ids = list(parsed.intent.command_ids)
                 # F142 WS-C: applicability gate. The tester may declare that no
                 # registered command exercises this slice (project not yet
@@ -5644,6 +6584,21 @@ def build_run_turn(
                         rationale=f"{parsed.code.value}: {parsed.detail}",
                         related_task_ids=[task.task_id])
                     approved = False
+                elif isinstance(parsed.intent, BlockedIntent):
+                    # Spec 25: the PM half of the strict-mode dual review could not
+                    # be given. Recorded with its reason; NOT approved — the gate
+                    # stays unsatisfied rather than passing on a non-verdict. The
+                    # review task itself blocks below only for a worker reviewer;
+                    # here the PM review task completes so the dual-review gate can
+                    # be re-driven by an ordinary plan turn.
+                    store.record_decision(
+                        title=f"pm review blocked: {task.title}",
+                        context=f"task {task.task_id}", choice="blocked",
+                        rationale=_blocked_reason_text(parsed.intent),
+                        related_task_ids=[task.task_id])
+                    _record_capability_ask(store, parsed.intent, role=PM, task=task,
+                                           context=f"task {task.task_id}")
+                    approved = False
                 elif parsed.intent.reviewed_head != pr["head"]:
                     store.record_decision(
                         title=f"stale pm review: {pr['branch']}",
@@ -5691,6 +6646,10 @@ def build_run_turn(
             role, task_id = PM, "plan"
         elif isinstance(action, PMAssist):
             role, task_id = PM, action.task_id
+        elif isinstance(action, LastWord):
+            # SPEC-23: attributed to the PM, keyed by the detector that asked, so
+            # the transcript shows WHY the harness spent this turn.
+            role, task_id = PM, f"last-word:{action.detector}"
         elif isinstance(action, GovernancePlan):
             role, task_id = PM, f"governance:{action.phase}"
         elif isinstance(action, GovernanceReview):
@@ -5974,6 +6933,17 @@ def build_run_turn(
                 title="delivery review rejected (unparseable)",
                 context="delivery_review", choice="review_rejected",
                 rationale=f"{parsed.code.value}: {parsed.detail}",
+                extra={"reviewed_head": head})
+            approved = False
+        elif isinstance(parsed.intent, BlockedIntent):
+            # Spec 25: the delivery reviewer said it could not review the delivered
+            # head. Recorded as a NON-verdict (the same fail-closed treatment as a
+            # stale head): `done` does not stick, and nothing is fabricated in
+            # either direction.
+            store.record_decision(
+                title="delivery review blocked",
+                context="delivery_review", choice="blocked",
+                rationale=_blocked_reason_text(parsed.intent),
                 extra={"reviewed_head": head})
             approved = False
         elif parsed.intent.reviewed_head != head:
@@ -6306,6 +7276,29 @@ class CodingRunner:
         # every 'doing' task is a safe-to-requeue orphan.
         from .run_recovery import reclaim_stranded_inflight
         reclaim_stranded_inflight(self.store, reason="run_start")
+        # SPEC-23 (Item 6): the last-word SNAPSHOT (which detector was asked, what
+        # it answered) describes one run and must not be read as this run's. A
+        # FRESH start clears it; a resume/continue — the only caller that passes
+        # `counters` — keeps it, because the budget it belongs to is carried too.
+        if counters is None:
+            try:
+                # SPEC-27 rides the SAME rule for the SAME reason: the narrowing
+                # ladder (and the narrowing FLAGS it engaged) belong to the run
+                # whose budget carried them. A fresh start must not inherit a
+                # mid-ladder rung map or a still-engaged clamp from the last run;
+                # a resume/continue keeps both, because `counters_from_run_state`
+                # carried the budget that bounds them.
+                self.store.set_run_state(
+                    last_words=None, narrow_ladder=None,
+                    integration_only=False, planning_clamped=False)
+            except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
+                pass
+        # SPEC-24 (Item 1 / Edge cases): clear the published detector snapshot
+        # UNCONDITIONALLY, resume included. Every detector window re-arms on
+        # `errorta continue` (`c = counters or LoopCounters()`), so a surviving
+        # snapshot would have the resumed run's first PM turn reading windows that
+        # no longer exist. The loop republishes at its first quiescent point.
+        _detector_state.clear(self.store)
         # F087-15 M2: persist a worktree fingerprint so resume can verify the
         # worktree wasn't deleted/reset between interruption and resume.
         if self.workspace is not None:
@@ -6331,8 +7324,20 @@ class CodingRunner:
         by_role = members_by_coding_role(self.members)
         member_pairs = [(m["id"], coding_role_of(m)) for m in self.members
                         if m.get("enabled", True)]
-        # GL05 (Item 1): role-justification audit — advisory only, at run-setup.
-        _audit_topology_advisory(self.store, member_pairs, policy)
+        # SPEC-26 (Item 2): role-capability closure. GL05's audit scored the same
+        # council and did nothing with the answer; this SEATS the consequence —
+        # every seated role discharges its duty, or it is not seated, or
+        # `capability_overrides` names it. Never a refused run: the shipped defaults
+        # flag both the TESTER and the REVIEWER on a fresh project, so a refusal
+        # would refuse the product's own default config. Mutates `member_pairs` and
+        # `by_role` in place (both must be filtered — filtering one seats a ghost).
+        # Evaluated HERE rather than in the confirm route so `resume`/`continue`,
+        # which both come through `CodingRunner.run`, re-derive against current state.
+        role_closure_state = _apply_role_closure(
+            self.store, member_pairs, by_role, policy)
+        # The pre-closure roster: the concurrent pool is sized from it so a role
+        # re-seated mid-run (Item 3) cannot silently serialize behind a full pool.
+        pool_members = list(role_closure_state.full_pairs)
         # F127: member tier ranks so the escalate-up ladder reassigns a task a
         # weak member can't do to a stronger one.
         from .model_tier import member_rank
@@ -6345,12 +7350,14 @@ class CodingRunner:
             should_cancel=should_cancel,
             dev_repo_read=bool(getattr(policy, "dev_repo_read", False)),
             reviewer_repo_read=bool(getattr(policy, "reviewer_repo_read", False)),
-            review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)))
+            review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)),
+            role_closure_state=role_closure_state)
         try:
             res = run_coding_loop(self.store, member_pairs, policy,
                                   run_turn=run_turn, counters=counters,
                                   should_cancel=should_cancel,
                                   member_tiers=member_tiers,
+                                  pool_members=pool_members,
                                   delivery_review=getattr(
                                       run_turn, "delivery_review", None))
         except Exception as exc:
@@ -6373,5 +7380,12 @@ class CodingRunner:
                     "model_escalations": res.counters.model_escalations,
                     "task_reassignments": res.counters.task_reassignments,
                     "pm_assists": res.counters.pm_assists,
+                    # Spec 22-28 P0.2: the detector windows whose SUBJECT outlives
+                    # the run (a frozen path, a red gate, a broken revise lineage).
+                    # Additive keys; `counters_from_run_state` restores them on a
+                    # resume/continue so a window cannot silently re-arm while the
+                    # state it bounds is still there. Every other consumer of this
+                    # block reads by key, so the extra keys are inert for them.
+                    **window_counters_to_dict(res.counters),
                 })
         return res

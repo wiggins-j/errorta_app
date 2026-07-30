@@ -234,7 +234,7 @@ def test_livelock_stops_after_limit_with_no_recovery(
         result = _account_revise_livelock(s, c, policy)
         if result is not None:
             break
-    assert result is not None and result.stop_reason == REVISE_LIVELOCK
+    assert result is not None and result.reason == REVISE_LIVELOCK
 
 
 def test_a_merge_resets_the_livelock_window(tmp_errorta_home, tmp_path) -> None:
@@ -334,4 +334,4 @@ def test_breaker_then_livelock_stops_the_run(tmp_errorta_home, tmp_path) -> None
         result = _account_revise_livelock(s, c, policy)
         if result is not None:
             break
-    assert result is not None and result.stop_reason == REVISE_LIVELOCK
+    assert result is not None and result.reason == REVISE_LIVELOCK

@@ -619,6 +619,57 @@ def resolve_stale_member_health(
     return dismissed
 
 
+def resolve_closed_capability(
+    project_id: str,
+    role: str,
+    capability: str = "",
+    *,
+    store: LedgerStore | None = None,
+) -> list[str]:
+    """SPEC-26 Item 3 — dismiss the capability Alert(s) a role has now closed.
+
+    The topology advisory has fired on every run since GL05 landed and has never
+    once resolved, because nothing ever wrote the other half. This is that half,
+    in the exact idiom ``resolve_stale_member_health`` uses (``_write_resolution``
+    with ``state="dismissed", action="dismiss", by="system"``).
+
+    Dismisses BOTH producers for the same ``(role, capability)`` pair, because they
+    are two observations of one fact and must not double-report:
+    * ``topology_audit`` — the seat-time closure verdict (this spec);
+    * ``capability_gap`` — GL03's confabulation alarm, the same disease observed one
+      turn later when the role invents the tool its manifest lacks.
+
+    Matched on ``context`` (``role``/``capability``), not on the title: the raise
+    site truncates its title to 80 chars for dedupe, and a string prefix cannot key
+    a resolution. Older signals raised before SPEC-26 carry no ``role`` in context,
+    so they are matched by an unambiguous role mention in the title as a fallback —
+    a run that upgrades mid-flight must still be able to clear its stale Alert.
+
+    Returns the dismissed signal titles."""
+    store = store or _store(project_id)
+    role_l = str(role or "").strip().lower()
+    cap_l = str(capability or "").strip().lower()
+    dismissed: list[str] = []
+    for sig in list_open(project_id, store=store):
+        if sig.source not in ("topology_audit", "capability_gap"):
+            continue
+        ctx = sig.context or {}
+        ctx_role = str(ctx.get("role", "") or "").strip().lower()
+        if ctx_role:
+            if ctx_role != role_l:
+                continue
+            ctx_cap = str(ctx.get("capability", "") or "").strip().lower()
+            # An empty recorded capability matches any: the pre-SPEC-26 raise site
+            # recorded only `{"advisory": msg}`.
+            if cap_l and ctx_cap and ctx_cap != cap_l:
+                continue
+        elif role_l.upper() not in (sig.title or ""):
+            continue
+        _write_resolution(store, sig, state="dismissed", action="dismiss", by="system")
+        dismissed.append(sig.title)
+    return dismissed
+
+
 def resolve_stale_worker_unproductive(
     project_id: str,
     members: list[dict[str, Any]],

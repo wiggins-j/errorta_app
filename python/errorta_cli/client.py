@@ -243,7 +243,16 @@ def _raise_for_status(resp: httpx.Response) -> None:
         raise ResidencyRefused(
             message or "the remote data plane is not reachable", code=code
         )
-    raise CliError(f"sidecar returned {status}: {message or detail!r}", code=code)
+    # Spec 22 Item 2: an unhandled route exception now carries an `error_id` that
+    # also appears above the traceback in ${ERRORTA_HOME}/logs/sidecar.log, so the
+    # operator-facing string is greppable instead of the old, content-free
+    # `sidecar returned 500: 'Internal Server Error'`. Appended only when present
+    # — an older sidecar's payload renders exactly as it did before.
+    error_id = detail.get("error_id") if isinstance(detail, dict) else None
+    suffix = f" (error id: {error_id})" if error_id else ""
+    raise CliError(
+        f"sidecar returned {status}: {message or detail!r}{suffix}", code=code
+    )
 
 
 def _classify(detail: Any) -> tuple[str | None, str | None]:

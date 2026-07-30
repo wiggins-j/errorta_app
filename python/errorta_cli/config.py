@@ -89,6 +89,23 @@ def sidecar_lock_path(home: Path) -> Path:
     return home / "sidecar.lock"
 
 
+def logs_dir(home: Path) -> Path:
+    """Spec 22 Item 1 — ``${ERRORTA_HOME}/logs``, the sidecar's on-disk log dir.
+
+    Mirrors ``errorta_app.paths.logs_dir`` WITHOUT importing it (golden invariant
+    #1: ``errorta_cli`` imports nothing from ``errorta_app``). ``ERRORTA_LOGS_DIR``
+    wins on both sides so the desktop app's "reveal logs folder" button and the
+    CLI's fd redirect never point at different directories.
+    """
+    raw = (os.environ.get("ERRORTA_LOGS_DIR") or "").strip()
+    return Path(raw).expanduser() if raw else Path(home) / "logs"
+
+
+def sidecar_log_path(home: Path) -> Path:
+    """The merged sidecar stdout+stderr log (see ``sidecar._launch``)."""
+    return logs_dir(home) / "sidecar.log"
+
+
 def sidecar_token_path(home: Path) -> Path:
     """R3 — the per-sidecar bearer token (0600).
 

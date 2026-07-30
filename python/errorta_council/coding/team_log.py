@@ -185,6 +185,14 @@ def build_team_log(store: Any) -> list[dict[str, Any]]:
                 f"blocked the PR for {title} after the conflict-resolve cap")
         elif choice == "blocked":
             add(at, "pm", "", "blocked", f"blocked the task: {title}")
+        elif choice == "capability_ask":
+            # Spec 25: a worker asked for a capability it does not have (the
+            # honest form of the signal GL03 infers from a confabulated tool
+            # call). Rendered like `context_request` — an ask the team can see —
+            # attributed to the role that made it, which the decision stamps.
+            role = str(d.get("role") or "dev")
+            add(at, role, member_id(role, tid), "capability_ask",
+                f"asked for a capability it does not have: {title}")
         elif choice == "governance_plan_materialized":
             add(at, "pm", "", "artifact",
                 "turned the approved plan into developer tasks")

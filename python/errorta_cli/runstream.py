@@ -156,6 +156,38 @@ def gloss(reason: str | None) -> str:
     return STOP_REASON_GLOSS.get(reason, reason)
 
 
+def last_word_note(run_payload: Any) -> str:
+    """SPEC-23 (Item 6) — the second summary line, or ``""`` when there was no
+    intervention.
+
+    :data:`STOP_REASON_GLOSS` stays byte-identical (no reason changed), so this is
+    an ADDITIONAL line derived from ``run_state.last_words``. A run whose
+    ``last_word_limit`` is 0 — or which never tripped a heuristic stop — never
+    wrote the key and renders exactly today's output.
+
+    The wording is load-bearing: an operator must be able to tell "the PM agreed
+    with the halt" from "we could not hear the PM". Reading a failed/unparsed
+    intervention as consent is precisely the Spec 21 mistake this spec exists to
+    stop repeating.
+    """
+    lw = _state(run_payload).get("last_words")
+    if not isinstance(lw, dict) or not lw.get("outcome"):
+        return ""
+    detector = str(lw.get("detector") or "a guard")
+    rationale = " ".join(str(lw.get("rationale") or "").split())[:400]
+    outcome = str(lw.get("outcome"))
+    if outcome == "unparsed":
+        return (f"the PM was asked about `{detector}` and could not be read — "
+                "the halt was NOT confirmed"
+                + (f" ({rationale})" if rationale else ""))
+    if outcome in ("accepted", "done"):
+        return (f"the PM was asked about `{detector}` and proposed a next action"
+                + (f": {rationale}" if rationale else "")
+                + " — the run continued")
+    return (f"the PM was asked about `{detector}` and confirmed the halt"
+            + (f": {rationale}" if rationale else ""))
+
+
 def _run_path(project_id: str) -> str:
     return f"/coding/projects/{project_id}/run"
 
