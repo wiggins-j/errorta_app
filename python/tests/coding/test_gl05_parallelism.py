@@ -270,6 +270,17 @@ def test_hot_path_gate_allows_the_successor_but_still_blocks_an_intruder(
     assert intruder.task_id not in ids
 
 
+def test_a_finished_revise_returns_the_claim_to_the_original_pr(
+        tmp_path: Path) -> None:
+    """A terminal successor with no live PR no longer owns the predecessor."""
+    s = _store(tmp_path)
+    original, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+    s.update_task(revise.task_id, state="done")
+
+    owners = inflight_owned_paths_by_task(s)
+    assert owners == {original.task_id: {"src/store.ts"}}
+
+
 def test_partition_lifts_when_owner_merges(tmp_path: Path):
     # Once the owner's PR merges, the file is free and the second toucher dispatches.
     s = _store(tmp_path)
