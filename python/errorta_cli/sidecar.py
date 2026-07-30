@@ -442,6 +442,36 @@ def _serve_argv() -> list[str]:
     return [sys.executable, "-m", "errorta_cli", "__serve__"]
 
 
+# PyInstaller's onefile parent→child hand-off. The bootloader sets these when a
+# frozen process spawns another copy of itself: the child sees "a parent already
+# unpacked the archive" and REUSES the parent's `_MEI…` directory instead of
+# extracting its own. That is correct for a child the parent waits on — and
+# catastrophic for ours, which is `start_new_session=True` and deliberately
+# OUTLIVES us. The short-lived CLI exits, its atexit cleanup removes the shared
+# directory, and the sidecar keeps serving from a temp dir that no longer exists.
+#
+# The failure is invisible until it isn't: every module already imported at that
+# moment stays resident in `sys.modules`, so /healthz, `status`, `projects` and
+# `delete` all keep working. The first module imported AFTERWARDS can never be
+# loaded — and `routes/coding.py::_project_out` lazy-imports
+# errorta_project_grounding → sqlite3 → `_sqlite3` in a function body, so
+# `errorta new` raised `ModuleNotFoundError: No module named '_sqlite3'` from a
+# binary that demonstrably bundles it. That is the long-unexplained CLI-spawned
+# sidecar 500: not a packaging gap, a lifetime bug. It reproduced only when the
+# sidecar had been spawned by an EARLIER command (dir already reaped) — spawn and
+# create in one invocation and it passes, which is why it survived three
+# debugging sessions and never reproduced on demand.
+#
+# Stripping them makes the detached sidecar unpack and own its own copy. Legacy
+# `_MEIPASS2` is the PyInstaller<6 spelling; harmless to drop on 6.x.
+_PYI_ONEFILE_HANDOFF_VARS = (
+    "_PYI_PARENT_PROCESS_LEVEL",
+    "_PYI_APPLICATION_HOME_DIR",
+    "_PYI_ARCHIVE_FILE",
+    "_MEIPASS2",
+)
+
+
 def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
     """Spawn a fresh CLI-owned sidecar, wait for readiness, persist the record."""
     port = _free_port()
@@ -453,7 +483,10 @@ def spawn(home: Path, *, our_commit: str | None = None) -> SidecarHandle:
     token = mint_token()
     write_token(home, token)
     env = {
-        **os.environ,
+        # The detached sidecar must NOT inherit the onefile hand-off vars — see
+        # _PYI_ONEFILE_HANDOFF_VARS. It outlives us; it needs its own extraction.
+        **{k: v for k, v in os.environ.items()
+           if k not in _PYI_ONEFILE_HANDOFF_VARS},
         "ERRORTA_SIDECAR_PORT": str(port),
         "ERRORTA_HOME": str(home),
         SIDECAR_TOKEN_ENV: token,

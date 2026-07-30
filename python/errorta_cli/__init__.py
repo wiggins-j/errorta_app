@@ -15,6 +15,6 @@ from __future__ import annotations
 # Never hand-edit — run `scripts/bump-version.sh X.Y.Z`, which rewrites all
 # three declarations. tests/test_version_identity.py locks them byte-equal and
 # scripts/release-cli.sh's preflight refuses to build on drift.
-__version__ = "0.1.0-alpha.14"
+__version__ = "0.1.0-alpha.15"
 
 __all__ = ["__version__"]
