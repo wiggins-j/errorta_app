@@ -579,6 +579,23 @@ def _approve_pr(store, ws, *, closure):
     return store.get_pr(pr["pr_id"])
 
 
+def test_a_role_absent_from_the_roster_is_not_seated(tmp_path: Path) -> None:
+    """Closure verdicts only cover supplied roles; absence must not become a seat."""
+    s = _store("cl-absent", tmp_path)
+    ws = _ws("cl-absent", s)
+    s.set_test_commands({"unit": _UNIT})
+    members = [m for m in _MEMBERS if m["metadata"]["coding_role"] != TESTER]
+    pairs, by_role = _roster(members)
+    closure = _apply_role_closure(
+        s, pairs, by_role, CodingAutonomyPolicy(reviewer_repo_read=True))
+
+    assert closure.seated(TESTER) is False
+    assert closure.seated(PM) is True
+    pr = _approve_pr(s, ws, closure=closure)
+    assert pr["status"] == "mergeable"
+    assert not [t for t in s.list_tasks() if t.title.startswith("test PR:")]
+
+
 def test_an_unseated_tester_never_wedges_an_approved_pr(tmp_path: Path) -> None:
     """THE wedge regression, asserted rather than described. Without the coupling
     this test hangs the PR: the spawn creates a ``test PR:`` task nobody can take

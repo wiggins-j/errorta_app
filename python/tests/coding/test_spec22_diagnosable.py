@@ -16,7 +16,9 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -255,28 +257,66 @@ def test_a_retry_after_a_failed_create_behaves_like_a_first_attempt(
     assert (_ledger_dir("retry") / "project.json").is_file()
 
 
-def test_a_failed_create_never_removes_a_pre_existing_project(
-    monkeypatch, tmp_errorta_home: Path
+def test_a_duplicate_create_never_overwrites_a_pre_existing_project(
+    tmp_errorta_home: Path,
 ) -> None:
-    """The 409-shaped race: a concurrent create that won must not be deleted."""
-    from errorta_app.routes import coding as coding_routes
-
     c = TestClient(app, headers={"x-errorta-origin": "tauri-ui"},
                    raise_server_exceptions=False)
     assert _new_project(c, "winner").status_code == 200
     marker = _ledger_dir("winner") / "project.json"
+    original = marker.read_bytes()
     assert marker.is_file()
 
-    def _boom(*_a, **_k):
-        raise RuntimeError("second create exploded")
+    duplicate = _new_project(c, "winner", grounding={"mode": "none"},
+                             north_star="replacement")
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "project already exists"}
 
-    monkeypatch.setattr(coding_routes, "_apply_grounding_payload", _boom)
-    assert _new_project(c, "winner", grounding={"mode": "none"}).status_code >= 400
-
-    # The precondition ("this request created the directory") held it back.
     assert _ledger_dir("winner").is_dir()
-    assert marker.is_file()
+    assert marker.read_bytes() == original
     assert _client(tmp_errorta_home).get("/coding/projects/winner").status_code == 200
+
+
+def test_concurrent_create_loser_cannot_delete_the_winner(
+    monkeypatch, tmp_errorta_home: Path,
+) -> None:
+    """The directory claim, not timing luck, owns compensating cleanup."""
+    from errorta_app.routes import coding as coding_routes
+
+    entered_grounding = Event()
+    release_grounding = Event()
+    real_apply = coding_routes._apply_grounding_payload
+
+    def _paused_apply(store, payload):
+        entered_grounding.set()
+        assert release_grounding.wait(timeout=10)
+        return real_apply(store, payload)
+
+    monkeypatch.setattr(coding_routes, "_apply_grounding_payload", _paused_apply)
+
+    def _winner_request():
+        client = TestClient(app, headers={"x-errorta-origin": "tauri-ui"},
+                            raise_server_exceptions=False)
+        return _new_project(client, "raced", grounding={"mode": "none"})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        winner = pool.submit(_winner_request)
+        assert entered_grounding.wait(timeout=10)
+        try:
+            loser = _new_project(
+                TestClient(app, headers={"x-errorta-origin": "tauri-ui"},
+                           raise_server_exceptions=False),
+                "raced",
+                grounding={"mode": "none"},
+            )
+            assert loser.status_code == 409
+        finally:
+            release_grounding.set()
+        assert winner.result(timeout=10).status_code == 200
+
+    marker = _ledger_dir("raced") / "project.json"
+    assert marker.is_file()
+    assert _client(tmp_errorta_home).get("/coding/projects/raced").status_code == 200
 
 
 # --------------------------------------------------------------------------- #

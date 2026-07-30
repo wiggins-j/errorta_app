@@ -2519,9 +2519,8 @@ class RoleClosure:
         self.indeterminate = False
 
     def seated(self, role: str) -> bool:
-        """Is ``role`` in the seated roster for this run? True for a run with no
-        closure applied at all — the disable value is 'today's behaviour'."""
-        return role not in self.unseated
+        """Is ``role`` present in the run's current seated roster?"""
+        return any(seated_role == role for _, seated_role in self.member_pairs)
 
     def unseat(self, verdict: "_capabilities.ClosureVerdict") -> None:
         role = verdict.role

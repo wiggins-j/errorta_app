@@ -20,7 +20,9 @@ from pathlib import Path
 
 from errorta_council.coding.autonomy import (
     CodingAutonomyPolicy,
+    hot_owned_paths_by_task,
     inflight_owned_paths,
+    inflight_owned_paths_by_task,
     policy_from_dict,
     policy_to_dict,
     runtime_cap,
@@ -172,6 +174,100 @@ def test_a_priori_partition_holds_second_toucher_before_any_conflict(tmp_path: P
     ids = {a.task_id for a in _assigns(plan_next_batch(s, idle, owned_paths=owned))}
     assert second.task_id not in ids   # held — waits for owner's PR to merge
     assert other.task_id in ids        # disjoint file → dispatched in parallel
+
+
+def _rejected_pr_with_revise(s, path: str, *, branch: str = "br-1"):
+    """Build the exact rejected-PR/revise succession shape."""
+    original = s.add_task(
+        title=f"impl {branch}", role=DEV, target_files=[path])
+    s.update_task(original.task_id, state="doing")
+    pr = s.record_pr(
+        task_id=original.task_id, branch=branch, head=f"h-{branch}",
+        dev_member="m-dev1")
+    s.update_pr(
+        pr["pr_id"], changed_paths=[path], status="changes_requested")
+    s.update_task(original.task_id, state="done")
+    revise = s.add_task(
+        title=f"revise: {branch}", role=DEV, pr_id=pr["pr_id"],
+        target_files=[path])
+    return original, pr, revise
+
+
+def test_path_citing_revise_inherits_ownership_without_blocking_itself(
+        tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _original, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+
+    owners = inflight_owned_paths_by_task(s)
+    assert owners == {revise.task_id: {"src/store.ts"}}
+    assert inflight_owned_paths(s) == {"src/store.ts"}
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev2", DEV)], owned_by_task=owners))}
+    assert revise.task_id in ids
+
+
+def test_revise_ownership_still_blocks_unrelated_work(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _original, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+    intruder = s.add_task(
+        title="unrelated", role=DEV, target_files=["src/store.ts"])
+    other = s.add_task(
+        title="other", role=DEV, target_files=["src/other.ts"])
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s,
+        [("m-dev2", DEV), ("m-dev3", DEV), ("m-dev4", DEV)],
+        owned_by_task=inflight_owned_paths_by_task(s),
+    ))}
+    assert revise.task_id in ids
+    assert intruder.task_id not in ids
+    assert other.task_id in ids
+
+
+def test_multi_hop_revise_lineage_transfers_all_ownership_to_latest(
+        tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    original, _pr1, revise1 = _rejected_pr_with_revise(
+        s, "src/store.ts", branch="br-1")
+    s.update_task(revise1.task_id, state="doing")
+    pr2 = s.record_pr(
+        task_id=revise1.task_id, branch="br-2", head="h-br-2",
+        dev_member="m-dev2")
+    s.update_pr(
+        pr2["pr_id"], changed_paths=["src/store.ts"],
+        status="changes_requested")
+    s.update_task(revise1.task_id, state="done")
+    revise2 = s.add_task(
+        title="revise: br-2", role=DEV, pr_id=pr2["pr_id"],
+        target_files=["src/store.ts"])
+
+    owners = inflight_owned_paths_by_task(s)
+    assert owners == {revise2.task_id: {"src/store.ts"}}
+    assert original.task_id not in owners
+    assert revise1.task_id not in owners
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev3", DEV)], owned_by_task=owners))}
+    assert revise2.task_id in ids
+
+
+def test_hot_path_gate_allows_the_successor_but_still_blocks_an_intruder(
+        tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _original, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+    intruder = s.add_task(
+        title="unrelated", role=DEV, target_files=["src/store.ts"])
+    hot = {"src/store.ts": 2}
+    owners = hot_owned_paths_by_task(s, hot)
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s,
+        [("m-dev2", DEV), ("m-dev3", DEV)],
+        hot_paths=set(hot),
+        hot_blocked_by_task=owners,
+    ))}
+    assert revise.task_id in ids
+    assert intruder.task_id not in ids
 
 
 def test_partition_lifts_when_owner_merges(tmp_path: Path):

@@ -27,18 +27,12 @@ reached by a real run, is bound to the delivered head, and its verdict decides t
 outcome* — it does NOT prove pixels. Tier 1b removes the seam and drives real
 Chromium; it skips when the toolchain is absent, exactly as GL01's probe smoke does.
 
-WHY THE CANONICAL RUN PINS ``max_parallel_workers=1``. Writing this fixture found a
-live composition defect, and the pin is the honest way to land around it rather than
-through it: under fan-out, GL05's strict a-priori file-ownership partition
-(``autonomy.inflight_owned_paths`` -> ``topology.plan_next_batch``) can never
-dispatch a ``revise:`` task whose reviewer finding CITES a path, because the PR the
-revise supersedes stays ``changes_requested`` — a live PR — and therefore keeps
-owning that path until the revise merges. The run then plans forever and stops
-``no_progress``. :func:`test_concurrent_fanout_wedges_a_path_citing_revise` pins
-that behaviour precisely, with the fix instructions in its docstring, and
-:func:`test_tier1_concurrent_fanout_completes` proves the same transcript completes
-on the concurrent chain the moment the partition is not in the way — so BOTH loop
-chains are covered (batch-plan regression lock 5).
+The canonical run pins ``max_parallel_workers=1`` to exercise the sequential loop,
+while :func:`test_tier1_concurrent_fanout_completes` drives the same transcript
+through the concurrent batch planner with the default strict file partition. A
+revise lineage inherits the superseded PR's ownership, so the successor remains
+dispatchable without weakening exclusivity for unrelated work. Together the two
+tests cover both loop chains (batch-plan regression lock 5).
 """
 from __future__ import annotations
 
@@ -849,52 +843,15 @@ def test_a_pm_that_never_claims_done_does_not_complete(
 def test_tier1_concurrent_fanout_completes(monkeypatch: pytest.MonkeyPatch,
                                            tmp_errorta_home: Path) -> None:
     """The SAME transcript on the concurrent chain (`plan_next_batch` /
-    `_run_concurrent_loop`), where real fanned-out runs live.
-
-    `strict_file_partition=False` is not a convenience: with it ON this run cannot
-    finish, for the reason pinned by
-    :func:`test_concurrent_fanout_wedges_a_path_citing_revise` below. Everything else
-    is the default policy."""
-    fx = _run_fixture("spec28-fanout", monkeypatch, max_parallel_workers=None,
-                      strict_file_partition=False)
+    `_run_concurrent_loop`), where real fanned-out runs live. The default strict
+    partition must admit a revise task through its own superseded PR's ownership."""
+    fx = _run_fixture("spec28-fanout", monkeypatch, max_parallel_workers=None)
     assert fx.team.unexpected == [], fx.team.unexpected
     assert fx.res.stop_reason == DEFINITION_OF_DONE, fx.res.detail
     assert fx.store.get_project().status == "done"
     _assert_artifact_graph_on_master(fx)
     assert any(r["passed"] for r in fx.probe_runs())
     assert fx.counters.iterations >= 12
-
-
-def test_concurrent_fanout_wedges_a_path_citing_revise(
-    monkeypatch: pytest.MonkeyPatch, tmp_errorta_home: Path,
-) -> None:
-    """DEFECT LOCK, not an endorsement — the composition bug Spec 28 found.
-
-    GL05's strict a-priori file-ownership partition holds a path from the first tick
-    an in-flight DEV task owns it, where "in-flight" includes *any task carrying a
-    non-terminal PR* (`autonomy.inflight_owned_paths`). A reviewer's CITED blocking
-    finding spawns a `revise:` task whose detail names that same path, while the PR
-    the revise supersedes stays `changes_requested` — a live PR — until that very
-    revise merges. So `plan_next_batch` skips the revise on every tick, forever: the
-    run plans, plans, plans and stops `no_progress` with the revise still `todo` and
-    `next_task("dev")` happily returning it.
-
-    THE FIX (out of scope for Spec 28, which changes no engine code): the partition
-    must not let a PR's own revise lineage be blocked by the PR it supersedes — e.g.
-    exclude the task behind `task.pr_id` from the owner set when scoring that task,
-    the way `_materialize_pm_tasks` already excludes a PMAssist parent from its own
-    dedupe index. WHEN THAT LANDS this test goes red: delete it, and drop the
-    `strict_file_partition=False` from `test_tier1_concurrent_fanout_completes`."""
-    fx = _run_fixture("spec28-wedge", monkeypatch, max_parallel_workers=None,
-                      strict_file_partition=True, max_iterations=40)
-    assert fx.res.stop_reason != DEFINITION_OF_DONE
-    stuck = [t for t in fx.store.list_tasks()
-             if t.title.startswith("revise:") and t.state == "todo"]
-    assert stuck, [(t.title, t.state) for t in fx.store.list_tasks()]
-    # The scheduler would hand it out — only the partition holds it back.
-    assert fx.store.next_task("dev") is not None
-    assert fx.store.get_pr(stuck[0].pr_id)["status"] == "changes_requested"
-
 
 # --------------------------------------------------------------------------- #
 # Tier 1b — the browser-backed tier (gates when the toolchain is present)
@@ -966,4 +923,3 @@ def test_pyproject_addopts_deselects_live_flaky_and_manual() -> None:
         assert f"not {marker}" in addopts, addopts
         # The marker must also still be DECLARED, or `-m` would filter on a typo.
         assert any(m.split(":", 1)[0] == marker for m in ini["markers"]), marker
-

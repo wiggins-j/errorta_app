@@ -631,40 +631,106 @@ def hot_owned_paths(ledger: Any, hot: dict[str, int]) -> set[str]:
     return owned
 
 
-def inflight_owned_paths(ledger: Any) -> set[str]:
-    """GL05 (Item 2): the STRICT a-priori file-ownership partition — the union of
-    DECLARED (``task_touched_paths``) and OBSERVED (open-PR ``changed_paths``) file
-    paths held by every in-flight DEV task (one that is ``doing`` or has an open,
-    un-merged PR).
+def inflight_owned_paths_by_task(ledger: Any) -> dict[str, set[str]]:
+    """Return active DEV path ownership keyed by the task that may advance it.
 
-    Unlike ``hot_owned_paths`` this is NOT filtered to hot files: it holds a file
-    from the FIRST tick a task owns it, so two in-flight tasks never own the same
-    master file even before the first conflict (the reactive hot-file gate engages
-    only after ``hot_file_threshold`` conflicts). Mirrors ``hot_owned_paths``'s
-    observed-``changed_paths`` signal so a prose-silent writer whose open PR touched
-    a file still owns it. A task with no declared/observed paths contributes nothing
-    — an empty set is UNKNOWN ownership, not universal (mirrors SPEC-13/F159), so
-    this never collapses fan-out to serial on silence."""
-    owned: set[str] = set()
+    GL05 originally flattened ownership into one set. That cannot represent a
+    revise lineage: a rejected PR remains non-terminal while its ``revise:`` task
+    back-links that PR, so the predecessor's paths made the successor collide with
+    itself forever. Keep the owner identity and transfer every live ancestor's
+    claim to the newest live successor. Unrelated tasks are still held off those
+    paths; only the successor itself may advance the lineage.
+
+    Ownership combines declared task paths with observed ``changed_paths`` from
+    non-terminal PRs. Prose-silent work with neither signal contributes nothing,
+    preserving the existing fail-open-on-unknown behavior.
+    """
     observed_by_task: dict[str, set[str]] = {}
     live_pr_tasks: set[str] = set()
+    pr_owner: dict[str, str] = {}
     list_prs = getattr(ledger, "list_prs", None)
     if callable(list_prs):
         for pr in list_prs():
             if pr.get("status") not in ("merged", "superseded", "abandoned", "closed"):
                 tid = pr.get("task_id")
                 if tid:
-                    live_pr_tasks.add(str(tid))
+                    task_id = str(tid)
+                    live_pr_tasks.add(task_id)
+                    pr_id = str(pr.get("pr_id") or "")
+                    if pr_id:
+                        pr_owner[pr_id] = task_id
                     changed = {_paths.normalize_path(str(p))
                                for p in (pr.get("changed_paths") or []) if p}
                     if changed:
-                        observed_by_task.setdefault(str(tid), set()).update(changed)
-    for task in ledger.list_tasks(role=DEV):
+                        observed_by_task.setdefault(task_id, set()).update(changed)
+
+    tasks = list(ledger.list_tasks(role=DEV))
+    # predecessor task -> its first live revise successor. Multiple live successors
+    # are already an invalid lineage; choosing the first keeps one owner and lets the
+    # within-batch partition serialize any duplicate behind it.
+    successor: dict[str, str] = {}
+    for task in tasks:
+        predecessor_pr = str(getattr(task, "pr_id", "") or "")
+        # A completed revise task can still be the bridge to its own live PR and
+        # the next revise generation. Retain that bridge while its PR is live;
+        # otherwise terminal tasks are not active successors.
+        terminal_without_live_pr = (
+            task.state in ("done", "dropped")
+            and task.task_id not in live_pr_tasks
+        )
+        if not predecessor_pr or terminal_without_live_pr:
+            continue
+        predecessor_task = pr_owner.get(predecessor_pr)
+        if predecessor_task and predecessor_task != task.task_id:
+            successor.setdefault(predecessor_task, task.task_id)
+
+    def _latest_successor(task_id: str) -> str:
+        current = task_id
+        seen = {current}
+        while successor.get(current) and successor[current] not in seen:
+            current = successor[current]
+            seen.add(current)
+        return current
+
+    owned: dict[str, set[str]] = {}
+    for task in tasks:
         if task.state != "doing" and task.task_id not in live_pr_tasks:
             continue
-        owned |= _paths.task_touched_paths(task) | observed_by_task.get(
-            task.task_id, set())
+        paths = (_paths.task_touched_paths(task)
+                 | observed_by_task.get(task.task_id, set()))
+        if paths:
+            owned.setdefault(_latest_successor(task.task_id), set()).update(paths)
     return owned
+
+
+def inflight_owned_paths(ledger: Any) -> set[str]:
+    """The flat union of :func:`inflight_owned_paths_by_task`.
+
+    Kept for diagnostics and compatibility. The concurrent scheduler uses the
+    keyed form so a revise is not blocked by the ownership it inherited.
+    """
+    owned: set[str] = set()
+    for paths in inflight_owned_paths_by_task(ledger).values():
+        owned |= paths
+    return owned
+
+
+def hot_owned_paths_by_task(ledger: Any, hot: dict[str, int]) -> dict[str, set[str]]:
+    """The hot-path subset of keyed in-flight ownership.
+
+    F159's hot-file gate needs the same successor exception as GL05's strict
+    partition. Otherwise a path becomes redispatchable under the strict gate but
+    remains permanently blocked once conflict history makes it hot.
+    """
+    if not hot:
+        return {}
+    hot_set = set(hot)
+    out: dict[str, set[str]] = {}
+    for task_id, paths in inflight_owned_paths_by_task(ledger).items():
+        held = {path for path in hot_set if _paths.paths_intersect(paths, {path})}
+        if held:
+            out[task_id] = held
+    return out
 
 
 def frozen_paths(ledger: Any) -> set[str]:
@@ -4063,14 +4129,16 @@ def _run_concurrent_loop(
                 # every gate below a no-op → dispatch is identical to pre-F159.
                 _hot = hot_files(ledger, threshold=policy.hot_file_threshold)
                 _hot_paths = set(_hot)
-                _hot_blocked = hot_owned_paths(ledger, _hot)
+                _hot_blocked_by_task = hot_owned_paths_by_task(ledger, _hot)
                 # GL05 (Item 2): the strict a-priori file-ownership partition — the
                 # paths already held by every in-flight/doing task, so a fan-out can't
                 # hand two tasks the same DECLARED file from tick 0 (the reactive
                 # hot-file gate only engages after N conflicts). Empty when the flag is
                 # off, restoring pre-GL05 dispatch exactly.
-                _owned = (inflight_owned_paths(ledger)
-                          if policy.strict_file_partition else None)
+                _owned_by_task = (
+                    inflight_owned_paths_by_task(ledger)
+                    if policy.strict_file_partition else None
+                )
                 _frozen = frozen_paths(ledger)
                 # SPEC-27 Item 2: the narrowing flags the dispatch phase honours.
                 # Read ONCE per iteration beside the hot/frozen picture, at the
@@ -4088,9 +4156,10 @@ def _run_concurrent_loop(
                 while model_in_flight < cap:
                     batch = plan_next_batch(
                         ledger, _idle_members(members, busy), member_tiers,
-                        hot_paths=_hot_paths, hot_blocked=_hot_blocked,
+                        hot_paths=_hot_paths,
+                        hot_blocked_by_task=_hot_blocked_by_task,
                         frozen=_frozen, frozen_owner_task_id=_frozen_owner,
-                        owned_paths=_owned,
+                        owned_by_task=_owned_by_task,
                         integration_only=_narrow["integration_only"],
                         planning_clamped=_narrow["planning_clamped"])
                     if not batch:
@@ -4147,12 +4216,13 @@ def _run_concurrent_loop(
                         # the rest of this tick (it's `doing`); recompute so the
                         # next plan_next_batch call won't hand a colliding task out.
                         if _hot:
-                            _hot_blocked = hot_owned_paths(ledger, _hot)
+                            _hot_blocked_by_task = hot_owned_paths_by_task(
+                                ledger, _hot)
                         # GL05 (Item 2): the just-assigned task is now `doing`, so it
                         # owns its declared paths a priori; recompute so the next
                         # plan_next_batch call holds any task declaring the same file.
                         if policy.strict_file_partition:
-                            _owned = inflight_owned_paths(ledger)
+                            _owned_by_task = inflight_owned_paths_by_task(ledger)
                     fut = pool.submit(
                         _safe_run_turn, run_turn, action, ledger,
                         0 if is_mechanical else 1)

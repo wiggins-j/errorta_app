@@ -371,9 +371,11 @@ def plan_next_batch(
     *,
     hot_paths: set[str] | None = None,        # F159: paths that are "hot"
     hot_blocked: set[str] | None = None,      # F159: hot paths already held this tick
+    hot_blocked_by_task: dict[str, set[str]] | None = None,  # F159: keyed owners
     frozen: set[str] | None = None,           # F159: centralize-frozen paths
     frozen_owner_task_id: str | None = None,  # F159: the only task allowed to touch frozen
     owned_paths: set[str] | None = None,      # GL05: a-priori file-ownership partition
+    owned_by_task: dict[str, set[str]] | None = None,  # GL05: keyed owners
     integration_only: bool = False,           # SPEC-27: drain, don't fan out
     planning_clamped: bool = False,           # SPEC-27: find a worker turn first
 ) -> list[CodingAction]:
@@ -473,6 +475,11 @@ def plan_next_batch(
     # we assign, so two tasks in one batch never claim the same hot file.
     hot = set(hot_paths or ())
     blocked = set(hot_blocked or ())
+    hot_owner_map = {
+        str(task_id): set(paths)
+        for task_id, paths in (hot_blocked_by_task or {}).items()
+    }
+    hot_claimed: set[str] = set()
     frozen_set = set(frozen or ())
     # GL05 (Item 2): the strict a-priori file-ownership partition. Engaged ONLY when
     # the caller opts in by passing `owned_paths` (the concurrent loop does; the `=1`
@@ -482,8 +489,36 @@ def plan_next_batch(
     # (nor two tasks in one batch) ever own the same DECLARED file. Fail-open on
     # silence: a task with an empty `tp` is never held (empty == unknown ownership,
     # not universal).
-    partition_on = owned_paths is not None
+    partition_on = owned_paths is not None or owned_by_task is not None
     owned = set(owned_paths or ())
+    owner_map = {
+        str(task_id): set(paths)
+        for task_id, paths in (owned_by_task or {}).items()
+    }
+    claimed: set[str] = set()
+
+    def _unavailable_for(
+        task_id: str,
+        flat: set[str],
+        by_task: dict[str, set[str]],
+        claimed_now: set[str],
+    ) -> set[str]:
+        """Paths held by another task, plus every path claimed this batch.
+
+        The keyed form is load-bearing for revise lineages: ownership transfers
+        from a rejected PR to its live successor, and that successor must not be
+        blocked by its own claim. Flat callers retain the pre-fix behavior.
+        """
+        if not by_task:
+            return flat | claimed_now
+        other = {
+            path
+            for owner_id, paths in by_task.items()
+            if owner_id != task_id
+            for path in paths
+        }
+        return flat | other | claimed_now
+
     worker_assigned = False
     for role in _WORKER_PRIORITY:
         ids = [m for m in by_role.get(role, []) if m not in used_members]
@@ -523,7 +558,9 @@ def plan_next_batch(
                 # dispatch is byte-identical to before.
                 if role == DEV and not tp:
                     continue
-            if blocked and _paths.paths_intersect(tp, blocked):
+            hot_unavailable = _unavailable_for(
+                task.task_id, blocked, hot_owner_map, hot_claimed)
+            if hot_unavailable and _paths.paths_intersect(tp, hot_unavailable):
                 continue
             # GL05 (Item 2): strict a-priori file-ownership partition. A task whose
             # DECLARED paths overlap a path already owned by an in-flight/doing task
@@ -531,7 +568,9 @@ def plan_next_batch(
             # PR merges first, exactly like the hot-file hold but WITHOUT waiting for N
             # conflicts. `tp` empty = unknown ownership, not universal, so a
             # prose-silent task is never globally serialized (fail-open on silence).
-            if partition_on and tp and _paths.paths_intersect(tp, owned):
+            owned_unavailable = _unavailable_for(
+                task.task_id, owned, owner_map, claimed)
+            if partition_on and tp and _paths.paths_intersect(tp, owned_unavailable):
                 continue
             # F127: assign each task to an eligible (non-excluded) idle member,
             # preferring the highest tier. A task barred for every free member is
@@ -550,12 +589,14 @@ def plan_next_batch(
             # F159: claim this task's hot paths so a later candidate in the SAME
             # batch touching them waits (cross-tick holds come in via hot_blocked).
             if hot:
-                blocked |= {hp for hp in hot if _paths.paths_intersect(tp, {hp})}
+                hot_claimed |= {
+                    hp for hp in hot if _paths.paths_intersect(tp, {hp})
+                }
             # GL05 (Item 2): claim ALL this task's declared paths (not only hot ones)
             # so a later candidate in the SAME batch can't be handed an overlapping
             # file; cross-tick holds arrive via `owned_paths`.
             if partition_on and tp:
-                owned |= tp
+                claimed |= tp
             # SPEC-27 `integration_only`: serial drain. One assign this tick, so
             # the run narrows to integrating what it has instead of fanning out
             # against a base that is about to move. Non-wedge invariant 1 holds by

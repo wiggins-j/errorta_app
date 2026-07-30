@@ -640,16 +640,16 @@ def create_project(body: _NewProject, request: Request) -> dict[str, Any]:
         store = LedgerStore(body.project_id)  # backstop: store re-validates the slug
     except LedgerError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # Spec 22 Item 3 — compensating cleanup. Upfront validation (above) covers
-    # bad INPUT; it cannot cover execution failures, because
-    # `_apply_grounding_payload` does real work (imports, a bootstrap job,
-    # filesystem writes) that no amount of validation makes infallible. Without
-    # this, a failure after `create_project` left `<ledger_root>/<id>/` — plus the
-    # `.run.lock` the first store.lock drops next to it — on disk, and the retry
-    # tripped over the residue. The precondition is the guard that makes cleanup
-    # safe: only remove the directory if THIS request created it, so a race where
-    # a concurrent create won can never delete the winner's project.
-    created_dir = not store.dir.exists()
+    # Spec 22 Item 3 — atomically claim the project id before writing any state.
+    # A check-then-create guard is racy: two requests can both observe an absent
+    # directory and the loser can later delete the winner during compensation.
+    # mkdir(exist_ok=False) makes exactly one request the owner; only that owner
+    # may perform the compensating cleanup below.
+    store.dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        store.dir.mkdir()
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="project already exists") from exc
     try:
         store.create_project(
             north_star=body.north_star, definition_of_done=body.definition_of_done,
@@ -660,8 +660,7 @@ def create_project(body: _NewProject, request: Request) -> dict[str, Any]:
         grounding_result = _apply_grounding_payload(store, body.grounding)
         out = {"project": _project_out(store)}
     except BaseException as exc:
-        if created_dir:
-            _cleanup_failed_create(store, exc)
+        _cleanup_failed_create(store, exc)
         raise
     if grounding_result:
         out.update(grounding_result)
