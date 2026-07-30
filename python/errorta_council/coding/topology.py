@@ -347,6 +347,7 @@ def plan_next_batch(
     frozen: set[str] | None = None,           # F159: centralize-frozen paths
     frozen_owner_task_id: str | None = None,  # F159: the only task allowed to touch frozen
     owned_paths: set[str] | None = None,      # GL05: a-priori file-ownership partition
+    owned_by_task: dict[str, set[str]] | None = None,   # …keyed by owner (preferred)
 ) -> list[CodingAction]:
     """F087 Slice 1 — the concurrent planner: return ALL runnable actions for the
     idle members this tick (vs ``decide_next``'s single action). READ-ONLY.
@@ -435,8 +436,30 @@ def plan_next_batch(
     # (nor two tasks in one batch) ever own the same DECLARED file. Fail-open on
     # silence: a task with an empty `tp` is never held (empty == unknown ownership,
     # not universal).
-    partition_on = owned_paths is not None
-    owned = set(owned_paths or ())
+    # `owned_by_task` (preferred) carries WHO holds each path, which lets a
+    # candidate be scored against every OTHER task's claim. That distinction is
+    # load-bearing: a `revise:` task inherits the paths of the PR it supersedes
+    # (that PR sits `changes_requested`, i.e. non-terminal), so scored against a
+    # flat union it collides with itself and is skipped every tick, forever — the
+    # run plans on and dies `no_progress` with the revise still `todo`. The flat
+    # `owned_paths` form is still accepted (no per-candidate exclusion) so older
+    # callers and tests keep working.
+    partition_on = owned_paths is not None or owned_by_task is not None
+    owned_map: dict[str, set[str]] = {
+        str(tid): set(paths) for tid, paths in (owned_by_task or {}).items()}
+    owned = set(owned_paths or ()) | {p for ps in owned_map.values() for p in ps}
+    # Claimed THIS batch — always blocking, whoever the candidate is (two tasks in
+    # one tick must never be handed the same file).
+    claimed: set[str] = set()
+
+    def _owned_for(task_id: str) -> set[str]:
+        """Paths unavailable to `task_id`: everything claimed this batch, plus every
+        cross-tick claim held by SOMEONE ELSE. A task is never blocked by its own
+        holding — see the succession note in `inflight_owned_paths_by_task`."""
+        if not owned_map:
+            return owned | claimed
+        others = {p for tid, ps in owned_map.items() if tid != task_id for p in ps}
+        return others | set(owned_paths or ()) | claimed
     worker_assigned = False
     for role in _WORKER_PRIORITY:
         ids = [m for m in by_role.get(role, []) if m not in used_members]
@@ -480,7 +503,8 @@ def plan_next_batch(
             # PR merges first, exactly like the hot-file hold but WITHOUT waiting for N
             # conflicts. `tp` empty = unknown ownership, not universal, so a
             # prose-silent task is never globally serialized (fail-open on silence).
-            if partition_on and tp and _paths.paths_intersect(tp, owned):
+            if partition_on and tp and _paths.paths_intersect(
+                    tp, _owned_for(task.task_id)):
                 continue
             # F127: assign each task to an eligible (non-excluded) idle member,
             # preferring the highest tier. A task barred for every free member is
@@ -505,6 +529,7 @@ def plan_next_batch(
             # file; cross-tick holds arrive via `owned_paths`.
             if partition_on and tp:
                 owned |= tp
+                claimed |= tp
 
     # PM plans only when the worker pipeline was dry this tick (and not merging).
     if pm_ids and not worker_assigned:

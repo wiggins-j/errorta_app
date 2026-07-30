@@ -21,6 +21,7 @@ from pathlib import Path
 from errorta_council.coding.autonomy import (
     CodingAutonomyPolicy,
     inflight_owned_paths,
+    inflight_owned_paths_by_task,
     policy_from_dict,
     policy_to_dict,
     runtime_cap,
@@ -166,6 +167,81 @@ def test_a_priori_partition_holds_second_toucher_before_any_conflict(tmp_path: P
     ids = {a.task_id for a in _assigns(plan_next_batch(s, idle, owned_paths=owned))}
     assert second.task_id not in ids   # held — waits for owner's PR to merge
     assert other.task_id in ids        # disjoint file → dispatched in parallel
+
+
+def _rejected_pr_with_revise(s, path: str):
+    """The exact shape `_handle_review_rejection` leaves behind: a PR sitting
+    `changes_requested` (non-terminal) plus a live `revise:` task back-linking it
+    via `pr_id`, whose declared paths name the file the finding cited."""
+    orig = s.add_task(title="impl store", role=DEV, target_files=[path])
+    s.update_task(orig.task_id, state="doing")
+    pr = s.record_pr(task_id=orig.task_id, branch="br-1", head="h1", dev_member="m-dev1")
+    s.update_pr(pr["pr_id"], changed_paths=[path], status="changes_requested")
+    s.update_task(orig.task_id, state="done")
+    revise = s.add_task(title="revise: br-1", role=DEV, pr_id=pr["pr_id"],
+                        target_files=[path])
+    return orig, pr, revise
+
+
+def test_a_path_citing_revise_is_not_blocked_by_the_pr_it_supersedes(tmp_path: Path):
+    """THE FAN-OUT DEADLOCK. A reviewer rejection leaves the PR `changes_requested`
+    — non-terminal, therefore "in flight" — and spawns a `revise:` whose declared
+    paths name the cited file. Scored against a flat union the revise collides with
+    its own predecessor and is skipped EVERY tick: the run plans on and dies
+    `no_progress` with the revise still `todo`.
+
+    Found by SPEC-28's acceptance harness driving a real loop; it made a
+    path-citing rejection undispatchable under fan-out, and an *uncited* finding
+    spawns no revise at all — so there was no actionable rejection that survived."""
+    s = _store(tmp_path)
+    _orig, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+
+    by_task = inflight_owned_paths_by_task(s)
+    # Ownership TRANSFERS to the successor — it is not released.
+    assert by_task.get(revise.task_id) == {"src/store.ts"}
+    assert "src/store.ts" in inflight_owned_paths(s)
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev2", DEV)], owned_by_task=by_task))}
+    assert revise.task_id in ids       # dispatched — not blocked by itself
+
+
+def test_an_unrelated_task_is_still_held_off_the_revised_file(tmp_path: Path):
+    """The fix must not simply RELEASE the path — that would let an unrelated task
+    race the revise on the same file, which is what the partition exists to stop."""
+    s = _store(tmp_path)
+    _orig, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+    intruder = s.add_task(title="unrelated", role=DEV, target_files=["src/store.ts"])
+    other = s.add_task(title="other", role=DEV, target_files=["src/other.ts"])
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev2", DEV), ("m-dev3", DEV), ("m-dev4", DEV)],
+        owned_by_task=inflight_owned_paths_by_task(s)))}
+    assert revise.task_id in ids       # the successor runs
+    assert intruder.task_id not in ids  # …and still owns the file against others
+    assert other.task_id in ids        # disjoint file unaffected
+
+
+def test_a_finished_revise_returns_the_claim_to_the_original_pr(tmp_path: Path):
+    """Succession is only while the successor is live. Once the revise is done the
+    original PR — still open — owns its paths again."""
+    s = _store(tmp_path)
+    orig, _pr, revise = _rejected_pr_with_revise(s, "src/store.ts")
+    s.update_task(revise.task_id, state="done")
+    by_task = inflight_owned_paths_by_task(s)
+    assert by_task.get(orig.task_id) == {"src/store.ts"}
+    assert revise.task_id not in by_task
+
+
+def test_two_tasks_in_one_batch_still_never_share_a_file(tmp_path: Path):
+    """The per-candidate exclusion must not weaken the within-batch claim: a task
+    placed THIS tick blocks a later candidate regardless of who owns what."""
+    s = _store(tmp_path)
+    a = s.add_task(title="a", role=DEV, target_files=["src/store.ts"])
+    b = s.add_task(title="b", role=DEV, target_files=["src/store.ts"])
+    ids = {x.task_id for x in _assigns(plan_next_batch(
+        s, [("m-dev1", DEV), ("m-dev2", DEV)], owned_by_task={}))}
+    assert len(ids & {a.task_id, b.task_id}) == 1   # exactly one, not both
 
 
 def test_partition_lifts_when_owner_merges(tmp_path: Path):
