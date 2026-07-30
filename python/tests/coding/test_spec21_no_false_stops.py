@@ -114,7 +114,7 @@ def test_red_gate_still_stops_the_run() -> None:
     the head churns still trips."""
     policy = CodingAutonomyPolicy(gate_stall_limit=8)
     out = _drive(_red(), policy, 40)
-    assert out is not None and out.stop_reason == GATE_NOT_IMPROVING
+    assert out is not None and out.reason == GATE_NOT_IMPROVING
 
 
 def test_gate_has_failure_reads_each_shape() -> None:

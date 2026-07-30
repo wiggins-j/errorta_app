@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import config
 from ..client import SidecarClient
 from ..registry import Command, register
 from ..render.status import render_status
@@ -44,6 +45,12 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
         "health": health,
         "run": run,
         "projects": projects,
+        # Spec 22 Items 1 + 5: print the path the sidecar's output actually goes
+        # to. A path the CLI prints must exist and be written — an identity signal
+        # that can be wrong is a diagnostic liability, not a diagnostic (which is
+        # exactly what `${ERRORTA_HOME}/logs/` was: a directory the desktop app
+        # offers to open and nothing had ever populated).
+        "log_path": str(config.sidecar_log_path(ctx.home)),
     }
 
 

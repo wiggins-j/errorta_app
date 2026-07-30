@@ -81,6 +81,13 @@ release = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Spec 28 (Item 7): make the markers ENFORCEMENT, not documentation. There is no
+# CI (CONTRIBUTING.md) — the merge gate is the local `( cd python && pytest )` —
+# so without this a `live` test would run inside it and spend real money on every
+# PR, and `flaky`'s declared contract ("never part of the merge gate") would stay
+# aspirational. Opt back in explicitly: `pytest -m live tests/coding/...`.
+# `test_spec28_autonomy_acceptance.py` locks this line against drift.
+addopts = "-m 'not live and not flaky and not manual'"
 markers = [
     "internal_contract: tests that lock internal-only shape contracts (NOT a public schema commitment)",
     # Test-automation plan markers (docs/TEST_AUTOMATION_PLAN.md). Acceptance

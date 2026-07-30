@@ -565,12 +565,18 @@ def test_runtime_arm_is_opt_in_and_leaves_tester_condition_alone(
 def test_tester_spawn_condition_and_not_applicable_path_unchanged() -> None:
     """Source lock for Item 5's regression: the runtime arm must NOT relax the
     tester-spawn condition (it still gates on unit commands) and the
-    `not_applicable` escape must remain intact."""
+    `not_applicable` escape must remain intact.
+
+    SPEC-26 (S4) TIGHTENED the condition — it now also requires a seated TESTER, so
+    unseating one cannot leave an approved PR waiting on a task nobody can take. The
+    unit-command half this test exists to lock is unchanged."""
     import inspect
 
     from errorta_council.coding import runner as r
     src = inspect.getsource(r.build_run_turn)
-    assert "if store.get_unit_test_commands():" in src  # tester spawn unchanged
+    # tester spawn still gates on unit commands (SPEC-26 adds a conjunct, never
+    # relaxes this one)
+    assert "if store.get_unit_test_commands() and _tester_seated():" in src
     assert "tests_not_applicable" in src                # not_applicable path intact
 
 

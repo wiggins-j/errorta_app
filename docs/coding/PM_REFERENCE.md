@@ -87,11 +87,63 @@ The governing invariant, audited by `capabilities.audit_grant_or_delete`:
 > signal (SPEC-12 gave the TESTER the in-loop gate; SPEC-14 gave the REVIEWER
 > repo-read); delete when it adds no distinct signal even with the capability.
 
-GL03 does not delete any role — SPEC-12/14 already chose *grant* for the two live
-cases; the audit exists so that choice cannot silently regress. Note the honest
-framing: the confabulation→gap link is *inferred* from ACI results, not directly
-studied, so the detector is an advisory heuristic tuned conservatively — it pages
-the PM, it never blocks the run.
+The confabulation→gap link is *inferred* from ACI results, not directly studied, so
+that **detector** stays an advisory heuristic tuned conservatively — it pages the PM,
+it never blocks the run.
+
+The **audit** is not advisory any more. SPEC-26 gives its verdict a consequence at
+seat time, in exactly three outcomes:
+
+| Outcome | Meaning | What happens |
+|---|---|---|
+| `capable` | duty ⊆ capability, right now | the role is seated |
+| `deferred` | the **run** can still close this gap | the role is **not seated**, and is re-checked after every merge — when the capability arrives it is re-seated, the open advisory is dismissed, and a `role_capability_closed` decision records what closed it |
+| `unclosable` | only the **operator** can close it | the role is **not seated** for this run; the recorded remedy names the one action that would change that |
+
+> For every role seated in a run, the manifest grants a capability sufficient for
+> that role's duty — **or the role is not seated, or a `capability_overrides` entry
+> naming it is recorded on the autonomy policy.** There is no fourth state.
+
+The consequence is **unseat, never refuse**. On the shipped defaults a fresh project
+flags two roles — the REVIEWER (`reviewer_repo_read` defaults `false`) and the TESTER
+— so a run that refused to start would refuse the product's own default
+configuration on every new project. Unseating is cheap where the loop can absorb it:
+the scheduler already skips a role with no seated members, and an unseated role
+cannot keep a finished project alive either.
+
+**Two roles are seated under protest instead**, because unseating them would not cost
+"zero dispatches" — it would remove a structural precondition of the pipeline:
+
+* **DEV** — a council with no producer never advances (unreachable today; a
+  regression tripwire, not a feature).
+* **REVIEWER** — the merge gate requires reviewer approval and is the *only* writer
+  of a mergeable PR, and there is no reviewer-less merge path. With no seated
+  reviewer every PR would sit at `open` forever and the run would end
+  `completion_blocked` with an empty master.
+
+For those two the finding gets *louder*, not quieter: the advisory is recorded and
+paged as usual, plus a second `role_capability_unclosed` decision naming why the role
+kept its seat and what would actually close the gap. Making the ungrounded reviewer
+genuinely unseatable needs a reviewer-less merge path (auto-approve, or a PM-review
+fallback) — a product trust-boundary decision, not a side effect of a capability
+audit. The TESTER is the one role that is genuinely free to unseat, and only because
+the tester-spawn and merge-gate predicates were coupled to the same seat check.
+
+**The TESTER fact, stated plainly.** No engine path can register a *unit-scoped* test
+command: `gate_bootstrap` deliberately registers acceptance scope only, and the
+unit registry is written only by the app UI and `errorta test-commands set`. So a
+headless autonomous run **cannot arm its own tester**, and the seat stays `deferred`
+until a unit-scoped command is registered. That is why the tester's capability is
+measured by "is there a unit-scoped command?" and not by "does the engine have an
+acceptance gate?" — an acceptance command, or a detected runtime profile, gives the
+*engine* a gate while leaving the *tester* undispatchable, and resolving the seat on
+that signal would launder an unclosed gap into a green check.
+
+**Want an idle tester on the board anyway?** Set `capability_overrides` on the
+project's autonomy policy (e.g. `{"tester": true}`). The role is seated regardless of
+its verdict; the verdict is still computed, still recorded, and still rendered — an
+override suppresses the *consequence*, never the *finding*. The empty default (`{}`)
+reproduces pre-SPEC-26 behaviour for every role.
 
 ---
 
@@ -179,7 +231,10 @@ burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
 result instead of looping to budget), `hot_file_threshold` (2) /
 `hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
 F159 hot-file serializer, `revise_chain_limit` (3) / `revise_livelock_limit` (5,
-Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below).
+Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below),
+`last_word_limit` (2, Spec 23 — see below), `governance_proximity` (0.6, Spec 24
+— see below), `narrow_limit` (3) / `narrow_drain_iters` (5, Spec 27 — see
+below).
 
 **Spec 16 — revise chains are bounded.** A revise chain that keeps getting the
 **same** finding class is non-progressive churn. After `revise_chain_limit` (3)
@@ -191,6 +246,101 @@ it. A *different* finding each round is real progress and is never broken. If th
 re-plan also fails to make any merge progress for `revise_livelock_limit` (5)
 iterations, the run stops with `revise_livelock` (a failure-class stop reason).
 Set either knob to `0` to disable it.
+
+**Spec 23 — `last_word_limit`, and what a last-word turn is.** The engine can end
+a run about a dozen ways and only a couple of them mean "the work is done" or "a
+human/budget said stop". Everything else — `no_progress`, `not_converging`,
+`gate_not_improving`, `planning_churn`, `dispatch_wedged`, `revise_livelock`,
+`delivery_review_stalled`, an exhausted F127 ladder — is a **heuristic**: a
+detector's opinion, computed between turns from the ledger alone, which can be
+wrong. Before one of those lands, the PM gets **one bounded turn** on it.
+
+That turn is a **last word**, and the PM will see it as a prompt naming the guard
+that tripped, the evidence it computed, and a binary demand: *propose a concrete
+next action, or confirm the halt.* Two answers keep the run alive — a plan
+carrying at least one task that actually **materializes** (a duplicate or an
+unexecutable proposal materializes nothing and reads as an abstention), or a
+`done` claim, which is then judged by the ordinary completion gate like any other.
+Anything else — decisions only, a `blocked` turn, or a turn that could not be
+parsed — stops the run with **exactly** the stop reason it would have had anyway,
+plus the PM's rationale on the ledger. An unparsed turn is recorded as *not
+heard*, never as agreement.
+
+Hard stops are never intervened on: `budget_exhausted`, `cancelled`,
+`checkpoint`, `hard_blocker`, `member_unhealthy`. Bounded three ways:
+`last_word_limit` (2) per run — persisted, so it does not re-arm on
+`errorta continue` — one turn per detector unless a PR merges in between, and the
+turn itself is excluded from detector accounting so an intervention can never
+trigger another. Worst case: 2 extra iterations and 2 extra model calls.
+`last_word_limit=0` disables the whole mechanism.
+
+**Spec 24 — `governance_proximity`, and what the GOVERNANCE STATE block is.** You
+cannot course-correct against a threshold you cannot observe. The detectors above
+compute between turns and terminate; nothing in the PM's prompt used to say that
+one of them was six iterations into an eight-iteration window. Each iteration the
+loop now publishes a compact snapshot of every detector's current reading against
+its live threshold into `run_state.detector_state`, and the PM prompt renders the
+ones that are close as a **GOVERNANCE STATE** block.
+
+Four properties define it, and each is locked by a test:
+
+* **It is a reading, not an instruction.** Every line is a noun phrase and a
+  number. It never carries a remedy — "re-plan", "split the task", "consider
+  finishing" are the standing planning instructions' job.
+* **A window is stated as a window, never as a deadline.** *"unchanged for 5
+  iterations; the window is 8"*, never *"3 iterations before the run is killed"*.
+  The block also carries an explicit sentence that nothing in it is a reason to
+  declare the project done — a model told it is about to be punished for not
+  finishing has an obvious cheap escape, and that is the one failure mode this
+  wording exists to prevent.
+* **It is absent when it has nothing to say.** No reading near its window, no
+  convergence clamp engaged, and no open attention signals ⇒ no key, no segment,
+  and a prompt byte-identical to a run without the feature.
+* **It is bounded**, and it is PM-only: a dev turn cannot act on `plan_streak`.
+
+`governance_proximity` (0.6) is how close is close: a reading renders once it
+reaches `min(threshold - 1, max(1, ceil(0.6 × threshold)))` — so a gate stall
+(window 8) first appears at 5, planning churn (6) at 4, PM idleness (2) at 1, and
+the run budget (200) at iteration 120. The `threshold - 1` clamp is what gives a
+small window a warning band at all. Raise the ratio for a quieter prompt, lower it
+for an earlier one, and set it to **`0.0`** to disable the whole block and restore
+today's prompt bytes exactly. Reading is not negotiation: there is no turn shape
+by which the PM can raise a limit, reset a window, or suppress a reading — the one
+override channel is Spec 23's bounded last-word turn, which renders this same
+block focused on the detector that tripped.
+
+**Spec 27 — `narrow_limit` / `narrow_drain_iters`: convergence is a CONTROL, not
+a kill.** Every detector above used to have exactly two things it could say —
+"continue" or "die". Each one now has an ordered, bounded **intervention ladder**,
+and the default answer to a tripped threshold is to **narrow the run**, not end
+it. The ladders, in rung order:
+
+| Detector | Rungs |
+|---|---|
+| `not_converging` | force integration → clamp fan-out → last word → stop |
+| `planning_churn` | clamp planning → last word → stop |
+| `delivery_review_stalled` | force integration → last word → stop |
+| `gate_not_improving`, `dispatch_wedged`, `revise_livelock`, `no_progress`, an exhausted F127 ladder | last word → stop |
+| `no_actionable_work` | last word **only when open work remains** → stop |
+| `completion_blocked` | stop (F128 already re-prompts the PM) |
+| `budget_exhausted`, `cancelled`, `checkpoint`, `hard_blocker`, `member_unhealthy` | *none — hard stops are never narrowed* |
+
+From your seat, a narrowed run looks like: fan-out clamped to serial, integration
+forced (drain and merge what is approved before opening new fronts), a re-plan
+requested. **None of that is a punishment** — it is the engine buying the run a
+chance to drain before a stop lands underneath it, and every rung is recorded as a
+ledger decision so you can see which were tried.
+
+Narrowing rungs cost **zero model calls** and defer a stop by exactly one
+iteration each. A ladder resets only on real **progress**: a merged PR, or the
+convergence window recovering past its release band. `narrow_limit` (3) caps the
+narrowings one run may engage, run-wide, and is **persisted** so it does not
+re-arm on `errorta continue`; `narrow_drain_iters` (5) force-lifts a narrowing
+whose release condition never arrives (a narrowing that never releases is itself a
+wedge) and multiplies into the hard ceiling on extra iterations —
+`narrow_limit × narrow_drain_iters` = **15**, against a 200-iteration budget. A
+run that exhausts its ladder stops with **exactly** today's stop reason and exit
+code. Set `narrow_limit=0` to disable the ladder entirely.
 
 **Spec 11 — `dev_repo_read`.** When `true` (opt-in; default `false`) a DEV turn can READ its task
 worktree in-turn: the `claude_cli` vendor runs with cwd set to the worktree and a
@@ -214,6 +364,42 @@ blocked. `review_min_latency_ms` (default `0`, off) is the latency fallback for
 vendors that don't report a turn count. `review_screenshot` (default off) is a P2
 follow-up (attach a headless screenshot of the running head to visual-DoD
 reviews) — **not yet implemented**.
+
+**Spec 25 — the `blocked` turn, and what it means for you.** Every role can now
+emit one always-legal intent:
+
+```json
+{"kind": "blocked",
+ "reason": "missing_capability | missing_context | contradictory_instruction | waiting_on_other_work | cannot_express_intent | other",
+ "detail": "what you cannot do and why, in one or two sentences",
+ "needs": {"capability": "execution | repo_read | context | write_scope | other",
+           "what": "a way to run pytest and see the output", "why": ""}}
+```
+
+Its only requirement is a non-empty `detail`. That is deliberate: every other
+intent carries a rule relating two fields, and each such rule is a state some run
+eventually lands in with nothing legal left to say — the failure mode that stopped
+three healthy runs. A **worker's** block marks its task `blocked` with the agent's
+own words on the ledger and is *not* counted as an unproductive turn; the **PM's**
+block still counts toward `pm_idle` (a PM with nothing to add *is* the idle state
+— it is now merely legible). New decision choices to look for:
+`blocked` and `capability_ask`.
+
+**You answer a capability ask by re-planning, never by granting a tool.** Nothing
+in the engine lets a plan turn widen a role's tool surface (`_ROLE_TOOLS` is
+static). The real answers are: re-scope the task to what the role can do, register
+a test command so an acceptance gate exists (the honest answer to
+`capability: "execution"`), split the work, or drop it.
+
+**Knobs.** `blocked_turn_limit` (3) — how many times one member may block the same
+task before the task is routed to the F127 recovery ladder instead (`0` disables
+the accounting). `schema_reject_limit` (3) — how many consecutive PM turns
+rejected *for shape* are absorbed before they count as idleness again. A rejected
+turn is not an idle turn: the PM tried to say something and the validator refused
+it, and charging `pm_idle` for that made compliance accelerate termination. Past
+the limit the rejections resume feeding `pm_idle` and the run ends `no_progress`
+as before — with the `pm turn rejected` decisions carrying the validator dump, so
+you can file it as the **schema bug** it is. `0` restores the old accounting.
 
 **F159 — hot files.** A file that appears in `hot_file_threshold` PRs' merge
 conflicts is "hot": parallel edits to it are serialized (only one task holds it
@@ -433,6 +619,19 @@ and FastAPI routers. Update the prose and this contract together.
 > the batch in parallel without both editing `CodingAutonomyPolicy`. Each spec
 > documents its own knob when it lands.
 
+> **Spec 22-28 batch, prep PR (P0.1).** Five more `autonomy_defaults` keys below
+> are landed ahead of their features and have **no consumers yet** — setting them
+> changes nothing until the matching spec merges:
+> `blocked_turn_limit` (Spec 25), `capability_overrides` (Spec 26).
+> (`last_word_limit` is now **live** — see "Spec 23" below;
+> `governance_proximity` is now **live** — see "Spec 24" below; and
+> `narrow_limit` / `narrow_drain_iters` are now **live** — see "Spec 27"
+> below.) Same reason as
+> above: five branches build in parallel without racing `CodingAutonomyPolicy`.
+> Each knob's **disable value** — `0` for the ints, `0.0` for
+> `governance_proximity`, `{}` for `capability_overrides` — is required to
+> reproduce today's behaviour exactly, and stays required after its spec lands.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -443,6 +642,8 @@ and FastAPI routers. Update the prose and this contract together.
   "pm_model_modes": ["single"],
   "run_setup_fields": ["block_on_problems", "checkpoint_cadence", "checkpoint_n", "delivery_review_round_limit", "governance_mode", "grounding", "guardrail_enabled", "human_code_approval", "max_iterations", "max_model_calls", "max_parallel_workers", "max_review_rounds", "member_failure_limit", "members", "preflight_enabled", "team_room_id"],
   "autonomy_defaults": {
+    "blocked_turn_limit": 3,
+    "capability_overrides": {},
     "checkpoint_cadence": "per_milestone",
     "checkpoint_n": 5,
     "completion_refused_limit": 2,
@@ -460,14 +661,18 @@ and FastAPI routers. Update the prose and this contract together.
     "gate_bootstrap": true,
     "gate_min_merge_interval": 3,
     "gate_stall_limit": 8,
+    "governance_proximity": 0.6,
     "hot_file_escalation_threshold": 4,
     "hot_file_freeze_stall_limit": 15,
     "hot_file_threshold": 2,
+    "last_word_limit": 2,
     "max_iterations": 200,
     "max_model_calls": null,
     "max_parallel_workers": null,
     "member_failure_limit": 3,
     "model_escalation_limit": 2,
+    "narrow_drain_iters": 5,
+    "narrow_limit": 3,
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
@@ -477,6 +682,7 @@ and FastAPI routers. Update the prose and this contract together.
     "reviewer_repo_read": false,
     "revise_chain_limit": 3,
     "revise_livelock_limit": 5,
+    "schema_reject_limit": 3,
     "strict_file_partition": true,
     "task_reassignment_limit": 2,
     "web_probe": true,

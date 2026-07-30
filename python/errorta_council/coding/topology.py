@@ -75,6 +75,32 @@ class PMAssist:
 
 
 @dataclass(frozen=True)
+class LastWord:
+    """SPEC-23: give the PM ONE bounded turn before a HEURISTIC stop lands.
+
+    A detector computes between turns from the ledger alone and its only
+    vocabulary is ``None`` or a terminal stop — so a run that is working can be
+    ended by a detector whose own evidence is wrong, and nothing is in a position
+    to say otherwise. This action is that position: the loop constructs it at the
+    moment a heuristic stop WOULD have been returned and asks the PM to propose a
+    concrete next action or confirm the halt.
+
+    Deliberately NOT returned by ``decide_next`` — it is never scheduled, only
+    injected by ``autonomy._intervene`` at a quiescent point, and it rides the
+    existing ``run_turn`` seam (no new member, no new role, no new schema).
+
+    * ``member_id`` — the PM.
+    * ``detector``  — the heuristic ``stop_reason`` that is about to fire.
+    * ``evidence``  — what that detector observed, its threshold, and for how
+      long (the :class:`~errorta_council.coding.autonomy.DetectorEvidence` text
+      that the attention Problem is raised with, so both say the same thing).
+    """
+    member_id: str
+    detector: str
+    evidence: str = ""
+
+
+@dataclass(frozen=True)
 class Merge:
     """F087-17: give the PM a turn to merge an approved+green PR into master."""
     member_id: str
@@ -121,6 +147,7 @@ CodingAction = (
     Assign
     | Plan
     | PMAssist
+    | LastWord
     | Merge
     | GateRun
     | GovernancePlan
@@ -344,9 +371,13 @@ def plan_next_batch(
     *,
     hot_paths: set[str] | None = None,        # F159: paths that are "hot"
     hot_blocked: set[str] | None = None,      # F159: hot paths already held this tick
+    hot_blocked_by_task: dict[str, set[str]] | None = None,  # F159: keyed owners
     frozen: set[str] | None = None,           # F159: centralize-frozen paths
     frozen_owner_task_id: str | None = None,  # F159: the only task allowed to touch frozen
     owned_paths: set[str] | None = None,      # GL05: a-priori file-ownership partition
+    owned_by_task: dict[str, set[str]] | None = None,  # GL05: keyed owners
+    integration_only: bool = False,           # SPEC-27: drain, don't fan out
+    planning_clamped: bool = False,           # SPEC-27: find a worker turn first
 ) -> list[CodingAction]:
     """F087 Slice 1 — the concurrent planner: return ALL runnable actions for the
     idle members this tick (vs ``decide_next``'s single action). READ-ONLY.
@@ -366,6 +397,24 @@ def plan_next_batch(
     * The PM plans only when no worker could be assigned this tick (mirrors
       ``decide_next``: plan when the pipeline is dry), so it doesn't spam plan
       turns while devs are busy.
+
+    SPEC-27 (Item 2) adds two NARROWING keywords, threaded exactly like
+    ``hot_paths`` / ``frozen`` / ``owned_paths``. Both default ``False``, so every
+    pre-spec caller — including the whole ``max_parallel_workers <= 1`` path, which
+    uses ``decide_next`` and is unchanged — plans byte-identically. Both obey the
+    non-wedge invariant: neither can make an otherwise-dispatchable task
+    non-dispatchable.
+
+    * ``integration_only`` — engaged only while a PR is ``mergeable`` (i.e. while
+      the exclusive ``Merge`` branch above is provably reachable). It caps the
+      worker fan-out at ONE assign per tick, so approved work drains serially
+      instead of the run opening more fronts against a moving base. It REDUCES
+      concurrency; it never blocks the last dispatchable task.
+    * ``planning_clamped`` — the PM's plan turn is already gated on "no worker
+      could be assigned", so the only honest way to FORCE a worker turn is to look
+      harder for one: this widens the ready-task over-fetch so a role whose head
+      tasks are all excluded/gated finds a dispatchable task behind them. Strictly
+      ADDITIVE to dispatchability.
     """
     try:
         project = ledger.get_project()
@@ -426,6 +475,11 @@ def plan_next_batch(
     # we assign, so two tasks in one batch never claim the same hot file.
     hot = set(hot_paths or ())
     blocked = set(hot_blocked or ())
+    hot_owner_map = {
+        str(task_id): set(paths)
+        for task_id, paths in (hot_blocked_by_task or {}).items()
+    }
+    hot_claimed: set[str] = set()
     frozen_set = set(frozen or ())
     # GL05 (Item 2): the strict a-priori file-ownership partition. Engaged ONLY when
     # the caller opts in by passing `owned_paths` (the concurrent loop does; the `=1`
@@ -435,8 +489,36 @@ def plan_next_batch(
     # (nor two tasks in one batch) ever own the same DECLARED file. Fail-open on
     # silence: a task with an empty `tp` is never held (empty == unknown ownership,
     # not universal).
-    partition_on = owned_paths is not None
+    partition_on = owned_paths is not None or owned_by_task is not None
     owned = set(owned_paths or ())
+    owner_map = {
+        str(task_id): set(paths)
+        for task_id, paths in (owned_by_task or {}).items()
+    }
+    claimed: set[str] = set()
+
+    def _unavailable_for(
+        task_id: str,
+        flat: set[str],
+        by_task: dict[str, set[str]],
+        claimed_now: set[str],
+    ) -> set[str]:
+        """Paths held by another task, plus every path claimed this batch.
+
+        The keyed form is load-bearing for revise lineages: ownership transfers
+        from a rejected PR to its live successor, and that successor must not be
+        blocked by its own claim. Flat callers retain the pre-fix behavior.
+        """
+        if not by_task:
+            return flat | claimed_now
+        other = {
+            path
+            for owner_id, paths in by_task.items()
+            if owner_id != task_id
+            for path in paths
+        }
+        return flat | other | claimed_now
+
     worker_assigned = False
     for role in _WORKER_PRIORITY:
         ids = [m for m in by_role.get(role, []) if m not in used_members]
@@ -446,7 +528,11 @@ def plan_next_batch(
         # from the first-ready ones (F127 reassignment). F159: when the hot/frozen
         # gate is active, fetch extra headroom so a gated task doesn't starve an
         # idle member of the non-colliding work behind it.
-        want = len(ids) + (32 if (hot or frozen_set or partition_on) else 0)
+        # SPEC-27 `planning_clamped`: widen the window so a head-of-line-blocked
+        # role finds the dispatchable task BEHIND its gated heads, instead of
+        # falling through to yet another PM plan turn (the churn being narrowed).
+        want = len(ids) + (32 if (hot or frozen_set or partition_on
+                                  or planning_clamped) else 0)
         tasks = ledger.next_tasks(role, want, exclude=chosen_tasks)
         for task in tasks:
             # F159: serialize hot-file / frozen-file contention. A task that would
@@ -472,7 +558,9 @@ def plan_next_batch(
                 # dispatch is byte-identical to before.
                 if role == DEV and not tp:
                     continue
-            if blocked and _paths.paths_intersect(tp, blocked):
+            hot_unavailable = _unavailable_for(
+                task.task_id, blocked, hot_owner_map, hot_claimed)
+            if hot_unavailable and _paths.paths_intersect(tp, hot_unavailable):
                 continue
             # GL05 (Item 2): strict a-priori file-ownership partition. A task whose
             # DECLARED paths overlap a path already owned by an in-flight/doing task
@@ -480,7 +568,9 @@ def plan_next_batch(
             # PR merges first, exactly like the hot-file hold but WITHOUT waiting for N
             # conflicts. `tp` empty = unknown ownership, not universal, so a
             # prose-silent task is never globally serialized (fail-open on silence).
-            if partition_on and tp and _paths.paths_intersect(tp, owned):
+            owned_unavailable = _unavailable_for(
+                task.task_id, owned, owner_map, claimed)
+            if partition_on and tp and _paths.paths_intersect(tp, owned_unavailable):
                 continue
             # F127: assign each task to an eligible (non-excluded) idle member,
             # preferring the highest tier. A task barred for every free member is
@@ -499,12 +589,22 @@ def plan_next_batch(
             # F159: claim this task's hot paths so a later candidate in the SAME
             # batch touching them waits (cross-tick holds come in via hot_blocked).
             if hot:
-                blocked |= {hp for hp in hot if _paths.paths_intersect(tp, {hp})}
+                hot_claimed |= {
+                    hp for hp in hot if _paths.paths_intersect(tp, {hp})
+                }
             # GL05 (Item 2): claim ALL this task's declared paths (not only hot ones)
             # so a later candidate in the SAME batch can't be handed an overlapping
             # file; cross-tick holds arrive via `owned_paths`.
             if partition_on and tp:
-                owned |= tp
+                claimed |= tp
+            # SPEC-27 `integration_only`: serial drain. One assign this tick, so
+            # the run narrows to integrating what it has instead of fanning out
+            # against a base that is about to move. Non-wedge invariant 1 holds by
+            # construction — the assign is MADE, only the second one is deferred.
+            if integration_only:
+                break
+        if integration_only and worker_assigned:
+            break
 
     # PM plans only when the worker pipeline was dry this tick (and not merging).
     if pm_ids and not worker_assigned:
@@ -634,7 +734,25 @@ class CodingReconciler:
         return done
 
     def block_task(self, task: Task, *, reason: str) -> Task:
-        """A task cannot proceed -> mark blocked + record why (PM picks it up)."""
+        """A task cannot proceed -> mark blocked + record why (PM picks it up).
+
+        Spec 25 made this reachable from a member turn (the `blocked` intent), so
+        it can now race a task's completion: in the concurrent loop a worker's
+        block may land after that task was already finished or dropped by another
+        turn. Blocking a TERMINAL task would be a state regression — a done task
+        would silently re-enter the backlog — so the transition is skipped and
+        only the reason is recorded, the same discipline `_requeue_stranded`
+        applies on the noop path. The decision is written either way: the agent
+        said something, and it is not thrown away."""
+        current = next((t for t in self.ledger.list_tasks()
+                        if t.task_id == task.task_id), task)
+        if str(getattr(current, "state", "")) in ("done", "dropped"):
+            self.ledger.record_decision(
+                title=f"blocked (task already {current.state}): {task.title}",
+                context=f"task {task.task_id}", choice="blocked",
+                rationale=reason, related_task_ids=[task.task_id],
+            )
+            return current
         blocked = self.ledger.update_task(task.task_id, state="blocked")
         self.ledger.record_decision(
             title=f"blocked: {task.title}", context=f"task {task.task_id}",

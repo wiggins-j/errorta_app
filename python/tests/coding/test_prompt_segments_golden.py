@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 from errorta_council.coding import capabilities
+from errorta_council.coding import detector_state as _detector_state
 from errorta_council.coding.gate_state import gate_available, latest_gate_text
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
@@ -60,7 +61,32 @@ from errorta_council.coding.turn_controller import tool_catalog_text
 # The empty-string behaviour is itself the contract: a gate-less project's
 # prompts must stay byte-identical to today, which is why the renderer returns
 # "" rather than an empty labelled block.
+#
+# Spec 22-28 prep (P0.4) — same seam, one batch later.
+#
+# `runner.PROMPT_TAIL_SEGMENT_ORDER` fixes the tail of every member prompt as
+#
+#     gate_output -> governance_state -> tool_guidance -> standing rules
+#
+# so SPEC-23 / SPEC-24 / SPEC-25 cannot race each other over where their content
+# goes. SPEC-24 has now LANDED, so `_governance_state_for_pm` below calls its real
+# renderer at the reserved position — exactly the P0.5 seam pattern, and the
+# reason this byte-lock survived the insertion unmodified in shape: no fixture
+# here publishes a `detector_state` snapshot, so the renderer returns "" and the
+# assertion is unchanged.
 # --------------------------------------------------------------------------- #
+
+
+def _governance_state_for_pm(store: LedgerStore) -> str:
+    """SPEC-24's `governance_state` renderer, called at the reserved position.
+
+    "" is not a placeholder convenience — it is the contract: a run with nothing
+    near a threshold must render NO segment at all, so today's prompt bytes
+    survive SPEC-24 unchanged. Every fixture in this file publishes no snapshot,
+    so this returns "" for all of them; a fixture that DID publish one would see
+    the same bytes on both sides, which is what makes this a real lock rather than
+    a tautology."""
+    return _detector_state.prompt_text(store)
 
 
 def _project(pid: str, *, north: str = "build a game",
@@ -138,6 +164,9 @@ def _old_pm_prompt(store: LedgerStore) -> str:
         f"{_model_assignment_prompt(store)}"
         f"Project state: {_orientation_text(store)}\n"
         f"{_pm_boot_text(store) or _grounding_packet_text('pm', store)}"
+        # Spec 22-28 P0.4: the reserved `governance_state` slot — before
+        # tool_guidance, after any gate_output (the PM prompt has none today).
+        f"{_governance_state_for_pm(store)}"
         # Spec 15 (Item 1): the reference CALLS the renderer at the fixed insertion
         # point (the P0.5 seam pattern), so this stays a real byte-lock on the rest.
         f"{capabilities.pm_capability_segment(store)}\n"
@@ -421,6 +450,27 @@ def test_composition_categories_sum_to_sent_total(tmp_errorta_home: Path) -> Non
     for cat in comp["categories"]:
         assert isinstance(cat["class"], str) and cat["class"]
         assert isinstance(cat["tokens"], int) and cat["tokens"] > 0
+
+
+def test_prompt_tail_order_is_the_reserved_contract(tmp_errorta_home: Path) -> None:
+    """Spec 22-28 P0.4 — the tail order three later specs insert into.
+
+    Locks (a) the declared order itself and (b) that the PM builder ends with
+    `tool_guidance` then the standing `role_instructions`, which is what makes the
+    reserved `governance_state` slot unambiguous. If SPEC-24 inserts anywhere else,
+    this fails before the golden does and says why."""
+    from errorta_council.coding.runner import PROMPT_TAIL_SEGMENT_ORDER
+
+    assert PROMPT_TAIL_SEGMENT_ORDER == (
+        "gate_output", "governance_state", "tool_guidance", "role_instructions")
+    # SPEC-24 has landed, and this fixture publishes no `detector_state` snapshot —
+    # so the ABSENCE contract applies and no `governance_state` segment is emitted
+    # at all (not an empty one). That is the byte-identity guarantee, asserted here
+    # as a structural property rather than inferred from the golden.
+    _project("tail0")
+    segs = _pm_prompt_segments(LedgerStore("tail0"), pin="", done_gate="")
+    assert [s.class_ for s in segs][-2:] == ["tool_guidance", "role_instructions"]
+    assert not [s for s in segs if s.class_ == "governance_state"]
 
 
 def test_dev_prompt_carries_port_binding_guidance(tmp_errorta_home: Path) -> None:

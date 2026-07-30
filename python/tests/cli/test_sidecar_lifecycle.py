@@ -92,7 +92,7 @@ def test_home_lock_uses_fcntl_without_warning(monkeypatch, tmp_path: Path, capsy
 def test_spawn_when_no_record(monkeypatch, tmp_path: Path) -> None:
     launched: dict[str, object] = {}
 
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         launched["argv"] = argv
         launched["env"] = env
         launched["port"] = int(env["ERRORTA_SIDECAR_PORT"])
@@ -276,7 +276,7 @@ def test_adopt_registers_client_pidfile(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_spawn_registers_client_pidfile(monkeypatch, tmp_path: Path) -> None:
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         fake_launch.port = int(env["ERRORTA_SIDECAR_PORT"])  # type: ignore[attr-defined]
         # The child's env carries started_by=cli so its advertisement is honest.
         assert env["ERRORTA_STARTED_BY"] == "cli"
@@ -304,7 +304,7 @@ def test_stale_record_respawns(monkeypatch, tmp_path: Path) -> None:
     # Dead sidecar on 5555; the freshly-spawned one answers on its new port.
     spawned_port: dict[str, int] = {}
 
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         spawned_port["port"] = int(env["ERRORTA_SIDECAR_PORT"])
         return _FakeProc(pid=9001)
 
@@ -434,7 +434,7 @@ def test_concurrent_resolve_spawns_exactly_once(monkeypatch, tmp_path: Path) -> 
     calls_lock = threading.Lock()
     spawned: dict[str, int] = {}
 
-    def fake_launch(argv, env):
+    def fake_launch(argv, env, **_kw):
         with calls_lock:
             launch_calls.append(1)
         spawned["port"] = int(env["ERRORTA_SIDECAR_PORT"])

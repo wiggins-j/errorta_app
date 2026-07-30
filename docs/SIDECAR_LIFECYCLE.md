@@ -84,7 +84,32 @@ cd python && source .venv/bin/activate && python -m errorta_app.server
 
 - The free-port allocation has a small race between drop and re-bind. We
   accept it; the same pattern is used by Vite, Next.js, etc.
-- v0.1 logs sidecar stdout/stderr straight to the Rust shell's stderr.
-  Structured logging + an in-app log viewer is a v0.5 problem.
+- **Sidecar logging (Spec 22).** The two front-ends differ, deliberately.
+  - **CLI-spawned** — `errorta_cli.sidecar._launch` opens
+    `${ERRORTA_HOME}/logs/sidecar.log` and hands that fd to the child as both
+    stdout *and* stderr (merged: a traceback split across two files is worse
+    than either). The fd is inherited by the detached child and outlives the
+    CLI process, so a sidecar that dies during startup leaves its traceback
+    behind instead of only an exit code. Rotation happens **at spawn** — the
+    child holds the fd for its whole life, so nothing can rotate underneath a
+    running sidecar: past 8 MB the file is renamed to `sidecar.log.1`
+    (displacing any previous `.1`) and a fresh one is opened. Exactly two
+    generations, 16 MB total, forever. An unwritable `logs/` fails **open**:
+    the CLI warns once on stderr and falls back to `DEVNULL`.
+  - **App-spawned** — Tauri still drains the sidecar's pipes to the Rust
+    shell's stderr (`src-tauri/src/sidecar.rs`). Item 1's fd redirect is
+    CLI-only, so the two never double-write.
+  - **Both** — `errorta_app.sidecar_log` installs a **redacting**, byte-capped
+    `logging` handler on the root and `uvicorn.*` loggers writing to the same
+    `logs/sidecar.log`. It runs the pipeline `/diagnostics/log-tail` already
+    applies, so `sk-…` / `sk-ant-…`-shaped tokens never reach disk. This is the
+    only half that covers an **adopted** sidecar, whose fds belong to whoever
+    spawned it and cannot be re-pointed. In the CLI case the console handlers
+    are detached while it is installed, so each structured line is written once
+    — and redacted. On crossing its budget the handler logs one warning and
+    stops writing (truncating in place is rejected: the CLI's fd points at the
+    inode).
+  - `ERRORTA_LOG_FILE` is unrelated and unchanged: opt-in, and **unredacted**.
+  - An in-app log viewer is still a v0.5 problem; the file is the v0.1 answer.
 - The `processes` command currently reports only the sidecar. Future work
   (Ollama supervisor) will extend it.

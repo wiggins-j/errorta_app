@@ -116,7 +116,11 @@ def test_wedge_trips_after_the_sustained_window_and_names_the_culprit(
     raised: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "errorta_council.coding.autonomy._maybe_raise_monitor",
-        lambda ledger, detector, reason: raised.append((detector, reason)),
+        # Spec 22-28 P0.3: detectors now hand `_maybe_raise_monitor` a structured
+        # `DetectorEvidence` instead of a bare string. `.reason` is the same text
+        # the monitor records, so the assertions below are unchanged.
+        lambda ledger, detector, evidence: raised.append(
+            (detector, getattr(evidence, "reason", evidence))),
     )
 
     stop = None
@@ -124,7 +128,7 @@ def test_wedge_trips_after_the_sustained_window_and_names_the_culprit(
         stop = _account_dispatch_wedge(store, c, policy)
         if i < policy.wedge_stall_limit:
             assert stop is None, f"tripped early after {i} iteration(s)"
-    assert stop is not None and stop.stop_reason == DISPATCH_WEDGED
+    assert stop is not None and stop.reason == DISPATCH_WEDGED
     assert c.wedge_streak == policy.wedge_stall_limit
     # The monitor was raised, naming the stranded prerequisite id + its block count.
     assert raised and raised[-1][0] == "dispatch_wedged"

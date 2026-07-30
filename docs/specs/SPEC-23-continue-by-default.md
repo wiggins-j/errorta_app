@@ -3,7 +3,7 @@
 **Source:** the two 2026-07-26 gravity-golf runs, and
 [`ROADMAP-autonomy.md`](ROADMAP-autonomy.md) Phase 1 (this is the keystone item).
 **Target version:** v0.1 (engine — `errorta_council/coding/autonomy.py`)
-**Status:** proposed
+**Status:** implemented
 **Owner:** wiggins-j
 
 ---

@@ -191,13 +191,19 @@ def render_setup(payload: Any) -> str:
 def render_run_terminal(run_payload: Any, *, reason: str | None, gloss_text: str) -> str:
     """One-line-ish summary of a finished run + its counters."""
     from ..errors import EXIT_RUN_FAILED
-    from ..runstream import classify_exit
+    from ..runstream import classify_exit, last_word_note
 
     state = (run_payload or {}).get("state") or {}
     failed = classify_exit(run_payload) == EXIT_RUN_FAILED
     style = "cli.bad" if failed else "cli.ok"
     head = "run failed" if failed else "run finished"
     lines: list[Any] = [Text(f"{head}: {reason or 'done'} — {gloss_text}", style=style)]
+    # SPEC-23: a run that stopped after the PM was given a last word must SAY so —
+    # and must distinguish "the PM confirmed the halt" from "we could not hear the
+    # PM". Empty (and therefore byte-identical to today) when no intervention ran.
+    note = last_word_note(run_payload)
+    if note:
+        lines.append(muted(f"  {note}"))
     counters = state.get("counters") or {}
     if counters:
         table = Table(show_edge=False, pad_edge=False, box=None, show_header=False)

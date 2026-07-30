@@ -147,9 +147,67 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
 ## How we will know it worked
 
 1. A run ends `definition_of_done` with a playable artifact (SPEC-28 asserts it).
+   **(SPEC-28 — landed, and this criterion is now executable.** A buildless-web
+   fixture runs through the real `CodingRunner` → `build_run_turn` →
+   `run_coding_loop` — real git, real branches, real PRs, real merge gate, a real
+   `python -m http.server` child — to `definition_of_done`, with GL01's `web:probe`
+   firing from a loop-driven run for the first time and bound to the delivered
+   head. Criterion 2 is executable in its "no heuristic stop, no intervention was
+   even requested" form; criterion 4 in part (the run records the advisory and
+   seats/unseats accordingly). Criteria 3 and 5 remain prose here. Determinism:
+   the model is the only seam scripted, keyed on *(role, ledger state)*.
+   **What it is *not*:** Tier 1 seams the browser, so it proves the probe arm is
+   *reached* and *decides*, not that pixels rendered — Tier 1b (skipif-gated, real
+   Chromium) is the tier that asserts pixels, and Tier 2 (`-m live`, never gating)
+   is the only tier that says anything about a real team. **And it found one:** the
+   canonical run pins `max_parallel_workers=1` because GL05's strict file-ownership
+   partition cannot dispatch a `revise:` task whose reviewer finding cites a path —
+   the PR it supersedes still owns that path until the revise merges. Pinned by
+   `test_concurrent_fanout_wedges_a_path_citing_revise`; the fix is the top
+   follow-up out of this spec.)
 2. No run ends on a heuristic stop without a recorded PM intervention that was
-   given a real chance to continue.
+   given a real chance to continue. **(SPEC-23 — landed.** Every heuristic stop
+   now routes through `autonomy._intervene` at all four loop hook sites, and each
+   intervention leaves two decisions plus a `run_state.last_words` snapshot the
+   CLI renders. Bounded at `last_word_limit` (2) per run, persisted across
+   `errorta continue`, one turn per detector unless a PR merged in between —
+   worst case 2 extra iterations and 2 extra model calls. What it is *not* yet: an
+   unparsed intervention still cannot be retried, and a PM whose correct answer is
+   "wait for the in-flight PRs" reads as an abstention until a no-op-with-reason
+   plan shape exists. **SPEC-24 — landed**, and it is this criterion's
+   *precondition*: an intervention is only a real chance to continue if the PM
+   could see what it is arguing about. Both loop chains now publish a
+   `run_state.detector_state` snapshot at the quiescent point, the PM prompt
+   renders it as a bounded GOVERNANCE STATE block whenever a reading is within
+   `governance_proximity` of its window, and the last-word prompt renders the same
+   block focused on the detector that tripped — one renderer, so the numbers in the
+   standing prompt and the intervention prompt cannot drift. Absent, not empty,
+   when nothing is near; `governance_proximity=0.0` restores today's prompt bytes.)
 3. Any `500` or turn rejection leaves a traceback and a correlation id.
-4. The topology advisory either resolves or the role is not seated.
+4. The topology advisory either resolves or the role is not seated. **(SPEC-26 —
+   landed, and mechanically checkable.** Two honest readings, recorded rather than
+   glossed. For the TESTER the answer on a headless greenfield run is *not seated*,
+   because no engine path can register a unit-scoped test command — correct until
+   `gate_bootstrap` gains a unit-scoped arm. For the ungrounded REVIEWER the answer
+   is *seated under protest*: unseating it wedges every run, because the merge gate
+   demands reviewer approval and the engine has no reviewer-less merge path.
+   **Follow-up, and the top one out of this spec:** give the engine a reviewer-less
+   merge path so the 26–92% false-rejection seat can actually be taken off the
+   board.)
 5. The count of ways to *recover* is no longer an order of magnitude smaller than
-   the count of ways to *die*.
+   the count of ways to *die*. **(SPEC-27 — landed.** The detector return contract
+   is now four-valued — `None` / `Narrow` / `Escalate` / `Stop` — and every
+   heuristic stop reason carries an ordered, bounded intervention ladder instead of
+   a single early return. `not_converging` forces integration, then clamps
+   fan-out, then asks the PM, then stops; `planning_churn` clamps planning first;
+   `delivery_review_stalled` drains its merges first; the wedge and the red gate
+   get no mechanical rung, by construction, because narrowing either makes it
+   worse. GL04's clamp was folded in rather than rewritten, and SPEC-23's
+   `_intervene` is the one and only escalation path. Recovery count goes from 2 to
+   2 + one bounded ladder per heuristic reason. Nothing the CLI reads moved: no
+   stop-reason string, no exit code, and a run that exhausts its ladder stops
+   exactly as it did. Bounded at `narrow_limit * narrow_drain_iters` = 15 extra
+   iterations and ZERO extra model calls; `narrow_limit=0` restores today's trace.
+   What it is *not* yet: the rung orders are fixed and honest, not optimal, and a
+   PM whose correct answer to an escalation is "the drain is working, do nothing"
+   still reads as an abstention until SPEC-25's typed no-op lands everywhere.)

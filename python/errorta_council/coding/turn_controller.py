@@ -119,6 +119,24 @@ def tool_catalog_text(role: str, *, repo_read: bool, gate: bool) -> str:
             " There is no execute, run, or shell tool for any role — do not plan "
             "one; execution evidence comes only from the acceptance gate (none is "
             "configured for this run yet).")
+    # Spec 25 (Item 1): the escape shape, in EVERY rendering, for EVERY role.
+    # This catalog's whole job is to describe the reality the harness enforces —
+    # and part of that reality is that a role can be handed work its granted
+    # surface cannot do. Naming the always-legal turn here is what keeps that
+    # state expressible instead of forcing a guess, a confabulated tool, or a
+    # silence the loop scores as failure. NOTE the string discipline this file's
+    # tests lock: the sentence must not contain "context_request" (a DEV-only
+    # channel, asserted absent for the other roles and for repo_read renderings).
+    out.append(
+        " If you genuinely cannot proceed — a capability you do not have, a "
+        "contradiction, or something the turn schema cannot express — reply with "
+        'the blocked intent {"kind": "blocked", "reason": '
+        '"missing_capability|missing_context|contradictory_instruction|'
+        'waiting_on_other_work|cannot_express_intent|other", "detail": "..."} '
+        "(optionally with \"needs\": {\"capability\": \"execution|repo_read|"
+        "context|write_scope|other\", \"what\": \"...\"}). It is always accepted "
+        "from any role, it is recorded verbatim for the PM, and it is not counted "
+        "against you — do not invent a tool or a verdict instead.")
     return "".join(out)
 
 

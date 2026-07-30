@@ -99,9 +99,15 @@ describe("getProjectUsageSummary", () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ usage: {} }));
     const usage = await getProjectUsageSummary("p1");
     expect(usage.total).toEqual({
-      input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-      turns: 0, measuredTurns: 0, unreportedTurns: 0,
+      input: 0, output: 0,
+      measuredInput: 0, measuredOutput: 0,
+      estimatedInput: 0, estimatedOutput: 0,
+      cacheRead: 0, cacheWrite: 0,
+      turns: 0, measuredTurns: 0, partialTurns: 0,
+      estimatedTurns: 0, unreportedTurns: 0,
+      coverage: { measuredPct: 0, estimatedPct: 0 },
     });
     expect(usage.byMember).toEqual({});
+    expect(usage.byRole).toEqual({});
   });
 });

@@ -16,10 +16,12 @@ import datetime as _dt
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from errorta_diagnostics.log_buffer import LogBuffer, install_buffer
 
@@ -197,6 +199,35 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).warning(
                 "ERRORTA_LOG_FILE could not be opened (%s): %s", log_file, exc)
             file_handler = None
+
+    # Spec 22 Item 1 — the always-on, REDACTED, byte-capped sink at
+    # ${ERRORTA_HOME}/logs/sidecar.log. Unlike ERRORTA_LOG_FILE above (opt-in and
+    # unredacted by its own admission) this one is safe to default on, which is
+    # the point: the directory the desktop app offers to open has never been
+    # written to by anything. Best-effort — an unwritable logs dir must never
+    # block startup (a CLI that refuses to run because it cannot open a log file
+    # is a worse product than one that logs nothing).
+    sidecar_log_handler = None
+    detached_console: list[tuple[logging.Logger, logging.Handler]] = []
+    try:
+        from . import paths as _paths
+        from . import sidecar_log as _sidecar_log
+
+        sidecar_log_path = _paths.sidecar_log_path()
+        # CLI-spawned: our stdout/stderr already point AT this file (the fd
+        # redirect in errorta_cli.sidecar._launch), so the console handlers would
+        # duplicate every line — unredacted. Detach them and let the redacting
+        # handler carry the structured lines; the fd still catches crashes and
+        # non-`logging` output, which is the half no handler can reach.
+        cli_spawned = bool((os.environ.get("ERRORTA_CLI_SIDECAR") or "").strip())
+        sidecar_log_handler, detached_console = _sidecar_log.install(
+            loggers, sidecar_log_path, detach_console=cli_spawned)
+        app.state.sidecar_log_path = str(sidecar_log_path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "sidecar log sink could not be opened: %s", exc)
+        sidecar_log_handler = None
+        detached_console = []
 
     try:
         settings = app_settings.load()
@@ -432,6 +463,14 @@ async def lifespan(app: FastAPI):
         watchdog_stop.set()
         for logger, handler in log_handlers:
             logger.removeHandler(handler)
+        if sidecar_log_handler is not None or detached_console:
+            try:
+                from . import sidecar_log as _sidecar_log
+
+                _sidecar_log.uninstall(
+                    loggers, sidecar_log_handler, detached_console)
+            except Exception:  # pragma: no cover - defensive
+                pass
         if file_handler is not None:
             for logger in loggers:
                 logger.removeHandler(file_handler)
@@ -476,6 +515,59 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+
+# --------------------------------------------------------------------------- #
+# Spec 22 Item 2 — a correlation id on every UNHANDLED route exception.
+# --------------------------------------------------------------------------- #
+
+def _mint_error_id() -> str:
+    """``e-<12 hex>`` — the shape ``LedgerStore.record_decision`` already uses."""
+    return f"e-{uuid.uuid4().hex[:12]}"
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Turn a bare ``Internal Server Error`` into something greppable.
+
+    Before this, an unhandled route exception reached the operator as
+    ``sidecar returned 500: 'Internal Server Error'`` — a string with zero
+    greppable content — while the traceback lived only in a process-lifetime ring
+    buffer no CLI command calls. Now the traceback is logged with an id that also
+    travels in the response body, so ``grep <id> ~/.errorta/logs/sidecar.log`` is
+    a complete first debugging step.
+
+    Deliberate ``HTTPException``s (the 404/409/422s all over ``routes/coding.py``)
+    never reach here — Starlette dispatches those to its own handler — so this
+    mints no ids for expected refusals.
+    """
+    err_id = _mint_error_id()
+    logging.getLogger("errorta.error").error(
+        "unhandled error %s on %s %s", err_id, request.method,
+        request.url.path, exc_info=exc,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "internal_error",
+                "error_id": err_id,
+                "message": "the sidecar hit an unhandled error",
+                "hint": f"grep {err_id} in {_error_log_hint()}",
+            }
+        },
+    )
+
+
+def _error_log_hint() -> str:
+    """Where to grep. Best-effort — never let path resolution break the 500."""
+    try:
+        from . import paths as _paths
+
+        return str(_paths.sidecar_log_path())
+    except Exception:  # pragma: no cover — defensive
+        return "${ERRORTA_HOME}/logs/sidecar.log"
+
 
 # Per-feature routers. Each module owns a single APIRouter with the prefix
 # baked in (e.g. /hardware, /ollama). Feature agents add endpoints inside

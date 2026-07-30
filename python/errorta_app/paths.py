@@ -110,6 +110,28 @@ def _read_legacy_with_warning() -> Optional[Path]:
 # moving ERRORTA_HOME moves everything atomically.
 
 
+# Spec 22 Item 1 — the log directory. This is the FIRST Python referent for a
+# directory only Rust had named so far: the desktop app's "reveal logs folder"
+# button (``src-tauri/src/shell_cmds_impl.rs::logs_folder``) honours
+# ``ERRORTA_LOGS_DIR`` and otherwise falls back to ``<home>/.errorta/logs``. We
+# resolve the same env var first so both sides point at one directory; without
+# the override we derive from ``errorta_home()`` so ``--home`` isolation (tests,
+# alternate stores) gets its own log exactly like ``sidecar.json`` does.
+_LOGS_DIR_ENV = "ERRORTA_LOGS_DIR"
+
+
+def logs_dir() -> Path:
+    raw = os.environ.get(_LOGS_DIR_ENV, "").strip()
+    p = Path(raw).expanduser() if raw else errorta_home() / "logs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def sidecar_log_path() -> Path:
+    """The merged, bounded, redacted sidecar log (Spec 22 Item 1)."""
+    return logs_dir() / "sidecar.log"
+
+
 def corpora_dir() -> Path:
     p = errorta_home() / "corpora"
     p.mkdir(parents=True, exist_ok=True)

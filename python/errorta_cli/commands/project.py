@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import config, shellinit
+from .. import config, shellinit, teamdraft
 from ..client import SidecarClient
 from ..errors import CliError
 from ..registry import Command, Param, register, render_json
@@ -226,6 +226,12 @@ def _delete_call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> d
     # DELETE /coding/projects/{id} (coding.py:556) — 409 "project run is still
     # active" surfaces as LockBusy (exit 3) with the real detail string.
     result = client.delete_json(f"/coding/projects/{project_id}")
+    # Spec 22 Item 4: the CLI's own per-project state. `teamdraft.clear` had
+    # exactly one caller in the tree (`team create`'s reset path) — delete was not
+    # it, so `${ERRORTA_HOME}/cli-team-drafts/<id>.json` outlived every deleted
+    # project. Done AFTER the HTTP call succeeds, so a 409 ("project run is still
+    # active") never destroys a draft the operator still needs.
+    teamdraft.clear(ctx.home, project_id)
     if ctx.project_id == project_id:
         ctx.switch_project(None)
     return {"_kind": "deleted", "project_id": project_id, "result": result}

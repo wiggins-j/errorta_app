@@ -30,6 +30,14 @@ If any one of those exits non-zero, the PR is not ready. Don't
 suppress, don't `xfail`, don't `// @ts-ignore` — fix the underlying
 issue or open an issue first to discuss.
 
+`pytest -m live` is **not** part of that sequence and must not be
+added to it. `python/pyproject.toml` deselects the `live`, `flaky`
+and `manual` markers, because a live test spends real money and takes
+tens of minutes — a gate that costs that much per PR does not get run,
+and a gate that is not run is not a gate. The live acceptance run
+(Spec 28 Tier 2) is a weekly maintainer job, mandatory within 7 days
+of a release cut: `bash scripts/live-acceptance.sh`.
+
 For React component work, also run:
 
 ```bash
