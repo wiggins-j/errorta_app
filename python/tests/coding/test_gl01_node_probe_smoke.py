@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -22,6 +23,15 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO_ROOT / "scripts" / "web-probe.mjs"
+
+# The coding conftest sets HOME=tmp_path for hermeticity, but Playwright resolves
+# its Chromium under the REAL home cache — so a probe subprocess launched in the
+# test body cannot find the browser and fails, even though the skipif (checked at
+# collection, before the monkeypatch) said it was available. Snapshot the real
+# environment at import time and run node with it, so the browser stays findable
+# regardless of the hermetic HOME. (SPEC-30: the oracle must actually run, not
+# silently skip/fail.)
+_REAL_ENV = dict(os.environ)
 
 _GOOD = ("<html><body><canvas id=c></canvas><script>"
          "const c=document.getElementById('c');c.width=300;c.height=150;"
@@ -42,7 +52,7 @@ def _playwright_available() -> bool:
     try:
         r = subprocess.run(["node", "--input-type=module", "-e", check],
                            cwd=str(_REPO_ROOT), capture_output=True,
-                           timeout=60, check=False)
+                           timeout=60, check=False, env=_REAL_ENV)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -69,7 +79,8 @@ def _serve(html: str, tmp_path: Path):
 
 def _probe(url: str) -> dict:
     r = subprocess.run(["node", str(_SCRIPT), url, "10"], cwd=str(_REPO_ROOT),
-                       capture_output=True, text=True, timeout=90, check=False)
+                       capture_output=True, text=True, timeout=90, check=False,
+                       env=_REAL_ENV)
     line = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")][-1]
     return json.loads(line)
 

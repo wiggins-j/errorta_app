@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -859,6 +860,28 @@ def test_tier1_concurrent_fanout_completes(monkeypatch: pytest.MonkeyPatch,
 _PROBE_SCRIPT = _REPO_ROOT / "scripts" / "web-probe.mjs"
 
 
+def _real_playwright_browsers_path() -> str:
+    """The real Chromium cache location, resolved at IMPORT (before the coding
+    conftest's autouse HOME=tmp_path monkeypatch). The engine's probe subprocess
+    inherits the process env — under the hermetic HOME it cannot find the browser
+    installed in the real cache. Pinning ``PLAYWRIGHT_BROWSERS_PATH`` to this
+    absolute path in the browser-tier test keeps the browser findable WITHOUT
+    un-hermeticizing HOME. (SPEC-30: the oracle must actually run, not silently
+    skip because the test moved HOME out from under it.)"""
+    env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if env:
+        return env
+    home = Path.home()
+    if sys.platform == "darwin":
+        return str(home / "Library" / "Caches" / "ms-playwright")
+    if sys.platform.startswith("win"):
+        return str(home / "AppData" / "Local" / "ms-playwright")
+    return str(home / ".cache" / "ms-playwright")
+
+
+_REAL_BROWSERS_PATH = _real_playwright_browsers_path()
+
+
 @functools.lru_cache(maxsize=1)
 def _playwright_available() -> bool:
     """The predicate `test_gl01_node_probe_smoke.py` already uses: node, the probe
@@ -890,6 +913,9 @@ def test_tier1b_real_chromium_probe_drives_the_delivered_artifact(
     `scripts/web-probe.mjs` drives real Chromium against the real served tree. This
     is the only tier that asserts PIXELS: the canvas is non-black and the console is
     clean, on an artifact a run produced by itself."""
+    # Keep Chromium findable despite the conftest's hermetic HOME (see
+    # _real_playwright_browsers_path) — the engine's probe subprocess inherits this.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", _REAL_BROWSERS_PATH)
     fx = _run_fixture("spec28-browser", monkeypatch, patch_probe=False)
     assert fx.res.stop_reason == DEFINITION_OF_DONE, fx.res.detail
     _assert_artifact_graph_on_master(fx)

@@ -183,7 +183,14 @@ def _verdict_to_result(verdict: dict[str, Any]) -> TestRunResult:
     paraphrase of it."""
     non_black = bool(verdict.get("non_black"))
     console_errors = [str(e) for e in (verdict.get("console_errors") or [])]
-    passed = bool(verdict.get("ok")) and non_black and not console_errors
+    # SPEC-30 (S1): an artifact that renders but IGNORES input (the empty
+    # gravity-golf gradient) or CRASHES on input (a wrong integration contract) is
+    # not a working deliverable. `interaction_changed is False` = drove a gesture,
+    # nothing moved (inert); a crash surfaces as a console error above. `None` =
+    # could not interact -> fail-open, the passive verdict stands.
+    interaction_changed = verdict.get("interaction_changed")
+    passed = (bool(verdict.get("ok")) and non_black and not console_errors
+              and interaction_changed is not False)
     reason = str(verdict.get("reason") or "")
     parts = [f"non_black={non_black}", f"console_errors={len(console_errors)}"]
     if reason:
@@ -205,11 +212,15 @@ def _probe_verdict_fields(verdict: dict[str, Any], *, head: str) -> dict[str, An
     falsy, so a probe-less PR is byte-identical to today."""
     console_errors = [str(e) for e in (verdict.get("console_errors") or [])]
     non_black = bool(verdict.get("non_black"))
-    passed = bool(verdict.get("ok")) and non_black and not console_errors
+    interaction_changed = verdict.get("interaction_changed")
+    passed = (bool(verdict.get("ok")) and non_black and not console_errors
+              and interaction_changed is not False)
     return {
         "probe_passed": passed,
         "probe_non_black": non_black,
         "probe_console_errors": len(console_errors),
+        "probe_interacted": interaction_changed is not None,
+        "probe_interaction_changed": bool(interaction_changed),
         "probe_screenshot": str(verdict.get("screenshot") or ""),
         "probe_reason": str(verdict.get("reason") or "")[:500],
         "probe_head": str(head),
@@ -240,6 +251,7 @@ def run_and_record(
     store: Any, workspace: Any, *, head: str, frames: int = 30,
     should_cancel: Optional[Callable[[], bool]] = None,
     node_runner: Optional[NodeRunner] = None,
+    serve_root: Optional[Any] = None,
 ) -> Optional[dict[str, Any]]:
     """Stand the web runtime up, drive the headless probe, and record a
     ``web:probe`` runtime-test bound to ``head``. Returns the recorded test-run
@@ -253,7 +265,15 @@ def run_and_record(
 
     A probe that **did** run records a session whose ``passed`` is the liveness
     verdict — a black canvas or a console error is a RED ``web:probe`` run. Fully
-    guarded: any failure returns ``None`` and never raises into the loop."""
+    guarded: any failure returns ``None`` and never raises into the loop.
+
+    SPEC-30 (S4): ``serve_root`` overrides the tree the runtime serves. Default
+    ``None`` serves ``workspace.root()`` (master, the post-merge / delivery arm).
+    A PER-PR pre-merge probe passes the PR branch's worktree here so the reviewer
+    gets execution evidence on the code it is about to approve, bound to the PR's
+    OWN head — which is why ``_attach_verdict_to_prs`` can stamp that PR (the head
+    matches). The post-merge arm never matched a PR head, so evidence never reached
+    the reviewer; this is the seam that closes that gap."""
     runner = node_runner or _default_node_runner
     try:
         from .runtime import RuntimeProfileStore
@@ -268,7 +288,8 @@ def run_and_record(
         from .runtime_process import RuntimeProcessManager
         mgr = RuntimeProcessManager(
             project_id=store.project_id, rstore=rstore,
-            workspace_root=workspace.root(), work_root=store.dir)
+            workspace_root=(serve_root if serve_root is not None
+                            else workspace.root()), work_root=store.dir)
     except Exception:  # noqa: BLE001 — can't build the launch machinery -> no evidence
         return None
 

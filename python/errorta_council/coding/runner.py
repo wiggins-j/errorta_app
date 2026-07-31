@@ -4624,6 +4624,40 @@ def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
     return session
 
 
+def _web_probe_pr_arm(store: LedgerStore, workspace: Any, *, task_id: str,
+                      branch: str, head: str,
+                      should_cancel: Optional[Callable[[], bool]] = None) -> None:
+    """SPEC-30 (S4): probe a PR's OWN tree, pre-merge, bound to the PR's head.
+
+    The post-merge ``_web_probe_arm`` serves master and records at the master head
+    — which no open PR ever carries, so its verdict never reached the reviewer.
+    This arm serves the PR BRANCH's worktree and records at ``head`` = the PR head,
+    so ``web_probe._attach_verdict_to_prs`` stamps THIS PR (the reviewer then reads
+    ``probe_passed`` / ``probe_reason`` off the record and, post-S4b, in its
+    prompt). Runs at PR-open, once per PR head. Fully fail-open: a non-web project,
+    an unresolvable worktree, or a headless-browser inability records nothing and
+    never fails the dev turn."""
+    try:
+        from .autonomy import load_policy
+        if not getattr(load_policy(store), "web_probe", True):
+            return
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        serve_root = workspace.task_root(task_id, branch=branch)
+    except Exception:  # noqa: BLE001 — no worktree -> no evidence (fail-open)
+        return
+    try:
+        from . import anchors, web_probe
+        run = web_probe.run_and_record(
+            store, workspace, head=head, serve_root=serve_root,
+            should_cancel=should_cancel)
+        if run:
+            anchors.reconcile(store, run, project_id=store.project_id)
+    except Exception:  # noqa: BLE001 — the probe never fails the dev turn
+        return
+
+
 def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
                    should_cancel: Optional[Callable[[], bool]] = None) -> None:
     """GL01 (Item 1 + Item 2): the sibling arm to ``_run_gate`` — the default web
@@ -4647,7 +4681,7 @@ def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
     except Exception:  # noqa: BLE001
         return
     if not getattr(policy, "web_probe", True):
-        return
+        return None
     try:
         from . import anchors, web_probe
         run = web_probe.run_and_record(
@@ -4655,13 +4689,18 @@ def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
             frames=int(getattr(policy, "web_probe_frames", 30)),
             should_cancel=should_cancel)
     except Exception:  # noqa: BLE001 — the probe never fails the turn
-        return
+        return None
     if not run:
-        return  # non-web project, or fail-open (no evidence recorded)
+        return None  # non-web project, or fail-open (no evidence recorded)
     try:
         anchors.reconcile(store, run, project_id=store.project_id)
     except Exception:  # noqa: BLE001 — the anchor lock is best-effort
         pass
+    # SPEC-30 (S2): hand the recorded verdict back so the completion gate can
+    # require it. A probe that RAN and came back red (black canvas, a console
+    # crash, or an inert canvas that ignored input) must block `done`; a probe
+    # that could not run returned None above (fail-open, never blocks).
+    return run
 
 
 # Spec 12 (S1): a merge that touches ONLY these is not gate-relevant — running the
@@ -6244,6 +6283,13 @@ def build_run_turn(
                     title=f"opened PR: {task.title}", context=f"task {task.task_id}",
                     choice="pr_opened", rationale=f"branch {branch}",
                     related_task_ids=[task.task_id], extra={"pr_id": pr["pr_id"]})
+                # SPEC-30 (S4): drive the PR's own tree headless, pre-merge, and
+                # stamp the verdict onto THIS PR so the reviewer has execution
+                # evidence for the code it is about to approve (grounding the
+                # ungrounded reviewer — the 26-92% false-rejection seat). Fail-open.
+                _web_probe_pr_arm(store, workspace, task_id=task.task_id,
+                                  branch=branch, head=str(pr.get("head") or ""),
+                                  should_cancel=should_cancel)
                 return TurnOutcome(kind="pr_opened", task=task)
 
             if action.role == REVIEWER:
@@ -7021,17 +7067,30 @@ def build_run_turn(
             _delivery_launch_evidence(store, workspace, head,
                                       should_cancel=should_cancel)
 
-        # GL01 (Item 1): the web probe rides delivery too — a runnable web tree's
-        # delivered head gets a did-it-render liveness check (the black-canvas
-        # oracle) recorded as evidence alongside the launch probe, and its anchors
-        # reconciled. Best-effort / fail-open: it records a verdict the reviewer and
-        # `errorta prs` can see, but never blocks `done` here (a headless-browser
-        # inability must not fail delivery) — the GateRun arm is the in-loop gate.
-        _web_probe_arm(store, workspace, head=head, should_cancel=should_cancel)
+        # GL01 (Item 1) + SPEC-30 (S2): the web probe rides delivery — a runnable
+        # web tree's delivered head gets a did-it-RUN liveness check (render + no
+        # console crash + responds to input) recorded as evidence, anchors
+        # reconciled. Fail-open: a probe that could NOT run returns None and never
+        # blocks (a headless-browser inability must not fail delivery). But a probe
+        # that RAN and came back RED — black canvas, a crash on interaction, or an
+        # inert canvas that ignored input — now BLOCKS `done`. This is the change
+        # that stops the "big square" and the crash-on-shot from shipping: before
+        # SPEC-30 the probe recorded a red verdict here and delivery ignored it.
+        probe_run = _web_probe_arm(store, workspace, head=head,
+                                   should_cancel=should_cancel)
+        probe_ok = True
+        if isinstance(probe_run, dict) and probe_run.get("passed") is False:
+            probe_ok = False
+            store.record_decision(
+                title="delivery web probe failed", context="delivery_review",
+                choice="probe_fail",
+                rationale=str((probe_run.get("results") or [{}])[0].get("reason")
+                              if probe_run.get("results") else "web probe red")[:500])
 
-        # `passed` requires a clean launch too. A launch cannot_verify leaves
-        # launched_clean=False so it also fails `passed`.
-        passed = approved and tests_passed and launched_clean
+        # `passed` requires a clean launch AND a non-red web probe. A launch or
+        # probe cannot_verify (None) leaves its flag True (fail-open); only a
+        # definitive red fails `passed`.
+        passed = approved and tests_passed and launched_clean and probe_ok
         # Cache once-per-head ONLY for a real verdict. A cannot_verify (inability
         # to launch) is NOT cached, so the next completion claim retries the launch
         # instead of resting on a false negative (matches _cannot_verify above; a
@@ -7090,6 +7149,27 @@ def build_run_turn(
                 detail=("The delivered program crashed on startup when launched "
                         "headless for delivery verification. Fix the crash so it "
                         f"launches without error: {launch_detail}"))
+            filed = True
+        if not probe_ok:
+            # SPEC-30 (S2/S4): the delivered web artifact rendered but is not a
+            # working deliverable — it crashed when driven, or ignored input
+            # entirely (the "big square"). File it as dev work carrying the probe's
+            # VERBATIM reason (the console crash line, or "did not respond to
+            # input") so the DEV gets grounded runtime evidence a diff cannot give.
+            probe_detail = ""
+            try:
+                res = (probe_run.get("results") or [{}])[0] if isinstance(probe_run, dict) else {}
+                probe_detail = str(res.get("stderr_preview") or res.get("reason") or "")
+            except Exception:  # noqa: BLE001
+                probe_detail = ""
+            store.add_task(
+                title="fix web artifact runtime behavior", role=DEV,
+                reason_summary="The delivered page does not run correctly when driven",
+                detail=("The delivered web artifact was loaded headless and driven "
+                        "with a pointer interaction. It either crashed on input or "
+                        "did not respond (an inert canvas). Fix it so the page runs "
+                        "without console errors AND visibly responds to input: "
+                        f"{probe_detail}"))
             filed = True
         reason = "launch_cannot_verify" if launch_cannot_verify else "rejected"
         return DeliveryReviewResult(passed=False, filed_findings=filed,
