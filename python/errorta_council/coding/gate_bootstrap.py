@@ -246,7 +246,17 @@ def _bootstrap_acceptance_command(store: Any, workspace: Any) -> None:
         return
     ran, reason = _smoke_ran_cleanly(session)
     if not ran:
-        _refuse(store, cmd_id, reason)
+        # SPEC-31: a candidate the team authored (and the DoD may require) that
+        # cannot EXECUTE is not silently dropped. The refusal is still correct (a
+        # command that cannot run is not a gate), but it is recorded as a distinct
+        # `test_runtime_unavailable` fact AND persisted to run_state, so the
+        # completion path can honestly acknowledge that the authored acceptance test
+        # was NOT run — instead of a `done` that overstates "tested" (run 10 shipped
+        # definition_of_done with an unexecuted acceptance test, and nothing said
+        # so). Provisioning the test runtime so it CAN run is a separate change:
+        # the executor gives test runs a minimal env by design, so resolving Node
+        # deps needs a sanctioned deps step, not arbitrary env injection.
+        _record_test_runtime_unavailable(store, cmd_id, spec, reason)
         _mark_cmd_resolved(store)
         return
     store.set_test_commands({cmd_id: spec})
@@ -266,6 +276,33 @@ def _mark_cmd_resolved(store: Any) -> None:
     refused), so it is not re-attempted on every subsequent merge."""
     try:
         store.set_run_state(gate_cmd_bootstrap_resolved=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_test_runtime_unavailable(
+    store: Any, cmd_id: str, spec: dict[str, Any], reason: str) -> None:
+    """SPEC-31: the authored acceptance test exists on master but could not be
+    EXECUTED (its runtime — a headless browser, jsdom, a missing interpreter — is
+    not provisioned). Record it as a distinct, first-class fact and persist it to
+    run_state so the completion path acknowledges the test was not run. This is the
+    same refusal as before (an un-runnable command is not registered as a gate),
+    but named honestly so `done` cannot silently overstate "tested"."""
+    try:
+        store.record_decision(
+            title="acceptance test present but not executed",
+            context="gate_bootstrap", choice="test_runtime_unavailable",
+            rationale=(f"the authored acceptance test {cmd_id!r} "
+                       f"(argv={spec.get('argv')}) could not run — {reason}. Its "
+                       "runtime is not provisioned, so it is not registered as a "
+                       "gate; rendering is still verified by the web:probe, but the "
+                       "unit acceptance test was NOT executed."))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        store.set_run_state(acceptance_test_unrun={
+            "command_id": cmd_id, "argv": list(spec.get("argv") or []),
+            "reason": str(reason)})
     except Exception:  # noqa: BLE001
         pass
 

@@ -1560,6 +1560,71 @@ def _reconcile_stale(store: LedgerStore, workspace: Any) -> None:
             pass
 
 
+# SPEC-30 (Fix B): title markers for the ENGINE-FILED execution-failure fix tasks
+# — the delivery review, the acceptance gate, the runtime launch, and the web
+# probe/artifact each file a "fix ..." DEV task when they observe a failure at some
+# head. These can go stale (the failure is resolved on master before the task is
+# worked), and a DEV that blocks a stale one wedges the completion gate. Matched by
+# a conservative title signature so a genuine human-authored task is never touched.
+_DELIVERY_FIX_MARKERS = (
+    "delivery review", "delivery test", "acceptance gate", "web artifact",
+    "runtime launch", "canvas rendering", "web probe",
+)
+
+
+def _is_engine_filed_fix_title(title: str) -> bool:
+    t = str(title or "").lower()
+    return t.startswith("fix ") and any(m in t for m in _DELIVERY_FIX_MARKERS)
+
+
+def _reconcile_moot_gate_fixes(store: LedgerStore, workspace: Any) -> None:
+    """SPEC-30 (Fix B): drop an engine-filed execution-failure fix task that is now
+    MOOT. The delivery review / gate / launch / probe file a "fix ..." task when
+    they see a failure at some head; by the time it is worked the failure can be
+    resolved on master (run 8: the acceptance gate was green — "nothing to fix").
+    A DEV that blocks such a stale task turns it ``blocked`` (human-required), which
+    PERMANENTLY wedges the completion gate — a blocked human-required task cannot be
+    auto-closed, so `done` is refused forever and the run dies planning_churn even
+    though nothing is actually wrong.
+
+    If there is NO failing runtime evidence at the delivered head, the fix is moot:
+    drop it (terminal, unblocks `done`). Only engine-filed fix tasks (title markers)
+    that are NOT in flight; a real remaining failure (`_red_runtime_evidence` True)
+    is left untouched so a genuine defect still blocks. Cheap and deterministic."""
+    if workspace is None:
+        return
+    try:
+        head = workspace.head()
+    except Exception:  # noqa: BLE001
+        return
+    # A real failure at the delivered head means the fix tasks are NOT moot.
+    if not head or _red_runtime_evidence(store, head):
+        return
+    try:
+        in_flight = {t.task_id for t in store.list_tasks(state="doing")}
+        candidates = [
+            t for t in store.list_tasks()
+            if str(getattr(t, "state", "")) in ("todo", "blocked")
+            and t.task_id not in in_flight
+            and _is_engine_filed_fix_title(getattr(t, "title", ""))
+        ]
+    except Exception:  # noqa: BLE001
+        return
+    for t in candidates:
+        try:
+            store.update_task(t.task_id, state="dropped")
+            store.record_decision(
+                title=f"stale fix task dropped: {t.title}",
+                context=f"task {t.task_id}", choice="stale_fix_resolved",
+                rationale=("no failing gate / probe / launch evidence remains at the "
+                           f"delivered head {str(head)[:12]}; this engine-filed fix "
+                           "task is moot — dropping it so a satisfied blocked task "
+                           "cannot wedge the completion gate as human-required"),
+                related_task_ids=[t.task_id])
+        except Exception:  # noqa: BLE001 — reconcile is best-effort
+            pass
+
+
 def _prune_dead_branches(store: LedgerStore, workspace: Any, *,
                          just_merged: str = "") -> None:
     """F087-18 #6: after a merge, delete the just-merged branch and any other
@@ -2885,18 +2950,20 @@ def _pm_prompt(store: LedgerStore) -> str:
     except Exception:
         pass
     # F128: if the backlog still has open work, the PM may NOT declare done — tell
-    # it exactly what's open so it finishes or explicitly cancels obsolete items.
+    # it exactly what's open so it finishes or prunes obsolete items.
     done_gate = ""
     open_items = pending_completion_work(store)
     if open_items:
         done_gate = (
             "You may NOT declare the project done — these items are still open: "
-            f"{summarize_open_items(open_items)}. Finish them. If an item is "
-            "obsolete, identify it in a decision for the operator to drop; the "
-            "current PM plan schema has no cancel intent. An item marked "
-            "(human-required) — a "
-            "blocked task or a conflicted PR — cannot be auto-closed; leave it and "
-            "the run will surface it for the human.\n"
+            f"{summarize_open_items(open_items)}. Finish the ones that the "
+            "Definition of Done genuinely needs. If an item is OBSOLETE or beyond "
+            "the DoD (scope you over-planned), DROP it: put its task_id in "
+            "`cancel_task_ids` on your plan turn — this is how you converge, do NOT "
+            "keep adding scope. (A todo/blocked task with no live PR is dropped; "
+            "in-flight work is not.) An item marked (human-required) — a conflicted "
+            "PR — cannot be auto-closed; leave it and the run will surface it for "
+            "the human.\n"
         )
     # Spec 08: tell the PM its proposals were rejected as duplicates. Without
     # this it re-proposes the same job forever — it cannot see the gate.
@@ -3081,6 +3148,7 @@ def _last_word_prompt(store: LedgerStore, action: Any) -> str:
 def _pm_turn_made_progress(
     intent: Any, created: list[Task],
     prior_decision_titles: Optional[set[str]] = None,
+    dropped: Optional[list[str]] = None,
 ) -> bool:
     """Spec 22-28 P0.5 (bug 1) — did this PM plan turn DO something?
 
@@ -3130,6 +3198,12 @@ def _pm_turn_made_progress(
     ``None`` (the default) keeps the pre-Spec-25 behaviour for callers that cannot
     take one, so no existing call site changes meaning by accident."""
     if created:
+        return True
+    # SPEC-30 convergence: pruning obsolete tasks is real progress — it drains the
+    # backlog toward a completion claim and writes durable ledger truth (dropped
+    # tasks + a pm_cancel decision). A prune-only turn must NOT read as idle, or the
+    # convergence path this enables would itself re-arm the no-progress detector.
+    if dropped:
         return True
     if getattr(intent, "tasks", None):
         # Every proposed task was rejected (duplicate / uncreatable): Spec 08 says
@@ -3297,6 +3371,75 @@ def _materialize_pm_tasks(
         if resolved:
             store.update_task(task.task_id, depends_on=resolved)
     return [task for task, _dependencies in created]
+
+
+def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
+    """SPEC-31: if the run is reaching `done` while an authored acceptance test was
+    never executed (its runtime is not provisioned — recorded by gate_bootstrap as
+    `acceptance_test_unrun`), record an explicit acknowledgement so `done` never
+    silently overstates "tested". Rendering is still gated by the web:probe; this
+    only makes the un-run of the unit acceptance test legible on the ledger.
+    Best-effort; never blocks done (blocking would re-wedge a run whose test simply
+    cannot run in this environment)."""
+    try:
+        unrun = (store.get_run_state() or {}).get("acceptance_test_unrun")
+    except Exception:  # noqa: BLE001
+        return
+    if not unrun:
+        return
+    try:
+        store.record_decision(
+            title="done reached with an unexecuted acceptance test",
+            context="completion", choice="done_acceptance_test_unrun",
+            rationale=(f"the authored acceptance test {unrun.get('command_id')!r} was "
+                       f"not executed ({unrun.get('reason')}); rendering is verified "
+                       "by the web:probe, but the unit acceptance test did not run. "
+                       "Recorded so `done` does not overstate coverage (SPEC-31)."))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
+    """SPEC-30 convergence: drop the todo/blocked tasks the PM asked to cancel, so
+    it can prune its own over-planned backlog and reach a completion claim.
+
+    Eligibility is deliberately narrow — only a ``todo`` or ``blocked`` task with
+    NO live PR is dropped. A ``doing`` (in-flight) or terminal task, or one whose
+    work is already in an open PR, is skipped: the PM prunes SCOPE, it does not
+    kill work in progress. The delivery + execution gates still judge the real
+    artifact, so pruning can never mark an incomplete project done. Returns the
+    ids actually dropped (for the caller's progress accounting). Fully guarded."""
+    ids = [str(i) for i in (getattr(intent, "cancel_task_ids", None) or [])]
+    if not ids:
+        return []
+    try:
+        by_id = {t.task_id: t for t in store.list_tasks()}
+        live_pr_task_ids = {
+            str(p.get("task_id") or "") for p in store.list_prs()
+            if p.get("status") in ("open", "changes_requested", "mergeable", "conflict")
+        }
+    except Exception:  # noqa: BLE001 — a read failure means "cancel nothing"
+        return []
+    dropped: list[str] = []
+    for tid in ids:
+        task = by_id.get(tid)
+        if task is None:
+            continue
+        if str(getattr(task, "state", "")) not in ("todo", "blocked"):
+            continue  # never drop in-flight (doing) or already-terminal work
+        if tid in live_pr_task_ids:
+            continue  # real work is in an open PR — not obsolete scope
+        try:
+            store.update_task(tid, state="dropped")
+            store.record_decision(
+                title=f"PM dropped task: {getattr(task, 'title', tid)}",
+                context="pm_cancel", choice="pm_task_cancelled",
+                rationale="the PM pruned this obsolete / over-scoped task to converge",
+                related_task_ids=[tid])
+            dropped.append(tid)
+        except Exception:  # noqa: BLE001 — best-effort prune
+            pass
+    return dropped
 
 
 def _dep_graph(store: LedgerStore) -> dict[str, list[str]]:
@@ -3499,15 +3642,29 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
     trunc = " [diff truncated]" if truncated else ""
-    trunc_note = (
-        "The diff above was truncated to fit — code beyond the cut is NOT shown. "
-        "This is a tooling limit, not evidence of a source-code defect, but review "
-        "coverage is incomplete and unseen code cannot be approved. Set approved "
-        "to false and include one finding asking the author to split or reduce the "
-        "change so its complete diff can be reviewed. Do not speculate about defects "
-        "in code that is not shown.\n"
-        if truncated else ""
-    )
+    # SPEC-32: when the worktree is mounted (repo_read), a truncated diff is a READ
+    # CUE, not a defect — open the file with your native tools and judge from it.
+    # Rejecting for truncation while holding the tree wastes a revise cycle (run 10:
+    # the delivery reviewer rejected a truncated acceptance test it could have
+    # opened). Only WITHOUT a mount is truncation review-blocking (the code is
+    # genuinely unseeable).
+    if truncated and repo_read:
+        trunc_note = (
+            "The diff above was truncated to fit — but you have the full worktree "
+            "mounted read-only. OPEN the affected files with your native read tools "
+            "(Read/Grep/Glob in your working directory) and judge them from source. "
+            "Do NOT set approved=false merely because the diff is truncated — that is "
+            "a tooling limit you can resolve by reading, not a code defect.\n")
+    elif truncated:
+        trunc_note = (
+            "The diff above was truncated to fit — code beyond the cut is NOT shown. "
+            "This is a tooling limit, not evidence of a source-code defect, but "
+            "review coverage is incomplete and unseen code cannot be approved. Set "
+            "approved to false and include one finding asking the author to split or "
+            "reduce the change so its complete diff can be reviewed. Do not speculate "
+            "about defects in code that is not shown.\n")
+    else:
+        trunc_note = ""
     # F142 WS-A: the reviewer judges THIS PR against its own task's scope, not
     # the whole North Star. `task` is the reviewer's OWN task ("review PR: ...");
     # the scope the PR must satisfy belongs to the DEV task under review, passed
@@ -3527,11 +3684,14 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
                "context above (fall back to the task scope if that is absent).")
     else:
         bar = ("Its acceptance bar is the task scope stated above.")
+    # SPEC-32: the truncation reject-example is only for the NO-MOUNT case. With a
+    # mount, the example is a clean approve — the reviewer opens the file instead.
+    reject_for_truncation = truncated and not repo_read
     example_findings = ([{
         "severity": "major",
         "title": "Diff exceeds review context",
         "body": "Split or reduce this change so the complete diff can be reviewed.",
-    }] if truncated else [])
+    }] if reject_for_truncation else [])
     verdict_example = json.dumps({
         "schema_version": "coding_turn.v1",
         "role": "reviewer",
@@ -3539,7 +3699,7 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
         "intent": {
             "kind": "review_verdict",
             "reviewed_head": pr.get("head"),
-            "approved": not truncated,
+            "approved": not reject_for_truncation,
             "findings": example_findings,
         },
     })
@@ -3592,7 +3752,10 @@ def _review_pr_prompt_segments(
     envelope = (
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
         '"reviewed_head".\n'
-        "Reply with ONLY a coding_turn.v1 envelope: "
+        + ("Read whatever files you need with your native tools first; then reply "
+           "with your verdict. Do NOT emit a tool_plan / tool_calls intent — your "
+           "reply must be a review_verdict.\n" if repo_read else "")
+        + "Reply with ONLY a coding_turn.v1 envelope: "
         f"{verdict_example}. "
         "If approved=false you MUST include at least one finding."
     )
@@ -3653,21 +3816,59 @@ class DeliveryReviewResult(NamedTuple):
     reason: str = ""
 
 
-def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
+def _delivery_review_prompt(store: LedgerStore, head: str, diff: str,
+                            *, repo_read: bool = False) -> str:
     """Ask a reviewer to judge the COMPLETE delivered diff as one integrated unit
     (integration correctness the per-PR reviews cannot see), bound to the delivered
     head. Emits the SAME coding_turn.v1 reviewer envelope as ``_review_pr_prompt``
     so ``parse_coding_turn(REVIEWER, ...)`` validates it; only the framing differs
-    (delivery-wide vs one scoped task)."""
+    (delivery-wide vs one scoped task).
+
+    SPEC-30 fix: ``repo_read`` means the delivered tree is mounted read-only for
+    this turn, so the reviewer can LIST/OPEN the delivered files instead of
+    inferring them from a (possibly truncated) diff. Ungrounded, run 7's delivery
+    reviewer invented a filename ("Missing acceptance test file test/test.js") that
+    the DEV then could not act on — the finding named a path that was never the
+    team's convention. Grounded, it must verify a file's ABSENCE by looking, and
+    describe any missing deliverable by its BEHAVIOUR, not an invented path."""
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
     trunc = " [diff truncated]" if truncated else ""
-    trunc_note = (
-        "The diff above was truncated to fit — code beyond the cut is NOT shown. "
-        "Coverage is incomplete, so set approved=false with a finding asking to "
-        "reduce/split the delivered change so its full diff can be reviewed.\n"
-        if truncated else "")
+    # SPEC-30 fix: a truncated diff must NOT force a delivery rejection. The per-PR
+    # review can validly ask to "split" a large PR — but the DELIVERY diff IS the
+    # whole finished project, which cannot be split, so "reduce the delivered
+    # change" is an UNSATISFIABLE constraint that rejected every large deliverable
+    # forever (run 6 stopped planning_churn here with a working game merged). It is
+    # also unnecessary now: the execution gate (registered tests + runtime launch +
+    # the web:probe that drives the assembled artifact) proves whole-artifact
+    # correctness the diff cannot, so the delivery reviewer judges the VISIBLE
+    # portion for integration defects and leaves "does it run as assembled" to the
+    # gate. Truncation is a note, never an auto-reject.
+    # SPEC-32: with the tree mounted (repo_read), truncation is a READ CUE — open
+    # the affected files rather than judging (or rejecting) from the diff. Run 10's
+    # delivery reviewer rejected a truncated acceptance test it could have opened.
+    if truncated and repo_read:
+        trunc_note = (
+            "The diff above is large and was truncated to fit — but you have the "
+            "COMPLETE delivered tree mounted read-only. OPEN the affected files with "
+            "your native read tools (Read/Grep/Glob) and judge them from source; do "
+            "NOT reject because a file is truncated in the diff, and do NOT reject "
+            "because the delivered change is large — it is the whole project and "
+            "cannot be split. Rely on the recorded execution gate (tests, runtime "
+            "launch, and the web:probe that drove the assembled page) for "
+            "whole-artifact correctness the diff cannot show.\n")
+    elif truncated:
+        trunc_note = (
+            "The diff above is large and was truncated to fit — code beyond the cut "
+            "is NOT shown. Do NOT reject solely because the delivered change is "
+            "large: it is the complete project and cannot be split. Judge the "
+            "VISIBLE portion for integration defects (contract/type/import "
+            "mismatches across merged parts), and rely on the recorded execution "
+            "gate (tests, runtime launch, and the web:probe) for whole-artifact "
+            "correctness.\n")
+    else:
+        trunc_note = ""
     try:
         project = store.get_project()
         north_star = str(getattr(project, "north_star", "") or "")
@@ -3681,13 +3882,8 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
         "intent": {
             "kind": "review_verdict",
             "reviewed_head": head,
-            "approved": not truncated,
-            "findings": ([{
-                "severity": "major",
-                "title": "Delivered change exceeds review context",
-                "body": "Reduce the delivered change so its complete diff can be "
-                        "reviewed.",
-            }] if truncated else []),
+            "approved": True,
+            "findings": [],
         },
     })
     return (
@@ -3705,7 +3901,14 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
         "Approve only if the whole delivered result is correct, consistent, and "
         "complete. Do NOT request changes merely because more features could be "
         "added — judge against the Definition of Done.\n"
-        f"Delivered diff vs the project base{trunc}:\n```diff\n{cap}\n```\n"
+        + ("The COMPLETE delivered tree is mounted read-only for this turn — open "
+           "and list files to check what actually exists. Do NOT invent or assume a "
+           "file path: verify a file's ABSENCE by looking. If the Definition of Done "
+           "requires a deliverable that is genuinely missing (e.g. an acceptance "
+           "test), describe it by its BEHAVIOUR and acceptance criteria in the "
+           "finding — never by a made-up filename the team never used.\n"
+           if repo_read else "")
+        + f"Delivered diff vs the project base{trunc}:\n```diff\n{cap}\n```\n"
         f"{trunc_note}"
         f"The delivered head you are reviewing is {head!r}; echo it verbatim as "
         '"reviewed_head".\n'
@@ -4624,6 +4827,41 @@ def _run_gate(store: LedgerStore, workspace: Any, *, head: str, task_id: str,
     return session
 
 
+def _web_probe_pr_arm(store: LedgerStore, workspace: Any, *, task_id: str,
+                      branch: str, head: str,
+                      should_cancel: Optional[Callable[[], bool]] = None) -> None:
+    """SPEC-30 (S4): probe a PR's OWN tree, pre-merge, bound to the PR's head.
+
+    The post-merge ``_web_probe_arm`` serves master and records at the master head
+    — which no open PR ever carries, so its verdict never reached the reviewer.
+    This arm serves the PR BRANCH's worktree and records at ``head`` = the PR head,
+    so ``web_probe._attach_verdict_to_prs`` stamps THIS PR (the reviewer then reads
+    ``probe_passed`` / ``probe_reason`` off the record and, post-S4b, in its
+    prompt). Runs at PR-open, once per PR head. Fully fail-open: a non-web project,
+    an unresolvable worktree, or a headless-browser inability records nothing and
+    never fails the dev turn."""
+    try:
+        from .autonomy import load_policy
+        if not getattr(load_policy(store), "web_probe", True):
+            return
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        serve_root = workspace.task_root(task_id, branch=branch)
+    except Exception:  # noqa: BLE001 — no worktree -> no evidence (fail-open)
+        return
+    try:
+        from . import web_probe
+        # pr_scoped: recorded under PR_PROBE_TASK_ID so the gate detectors exclude
+        # it (branch evidence, not the integrated gate), and NO master-anchor
+        # reconcile — anchors track the master timeline, not per-branch heads.
+        web_probe.run_and_record(
+            store, workspace, head=head, serve_root=serve_root,
+            should_cancel=should_cancel, pr_scoped=True)
+    except Exception:  # noqa: BLE001 — the probe never fails the dev turn
+        return
+
+
 def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
                    should_cancel: Optional[Callable[[], bool]] = None) -> None:
     """GL01 (Item 1 + Item 2): the sibling arm to ``_run_gate`` — the default web
@@ -4647,7 +4885,7 @@ def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
     except Exception:  # noqa: BLE001
         return
     if not getattr(policy, "web_probe", True):
-        return
+        return None
     try:
         from . import anchors, web_probe
         run = web_probe.run_and_record(
@@ -4655,13 +4893,18 @@ def _web_probe_arm(store: LedgerStore, workspace: Any, *, head: str,
             frames=int(getattr(policy, "web_probe_frames", 30)),
             should_cancel=should_cancel)
     except Exception:  # noqa: BLE001 — the probe never fails the turn
-        return
+        return None
     if not run:
-        return  # non-web project, or fail-open (no evidence recorded)
+        return None  # non-web project, or fail-open (no evidence recorded)
     try:
         anchors.reconcile(store, run, project_id=store.project_id)
     except Exception:  # noqa: BLE001 — the anchor lock is best-effort
         pass
+    # SPEC-30 (S2): hand the recorded verdict back so the completion gate can
+    # require it. A probe that RAN and came back red (black canvas, a console
+    # crash, or an inert canvas that ignored input) must block `done`; a probe
+    # that could not run returned None above (fail-open, never blocks).
+    return run
 
 
 # Spec 12 (S1): a merge that touches ONLY these is not gate-relevant — running the
@@ -5587,18 +5830,21 @@ def build_run_turn(
                             "rationale": ("the PM claimed done, but open work "
                                           "remains: "
                                           f"{summarize_open_items(open_items)}")})
+                _ack_unrun_acceptance_test(store)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(
                     kind="project_done",
                     last_word={"outcome": "done",
                                "rationale": intent.completion_summary})
             created = _materialize_pm_tasks(store, intent)
-            if created:
+            dropped = _apply_pm_cancels(store, intent)
+            if created or dropped:
                 return TurnOutcome(
                     kind="planned", made_progress=True,
                     last_word={
                         "outcome": "accepted",
-                        "rationale": said or "proposed new work",
+                        "rationale": said or ("proposed new work" if created
+                                              else "pruned obsolete tasks"),
                         "task_ids": [t.task_id for t in created]})
             # Decisions only, or every proposed task rejected as a duplicate /
             # unexecutable. Nothing materialized, so there is nothing for the loop
@@ -5700,13 +5946,15 @@ def build_run_turn(
                 # F093: persist the PM's completion justification so the UI can
                 # show "✓ Complete — here's why". (intent.completion_summary is
                 # validated non-empty when done=true, schemas.py PMPlanIntent.)
+                _ack_unrun_acceptance_test(store)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)
+            dropped = _apply_pm_cancels(store, intent)
             return TurnOutcome(
                 kind="planned",
                 made_progress=_pm_turn_made_progress(
-                    intent, created, prior_decision_titles))
+                    intent, created, prior_decision_titles, dropped=dropped))
 
         if isinstance(action, GateRun):
             # Spec 12 (S1): run the acceptance gate on the integrated master tree,
@@ -6244,6 +6492,13 @@ def build_run_turn(
                     title=f"opened PR: {task.title}", context=f"task {task.task_id}",
                     choice="pr_opened", rationale=f"branch {branch}",
                     related_task_ids=[task.task_id], extra={"pr_id": pr["pr_id"]})
+                # SPEC-30 (S4): drive the PR's own tree headless, pre-merge, and
+                # stamp the verdict onto THIS PR so the reviewer has execution
+                # evidence for the code it is about to approve (grounding the
+                # ungrounded reviewer — the 26-92% false-rejection seat). Fail-open.
+                _web_probe_pr_arm(store, workspace, task_id=task.task_id,
+                                  branch=branch, head=str(pr.get("head") or ""),
+                                  should_cancel=should_cancel)
                 return TurnOutcome(kind="pr_opened", task=task)
 
             if action.role == REVIEWER:
@@ -6637,6 +6892,10 @@ def build_run_turn(
         # F087-19 #2: clean up stale/superseded PRs + corrective tasks before each
         # turn so the backlog/context reflects what master actually still needs.
         _reconcile_stale(store, workspace)
+        # SPEC-30 (Fix B): drop engine-filed execution-fix tasks that are now moot
+        # (no failing evidence at the delivered head), so a satisfied blocked task
+        # cannot wedge the completion gate as human-required (run 8).
+        _reconcile_moot_gate_fixes(store, workspace)
         # F087-16: record a verbatim transcript entry for every member turn
         # (the captured prompt + raw response + the resulting outcome), and emit
         # a one-line log so a live run is reviewable end to end.
@@ -6913,10 +7172,24 @@ def build_run_turn(
             return _cannot_verify("delivered diff unavailable (preview failed)")
         approved = False
         findings: list[dict[str, Any]] = []
+        # SPEC-30 fix: ground the delivery reviewer in the delivered tree so it
+        # cannot invent file paths (run 7's "Missing acceptance test file
+        # test/test.js" wedge). Mount the master working tree read-only when
+        # reviewer_repo_read honors this vendor; fall back to the plain member.
+        delivery_reviewer = reviewer_member
+        delivery_repo_read = False
+        if _member_honors_repo_read(reviewer_member, reviewer_repo_read):
+            try:
+                delivery_reviewer = {**reviewer_member,
+                                     "repo_read_root": str(workspace.root())}
+                delivery_repo_read = True
+            except Exception:  # noqa: BLE001 — grounding is best-effort
+                delivery_reviewer, delivery_repo_read = reviewer_member, False
         try:
             parsed = _parse_member_turn(
-                REVIEWER, _DELIVERY_TASK_ID, reviewer_member,
-                _delivery_review_prompt(store, head, diff),
+                REVIEWER, _DELIVERY_TASK_ID, delivery_reviewer,
+                _delivery_review_prompt(store, head, diff,
+                                        repo_read=delivery_repo_read),
                 context="delivery_review", related_task_ids=[])
         except _MemberCallFailed as exc:
             # Could not run the reviewer -> do NOT mark done and record NO verdict
@@ -7021,17 +7294,30 @@ def build_run_turn(
             _delivery_launch_evidence(store, workspace, head,
                                       should_cancel=should_cancel)
 
-        # GL01 (Item 1): the web probe rides delivery too — a runnable web tree's
-        # delivered head gets a did-it-render liveness check (the black-canvas
-        # oracle) recorded as evidence alongside the launch probe, and its anchors
-        # reconciled. Best-effort / fail-open: it records a verdict the reviewer and
-        # `errorta prs` can see, but never blocks `done` here (a headless-browser
-        # inability must not fail delivery) — the GateRun arm is the in-loop gate.
-        _web_probe_arm(store, workspace, head=head, should_cancel=should_cancel)
+        # GL01 (Item 1) + SPEC-30 (S2): the web probe rides delivery — a runnable
+        # web tree's delivered head gets a did-it-RUN liveness check (render + no
+        # console crash + responds to input) recorded as evidence, anchors
+        # reconciled. Fail-open: a probe that could NOT run returns None and never
+        # blocks (a headless-browser inability must not fail delivery). But a probe
+        # that RAN and came back RED — black canvas, a crash on interaction, or an
+        # inert canvas that ignored input — now BLOCKS `done`. This is the change
+        # that stops the "big square" and the crash-on-shot from shipping: before
+        # SPEC-30 the probe recorded a red verdict here and delivery ignored it.
+        probe_run = _web_probe_arm(store, workspace, head=head,
+                                   should_cancel=should_cancel)
+        probe_ok = True
+        if isinstance(probe_run, dict) and probe_run.get("passed") is False:
+            probe_ok = False
+            store.record_decision(
+                title="delivery web probe failed", context="delivery_review",
+                choice="probe_fail",
+                rationale=str((probe_run.get("results") or [{}])[0].get("reason")
+                              if probe_run.get("results") else "web probe red")[:500])
 
-        # `passed` requires a clean launch too. A launch cannot_verify leaves
-        # launched_clean=False so it also fails `passed`.
-        passed = approved and tests_passed and launched_clean
+        # `passed` requires a clean launch AND a non-red web probe. A launch or
+        # probe cannot_verify (None) leaves its flag True (fail-open); only a
+        # definitive red fails `passed`.
+        passed = approved and tests_passed and launched_clean and probe_ok
         # Cache once-per-head ONLY for a real verdict. A cannot_verify (inability
         # to launch) is NOT cached, so the next completion claim retries the launch
         # instead of resting on a false negative (matches _cannot_verify above; a
@@ -7090,6 +7376,27 @@ def build_run_turn(
                 detail=("The delivered program crashed on startup when launched "
                         "headless for delivery verification. Fix the crash so it "
                         f"launches without error: {launch_detail}"))
+            filed = True
+        if not probe_ok:
+            # SPEC-30 (S2/S4): the delivered web artifact rendered but is not a
+            # working deliverable — it crashed when driven, or ignored input
+            # entirely (the "big square"). File it as dev work carrying the probe's
+            # VERBATIM reason (the console crash line, or "did not respond to
+            # input") so the DEV gets grounded runtime evidence a diff cannot give.
+            probe_detail = ""
+            try:
+                res = (probe_run.get("results") or [{}])[0] if isinstance(probe_run, dict) else {}
+                probe_detail = str(res.get("stderr_preview") or res.get("reason") or "")
+            except Exception:  # noqa: BLE001
+                probe_detail = ""
+            store.add_task(
+                title="fix web artifact runtime behavior", role=DEV,
+                reason_summary="The delivered page does not run correctly when driven",
+                detail=("The delivered web artifact was loaded headless and driven "
+                        "with a pointer interaction. It either crashed on input or "
+                        "did not respond (an inert canvas). Fix it so the page runs "
+                        "without console errors AND visibly responds to input: "
+                        f"{probe_detail}"))
             filed = True
         reason = "launch_cannot_verify" if launch_cannot_verify else "rejected"
         return DeliveryReviewResult(passed=False, filed_findings=filed,

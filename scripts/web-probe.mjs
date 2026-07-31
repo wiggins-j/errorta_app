@@ -88,6 +88,70 @@ async function main() {
       args.frames
     ).catch(() => {});
 
+    // SPEC-30 (S1) — the INTERACTION phase. Passive load catches a black canvas
+    // and a crash-on-start, but the gravity-golf failures (a module whose method
+    // name the integration got wrong; an input handler wired to the wrong
+    // contract) only fault when the artifact is DRIVEN. So: hash the canvas, drive
+    // a realistic pointer gesture across it (a press-drag-release — a "shot" for a
+    // mouse game, a generic poke otherwise), let it settle, and re-hash. A new
+    // pageerror during this window (the `applyGravity is not a function` crash) is
+    // captured by the existing pageerror listener and fails `ok`; an UNCHANGED
+    // canvas (the empty gradient that ignores input) sets interaction_changed=false
+    // for the gate to reject. Fully guarded: if we cannot interact, the fields go
+    // null and the passive verdict stands (fail-open, never a false red).
+    let interactionChanged = null;
+    const errsBeforeInteract = consoleErrors.length;
+    try {
+      const hashCanvas = () => page.evaluate(() => {
+        const c = document.querySelector("canvas");
+        if (!c || !c.width || !c.height) return null;
+        try {
+          const g = c.getContext("2d") || c.getContext("webgl") || c.getContext("webgl2");
+          if (!g || !g.getImageData) return null;
+          const d = g.getImageData(0, 0, c.width, c.height).data;
+          // Cheap, stable digest: strided sum so a moving sprite shifts it.
+          let h = 0;
+          for (let i = 0; i < d.length; i += 40) h = (h + d[i] * (i + 1)) % 2147483647;
+          return h;
+        } catch { return null; }
+      }).catch(() => null);
+
+      const box = await page.evaluate(() => {
+        const c = document.querySelector("canvas");
+        if (!c) return null;
+        const r = c.getBoundingClientRect();
+        return { x: r.left, y: r.top, w: r.width, h: r.height };
+      }).catch(() => null);
+
+      if (box && box.w > 0 && box.h > 0) {
+        const before = await hashCanvas();
+        // A press-drag-release across the canvas interior (trusted events). Kept
+        // >4px from the edges so it never triggers a browser edge gesture, and
+        // spanning a wide arc so a slingshot-style aim registers real power.
+        const x0 = box.x + box.w * 0.35, y0 = box.y + box.h * 0.55;
+        const x1 = box.x + box.w * 0.6, y1 = box.y + box.h * 0.4;
+        await page.mouse.move(x0, y0);
+        await page.mouse.down();
+        await page.mouse.move((x0 + x1) / 2, (y0 + y1) / 2, { steps: 8 });
+        await page.mouse.move(x1, y1, { steps: 8 });
+        await page.mouse.up();
+        // Also a plain click, in case the control is click-to-act.
+        await page.mouse.click(box.x + box.w * 0.5, box.y + box.h * 0.5);
+        // Let the reaction play out (physics, transitions) — bounded frames.
+        await page.evaluate(
+          (n) => new Promise((resolve) => {
+            let left = n;
+            const tick = () => (--left <= 0 ? resolve() : requestAnimationFrame(tick));
+            requestAnimationFrame(tick);
+          }),
+          Math.max(30, args.frames)
+        ).catch(() => {});
+        const after = await hashCanvas();
+        if (before !== null && after !== null) interactionChanged = before !== after;
+      }
+    } catch { /* interaction is best-effort; passive verdict stands */ }
+    const interactionError = consoleErrors.length > errsBeforeInteract;
+
     // Screenshot for the record (best-effort) + compute the verdict.
     let st = { mean: 0, variance: 0, samples: 0 };
     const hasCanvas = await page.evaluate(() => !!document.querySelector("canvas")).catch(() => false);
@@ -127,7 +191,18 @@ async function main() {
     else if (nonBlack) reason = `rendered content (mean=${st.mean.toFixed(1)}, var=${st.variance.toFixed(1)})`;
     else reason = `frame is uniformly black (mean=${st.mean.toFixed(1)}, var=${st.variance.toFixed(1)})`;
     const ok = nonBlack && consoleErrors.length === 0;
-    emit({ ok, non_black: nonBlack, console_errors: consoleErrors, reason, screenshot: args.screenshot || "" });
+    // SPEC-30: surface the interaction outcome. `interaction_changed` is
+    // true/false when we drove a gesture, null when we could not. `reason` gains a
+    // clause so `gate_state.latest_gate_text` shows the reviewer WHY it failed.
+    let reason2 = reason;
+    if (interactionError) reason2 += "; crashed on interaction (see console)";
+    else if (interactionChanged === false) reason2 += "; canvas did not respond to input (inert)";
+    else if (interactionChanged === true) reason2 += "; responded to input";
+    emit({
+      ok, non_black: nonBlack, console_errors: consoleErrors, reason: reason2,
+      screenshot: args.screenshot || "",
+      interaction_changed: interactionChanged, interaction_error: interactionError,
+    });
   } catch (e) {
     emit({ ok: false, non_black: false, console_errors: consoleErrors, reason: `probe error: ${String(e && e.message || e).slice(0, 300)}`, screenshot: args.screenshot || "" });
     process.exitCode = 4;

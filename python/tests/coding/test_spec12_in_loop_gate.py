@@ -329,7 +329,10 @@ def test_maybe_bootstrap_refuses_an_unrunnable_command(
             "label": "acc"}))
     gate_bootstrap.maybe_bootstrap(s, ws, CodingAutonomyPolicy())
     assert s.get_test_commands() == {}  # NOT registered
-    assert any(d["choice"] == "gate_bootstrap_refused" for d in s.list_decisions())
+    # SPEC-31: an un-runnable authored test is recorded as test_runtime_unavailable
+    # (still not registered as a gate) rather than silently refused.
+    assert any(d["choice"] == "test_runtime_unavailable" for d in s.list_decisions())
+    assert s.get_run_state().get("acceptance_test_unrun")  # persisted for the done ack
 
 
 def test_a_refused_candidate_smoke_runs_at_most_once(

@@ -76,30 +76,56 @@ class RedactingSidecarLogHandler(logging.FileHandler):
     def format(self, record: logging.LogRecord) -> str:
         return redact_line(super().format(record))
 
+    def _live_stream(self):
+        """SPEC-33: the stream, re-opened if it is ``None``.
+
+        This handler OVERRIDES ``emit`` and so lost ``FileHandler.emit``'s
+        reopen-if-None step. ``self.stream`` is ``None`` after ``close()`` (teardown
+        / rotation), but a background task (``_sync_grounding``) can still emit —
+        run 10 crashed here with ``AttributeError: 'NoneType' object has no
+        attribute 'write'``. Reopen lazily (append mode, so no data is lost); a
+        reopen failure returns ``None`` and the caller drops the record silently
+        rather than raising from logging."""
+        if self.stream is not None:
+            return self.stream
+        try:
+            self.stream = self._open()
+        except Exception:  # pragma: no cover — reopen failed -> drop the record
+            return None
+        return self.stream
+
     def emit(self, record: logging.LogRecord) -> None:
         if self._capped:
             return
         try:
             msg = self.format(record) + self.terminator
         except Exception:  # pragma: no cover — never raise from logging
-            self.handleError(record)
             return
         size = len(msg.encode("utf-8", errors="replace"))
+        stream = self._live_stream()
+        if stream is None:
+            return  # no sink available (closed + un-reopenable) -> drop, never raise
         if self._max_bytes and self._written + size > self._max_bytes:
             self._capped = True
             try:
-                self.stream.write(_CAPPED_NOTICE)
+                stream.write(_CAPPED_NOTICE)
                 self.flush()
             except Exception:  # pragma: no cover — defensive
                 pass
             return
         try:
-            self.stream.write(msg)
+            stream.write(msg)
             self.flush()
         except Exception:  # pragma: no cover — never raise from logging
-            self.handleError(record)
             return
         self._written += size
+
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: D102
+        # SPEC-33: a failed emit must NOT try to write again to the same missing
+        # stream. The default handleError writes the traceback to a stream — the
+        # very thing that just failed — producing a nested "Logging error" per
+        # emit (run 10). This handler is best-effort by contract: swallow.
+        return
 
 
 def _is_console_handler(handler: logging.Handler) -> bool:

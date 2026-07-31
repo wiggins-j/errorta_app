@@ -856,6 +856,33 @@ def _progress_fingerprint(ledger: Any, c: "LoopCounters") -> tuple:
     return (pr_fp, task_fp, ladder, foundation)
 
 
+def _gate_scoring_runs(runs: Any) -> list:
+    """The test-runs the ACCEPTANCE-GATE detectors score, excluding the web:probe.
+
+    SPEC-30: the web:probe is a LIVENESS oracle (does the assembled page render and
+    respond to input), not part of the acceptance-gate SCORE. It has its own
+    enforcement — the completion gate blocks `done` on a red probe (S2), and the
+    per-PR probe grounds the reviewer (S4). Scoring it inside `gate_not_improving`
+    conflates two different signals on one axis: a 0/1 probe score interleaves with
+    the acceptance-command count, so a mid-build integration that renders but has no
+    input wired yet (legitimately) pins the 'latest gate' score to 0 and trips the
+    acceptance-CHURN detector (run 6: a per-PR probe first, then the master probe,
+    each drove a false gate_not_improving pressure). Exclude BOTH the per-PR and the
+    master/delivery probe here; the acceptance-gate detectors score on registered
+    test commands + runtime launch + the delivery verdict. Guarded — a malformed
+    list degrades to itself rather than failing the detector."""
+    try:
+        from .web_probe import _PROBE_TASK_ID, PR_PROBE_TASK_ID
+        probe_task_ids = {PR_PROBE_TASK_ID, _PROBE_TASK_ID}
+    except Exception:  # noqa: BLE001
+        probe_task_ids = {"web-probe-pr", "web-probe"}
+    try:
+        return [r for r in (runs or [])
+                if str((r or {}).get("task_id")) not in probe_task_ids]
+    except Exception:  # noqa: BLE001
+        return list(runs or [])
+
+
 def _gate_fingerprint(ledger: Any) -> tuple[tuple, int]:
     """Spec 04: a snapshot of the ACCEPTANCE GATE RESULT — the test-run pass set
     and the delivery-review verdict — keyed on the RESULT, NOT the PR head.
@@ -877,7 +904,7 @@ def _gate_fingerprint(ledger: Any) -> tuple[tuple, int]:
     list_test_runs = getattr(ledger, "list_test_runs", None)
     if callable(list_test_runs):
         try:
-            runs = list_test_runs()
+            runs = _gate_scoring_runs(list_test_runs())
         except Exception:  # noqa: BLE001
             runs = None
         if runs:
@@ -1887,7 +1914,7 @@ def _gate_has_failure(ledger: Any) -> bool:
     delivery verdict) and is guarded identically — an unreadable ledger reports no
     failure, so the detector stays silent rather than stopping a run on a hiccup."""
     try:
-        runs = ledger.list_test_runs() or []
+        runs = _gate_scoring_runs(ledger.list_test_runs() or [])
     except Exception:  # noqa: BLE001
         return False
     if runs:

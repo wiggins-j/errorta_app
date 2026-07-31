@@ -25,6 +25,8 @@ from errorta_council.coding.autonomy import (
 from errorta_council.coding.evidence import merge_review
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
+    _REVIEW_DIFF_CAP,
+    _delivery_review_prompt,
     CodingRunner,
     build_run_turn,
     members_by_coding_role,
@@ -360,3 +362,42 @@ def test_delivery_review_stalls_at_round_limit(tmp_errorta_home: Path) -> None:
     assert res.stop_reason == DELIVERY_REVIEW_STALLED, res.stop_reason
     assert store.get_project().status != "done"
     assert fake.delivery_review_calls >= 2
+
+
+def test_delivery_review_does_not_auto_reject_a_truncated_diff() -> None:
+    """SPEC-30 fix: a large finished project's integrated diff overflows the review
+    cap, but the delivery reviewer must NOT be told to reject and "split the
+    delivered change" — that is unsatisfiable for a whole deliverable and stopped
+    run 6 (planning_churn) with a working game merged. A truncated delivery diff is
+    a NOTE that defers whole-artifact correctness to the execution gate; the example
+    envelope defaults approved=True with no forced finding."""
+    store = _make("spec30-delivery-trunc", {})
+    huge = "+" + ("x" * (_REVIEW_DIFF_CAP + 5000))
+    prompt = _delivery_review_prompt(store, "head-abc", huge)
+    # It must NOT instruct a reject-for-size, and must not force approved=false.
+    assert "set approved=false" not in prompt
+    assert "reduce/split the delivered change" not in prompt
+    assert '"approved": true' in prompt.lower() or '"approved":true' in prompt.lower()
+    # It should still tell the reviewer to lean on the execution gate.
+    assert "execution gate" in prompt or "web:probe" in prompt
+
+
+def test_delivery_review_untruncated_diff_unchanged() -> None:
+    """A small delivered diff carries no truncation note (byte-shape preserved)."""
+    store = _make("spec30-delivery-small", {})
+    prompt = _delivery_review_prompt(store, "head-xyz", "+def add(): pass\n")
+    assert "truncated" not in prompt
+    assert "head-xyz" in prompt
+
+
+def test_delivery_review_repo_read_grounds_the_reviewer() -> None:
+    """SPEC-30 fix: with the delivered tree mounted (repo_read=True), the delivery
+    reviewer is told to verify a file's absence by LOOKING and to describe a missing
+    deliverable by behaviour, not an invented path — the root cause of run 7's
+    'Missing acceptance test file test/test.js' wedge. Ungrounded, no such guard."""
+    store = _make("spec30-delivery-grounded", {})
+    grounded = _delivery_review_prompt(store, "h1", "+x\n", repo_read=True)
+    ungrounded = _delivery_review_prompt(store, "h1", "+x\n", repo_read=False)
+    assert "mounted read-only" in grounded and "invent" in grounded.lower()
+    assert "verify a file's ABSENCE" in grounded
+    assert "mounted read-only" not in ungrounded
