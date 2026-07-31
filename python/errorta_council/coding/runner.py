@@ -3373,6 +3373,32 @@ def _materialize_pm_tasks(
     return [task for task, _dependencies in created]
 
 
+def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
+    """SPEC-31: if the run is reaching `done` while an authored acceptance test was
+    never executed (its runtime is not provisioned — recorded by gate_bootstrap as
+    `acceptance_test_unrun`), record an explicit acknowledgement so `done` never
+    silently overstates "tested". Rendering is still gated by the web:probe; this
+    only makes the un-run of the unit acceptance test legible on the ledger.
+    Best-effort; never blocks done (blocking would re-wedge a run whose test simply
+    cannot run in this environment)."""
+    try:
+        unrun = (store.get_run_state() or {}).get("acceptance_test_unrun")
+    except Exception:  # noqa: BLE001
+        return
+    if not unrun:
+        return
+    try:
+        store.record_decision(
+            title="done reached with an unexecuted acceptance test",
+            context="completion", choice="done_acceptance_test_unrun",
+            rationale=(f"the authored acceptance test {unrun.get('command_id')!r} was "
+                       f"not executed ({unrun.get('reason')}); rendering is verified "
+                       "by the web:probe, but the unit acceptance test did not run. "
+                       "Recorded so `done` does not overstate coverage (SPEC-31)."))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
     """SPEC-30 convergence: drop the todo/blocked tasks the PM asked to cancel, so
     it can prune its own over-planned backlog and reach a completion claim.
@@ -5804,6 +5830,7 @@ def build_run_turn(
                             "rationale": ("the PM claimed done, but open work "
                                           "remains: "
                                           f"{summarize_open_items(open_items)}")})
+                _ack_unrun_acceptance_test(store)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(
                     kind="project_done",
@@ -5919,6 +5946,7 @@ def build_run_turn(
                 # F093: persist the PM's completion justification so the UI can
                 # show "✓ Complete — here's why". (intent.completion_summary is
                 # validated non-empty when done=true, schemas.py PMPlanIntent.)
+                _ack_unrun_acceptance_test(store)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)
