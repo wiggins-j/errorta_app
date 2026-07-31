@@ -3616,15 +3616,29 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
     trunc = " [diff truncated]" if truncated else ""
-    trunc_note = (
-        "The diff above was truncated to fit — code beyond the cut is NOT shown. "
-        "This is a tooling limit, not evidence of a source-code defect, but review "
-        "coverage is incomplete and unseen code cannot be approved. Set approved "
-        "to false and include one finding asking the author to split or reduce the "
-        "change so its complete diff can be reviewed. Do not speculate about defects "
-        "in code that is not shown.\n"
-        if truncated else ""
-    )
+    # SPEC-32: when the worktree is mounted (repo_read), a truncated diff is a READ
+    # CUE, not a defect — open the file with your native tools and judge from it.
+    # Rejecting for truncation while holding the tree wastes a revise cycle (run 10:
+    # the delivery reviewer rejected a truncated acceptance test it could have
+    # opened). Only WITHOUT a mount is truncation review-blocking (the code is
+    # genuinely unseeable).
+    if truncated and repo_read:
+        trunc_note = (
+            "The diff above was truncated to fit — but you have the full worktree "
+            "mounted read-only. OPEN the affected files with your native read tools "
+            "(Read/Grep/Glob in your working directory) and judge them from source. "
+            "Do NOT set approved=false merely because the diff is truncated — that is "
+            "a tooling limit you can resolve by reading, not a code defect.\n")
+    elif truncated:
+        trunc_note = (
+            "The diff above was truncated to fit — code beyond the cut is NOT shown. "
+            "This is a tooling limit, not evidence of a source-code defect, but "
+            "review coverage is incomplete and unseen code cannot be approved. Set "
+            "approved to false and include one finding asking the author to split or "
+            "reduce the change so its complete diff can be reviewed. Do not speculate "
+            "about defects in code that is not shown.\n")
+    else:
+        trunc_note = ""
     # F142 WS-A: the reviewer judges THIS PR against its own task's scope, not
     # the whole North Star. `task` is the reviewer's OWN task ("review PR: ...");
     # the scope the PR must satisfy belongs to the DEV task under review, passed
@@ -3644,11 +3658,14 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
                "context above (fall back to the task scope if that is absent).")
     else:
         bar = ("Its acceptance bar is the task scope stated above.")
+    # SPEC-32: the truncation reject-example is only for the NO-MOUNT case. With a
+    # mount, the example is a clean approve — the reviewer opens the file instead.
+    reject_for_truncation = truncated and not repo_read
     example_findings = ([{
         "severity": "major",
         "title": "Diff exceeds review context",
         "body": "Split or reduce this change so the complete diff can be reviewed.",
-    }] if truncated else [])
+    }] if reject_for_truncation else [])
     verdict_example = json.dumps({
         "schema_version": "coding_turn.v1",
         "role": "reviewer",
@@ -3656,7 +3673,7 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
         "intent": {
             "kind": "review_verdict",
             "reviewed_head": pr.get("head"),
-            "approved": not truncated,
+            "approved": not reject_for_truncation,
             "findings": example_findings,
         },
     })
@@ -3709,7 +3726,10 @@ def _review_pr_prompt_segments(
     envelope = (
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
         '"reviewed_head".\n'
-        "Reply with ONLY a coding_turn.v1 envelope: "
+        + ("Read whatever files you need with your native tools first; then reply "
+           "with your verdict. Do NOT emit a tool_plan / tool_calls intent — your "
+           "reply must be a review_verdict.\n" if repo_read else "")
+        + "Reply with ONLY a coding_turn.v1 envelope: "
         f"{verdict_example}. "
         "If approved=false you MUST include at least one finding."
     )
@@ -3799,14 +3819,30 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str,
     # correctness the diff cannot, so the delivery reviewer judges the VISIBLE
     # portion for integration defects and leaves "does it run as assembled" to the
     # gate. Truncation is a note, never an auto-reject.
-    trunc_note = (
-        "The diff above is large and was truncated to fit — code beyond the cut is "
-        "NOT shown. Do NOT reject solely because the delivered change is large: it "
-        "is the complete project and cannot be split. Judge the VISIBLE portion for "
-        "integration defects (contract/type/import mismatches across merged parts), "
-        "and rely on the recorded execution gate (tests, runtime launch, and the "
-        "web:probe that drove the assembled page) for whole-artifact correctness.\n"
-        if truncated else "")
+    # SPEC-32: with the tree mounted (repo_read), truncation is a READ CUE — open
+    # the affected files rather than judging (or rejecting) from the diff. Run 10's
+    # delivery reviewer rejected a truncated acceptance test it could have opened.
+    if truncated and repo_read:
+        trunc_note = (
+            "The diff above is large and was truncated to fit — but you have the "
+            "COMPLETE delivered tree mounted read-only. OPEN the affected files with "
+            "your native read tools (Read/Grep/Glob) and judge them from source; do "
+            "NOT reject because a file is truncated in the diff, and do NOT reject "
+            "because the delivered change is large — it is the whole project and "
+            "cannot be split. Rely on the recorded execution gate (tests, runtime "
+            "launch, and the web:probe that drove the assembled page) for "
+            "whole-artifact correctness the diff cannot show.\n")
+    elif truncated:
+        trunc_note = (
+            "The diff above is large and was truncated to fit — code beyond the cut "
+            "is NOT shown. Do NOT reject solely because the delivered change is "
+            "large: it is the complete project and cannot be split. Judge the "
+            "VISIBLE portion for integration defects (contract/type/import "
+            "mismatches across merged parts), and rely on the recorded execution "
+            "gate (tests, runtime launch, and the web:probe) for whole-artifact "
+            "correctness.\n")
+    else:
+        trunc_note = ""
     try:
         project = store.get_project()
         north_star = str(getattr(project, "north_star", "") or "")
