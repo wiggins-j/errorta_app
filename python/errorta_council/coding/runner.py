@@ -1560,6 +1560,71 @@ def _reconcile_stale(store: LedgerStore, workspace: Any) -> None:
             pass
 
 
+# SPEC-30 (Fix B): title markers for the ENGINE-FILED execution-failure fix tasks
+# — the delivery review, the acceptance gate, the runtime launch, and the web
+# probe/artifact each file a "fix ..." DEV task when they observe a failure at some
+# head. These can go stale (the failure is resolved on master before the task is
+# worked), and a DEV that blocks a stale one wedges the completion gate. Matched by
+# a conservative title signature so a genuine human-authored task is never touched.
+_DELIVERY_FIX_MARKERS = (
+    "delivery review", "delivery test", "acceptance gate", "web artifact",
+    "runtime launch", "canvas rendering", "web probe",
+)
+
+
+def _is_engine_filed_fix_title(title: str) -> bool:
+    t = str(title or "").lower()
+    return t.startswith("fix ") and any(m in t for m in _DELIVERY_FIX_MARKERS)
+
+
+def _reconcile_moot_gate_fixes(store: LedgerStore, workspace: Any) -> None:
+    """SPEC-30 (Fix B): drop an engine-filed execution-failure fix task that is now
+    MOOT. The delivery review / gate / launch / probe file a "fix ..." task when
+    they see a failure at some head; by the time it is worked the failure can be
+    resolved on master (run 8: the acceptance gate was green — "nothing to fix").
+    A DEV that blocks such a stale task turns it ``blocked`` (human-required), which
+    PERMANENTLY wedges the completion gate — a blocked human-required task cannot be
+    auto-closed, so `done` is refused forever and the run dies planning_churn even
+    though nothing is actually wrong.
+
+    If there is NO failing runtime evidence at the delivered head, the fix is moot:
+    drop it (terminal, unblocks `done`). Only engine-filed fix tasks (title markers)
+    that are NOT in flight; a real remaining failure (`_red_runtime_evidence` True)
+    is left untouched so a genuine defect still blocks. Cheap and deterministic."""
+    if workspace is None:
+        return
+    try:
+        head = workspace.head()
+    except Exception:  # noqa: BLE001
+        return
+    # A real failure at the delivered head means the fix tasks are NOT moot.
+    if not head or _red_runtime_evidence(store, head):
+        return
+    try:
+        in_flight = {t.task_id for t in store.list_tasks(state="doing")}
+        candidates = [
+            t for t in store.list_tasks()
+            if str(getattr(t, "state", "")) in ("todo", "blocked")
+            and t.task_id not in in_flight
+            and _is_engine_filed_fix_title(getattr(t, "title", ""))
+        ]
+    except Exception:  # noqa: BLE001
+        return
+    for t in candidates:
+        try:
+            store.update_task(t.task_id, state="dropped")
+            store.record_decision(
+                title=f"stale fix task dropped: {t.title}",
+                context=f"task {t.task_id}", choice="stale_fix_resolved",
+                rationale=("no failing gate / probe / launch evidence remains at the "
+                           f"delivered head {str(head)[:12]}; this engine-filed fix "
+                           "task is moot — dropping it so a satisfied blocked task "
+                           "cannot wedge the completion gate as human-required"),
+                related_task_ids=[t.task_id])
+        except Exception:  # noqa: BLE001 — reconcile is best-effort
+            pass
+
+
 def _prune_dead_branches(store: LedgerStore, workspace: Any, *,
                          just_merged: str = "") -> None:
     """F087-18 #6: after a merge, delete the just-merged branch and any other
@@ -6708,6 +6773,10 @@ def build_run_turn(
         # F087-19 #2: clean up stale/superseded PRs + corrective tasks before each
         # turn so the backlog/context reflects what master actually still needs.
         _reconcile_stale(store, workspace)
+        # SPEC-30 (Fix B): drop engine-filed execution-fix tasks that are now moot
+        # (no failing evidence at the delivered head), so a satisfied blocked task
+        # cannot wedge the completion gate as human-required (run 8).
+        _reconcile_moot_gate_fixes(store, workspace)
         # F087-16: record a verbatim transcript entry for every member turn
         # (the captured prompt + raw response + the resulting outcome), and emit
         # a one-line log so a live run is reviewable end to end.
