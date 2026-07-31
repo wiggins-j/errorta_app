@@ -872,7 +872,7 @@ def _gate_scoring_runs(runs: Any) -> list:
     test commands + runtime launch + the delivery verdict. Guarded — a malformed
     list degrades to itself rather than failing the detector."""
     try:
-        from .web_probe import PR_PROBE_TASK_ID, _PROBE_TASK_ID
+        from .web_probe import _PROBE_TASK_ID, PR_PROBE_TASK_ID
         probe_task_ids = {PR_PROBE_TASK_ID, _PROBE_TASK_ID}
     except Exception:  # noqa: BLE001
         probe_task_ids = {"web-probe-pr", "web-probe"}
