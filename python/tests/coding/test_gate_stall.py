@@ -70,6 +70,44 @@ def test_fingerprint_score_is_pass_count() -> None:
     assert score == 6
 
 
+def test_fingerprint_excludes_per_pr_probes() -> None:
+    """SPEC-30 (S4 fix): a per-PR web:probe (recorded under PR_PROBE_TASK_ID) is
+    branch-scoped evidence, NOT the integrated gate. A green acceptance run followed
+    by a red per-PR probe must score off the acceptance run (6), not the probe (0)
+    — otherwise gate_not_improving trips on branch-scoped evidence during build-up.
+    """
+    from errorta_council.coding.web_probe import PR_PROBE_TASK_ID
+    acceptance = {**_test_record(6, 12, head="master"), "task_id": "gate"}
+    pr_probe = {
+        "task_id": PR_PROBE_TASK_ID, "head": "branch-tip",
+        "results": [{"command_id": "web:probe", "exit_code": 1, "status": "failed"}],
+        "passed": False,
+    }
+    led = FakeLedger(test_runs=[acceptance, pr_probe])  # probe is runs[-1]
+    _fp, score = _gate_fingerprint(led)
+    assert score == 6, "per-PR probe must not drag the gate score to 0"
+
+
+def test_gate_stall_does_not_trip_on_per_pr_probes() -> None:
+    """The end-to-end lock: a run whose only recent test-runs are red per-PR probes
+    (build-up phase) must NOT trip gate_not_improving — the probes are excluded, so
+    there is no integrated-gate failure to stall on."""
+    from errorta_council.coding.web_probe import PR_PROBE_TASK_ID
+    probes = [{
+        "task_id": PR_PROBE_TASK_ID, "head": f"branch-{i}",
+        "results": [{"command_id": "web:probe", "exit_code": 1, "status": "failed"}],
+        "passed": False,
+    } for i in range(12)]
+    led = FakeLedger(test_runs=probes)
+    pol = CodingAutonomyPolicy(gate_stall_limit=8)
+    c = LoopCounters()
+    result = None
+    for _ in range(15):
+        c.iterations += 1
+        result = _account_gate_stall(led, c, pol)
+    assert result is None, "per-PR probes must not drive gate_not_improving"
+
+
 def test_fingerprint_ignores_head() -> None:
     fp_a, score_a = _gate_fingerprint(FakeLedger(test_runs=[_test_record(6, head="aaa")]))
     fp_b, score_b = _gate_fingerprint(FakeLedger(test_runs=[_test_record(6, head="bbb")]))

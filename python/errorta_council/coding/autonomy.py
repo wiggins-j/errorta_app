@@ -856,6 +856,28 @@ def _progress_fingerprint(ledger: Any, c: "LoopCounters") -> tuple:
     return (pr_fp, task_fp, ladder, foundation)
 
 
+def _gate_scoring_runs(runs: Any) -> list:
+    """The test-runs the ACCEPTANCE-GATE detectors score, excluding per-PR probes.
+
+    SPEC-30 (S4): a per-PR web:probe runs against one PR BRANCH's tree as evidence
+    for that PR's reviewer — it is not the integrated gate. During build-up a
+    module PR with no input wired yet is legitimately inert, so its probe is red;
+    if that red run is read as the 'latest gate run', `gate_not_improving` /
+    `_gate_has_failure` trip on branch-scoped evidence rather than the integrated
+    acceptance gate. Exclude runs recorded under the per-PR probe task_id; the
+    master / delivery probe (the integrated gate's liveness signal) is kept. Guarded
+    — a malformed list degrades to itself rather than failing the detector."""
+    try:
+        from .web_probe import PR_PROBE_TASK_ID
+    except Exception:  # noqa: BLE001
+        PR_PROBE_TASK_ID = "web-probe-pr"
+    try:
+        return [r for r in (runs or [])
+                if str((r or {}).get("task_id")) != PR_PROBE_TASK_ID]
+    except Exception:  # noqa: BLE001
+        return list(runs or [])
+
+
 def _gate_fingerprint(ledger: Any) -> tuple[tuple, int]:
     """Spec 04: a snapshot of the ACCEPTANCE GATE RESULT — the test-run pass set
     and the delivery-review verdict — keyed on the RESULT, NOT the PR head.
@@ -877,7 +899,7 @@ def _gate_fingerprint(ledger: Any) -> tuple[tuple, int]:
     list_test_runs = getattr(ledger, "list_test_runs", None)
     if callable(list_test_runs):
         try:
-            runs = list_test_runs()
+            runs = _gate_scoring_runs(list_test_runs())
         except Exception:  # noqa: BLE001
             runs = None
         if runs:
@@ -1887,7 +1909,7 @@ def _gate_has_failure(ledger: Any) -> bool:
     delivery verdict) and is guarded identically — an unreadable ledger reports no
     failure, so the detector stays silent rather than stopping a run on a hiccup."""
     try:
-        runs = ledger.list_test_runs() or []
+        runs = _gate_scoring_runs(ledger.list_test_runs() or [])
     except Exception:  # noqa: BLE001
         return False
     if runs:

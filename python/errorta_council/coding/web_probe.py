@@ -39,6 +39,15 @@ from .testing import TestRunResult, TestRunSession
 # command_id doubles as the ANCHOR KEY (see ``anchors.py``) — one anchor per web
 # project, promoted on a green frame, broken on a later black one.
 _PROBE_TASK_ID = "web-probe"
+# SPEC-30 (S4 fix): a PER-PR probe runs against a PR BRANCH's tree at the PR head,
+# as evidence for the reviewer — it is NOT the integrated acceptance gate. It is
+# recorded under this distinct task_id so the gate detectors (`_gate_fingerprint`,
+# `_gate_has_failure`) can EXCLUDE it: otherwise every red per-PR probe during
+# build-up (a module with no input wired yet is legitimately inert) becomes the
+# "latest gate run" with score 0, and `gate_not_improving` trips on branch-scoped
+# evidence rather than the integrated gate. The master/delivery probe keeps
+# `_PROBE_TASK_ID` and still counts, exactly as before.
+PR_PROBE_TASK_ID = "web-probe-pr"
 PROBE_COMMAND_ID = "web:probe"
 
 # The web-profile kinds this liveness oracle applies to. A non-web project (a
@@ -252,6 +261,7 @@ def run_and_record(
     should_cancel: Optional[Callable[[], bool]] = None,
     node_runner: Optional[NodeRunner] = None,
     serve_root: Optional[Any] = None,
+    pr_scoped: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Stand the web runtime up, drive the headless probe, and record a
     ``web:probe`` runtime-test bound to ``head``. Returns the recorded test-run
@@ -321,8 +331,10 @@ def run_and_record(
             command_ids=[PROBE_COMMAND_ID], results=[result], unknown_ids=[],
             passed=bool(result.passed), sandbox="")
         try:
-            run = store.record_test_run(probe_session, task_id=_PROBE_TASK_ID,
-                                        head=head)
+            run = store.record_test_run(
+                probe_session,
+                task_id=(PR_PROBE_TASK_ID if pr_scoped else _PROBE_TASK_ID),
+                head=head)
         except Exception:  # noqa: BLE001 — recording failed -> no evidence
             return None
         try:

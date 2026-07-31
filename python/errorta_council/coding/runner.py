@@ -4648,12 +4648,13 @@ def _web_probe_pr_arm(store: LedgerStore, workspace: Any, *, task_id: str,
     except Exception:  # noqa: BLE001 — no worktree -> no evidence (fail-open)
         return
     try:
-        from . import anchors, web_probe
-        run = web_probe.run_and_record(
+        from . import web_probe
+        # pr_scoped: recorded under PR_PROBE_TASK_ID so the gate detectors exclude
+        # it (branch evidence, not the integrated gate), and NO master-anchor
+        # reconcile — anchors track the master timeline, not per-branch heads.
+        web_probe.run_and_record(
             store, workspace, head=head, serve_root=serve_root,
-            should_cancel=should_cancel)
-        if run:
-            anchors.reconcile(store, run, project_id=store.project_id)
+            should_cancel=should_cancel, pr_scoped=True)
     except Exception:  # noqa: BLE001 — the probe never fails the dev turn
         return
 
