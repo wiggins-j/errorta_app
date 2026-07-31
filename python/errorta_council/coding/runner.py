@@ -3653,12 +3653,21 @@ class DeliveryReviewResult(NamedTuple):
     reason: str = ""
 
 
-def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
+def _delivery_review_prompt(store: LedgerStore, head: str, diff: str,
+                            *, repo_read: bool = False) -> str:
     """Ask a reviewer to judge the COMPLETE delivered diff as one integrated unit
     (integration correctness the per-PR reviews cannot see), bound to the delivered
     head. Emits the SAME coding_turn.v1 reviewer envelope as ``_review_pr_prompt``
     so ``parse_coding_turn(REVIEWER, ...)`` validates it; only the framing differs
-    (delivery-wide vs one scoped task)."""
+    (delivery-wide vs one scoped task).
+
+    SPEC-30 fix: ``repo_read`` means the delivered tree is mounted read-only for
+    this turn, so the reviewer can LIST/OPEN the delivered files instead of
+    inferring them from a (possibly truncated) diff. Ungrounded, run 7's delivery
+    reviewer invented a filename ("Missing acceptance test file test/test.js") that
+    the DEV then could not act on — the finding named a path that was never the
+    team's convention. Grounded, it must verify a file's ABSENCE by looking, and
+    describe any missing deliverable by its BEHAVIOUR, not an invented path."""
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
@@ -3713,7 +3722,14 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
         "Approve only if the whole delivered result is correct, consistent, and "
         "complete. Do NOT request changes merely because more features could be "
         "added — judge against the Definition of Done.\n"
-        f"Delivered diff vs the project base{trunc}:\n```diff\n{cap}\n```\n"
+        + ("The COMPLETE delivered tree is mounted read-only for this turn — open "
+           "and list files to check what actually exists. Do NOT invent or assume a "
+           "file path: verify a file's ABSENCE by looking. If the Definition of Done "
+           "requires a deliverable that is genuinely missing (e.g. an acceptance "
+           "test), describe it by its BEHAVIOUR and acceptance criteria in the "
+           "finding — never by a made-up filename the team never used.\n"
+           if repo_read else "")
+        + f"Delivered diff vs the project base{trunc}:\n```diff\n{cap}\n```\n"
         f"{trunc_note}"
         f"The delivered head you are reviewing is {head!r}; echo it verbatim as "
         '"reviewed_head".\n'
@@ -6968,10 +6984,24 @@ def build_run_turn(
             return _cannot_verify("delivered diff unavailable (preview failed)")
         approved = False
         findings: list[dict[str, Any]] = []
+        # SPEC-30 fix: ground the delivery reviewer in the delivered tree so it
+        # cannot invent file paths (run 7's "Missing acceptance test file
+        # test/test.js" wedge). Mount the master working tree read-only when
+        # reviewer_repo_read honors this vendor; fall back to the plain member.
+        delivery_reviewer = reviewer_member
+        delivery_repo_read = False
+        if _member_honors_repo_read(reviewer_member, reviewer_repo_read):
+            try:
+                delivery_reviewer = {**reviewer_member,
+                                     "repo_read_root": str(workspace.root())}
+                delivery_repo_read = True
+            except Exception:  # noqa: BLE001 — grounding is best-effort
+                delivery_reviewer, delivery_repo_read = reviewer_member, False
         try:
             parsed = _parse_member_turn(
-                REVIEWER, _DELIVERY_TASK_ID, reviewer_member,
-                _delivery_review_prompt(store, head, diff),
+                REVIEWER, _DELIVERY_TASK_ID, delivery_reviewer,
+                _delivery_review_prompt(store, head, diff,
+                                        repo_read=delivery_repo_read),
                 context="delivery_review", related_task_ids=[])
         except _MemberCallFailed as exc:
             # Could not run the reviewer -> do NOT mark done and record NO verdict

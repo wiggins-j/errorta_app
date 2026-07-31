@@ -388,3 +388,16 @@ def test_delivery_review_untruncated_diff_unchanged() -> None:
     prompt = _delivery_review_prompt(store, "head-xyz", "+def add(): pass\n")
     assert "truncated" not in prompt
     assert "head-xyz" in prompt
+
+
+def test_delivery_review_repo_read_grounds_the_reviewer() -> None:
+    """SPEC-30 fix: with the delivered tree mounted (repo_read=True), the delivery
+    reviewer is told to verify a file's absence by LOOKING and to describe a missing
+    deliverable by behaviour, not an invented path — the root cause of run 7's
+    'Missing acceptance test file test/test.js' wedge. Ungrounded, no such guard."""
+    store = _make("spec30-delivery-grounded", {})
+    grounded = _delivery_review_prompt(store, "h1", "+x\n", repo_read=True)
+    ungrounded = _delivery_review_prompt(store, "h1", "+x\n", repo_read=False)
+    assert "mounted read-only" in grounded and "invent" in grounded.lower()
+    assert "verify a file's ABSENCE" in grounded
+    assert "mounted read-only" not in ungrounded
