@@ -570,7 +570,20 @@ def plan_next_batch(
             # prose-silent task is never globally serialized (fail-open on silence).
             owned_unavailable = _unavailable_for(
                 task.task_id, owned, owner_map, claimed)
-            if partition_on and tp and _paths.paths_intersect(tp, owned_unavailable):
+            # SPEC-29: the partition only bites WRITERS. Its purpose is to stop two
+            # DEVs fanning out onto one file before the first lands — but a review
+            # task's touched paths are INFERRED from its title ("review PR: Create
+            # ball.js…" -> {ball.js}), and that path is owned by the still-open DEV
+            # PR the review must approve. With no role guard this deadlocks: the
+            # review waits for the PR's ownership to release, ownership only releases
+            # on merge, and merge needs the reviewer_approved this review would
+            # produce. A REVIEWER/TESTER reads the PR, it does not write the file, so
+            # serializing it behind the owner is never necessary — exactly the
+            # exemption the sibling F159 freeze already makes for non-writers above
+            # (see the `role == DEV` guard at the freeze teeth). Writers stay
+            # partitioned; non-writers pass.
+            if (partition_on and role == DEV and tp
+                    and _paths.paths_intersect(tp, owned_unavailable)):
                 continue
             # F127: assign each task to an eligible (non-excluded) idle member,
             # preferring the highest tier. A task barred for every free member is
