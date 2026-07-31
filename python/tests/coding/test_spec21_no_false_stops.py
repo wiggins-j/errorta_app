@@ -54,7 +54,7 @@ def test_decision_key_is_accepted_as_the_title() -> None:
 
 def test_a_genuinely_empty_turn_is_still_refused() -> None:
     """The real stall this rule reached for: no tasks, no decisions, not done."""
-    with pytest.raises(ValueError, match="at least one task or decision"):
+    with pytest.raises(ValueError, match="at least one task, decision, or"):
         PMPlanIntent(kind="plan", done=False, tasks=[], decisions=[])
 
 

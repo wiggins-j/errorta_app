@@ -103,7 +103,9 @@ def test_pm_prompt_lists_open_items_and_forbids_done(tmp_errorta_home: Path) -> 
 
     assert "may NOT declare the project done" in prompt
     assert "Join Detector Component" in prompt
-    assert "current PM plan schema has no cancel intent" in prompt
+    # SPEC-30 convergence: the PM is now told it CAN prune obsolete scope via
+    # cancel_task_ids (the old "no cancel intent" lament is gone).
+    assert "cancel_task_ids" in prompt
 
 
 def test_pm_prompt_has_no_gate_when_backlog_drained(tmp_errorta_home: Path) -> None:

@@ -128,25 +128,36 @@ class PMPlanIntent(BaseModel):
     tasks: List[PMTask] = []
     decisions: List[PMDecision] = []
     completion_summary: str = ""
+    # SPEC-30 convergence: task_ids the PM wants to DROP. Spec 21 legalised the
+    # "prune duplicates, add nothing" turn but gave the PM no way to actually
+    # express the prune — it could only ASK the operator to drop items. So an
+    # over-planning PM's backlog was a one-way ratchet (create-only) and, because
+    # the completion gate requires every open task resolved, it could NEVER
+    # converge to done (run 9: backlog grew 57->144, never drained, no completion
+    # claim). This is the missing expressibility: the PM prunes its own obsolete /
+    # over-scoped todo tasks and converges. The engine still only drops eligible
+    # tasks (todo/blocked, no live PR) and the delivery + execution gates still
+    # verify the real artifact, so pruning cannot ship incomplete work.
+    cancel_task_ids: List[str] = []
 
     @model_validator(mode="after")
     def _done_rules(self) -> "PMPlanIntent":
         if self.done and not self.completion_summary.strip():
             raise ValueError("done=true requires a completion_summary")
-        # Spec 21: a not-done turn with no NEW tasks is legitimate and common —
-        # the PM is waiting on in-flight work, or pruning duplicates it just
-        # created. Requiring a task made that state INEXPRESSIBLE: the
-        # gravity-golf PM tried four times to say "drop these duplicate HUD
-        # tasks, add nothing, not done", was rejected every time, and each
-        # rejection counted as no-progress until `pm_idle_limit` stopped a
-        # healthy run. An empty turn is still refused (no tasks AND no
-        # decisions) — that is the real stall this rule was reaching for, and
-        # `pm_idle_limit` already bounds a PM that keeps emitting them.
-        if not self.done and not self.tasks and not self.decisions:
+        # Spec 21 + SPEC-30: a not-done turn is legitimate when it adds a task,
+        # records a decision, OR prunes obsolete tasks (cancel_task_ids). Requiring
+        # a NEW task made pruning inexpressible: the gravity-golf PM tried four
+        # times to say "drop these duplicate HUD tasks, add nothing, not done", was
+        # rejected every time, and each rejection counted as no-progress until
+        # `pm_idle_limit` stopped a healthy run. Only a truly empty turn (nothing
+        # added, decided, OR cancelled) is refused — the real stall this reaches
+        # for, and `pm_idle_limit` already bounds a PM that keeps emitting them.
+        if (not self.done and not self.tasks and not self.decisions
+                and not self.cancel_task_ids):
             raise ValueError(
-                "done=false requires at least one task or decision (an empty "
-                "plan turn does nothing; to record a no-op deliberately, emit a "
-                "decision explaining what you are waiting on)")
+                "done=false requires at least one task, decision, or "
+                "cancel_task_ids entry (an empty plan turn does nothing; to record "
+                "a no-op deliberately, emit a decision explaining what you await)")
         return self
 
 

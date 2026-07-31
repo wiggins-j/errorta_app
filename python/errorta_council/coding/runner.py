@@ -2950,18 +2950,20 @@ def _pm_prompt(store: LedgerStore) -> str:
     except Exception:
         pass
     # F128: if the backlog still has open work, the PM may NOT declare done — tell
-    # it exactly what's open so it finishes or explicitly cancels obsolete items.
+    # it exactly what's open so it finishes or prunes obsolete items.
     done_gate = ""
     open_items = pending_completion_work(store)
     if open_items:
         done_gate = (
             "You may NOT declare the project done — these items are still open: "
-            f"{summarize_open_items(open_items)}. Finish them. If an item is "
-            "obsolete, identify it in a decision for the operator to drop; the "
-            "current PM plan schema has no cancel intent. An item marked "
-            "(human-required) — a "
-            "blocked task or a conflicted PR — cannot be auto-closed; leave it and "
-            "the run will surface it for the human.\n"
+            f"{summarize_open_items(open_items)}. Finish the ones that the "
+            "Definition of Done genuinely needs. If an item is OBSOLETE or beyond "
+            "the DoD (scope you over-planned), DROP it: put its task_id in "
+            "`cancel_task_ids` on your plan turn — this is how you converge, do NOT "
+            "keep adding scope. (A todo/blocked task with no live PR is dropped; "
+            "in-flight work is not.) An item marked (human-required) — a conflicted "
+            "PR — cannot be auto-closed; leave it and the run will surface it for "
+            "the human.\n"
         )
     # Spec 08: tell the PM its proposals were rejected as duplicates. Without
     # this it re-proposes the same job forever — it cannot see the gate.
@@ -3146,6 +3148,7 @@ def _last_word_prompt(store: LedgerStore, action: Any) -> str:
 def _pm_turn_made_progress(
     intent: Any, created: list[Task],
     prior_decision_titles: Optional[set[str]] = None,
+    dropped: Optional[list[str]] = None,
 ) -> bool:
     """Spec 22-28 P0.5 (bug 1) — did this PM plan turn DO something?
 
@@ -3195,6 +3198,12 @@ def _pm_turn_made_progress(
     ``None`` (the default) keeps the pre-Spec-25 behaviour for callers that cannot
     take one, so no existing call site changes meaning by accident."""
     if created:
+        return True
+    # SPEC-30 convergence: pruning obsolete tasks is real progress — it drains the
+    # backlog toward a completion claim and writes durable ledger truth (dropped
+    # tasks + a pm_cancel decision). A prune-only turn must NOT read as idle, or the
+    # convergence path this enables would itself re-arm the no-progress detector.
+    if dropped:
         return True
     if getattr(intent, "tasks", None):
         # Every proposed task was rejected (duplicate / uncreatable): Spec 08 says
@@ -3362,6 +3371,49 @@ def _materialize_pm_tasks(
         if resolved:
             store.update_task(task.task_id, depends_on=resolved)
     return [task for task, _dependencies in created]
+
+
+def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
+    """SPEC-30 convergence: drop the todo/blocked tasks the PM asked to cancel, so
+    it can prune its own over-planned backlog and reach a completion claim.
+
+    Eligibility is deliberately narrow — only a ``todo`` or ``blocked`` task with
+    NO live PR is dropped. A ``doing`` (in-flight) or terminal task, or one whose
+    work is already in an open PR, is skipped: the PM prunes SCOPE, it does not
+    kill work in progress. The delivery + execution gates still judge the real
+    artifact, so pruning can never mark an incomplete project done. Returns the
+    ids actually dropped (for the caller's progress accounting). Fully guarded."""
+    ids = [str(i) for i in (getattr(intent, "cancel_task_ids", None) or [])]
+    if not ids:
+        return []
+    try:
+        by_id = {t.task_id: t for t in store.list_tasks()}
+        live_pr_task_ids = {
+            str(p.get("task_id") or "") for p in store.list_prs()
+            if p.get("status") in ("open", "changes_requested", "mergeable", "conflict")
+        }
+    except Exception:  # noqa: BLE001 — a read failure means "cancel nothing"
+        return []
+    dropped: list[str] = []
+    for tid in ids:
+        task = by_id.get(tid)
+        if task is None:
+            continue
+        if str(getattr(task, "state", "")) not in ("todo", "blocked"):
+            continue  # never drop in-flight (doing) or already-terminal work
+        if tid in live_pr_task_ids:
+            continue  # real work is in an open PR — not obsolete scope
+        try:
+            store.update_task(tid, state="dropped")
+            store.record_decision(
+                title=f"PM dropped task: {getattr(task, 'title', tid)}",
+                context="pm_cancel", choice="pm_task_cancelled",
+                rationale="the PM pruned this obsolete / over-scoped task to converge",
+                related_task_ids=[tid])
+            dropped.append(tid)
+        except Exception:  # noqa: BLE001 — best-effort prune
+            pass
+    return dropped
 
 
 def _dep_graph(store: LedgerStore) -> dict[str, list[str]]:
@@ -5722,12 +5774,14 @@ def build_run_turn(
                     last_word={"outcome": "done",
                                "rationale": intent.completion_summary})
             created = _materialize_pm_tasks(store, intent)
-            if created:
+            dropped = _apply_pm_cancels(store, intent)
+            if created or dropped:
                 return TurnOutcome(
                     kind="planned", made_progress=True,
                     last_word={
                         "outcome": "accepted",
-                        "rationale": said or "proposed new work",
+                        "rationale": said or ("proposed new work" if created
+                                              else "pruned obsolete tasks"),
                         "task_ids": [t.task_id for t in created]})
             # Decisions only, or every proposed task rejected as a duplicate /
             # unexecutable. Nothing materialized, so there is nothing for the loop
@@ -5832,10 +5886,11 @@ def build_run_turn(
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)
+            dropped = _apply_pm_cancels(store, intent)
             return TurnOutcome(
                 kind="planned",
                 made_progress=_pm_turn_made_progress(
-                    intent, created, prior_decision_titles))
+                    intent, created, prior_decision_titles, dropped=dropped))
 
         if isinstance(action, GateRun):
             # Spec 12 (S1): run the acceptance gate on the integrated master tree,
