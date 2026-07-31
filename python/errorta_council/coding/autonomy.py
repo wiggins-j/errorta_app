@@ -857,23 +857,28 @@ def _progress_fingerprint(ledger: Any, c: "LoopCounters") -> tuple:
 
 
 def _gate_scoring_runs(runs: Any) -> list:
-    """The test-runs the ACCEPTANCE-GATE detectors score, excluding per-PR probes.
+    """The test-runs the ACCEPTANCE-GATE detectors score, excluding the web:probe.
 
-    SPEC-30 (S4): a per-PR web:probe runs against one PR BRANCH's tree as evidence
-    for that PR's reviewer — it is not the integrated gate. During build-up a
-    module PR with no input wired yet is legitimately inert, so its probe is red;
-    if that red run is read as the 'latest gate run', `gate_not_improving` /
-    `_gate_has_failure` trip on branch-scoped evidence rather than the integrated
-    acceptance gate. Exclude runs recorded under the per-PR probe task_id; the
-    master / delivery probe (the integrated gate's liveness signal) is kept. Guarded
-    — a malformed list degrades to itself rather than failing the detector."""
+    SPEC-30: the web:probe is a LIVENESS oracle (does the assembled page render and
+    respond to input), not part of the acceptance-gate SCORE. It has its own
+    enforcement — the completion gate blocks `done` on a red probe (S2), and the
+    per-PR probe grounds the reviewer (S4). Scoring it inside `gate_not_improving`
+    conflates two different signals on one axis: a 0/1 probe score interleaves with
+    the acceptance-command count, so a mid-build integration that renders but has no
+    input wired yet (legitimately) pins the 'latest gate' score to 0 and trips the
+    acceptance-CHURN detector (run 6: a per-PR probe first, then the master probe,
+    each drove a false gate_not_improving pressure). Exclude BOTH the per-PR and the
+    master/delivery probe here; the acceptance-gate detectors score on registered
+    test commands + runtime launch + the delivery verdict. Guarded — a malformed
+    list degrades to itself rather than failing the detector."""
     try:
-        from .web_probe import PR_PROBE_TASK_ID
+        from .web_probe import PR_PROBE_TASK_ID, _PROBE_TASK_ID
+        probe_task_ids = {PR_PROBE_TASK_ID, _PROBE_TASK_ID}
     except Exception:  # noqa: BLE001
-        PR_PROBE_TASK_ID = "web-probe-pr"
+        probe_task_ids = {"web-probe-pr", "web-probe"}
     try:
         return [r for r in (runs or [])
-                if str((r or {}).get("task_id")) != PR_PROBE_TASK_ID]
+                if str((r or {}).get("task_id")) not in probe_task_ids]
     except Exception:  # noqa: BLE001
         return list(runs or [])
 

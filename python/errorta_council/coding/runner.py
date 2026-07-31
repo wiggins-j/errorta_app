@@ -3663,10 +3663,23 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
     trunc = " [diff truncated]" if truncated else ""
+    # SPEC-30 fix: a truncated diff must NOT force a delivery rejection. The per-PR
+    # review can validly ask to "split" a large PR — but the DELIVERY diff IS the
+    # whole finished project, which cannot be split, so "reduce the delivered
+    # change" is an UNSATISFIABLE constraint that rejected every large deliverable
+    # forever (run 6 stopped planning_churn here with a working game merged). It is
+    # also unnecessary now: the execution gate (registered tests + runtime launch +
+    # the web:probe that drives the assembled artifact) proves whole-artifact
+    # correctness the diff cannot, so the delivery reviewer judges the VISIBLE
+    # portion for integration defects and leaves "does it run as assembled" to the
+    # gate. Truncation is a note, never an auto-reject.
     trunc_note = (
-        "The diff above was truncated to fit — code beyond the cut is NOT shown. "
-        "Coverage is incomplete, so set approved=false with a finding asking to "
-        "reduce/split the delivered change so its full diff can be reviewed.\n"
+        "The diff above is large and was truncated to fit — code beyond the cut is "
+        "NOT shown. Do NOT reject solely because the delivered change is large: it "
+        "is the complete project and cannot be split. Judge the VISIBLE portion for "
+        "integration defects (contract/type/import mismatches across merged parts), "
+        "and rely on the recorded execution gate (tests, runtime launch, and the "
+        "web:probe that drove the assembled page) for whole-artifact correctness.\n"
         if truncated else "")
     try:
         project = store.get_project()
@@ -3681,13 +3694,8 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str) -> str:
         "intent": {
             "kind": "review_verdict",
             "reviewed_head": head,
-            "approved": not truncated,
-            "findings": ([{
-                "severity": "major",
-                "title": "Delivered change exceeds review context",
-                "body": "Reduce the delivered change so its complete diff can be "
-                        "reviewed.",
-            }] if truncated else []),
+            "approved": True,
+            "findings": [],
         },
     })
     return (

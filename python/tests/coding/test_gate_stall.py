@@ -88,6 +88,24 @@ def test_fingerprint_excludes_per_pr_probes() -> None:
     assert score == 6, "per-PR probe must not drag the gate score to 0"
 
 
+def test_fingerprint_excludes_master_web_probe() -> None:
+    """SPEC-30: the MASTER web:probe is a liveness oracle (S2/per-PR enforced), not
+    an acceptance-gate score signal. A green acceptance run followed by a red master
+    web:probe (a rendered-but-inert integration mid-build) must still score 6, not 0
+    — otherwise gate_not_improving trips on the integration-liveness signal rather
+    than acceptance-command churn."""
+    from errorta_council.coding.web_probe import _PROBE_TASK_ID
+    acceptance = {**_test_record(6, 12, head="master"), "task_id": "gate"}
+    master_probe = {
+        "task_id": _PROBE_TASK_ID, "head": "master",
+        "results": [{"command_id": "web:probe", "exit_code": 1, "status": "failed"}],
+        "passed": False,
+    }
+    led = FakeLedger(test_runs=[acceptance, master_probe])
+    _fp, score = _gate_fingerprint(led)
+    assert score == 6, "master web:probe must not drive the acceptance-gate score"
+
+
 def test_gate_stall_does_not_trip_on_per_pr_probes() -> None:
     """The end-to-end lock: a run whose only recent test-runs are red per-PR probes
     (build-up phase) must NOT trip gate_not_improving — the probes are excluded, so
