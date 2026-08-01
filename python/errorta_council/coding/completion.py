@@ -113,9 +113,55 @@ def count_human_required(items: list[OpenItem]) -> int:
     return sum(1 for it in items if it.human_required)
 
 
+# SPEC-35 G2 — the acceptance gate's verdict for the `done` chokepoint.
+AcceptanceGateStatus = Literal["no_gate", "green", "red", "stale"]
+
+
+def acceptance_gate_status(ledger: Any, current_head: str) -> AcceptanceGateStatus:
+    """SPEC-35 G2: classify the project's acceptance gate at ``current_head``.
+
+    * ``no_gate``  — no acceptance-scoped command is registered (nothing to gate).
+    * ``green``    — the acceptance gate's own latest result is a pass AT this head.
+    * ``red``      — a result exists AT this head and it did not pass (fixable).
+    * ``stale``    — a gate is registered but its latest result is at a different
+                     head, or it has never run (needs a fresh run before `done`).
+
+    READ-ONLY and fail-open: any read error, or an unresolvable ``current_head``,
+    returns ``no_gate`` so this can never INVENT a block (the module's fail-closed
+    rule applies to open *work*; a `done`-block must fail *open* — a spurious block
+    with no recovery is the wedge SPEC-34's review forbids). Recovery is structural:
+    the in-loop gate re-runs the registered command every merge, so a ``red``/``stale``
+    verdict flips to ``green`` on its own once the tree is fixed.
+    """
+    head = str(current_head or "")
+    if not head:
+        return "no_gate"  # cannot bind a result to a head -> never block
+    try:
+        cmds = ledger.get_test_commands() or {}
+        has_acc = any(
+            str((spec or {}).get("scope", "unit")) == "acceptance"
+            for spec in cmds.values())
+    except Exception:  # noqa: BLE001 — never invent a block
+        return "no_gate"
+    if not has_acc:
+        return "no_gate"
+    try:
+        from .gate_state import latest_acceptance_result
+        res = latest_acceptance_result(ledger)
+    except Exception:  # noqa: BLE001
+        return "no_gate"
+    if not res:
+        return "stale"  # registered but never run -> force a fresh run
+    if str(res.get("head") or "") != head:
+        return "stale"  # a result, but not for the tree we are about to call done
+    return "green" if res.get("passed") else "red"
+
+
 __all__ = [
     "OpenItem",
     "pending_completion_work",
     "summarize_open_items",
     "count_human_required",
+    "acceptance_gate_status",
+    "AcceptanceGateStatus",
 ]
