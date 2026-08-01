@@ -13,18 +13,23 @@ the recovery invariant and result isolation.
 from __future__ import annotations
 
 from errorta_council.coding import completion, gate_state
-from errorta_council.coding.runner import (
-    _ACCEPTANCE_GATE_MAX_STALE_ARMS,
-    _acceptance_gate_blocks_done,
-)
+from errorta_council.coding.runner import _acceptance_gate_blocks_done
 
 _ACC = {"scope": "acceptance", "argv": ["node", "t.js"]}
 _UNIT = {"scope": "unit", "argv": ["true"]}
 
 
 def _run(head, results):
-    return {"head": head, "results": results,
-            "passed": all(r.get("passed") for r in results)}
+    # A recorded run's per-command results carry a `status` (to_dict). Default to
+    # "completed" so a plain {command_id, passed} models a genuine (RAN) result;
+    # a launch failure passes status="blocked"/"timed_out" explicitly.
+    norm = []
+    for r in results:
+        rr = dict(r)
+        rr.setdefault("status", "completed")
+        norm.append(rr)
+    return {"head": head, "results": norm,
+            "passed": all(r.get("passed") for r in norm)}
 
 
 class _Store:
@@ -63,7 +68,7 @@ def test_g1_picks_the_acceptance_run_over_probe_and_unit() -> None:
     ]
     store = _Store(cmds={"acc": _ACC, "u": _UNIT}, runs=runs)
     res = gate_state.latest_acceptance_result(store)
-    assert res == {"passed": True, "head": "h1"}
+    assert res == {"passed": True, "ran": True, "head": "h1"}
 
 
 def test_g1_uses_acceptance_own_result_not_session_verdict() -> None:
@@ -72,7 +77,17 @@ def test_g1_uses_acceptance_own_result_not_session_verdict() -> None:
     runs = [_run("h9", [{"command_id": "acc", "passed": True},
                         {"command_id": "u", "passed": False}])]
     store = _Store(cmds={"acc": _ACC, "u": _UNIT}, runs=runs)
-    assert gate_state.latest_acceptance_result(store) == {"passed": True, "head": "h9"}
+    assert gate_state.latest_acceptance_result(store) == {
+        "passed": True, "ran": True, "head": "h9"}
+
+
+def test_g1_ran_false_for_a_launch_failure() -> None:
+    # A blocked/timed_out acceptance result did not cleanly execute -> ran is False,
+    # so the caller can route it to `stale` (bounded) instead of `red` (unbounded).
+    runs = [_run("h1", [{"command_id": "acc", "passed": False, "status": "blocked"}])]
+    store = _Store(cmds={"acc": _ACC}, runs=runs)
+    assert gate_state.latest_acceptance_result(store) == {
+        "passed": False, "ran": False, "head": "h1"}
 
 
 def test_g1_none_when_no_acceptance_command_registered() -> None:
@@ -124,15 +139,23 @@ def test_g2_no_gate_when_head_unresolvable() -> None:
     assert completion.acceptance_gate_status(store, "") == "no_gate"
 
 
+def test_g2_launch_failure_is_stale_not_red() -> None:
+    # BLOCKER LOCK: a launch/provisioning failure (blocked/timed_out) at the head is
+    # environmental — no code merge flips it green. It must be `stale` (bounded via
+    # the completion_refused ladder), never `red` (an unbounded permanent wedge).
+    for bad in ("blocked", "timed_out", "failed"):
+        store = _Store(cmds={"acc": _ACC}, runs=[
+            _run("h1", [{"command_id": "acc", "passed": False, "status": bad}])])
+        assert completion.acceptance_gate_status(store, "h1") == "stale", bad
+
+
 # --------------------------------------------------------------------------- #
 # G3 / G4 — block + bounded stale-arm at the done chokepoint
 # --------------------------------------------------------------------------- #
-def test_g3_green_allows_and_resets_counter() -> None:
+def test_g3_green_allows() -> None:
     store = _Store(cmds={"acc": _ACC},
-                   runs=[_run("h1", [{"command_id": "acc", "passed": True}])],
-                   run_state={"acceptance_gate_stale_arms": 2})
+                   runs=[_run("h1", [{"command_id": "acc", "passed": True}])])
     assert _acceptance_gate_blocks_done(store, _WS("h1")) is None
-    assert store.get_run_state().get("acceptance_gate_stale_arms") == 0
 
 
 def test_g3_no_gate_allows() -> None:
@@ -150,21 +173,22 @@ def test_g3_red_blocks() -> None:
 def test_g3_stale_arms_the_in_loop_gate_and_blocks() -> None:
     store = _Store(cmds={"acc": _ACC})  # registered, never run -> stale
     reason = _acceptance_gate_blocks_done(store, _WS("HEAD1"))
-    assert reason and "no result" in reason
+    assert reason and "no usable result" in reason
     rs = store.get_run_state()
     assert rs.get("gate_due") is True
     assert rs.get("gate_dirty_head") == "HEAD1"
-    assert rs.get("acceptance_gate_stale_arms") == 1
 
 
-def test_g4_stale_degrades_to_allow_after_the_arm_budget() -> None:
-    store = _Store(
-        cmds={"acc": _ACC},
-        run_state={"acceptance_gate_stale_arms": _ACCEPTANCE_GATE_MAX_STALE_ARMS})
-    # at the cap: stop arming, record the miss, ALLOW (never wedge)
-    assert _acceptance_gate_blocks_done(store, _WS("h1")) is None
-    assert any(d["choice"] == "acceptance_gate_unverifiable" for d in store.decisions)
-    assert store.get_run_state().get("acceptance_gate_stale_arms") == 0
+def test_g4_launch_failure_blocks_via_stale_not_unbounded_red() -> None:
+    # BLOCKER LOCK: a launch-failing acceptance gate is `stale` (arms + blocks), NOT
+    # an unbounded `red`. Boundedness comes from the completion_refused ladder (each
+    # block returns completion_refused -> completion_blocked at the limit), so this
+    # never wedges; here we just assert it arms + defers rather than red-blocking.
+    store = _Store(cmds={"acc": _ACC}, runs=[
+        _run("h1", [{"command_id": "acc", "passed": False, "status": "blocked"}])])
+    reason = _acceptance_gate_blocks_done(store, _WS("h1"))
+    assert reason and "RED" not in reason           # not an unbounded red block
+    assert store.get_run_state().get("gate_due") is True  # armed a fresh run instead
 
 
 def test_g3_fail_open_without_workspace_or_head() -> None:

@@ -130,16 +130,23 @@ def latest_gate_text(store: Any, *, cap: int = _DEFAULT_CAP) -> str:
 
 def latest_acceptance_result(store: Any) -> dict[str, Any] | None:
     """SPEC-35 G1: the newest recorded run of an ACCEPTANCE-scoped command, as
-    ``{"passed": bool, "head": str}``, or ``None`` if none exists.
+    ``{"passed": bool, "ran": bool, "head": str}``, or ``None`` if none exists.
 
     Distinct from ``latest_gate_run`` on purpose: ``record_test_run`` is also called
     for the ``web:probe`` (web_probe.py) and per-PR unit runs (runner.py), so the
     newest run is frequently NOT the acceptance gate. This isolates the acceptance
     verdict by (1) resolving which command_ids are ``scope == "acceptance"`` in the
-    LIVE registry and (2) reading the acceptance command's OWN per-result ``passed``
+    LIVE registry and (2) reading the acceptance command's OWN per-result fields
     within the run — never the session-level verdict, which a mixed unit+acceptance
-    session would contaminate. READ-ONLY and fully guarded (returns ``None`` on any
-    read error) — callers use it to decide whether to block ``done``.
+    session would contaminate.
+
+    ``ran`` distinguishes a genuine assertion failure (``status == "completed"`` with
+    a non-zero exit) from a launch/provisioning failure (``blocked`` / ``timed_out``
+    / ``failed`` — the interpreter never started, the sandbox was unavailable, the
+    command timed out). The caller MUST treat the launch-failure case as
+    *unverifiable*, never as a fixable ``red``: a launch failure is environmental,
+    no code merge flips it green, so blocking ``done`` on it forever would be a wedge
+    (the SPEC-34 cardinal sin). READ-ONLY and fully guarded (``None`` on any error).
     """
     try:
         cmds = store.get_test_commands() or {}
@@ -165,6 +172,8 @@ def latest_acceptance_result(store: Any) -> dict[str, Any] | None:
         if acc_results:
             return {
                 "passed": all(bool(r.get("passed")) for r in acc_results),
+                "ran": all(
+                    str(r.get("status") or "") == "completed" for r in acc_results),
                 "head": str(run.get("head") or "")}
     return None
 

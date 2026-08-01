@@ -121,10 +121,18 @@ def acceptance_gate_status(ledger: Any, current_head: str) -> AcceptanceGateStat
     """SPEC-35 G2: classify the project's acceptance gate at ``current_head``.
 
     * ``no_gate``  — no acceptance-scoped command is registered (nothing to gate).
-    * ``green``    — the acceptance gate's own latest result is a pass AT this head.
-    * ``red``      — a result exists AT this head and it did not pass (fixable).
-    * ``stale``    — a gate is registered but its latest result is at a different
-                     head, or it has never run (needs a fresh run before `done`).
+    * ``green``    — the gate's own latest result RAN and passed AT this head.
+    * ``red``      — the gate's own latest result RAN and failed AT this head (a real
+                     assertion failure the team can fix by editing code — fixable).
+    * ``stale``    — a gate is registered but has no usable result at this head: it
+                     ran at a different head, has never run, OR its latest result at
+                     this head did not cleanly execute (a launch/provisioning failure
+                     — timeout, blocked sandbox, missing interpreter). A launch
+                     failure is deliberately NOT ``red``: it is environmental, no
+                     code merge flips it green, so treating it as ``red`` would wedge
+                     ``done`` forever. As ``stale`` it routes through the bounded
+                     arm-and-refuse path (runner) that terminates in a human-routed
+                     ``completion_blocked`` — never a silent permanent block.
 
     READ-ONLY and fail-open: any read error, or an unresolvable ``current_head``,
     returns ``no_gate`` so this can never INVENT a block (the module's fail-closed
@@ -154,6 +162,8 @@ def acceptance_gate_status(ledger: Any, current_head: str) -> AcceptanceGateStat
         return "stale"  # registered but never run -> force a fresh run
     if str(res.get("head") or "") != head:
         return "stale"  # a result, but not for the tree we are about to call done
+    if not res.get("ran", False):
+        return "stale"  # a launch/provisioning failure, not a fixable assertion fail
     return "green" if res.get("passed") else "red"
 
 
