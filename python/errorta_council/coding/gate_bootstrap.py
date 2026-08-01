@@ -223,6 +223,37 @@ def _detect_acceptance_command(
             spec["runtime_hint"] = runtime_hint
         return ("acceptance", spec)
 
+    # 1b) SPEC-36 (fix B) — no *.test.js matched, but the project DECLARES a test
+    #     script AND ships a JS/TS test file under test(s)/. Run 11 authored
+    #     test/acceptance.js (not *.test.js) with package.json
+    #     "scripts":{"test":"node test/acceptance.js"}; nothing matched, so no
+    #     acceptance command registered and SPEC-35's done-gate saw no_gate (a
+    #     silent miss). Propose the DECLARED runner via _choose_js_argv, grounded on
+    #     a real test file. Skip the npm-init placeholder ("... no test specified
+    #     ... && exit 1"): running it exits 1 with no framework output and would
+    #     register a gate that is red forever (a wedge). This CLOSES the detection
+    #     gap; a browser test still smoke-fails to a non-blocking
+    #     test_runtime_unavailable (that runnability gap is a separate change), so
+    #     the effect is to turn a silent no_gate into an honest acknowledgement.
+    pkg = _read_package_json(read_master)
+    _scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+    declared = _scripts.get("test") if isinstance(_scripts.get("test"), str) else ""
+    if declared.strip() and "no test specified" not in declared.lower():
+        dir_tests = sorted(
+            f for f in files
+            if (f.startswith("test/") or f.startswith("tests/") or "/test" in f)
+            and f.rsplit(".", 1)[-1] in ("js", "mjs", "cjs", "ts", "tsx"))
+        if dir_tests:
+            chosen = next((f for f in dir_tests if "acceptance" in f), dir_tests[0])
+            argv, runtime_hint = _choose_js_argv(chosen, files, pkg)
+            spec = {
+                "argv": argv, "cwd": ".", "timeout_seconds": 120,
+                "label": f"acceptance ({chosen} via declared test script)",
+                "scope": "acceptance"}
+            if runtime_hint:
+                spec["runtime_hint"] = runtime_hint
+            return ("acceptance", spec)
+
     # 2) A python test suite runnable with pytest.
     py_tests = [f for f in files
                 if (f.startswith("tests/") or f.startswith("test/"))
