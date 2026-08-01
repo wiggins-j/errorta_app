@@ -100,35 +100,28 @@ def _looks_like_test_output(blob: str) -> bool:
     return any(m in blob for m in _TEST_OUTPUT_MARKERS)
 
 
-# SPEC-34 S2 — counts of tests/assertions a runner reports it EXECUTED. A green
-# (exit 0) smoke that asserted NOTHING (empty suite, a Playwright file mis-run so
-# no `describe` registered, `--passWithNoTests`) would otherwise register a gate
-# that verifies nothing — the same "prove-it-works-by-doing-nothing" hole the
-# black-canvas oracle had. So a green gate is registered only when one of these
-# reports a positive count.
-_ASSERTION_COUNT_RES = (
-    re.compile(r"(\d+)\s+pass(?:ed|ing)", re.I),   # pytest/mocha/jest "N passed|passing"
-    re.compile(r"tests?:\s*(\d+)\s+passed", re.I),  # jest "Tests: N passed"
-    re.compile(r"#\s*pass\s+(\d+)", re.I),          # node:test "# pass N"
-    re.compile(r"(\d+)\s+tests?\s+passed", re.I),   # vitest "N tests passed"
-    re.compile(r"✓|√", re.I),                       # a green tick == ≥1 case ran
+# SPEC-34 S2 — POSITIVE evidence that a green (exit 0) run executed ZERO tests. A
+# suite that exits 0 having run nothing (empty suite, `--passWithNoTests`, a
+# Playwright file mis-run so no `describe` registered) would otherwise register a
+# gate that verifies nothing — the "prove-it-works-by-doing-nothing" hole the
+# black-canvas oracle had. So the ONLY green refused is one whose own output SAYS
+# it ran zero tests. A green run whose count is merely unreadable (a silent
+# ``node assert`` script, a head-truncated pytest summary) is NOT refused — it ran
+# clean and is registered exactly as before SPEC-34 (no false wedge, no regression;
+# review lock: never refuse a run that genuinely passed).
+_ZERO_TEST_SIGNATURES = (
+    "0 passed", "0 passing", "0 tests passed", "no tests ran", "no tests found",
+    "passwithnotests", "ran 0 tests", "collected 0 items", "# tests 0",
+    "# pass 0", "tests:       0", "tests: 0",
 )
 
 
-def _assertions_executed(blob: str) -> bool:
-    """SPEC-34 S2: did the runner actually execute ≥1 test/assertion? Parses the
-    reported counts; a tick mark counts as one. Conservative — anything it cannot
-    read as a positive count is treated as "asserted nothing"."""
-    for rx in _ASSERTION_COUNT_RES:
-        for m in rx.finditer(blob):
-            if not m.groups():           # a bare tick-mark pattern
-                return True
-            try:
-                if int(m.group(1)) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
-    return False
+def _ran_zero_tests(blob: str) -> bool:
+    """SPEC-34 S2: does the runner's own output POSITIVELY report zero executed
+    tests? Conservative by design — absence of a count is NOT zero (that would
+    wedge a silently-passing test); only an explicit zero-count marker counts."""
+    b = blob.lower()
+    return any(sig in b for sig in _ZERO_TEST_SIGNATURES)
 
 
 def _list_master(workspace: Any) -> list[str]:
@@ -183,8 +176,9 @@ def _choose_js_argv(
     has_cfg = lambda rx: any(rx.search(f) for f in files)  # noqa: E731
 
     # Playwright drives a real browser + its config's webServer — a runtime the
-    # sandbox (network-off, no Chromium) cannot stand up; flag it so the refusal is
-    # classified unprovisionable (escape hatch), not a fixable mis-invocation.
+    # sandbox (network-off, no Chromium) cannot stand up; the ``browser`` hint routes
+    # a non-green smoke to the non-blocking SPEC-31 ack instead of registering it as
+    # a red-forever gate (it is not a fixable mis-invocation).
     if "@playwright/test" in deps or has_cfg(_PW_CONFIG_RE):
         return (["npx", "--no-install", "playwright", "test"], "browser")
     if "vitest" in deps or has_cfg(_VITEST_CONFIG_RE):
@@ -374,28 +368,26 @@ def _bootstrap_acceptance_command(store: Any, workspace: Any) -> None:
         return
     r0 = (list(getattr(session, "results", []) or []) or [None])[0]
     green = getattr(r0, "exit_code", None) == 0
-    asserted = _assertions_executed(_result_blob(r0))
-    # SPEC-34 S2 — a GREEN (exit 0) smoke must PROVE it asserted something before it
-    # is registered as a gate. A suite that exits 0 without running any assertion
-    # (empty suite, `--passWithNoTests`, a Playwright file mis-run so no test
-    # registered) would otherwise become a green "acceptance gate" that verifies
-    # nothing. A real non-zero failure still registers (it IS a valid gate that runs
-    # red); only the vacuous green is refused.
-    if green and not asserted:
+    blob = _result_blob(r0)
+    # SPEC-34 S2 — a GREEN (exit 0) smoke that its OWN output says ran ZERO tests is
+    # not a gate (empty suite, `--passWithNoTests`, a mis-run framework file that
+    # registered no test). Refuse only on that positive zero-evidence; a green run
+    # whose count is merely unreadable still registers (no false wedge). A real
+    # non-zero failure also still registers — it IS a valid gate that runs red.
+    if green and _ran_zero_tests(blob):
         _record_test_runtime_unavailable(
             store, cmd_id, spec,
-            "ran clean but reported no executed tests/assertions (a green gate "
+            "ran clean but its output reports zero executed tests (a green gate "
             "that verifies nothing)")
         _mark_cmd_resolved(store)
         return
-    # SPEC-34 S1/S3 — a suite that declares a runtime the executor cannot provision
-    # (a Playwright browser + webServer: network-off, no Chromium) can still exit
-    # non-zero WITHOUT a launch-failure signature (npx "could not determine
-    # executable", a webServer connect error). Registering that as a gate makes it
-    # red forever — the wedge SPEC-34 warns against. So a ``runtime_hint`` candidate
-    # that did not end GREEN-and-asserted is recorded unprovisionable (escape hatch,
-    # classified so `done` is not blocked), never registered as a red gate.
-    if spec.get("runtime_hint") and not (green and asserted):
+    # SPEC-34 S1 — a suite that declares a runtime the executor cannot provision (a
+    # Playwright browser + webServer: network-off, no Chromium) can exit non-zero
+    # WITHOUT a launch-failure signature (npx "could not determine executable", a
+    # webServer connect error). Registering that makes it red forever — the wedge
+    # SPEC-34 warns against. So a ``runtime_hint`` candidate that did not end GREEN is
+    # recorded as unavailable (SPEC-31 ack), never registered as a red gate.
+    if spec.get("runtime_hint") and not green:
         _record_test_runtime_unavailable(
             store, cmd_id, spec,
             f"{spec['runtime_hint']} runtime not provisionable here — {reason}; "
@@ -423,61 +415,32 @@ def _mark_cmd_resolved(store: Any) -> None:
         pass
 
 
-# SPEC-34 S3 — signatures that mean the runtime is genuinely UNPROVISIONABLE in
-# the test executor (network-off, no browser, minimal env — deliberate, asserted
-# in testing._run_one). These are the escape-hatch cases: recording them must NOT
-# wedge `done` (regression lock 3). Anything NOT matching is treated as
-# provisionable — a gap the team could close (e.g. a green-but-vacuous suite) —
-# and DOES block `done` when the DoD requires acceptance testing.
-_UNPROVISIONABLE_SIGNATURES = (
-    "cannot find module", "no module named", "err_module_not_found",
-    "modulenotfounderror", "command not found", "is not recognized",
-    "no such file or directory", "chromium", "playwright", "browser",
-    "executable doesn't exist", "sandbox_unavailable",
-    "could not determine executable",  # npx: runner package not installed here
-)
-
-
-def _classify_unprovisionable(spec: dict[str, Any], reason: str) -> bool:
-    """SPEC-34 S3: is this un-run genuinely unprovisionable (escape hatch) rather
-    than a fixable gap? A ``runtime_hint`` (e.g. Playwright's browser) is
-    dispositive; otherwise fall back to the reason text."""
-    if spec.get("runtime_hint"):
-        return True
-    r = (reason or "").lower()
-    return any(sig in r for sig in _UNPROVISIONABLE_SIGNATURES)
-
-
 def _record_test_runtime_unavailable(
     store: Any, cmd_id: str, spec: dict[str, Any], reason: str) -> None:
-    """SPEC-31/34: the authored acceptance test exists on master but could not be
-    EXECUTED. Record it as a distinct, first-class fact and persist it to run_state
-    so the completion path can act on it. This is the same refusal as before (an
-    un-runnable command is not registered as a gate), but named honestly so `done`
-    cannot silently overstate "tested". SPEC-34 adds ``unprovisionable``: a genuinely
-    un-provisionable runtime (browser, missing dep in the network-off executor) is
-    the escape hatch (`done` may still complete with an ack); a provisionable gap
-    (e.g. a green-but-vacuous suite) blocks `done` when the DoD requires testing."""
-    unprovisionable = _classify_unprovisionable(spec, reason)
+    """SPEC-31: the authored acceptance test exists on master but could not be
+    EXECUTED (or a green run reported zero tests). Record it as a distinct,
+    first-class fact and persist it to run_state so the completion path can honestly
+    acknowledge the test was not run — instead of a `done` that silently overstates
+    "tested". This is the same refusal as before (an un-runnable/vacuous command is
+    not registered as a gate); it is NON-BLOCKING by design — blocking `done` on it
+    would wedge a run whose test simply cannot run or cannot be quantified in this
+    environment (the review's blocker: no recovery path exists to lift such a block).
+    A recoverable hard gate is deferred (SPEC-34 follow-on)."""
     try:
         store.record_decision(
             title="acceptance test present but not executed",
             context="gate_bootstrap", choice="test_runtime_unavailable",
             rationale=(f"the authored acceptance test {cmd_id!r} "
-                       f"(argv={spec.get('argv')}) could not run — {reason}. Its "
-                       "runtime is "
-                       + ("not provisionable here (escape hatch: `done` may still "
-                          "complete, acknowledged)" if unprovisionable else
-                          "provisionable — this is a gap the team can close; `done` "
-                          "is blocked while the DoD requires acceptance testing")
-                       + "; rendering is still verified by the web:probe, but the "
-                       "authored acceptance test was NOT executed."))
+                       f"(argv={spec.get('argv')}) was not registered as a gate — "
+                       f"{reason}. Rendering is still verified by the web:probe, but "
+                       "the authored acceptance test was NOT executed; recorded so "
+                       "`done` does not overstate coverage (SPEC-31)."))
     except Exception:  # noqa: BLE001
         pass
     try:
         store.set_run_state(acceptance_test_unrun={
             "command_id": cmd_id, "argv": list(spec.get("argv") or []),
-            "reason": str(reason), "unprovisionable": bool(unprovisionable)})
+            "reason": str(reason)})
     except Exception:  # noqa: BLE001
         pass
 

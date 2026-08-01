@@ -3399,59 +3399,31 @@ def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
         pass
 
 
-# SPEC-34 S3 — a DoD that demands the mechanic be verified by tests. Keyword match
-# (the DoD is free text); conservative — only these acceptance/test words arm the
-# block, so a project whose DoD never mentions testing is never wedged by S3
-# (regression lock 1).
-_DOD_TEST_WORDS = ("acceptance", "test", "verif", "assert", "gate passes",
-                   "passing tests", "green")
-
-
-def _dod_requires_acceptance(dod: str) -> bool:
-    d = (dod or "").lower()
-    return any(w in d for w in _DOD_TEST_WORDS)
-
-
-def _acceptance_unrun_blocks_done(store: LedgerStore) -> Optional[str]:
-    """SPEC-34 S3: should `done` be REFUSED because an authored acceptance test was
-    never run? Returns a refusal reason, or ``None`` to allow.
-
-    Blocks only when ALL hold: an acceptance test was authored-but-unrun, its
-    runtime is *provisionable* (a gap the team can close — not the browser/network
-    escape hatch), and the DoD demands acceptance testing. The genuinely
-    unprovisionable case returns ``None`` (the ack path handles it) so a run whose
-    test cannot run in this environment is never wedged (regression lock 3).
-    Fail-open: any read error allows `done` (S3 never invents a block)."""
-    try:
-        unrun = (store.get_run_state() or {}).get("acceptance_test_unrun")
-    except Exception:  # noqa: BLE001
-        return None
-    if not unrun or unrun.get("unprovisionable"):
-        return None
-    try:
-        dod = str(getattr(store.get_project(), "definition_of_done", "") or "")
-    except Exception:  # noqa: BLE001
-        return None
-    if not _dod_requires_acceptance(dod):
-        return None
-    return (f"the authored acceptance test {unrun.get('command_id')!r} "
-            f"(argv={unrun.get('argv')}) was never run — {unrun.get('reason')}. Its "
-            "runtime is provisionable, so this is a gap the team can close, and the "
-            "DoD requires acceptance testing; `done` is refused until it runs green "
-            "(SPEC-34).")
-
-
 def _record_completion_oracles(store: LedgerStore) -> None:
     """SPEC-34 S4: at `done`, record which oracles ACTUALLY verified the artifact,
     so a completion summary cannot conflate the liveness gate (web:probe + runtime
     launch — proves it renders and responds to input) with the team's authored
-    acceptance test (proves the mechanic has EFFECT). Best-effort; never blocks."""
+    acceptance test (proves the mechanic has EFFECT). Best-effort; never blocks.
+
+    Distinguishes three states honestly (review finding: never claim a test ran when
+    none was authored): NOT executed (an unrun was recorded), executed (an
+    acceptance-scoped gate is registered), or none authored (no acceptance test
+    exists at all)."""
     try:
         unrun = (store.get_run_state() or {}).get("acceptance_test_unrun")
     except Exception:  # noqa: BLE001
         unrun = None
-    acc = ("NOT executed — " + str((unrun or {}).get("reason") or "unavailable")
-           if unrun else "executed (registered acceptance gate)")
+    if unrun:
+        acc = "NOT executed — " + str((unrun or {}).get("reason") or "unavailable")
+    else:
+        try:
+            registered = any(
+                str((c or {}).get("scope") or "") == "acceptance"
+                for c in (store.get_test_commands() or {}).values())
+        except Exception:  # noqa: BLE001
+            registered = False
+        acc = ("executed (registered acceptance gate)" if registered
+               else "none authored")
     try:
         store.record_decision(
             title="completion oracle provenance",
@@ -5896,15 +5868,6 @@ def build_run_turn(
                             "rationale": ("the PM claimed done, but open work "
                                           "remains: "
                                           f"{summarize_open_items(open_items)}")})
-                acc_block = _acceptance_unrun_blocks_done(store)
-                if acc_block:
-                    store.record_decision(
-                        title="last word completion refused: acceptance test unrun",
-                        context=f"last_word:{action.detector}",
-                        choice="pm_completion_refused", rationale=acc_block)
-                    return TurnOutcome(
-                        kind="noop", made_progress=False,
-                        last_word={"outcome": "confirmed", "rationale": acc_block})
                 _ack_unrun_acceptance_test(store)
                 _record_completion_oracles(store)
                 store.set_completion(intent.completion_summary)
@@ -6019,17 +5982,6 @@ def build_run_turn(
                     return TurnOutcome(
                         kind="completion_refused", made_progress=False,
                         reason="open_work_remains")
-                # SPEC-34 S3: a done claim is also refused while an authored,
-                # provisionable acceptance test the DoD requires was never run green.
-                acc_block = _acceptance_unrun_blocks_done(store)
-                if acc_block:
-                    store.record_decision(
-                        title="completion refused: acceptance test unrun",
-                        context="plan", choice="pm_completion_refused",
-                        rationale=acc_block)
-                    return TurnOutcome(
-                        kind="completion_refused", made_progress=False,
-                        reason="acceptance_test_unrun")
                 # F093: persist the PM's completion justification so the UI can
                 # show "✓ Complete — here's why". (intent.completion_summary is
                 # validated non-empty when done=true, schemas.py PMPlanIntent.)
