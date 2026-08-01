@@ -45,6 +45,18 @@ def test_b_detects_declared_test_script_for_plainly_named_file() -> None:
     # plain `playwright` (not @playwright/test) + scripts.test -> npm test
     assert spec["argv"] == ["npm", "test", "--silent"]
     assert "acceptance.js" in spec["label"]
+    # review fix [1]: a plain `playwright` dep still needs a browser, so the hint is
+    # set even though argv is `npm test` — a non-green browser smoke is then recorded
+    # unavailable (SPEC-31 ack), never registered as a red-forever gate.
+    assert spec.get("runtime_hint") == "browser"
+
+
+def test_b_declared_test_no_browser_dep_has_no_hint() -> None:
+    # a node-only declared test must NOT get a browser hint.
+    pkg = b'{"scripts":{"test":"node test/acceptance.js"}}'
+    got = gb._detect_acceptance_command(_RUN11_FILES, read_master=_reader(pkg))
+    assert got and got[1]["argv"] == ["npm", "test", "--silent"]
+    assert "runtime_hint" not in got[1]
 
 
 def test_b_dot_test_js_branch_keeps_priority_over_1b() -> None:

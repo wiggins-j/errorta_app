@@ -175,10 +175,16 @@ def _choose_js_argv(
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     has_cfg = lambda rx: any(rx.search(f) for f in files)  # noqa: E731
 
-    # Playwright drives a real browser + its config's webServer — a runtime the
-    # sandbox (network-off, no Chromium) cannot stand up; the ``browser`` hint routes
-    # a non-green smoke to the non-blocking SPEC-31 ack instead of registering it as
-    # a red-forever gate (it is not a fixable mis-invocation).
+    # A browser runtime (Playwright — the @playwright/test RUNNER, a config, OR a
+    # plain ``playwright``/``playwright-core`` library dep) needs a real browser +
+    # webServer the sandbox (network-off, no Chromium) cannot stand up. The
+    # ``browser`` hint routes a non-green smoke to the non-blocking SPEC-31 ack
+    # instead of a red-forever gate — so it must be set whenever a browser is needed,
+    # INCLUDING the run-11 shape (plain ``playwright`` dep + a ``scripts.test`` that
+    # runs a node script driving chromium), not only for the @playwright/test runner.
+    needs_browser = (
+        "@playwright/test" in deps or "playwright" in deps
+        or "playwright-core" in deps or has_cfg(_PW_CONFIG_RE))
     if "@playwright/test" in deps or has_cfg(_PW_CONFIG_RE):
         return (["npx", "--no-install", "playwright", "test"], "browser")
     if "vitest" in deps or has_cfg(_VITEST_CONFIG_RE):
@@ -187,10 +193,11 @@ def _choose_js_argv(
         return (["npx", "--no-install", "jest"], None)
     if "mocha" in deps:
         return (["npx", "--no-install", "mocha", chosen], None)
+    hint = "browser" if needs_browser else None
     if isinstance(scripts.get("test"), str) and scripts["test"].strip():
-        return (["npm", "test", "--silent"], None)
+        return (["npm", "test", "--silent"], hint)
     # Nothing declared: a plain assert or ``node:test`` file runs under node.
-    return (["node", chosen], None)
+    return (["node", chosen], hint)
 
 
 def _detect_acceptance_command(
@@ -242,7 +249,8 @@ def _detect_acceptance_command(
         dir_tests = sorted(
             f for f in files
             if (f.startswith("test/") or f.startswith("tests/") or "/test" in f)
-            and f.rsplit(".", 1)[-1] in ("js", "mjs", "cjs", "ts", "tsx"))
+            and f.rsplit(".", 1)[-1] in (
+                "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"))
         if dir_tests:
             chosen = next((f for f in dir_tests if "acceptance" in f), dir_tests[0])
             argv, runtime_hint = _choose_js_argv(chosen, files, pkg)
