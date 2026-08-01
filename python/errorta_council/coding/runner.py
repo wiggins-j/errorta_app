@@ -3403,16 +3403,60 @@ def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
         pass
 
 
-def _record_completion_oracles(store: LedgerStore) -> None:
+# SPEC-36 (fix C) — patterns that mark a file on the delivered master tree as an
+# authored test/acceptance artifact. INTENTIONALLY broader than what gate_bootstrap
+# can register (*.test.js / pytest): S4's job is honest provenance, not registration,
+# so it must catch exactly the tests the bootstrap cannot — the run-11 miss was
+# test/acceptance.js (a real straight-line-solver) which, not ending in .test.js, was
+# never registered and made S4 falsely report "none authored".
+_AUTHORED_TEST_RE = re.compile(
+    r"(^|/)tests?/"                        # any file under a test/ or tests/ dir
+    r"|\.(test|spec)\.[cm]?[jt]sx?$"       # *.test.* / *.spec.* (js/ts/jsx/tsx/cjs)
+    r"|(^|/)acceptance\.[cm]?[jt]sx?$"     # a file literally named acceptance.*
+    r"|(^|/)conftest\.py$"                 # pytest
+    r"|_test\.py$|(^|/)test_[^/]*\.py$",   # python test files outside a test/ dir
+    re.IGNORECASE)
+
+
+def _tree_has_authored_test(workspace: Any) -> bool:
+    """SPEC-36 (fix C): does the MERGED master tree contain a file that looks like an
+    authored test/acceptance artifact, or a declared (non-placeholder) `npm test`
+    script? Reads git truth (no checkout switch) so it sees what actually shipped.
+    Deliberately broad and fully fail-open — a read error returns False (never
+    invents an authored test)."""
+    if workspace is None:
+        return False
+    try:
+        files = [f for f in workspace.list_files(scope="master") if f != ".gitignore"]
+    except Exception:  # noqa: BLE001
+        return False
+    if any(_AUTHORED_TEST_RE.search(f) for f in files):
+        return True
+    try:
+        raw = workspace.read_master_file("package.json")
+        if raw:
+            obj = json.loads(raw.decode("utf-8", "replace"))
+            scripts = obj.get("scripts") if isinstance(obj, dict) else None
+            cmd = scripts.get("test") if isinstance(scripts, dict) else None
+            if (isinstance(cmd, str) and cmd.strip()
+                    and "no test specified" not in cmd.lower()):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _record_completion_oracles(store: LedgerStore, workspace: Any = None) -> None:
     """SPEC-34 S4: at `done`, record which oracles ACTUALLY verified the artifact,
     so a completion summary cannot conflate the liveness gate (web:probe + runtime
     launch — proves it renders and responds to input) with the team's authored
     acceptance test (proves the mechanic has EFFECT). Best-effort; never blocks.
 
-    Distinguishes three states honestly (review finding: never claim a test ran when
-    none was authored): NOT executed (an unrun was recorded), executed (an
-    acceptance-scoped gate is registered), or none authored (no acceptance test
-    exists at all)."""
+    Distinguishes states honestly (SPEC-36 fix C — never claim a test ran when none
+    was authored, and never claim none was authored when one shipped): NOT executed
+    (an unrun was recorded), executed (an acceptance-scoped gate is registered),
+    authored-but-not-registered/runnable (a test file is on master the gate could
+    neither register nor run — the run-11 case), or none authored."""
     try:
         unrun = (store.get_run_state() or {}).get("acceptance_test_unrun")
     except Exception:  # noqa: BLE001
@@ -3426,8 +3470,15 @@ def _record_completion_oracles(store: LedgerStore) -> None:
                 for c in (store.get_test_commands() or {}).values())
         except Exception:  # noqa: BLE001
             registered = False
-        acc = ("executed (registered acceptance gate)" if registered
-               else "none authored")
+        if registered:
+            acc = "executed (registered acceptance gate)"
+        elif _tree_has_authored_test(workspace):
+            acc = ("authored but NOT registered/runnable — a test/acceptance "
+                   "artifact is present on master that the gate could neither "
+                   "register nor run (e.g. a browser test, or a filename the "
+                   "bootstrap does not match); it did NOT verify this build")
+        else:
+            acc = "none authored"
     try:
         store.record_decision(
             title="completion oracle provenance",
@@ -5936,7 +5987,7 @@ def build_run_turn(
                         kind="noop", made_progress=False,
                         last_word={"outcome": "confirmed", "rationale": gate_block})
                 _ack_unrun_acceptance_test(store)
-                _record_completion_oracles(store)
+                _record_completion_oracles(store, workspace)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(
                     kind="project_done",
@@ -6066,7 +6117,7 @@ def build_run_turn(
                 # show "✓ Complete — here's why". (intent.completion_summary is
                 # validated non-empty when done=true, schemas.py PMPlanIntent.)
                 _ack_unrun_acceptance_test(store)
-                _record_completion_oracles(store)
+                _record_completion_oracles(store, workspace)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)
