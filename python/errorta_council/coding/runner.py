@@ -3399,6 +3399,44 @@ def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
         pass
 
 
+def _record_completion_oracles(store: LedgerStore) -> None:
+    """SPEC-34 S4: at `done`, record which oracles ACTUALLY verified the artifact,
+    so a completion summary cannot conflate the liveness gate (web:probe + runtime
+    launch — proves it renders and responds to input) with the team's authored
+    acceptance test (proves the mechanic has EFFECT). Best-effort; never blocks.
+
+    Distinguishes three states honestly (review finding: never claim a test ran when
+    none was authored): NOT executed (an unrun was recorded), executed (an
+    acceptance-scoped gate is registered), or none authored (no acceptance test
+    exists at all)."""
+    try:
+        unrun = (store.get_run_state() or {}).get("acceptance_test_unrun")
+    except Exception:  # noqa: BLE001
+        unrun = None
+    if unrun:
+        acc = "NOT executed — " + str((unrun or {}).get("reason") or "unavailable")
+    else:
+        try:
+            registered = any(
+                str((c or {}).get("scope") or "") == "acceptance"
+                for c in (store.get_test_commands() or {}).values())
+        except Exception:  # noqa: BLE001
+            registered = False
+        acc = ("executed (registered acceptance gate)" if registered
+               else "none authored")
+    try:
+        store.record_decision(
+            title="completion oracle provenance",
+            context="completion", choice="completion_oracles",
+            rationale=("oracles at done — liveness gate (web:probe + runtime "
+                       "launch): verifies the artifact renders and responds to "
+                       "input, NOT that a mechanic has effect; authored acceptance "
+                       f"test: {acc}. 'verified by the liveness gate' is not "
+                       "'verified by acceptance tests' (SPEC-34)."))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
     """SPEC-30 convergence: drop the todo/blocked tasks the PM asked to cancel, so
     it can prune its own over-planned backlog and reach a completion claim.
@@ -5831,6 +5869,7 @@ def build_run_turn(
                                           "remains: "
                                           f"{summarize_open_items(open_items)}")})
                 _ack_unrun_acceptance_test(store)
+                _record_completion_oracles(store)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(
                     kind="project_done",
@@ -5947,6 +5986,7 @@ def build_run_turn(
                 # show "✓ Complete — here's why". (intent.completion_summary is
                 # validated non-empty when done=true, schemas.py PMPlanIntent.)
                 _ack_unrun_acceptance_test(store)
+                _record_completion_oracles(store)
                 store.set_completion(intent.completion_summary)
                 return TurnOutcome(kind="project_done")
             created = _materialize_pm_tasks(store, intent)

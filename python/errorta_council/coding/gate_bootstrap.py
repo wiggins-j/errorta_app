@@ -33,8 +33,10 @@ discipline: ``runner`` imports this, not the reverse).
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Optional
+import re
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ _LAUNCH_FAILURE_SIGNATURES = (
     "is not recognized",               # windows: interpreter absent
     "err_module_not_found",            # node: loader failed before user code
     "modulenotfounderror",             # python: import failed at collection
+    "could not determine executable",  # npx: the runner package is not installed
 )
 
 # Ambiguous: appears in a failed launch AND in a real test's assertion output.
@@ -97,6 +100,30 @@ def _looks_like_test_output(blob: str) -> bool:
     return any(m in blob for m in _TEST_OUTPUT_MARKERS)
 
 
+# SPEC-34 S2 — POSITIVE evidence that a green (exit 0) run executed ZERO tests. A
+# suite that exits 0 having run nothing (empty suite, `--passWithNoTests`, a
+# Playwright file mis-run so no `describe` registered) would otherwise register a
+# gate that verifies nothing — the "prove-it-works-by-doing-nothing" hole the
+# black-canvas oracle had. So the ONLY green refused is one whose own output SAYS
+# it ran zero tests. A green run whose count is merely unreadable (a silent
+# ``node assert`` script, a head-truncated pytest summary) is NOT refused — it ran
+# clean and is registered exactly as before SPEC-34 (no false wedge, no regression;
+# review lock: never refuse a run that genuinely passed).
+_ZERO_TEST_SIGNATURES = (
+    "0 passed", "0 passing", "0 tests passed", "no tests ran", "no tests found",
+    "passwithnotests", "ran 0 tests", "collected 0 items", "# tests 0",
+    "# pass 0", "tests:       0", "tests: 0",
+)
+
+
+def _ran_zero_tests(blob: str) -> bool:
+    """SPEC-34 S2: does the runner's own output POSITIVELY report zero executed
+    tests? Conservative by design — absence of a count is NOT zero (that would
+    wedge a silently-passing test); only an explicit zero-count marker counts."""
+    b = blob.lower()
+    return any(sig in b for sig in _ZERO_TEST_SIGNATURES)
+
+
 def _list_master(workspace: Any) -> list[str]:
     try:
         return [f for f in workspace.list_files(scope="master") if f != ".gitignore"]
@@ -104,25 +131,97 @@ def _list_master(workspace: Any) -> list[str]:
         return []
 
 
-def _detect_acceptance_command(files: list[str]) -> Optional[tuple[str, dict[str, Any]]]:
+# SPEC-34 S1 — a JS test file is not always run with bare ``node``. Invoking a
+# Playwright/vitest/jest/mocha suite as ``node <file>`` throws at import (run 10:
+# ``node acceptance.test.js`` -> "Playwright Test did not expect test.describe() to
+# be called here", exit 1) and the suite is then dropped as "unrunnable" — a
+# MIS-INVOCATION mistaken for a missing runtime. So when the project declares its
+# own runner (a framework dependency or a ``playwright.config``), propose THAT
+# runner. ``node <file>`` remains the fallback for a plain assert/``node:test``
+# script that declares nothing.
+_PW_CONFIG_RE = re.compile(r"(^|/)playwright\.config\.[cm]?[jt]s$")
+_VITEST_CONFIG_RE = re.compile(r"(^|/)v(itest|ite)\.config\.[cm]?[jt]s$")
+_JEST_CONFIG_RE = re.compile(r"(^|/)jest\.config\.[cm]?[jt]s$")
+
+
+def _read_package_json(read_master: Optional[Callable[[str], "bytes | None"]]
+                       ) -> dict[str, Any]:
+    """Best-effort parse of master ``package.json`` (``{}`` on any problem)."""
+    if read_master is None:
+        return {}
+    try:
+        raw = read_master("package.json")
+        if not raw:
+            return {}
+        obj = json.loads(raw.decode("utf-8", "replace"))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:  # noqa: BLE001 — a malformed manifest just means "no signal"
+        return {}
+
+
+def _choose_js_argv(
+    chosen: str, files: list[str], pkg: dict[str, Any]
+) -> tuple[list[str], Optional[str]]:
+    """Pick the argv that actually RUNS ``chosen`` given what the project declares,
+    plus a ``runtime_hint`` naming a runtime the network-off/minimal-env executor
+    cannot provision (so an honest ``test_runtime_unavailable`` beats a misleading
+    exit-1). Order: framework dependency / config wins, then a declared ``test``
+    script, then bare ``node`` for a script that needs no framework."""
+    deps = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        d = pkg.get(key)
+        if isinstance(d, dict):
+            deps.update(d)
+    scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+    has_cfg = lambda rx: any(rx.search(f) for f in files)  # noqa: E731
+
+    # Playwright drives a real browser + its config's webServer — a runtime the
+    # sandbox (network-off, no Chromium) cannot stand up; the ``browser`` hint routes
+    # a non-green smoke to the non-blocking SPEC-31 ack instead of registering it as
+    # a red-forever gate (it is not a fixable mis-invocation).
+    if "@playwright/test" in deps or has_cfg(_PW_CONFIG_RE):
+        return (["npx", "--no-install", "playwright", "test"], "browser")
+    if "vitest" in deps or has_cfg(_VITEST_CONFIG_RE):
+        return (["npx", "--no-install", "vitest", "run"], None)
+    if "jest" in deps or has_cfg(_JEST_CONFIG_RE):
+        return (["npx", "--no-install", "jest"], None)
+    if "mocha" in deps:
+        return (["npx", "--no-install", "mocha", chosen], None)
+    if isinstance(scripts.get("test"), str) and scripts["test"].strip():
+        return (["npm", "test", "--silent"], None)
+    # Nothing declared: a plain assert or ``node:test`` file runs under node.
+    return (["node", chosen], None)
+
+
+def _detect_acceptance_command(
+    files: list[str],
+    read_master: Optional[Callable[[str], "bytes | None"]] = None,
+) -> Optional[tuple[str, dict[str, Any]]]:
     """Propose ONE acceptance command that a runnable test file on master implies.
     Returns ``(command_id, spec)`` or ``None``. Grounded: only proposes an argv
     whose entrypoint file is present on master (the smoke run then proves it can
-    actually execute)."""
+    actually execute). ``read_master`` (a ``rel_path -> bytes|None`` reader) lets
+    S1 consult ``package.json`` for the project's declared runner; when omitted the
+    JS path falls back to bare ``node <file>``."""
     fileset = set(files)
 
-    # 1) A team-authored JS test file the browser-less runtime runs directly with
-    #    node — the gravity-golf case (test/acceptance.test.js). Prefer a file
-    #    literally named for acceptance, else the first *.test.js under test(s)/.
+    # 1) A team-authored JS test file. Prefer a file literally named for
+    #    acceptance, else the first *.test.js under test(s)/. Then invoke it with
+    #    the runner the project actually declares (SPEC-34 S1), not blindly `node`.
     js_tests = sorted(
         f for f in files
         if f.endswith(".test.js")
         and (f.startswith("test/") or f.startswith("tests/") or "/test" in f))
     if js_tests:
         chosen = next((f for f in js_tests if "acceptance" in f), js_tests[0])
-        return ("acceptance", {
-            "argv": ["node", chosen], "cwd": ".", "timeout_seconds": 120,
-            "label": f"acceptance ({chosen})", "scope": "acceptance"})
+        argv, runtime_hint = _choose_js_argv(
+            chosen, files, _read_package_json(read_master))
+        spec: dict[str, Any] = {
+            "argv": argv, "cwd": ".", "timeout_seconds": 120,
+            "label": f"acceptance ({chosen})", "scope": "acceptance"}
+        if runtime_hint:
+            spec["runtime_hint"] = runtime_hint
+        return ("acceptance", spec)
 
     # 2) A python test suite runnable with pytest.
     py_tests = [f for f in files
@@ -139,6 +238,14 @@ def _detect_acceptance_command(files: list[str]) -> Optional[tuple[str, dict[str
     return None
 
 
+def _result_blob(r: Any) -> str:
+    """Lower-cased stderr+stdout preview of a ``TestRunResult`` (``""`` if None)."""
+    if r is None:
+        return ""
+    return (str(getattr(r, "stderr_preview", "") or "")
+            + "\n" + str(getattr(r, "stdout_preview", "") or "")).lower()
+
+
 def _smoke_ran_cleanly(session: Any) -> tuple[bool, str]:
     """Did the candidate actually EXECUTE (regardless of pass/fail)? Returns
     ``(ran, reason)``. A real test failure (process completed, non-zero exit) is
@@ -152,8 +259,7 @@ def _smoke_ran_cleanly(session: Any) -> tuple[bool, str]:
     if status not in ("completed",):
         # blocked (sandbox), failed (launch), timed_out -> could not run cleanly.
         return False, f"status={status} ({getattr(r, 'reason', '') or 'launch failed'})"
-    blob = (str(getattr(r, "stderr_preview", "") or "")
-            + "\n" + str(getattr(r, "stdout_preview", "") or "")).lower()
+    blob = _result_blob(r)
     # Unambiguous launch failures refuse regardless of anything else.
     for sig in _LAUNCH_FAILURE_SIGNATURES:
         if sig in blob:
@@ -228,7 +334,8 @@ def _bootstrap_acceptance_command(store: Any, workspace: Any) -> None:
     except Exception:  # noqa: BLE001
         pass
     files = _list_master(workspace)
-    proposed = _detect_acceptance_command(files)
+    proposed = _detect_acceptance_command(
+        files, read_master=getattr(workspace, "read_master_file", None))
     if proposed is None:
         return
     cmd_id, spec = proposed
@@ -259,6 +366,34 @@ def _bootstrap_acceptance_command(store: Any, workspace: Any) -> None:
         _record_test_runtime_unavailable(store, cmd_id, spec, reason)
         _mark_cmd_resolved(store)
         return
+    r0 = (list(getattr(session, "results", []) or []) or [None])[0]
+    green = getattr(r0, "exit_code", None) == 0
+    blob = _result_blob(r0)
+    # SPEC-34 S2 — a GREEN (exit 0) smoke that its OWN output says ran ZERO tests is
+    # not a gate (empty suite, `--passWithNoTests`, a mis-run framework file that
+    # registered no test). Refuse only on that positive zero-evidence; a green run
+    # whose count is merely unreadable still registers (no false wedge). A real
+    # non-zero failure also still registers — it IS a valid gate that runs red.
+    if green and _ran_zero_tests(blob):
+        _record_test_runtime_unavailable(
+            store, cmd_id, spec,
+            "ran clean but its output reports zero executed tests (a green gate "
+            "that verifies nothing)")
+        _mark_cmd_resolved(store)
+        return
+    # SPEC-34 S1 — a suite that declares a runtime the executor cannot provision (a
+    # Playwright browser + webServer: network-off, no Chromium) can exit non-zero
+    # WITHOUT a launch-failure signature (npx "could not determine executable", a
+    # webServer connect error). Registering that makes it red forever — the wedge
+    # SPEC-34 warns against. So a ``runtime_hint`` candidate that did not end GREEN is
+    # recorded as unavailable (SPEC-31 ack), never registered as a red gate.
+    if spec.get("runtime_hint") and not green:
+        _record_test_runtime_unavailable(
+            store, cmd_id, spec,
+            f"{spec['runtime_hint']} runtime not provisionable here — {reason}; "
+            f"exit={getattr(r0, 'exit_code', None)}")
+        _mark_cmd_resolved(store)
+        return
     store.set_test_commands({cmd_id: spec})
     _mark_cmd_resolved(store)
     try:
@@ -283,20 +418,23 @@ def _mark_cmd_resolved(store: Any) -> None:
 def _record_test_runtime_unavailable(
     store: Any, cmd_id: str, spec: dict[str, Any], reason: str) -> None:
     """SPEC-31: the authored acceptance test exists on master but could not be
-    EXECUTED (its runtime — a headless browser, jsdom, a missing interpreter — is
-    not provisioned). Record it as a distinct, first-class fact and persist it to
-    run_state so the completion path acknowledges the test was not run. This is the
-    same refusal as before (an un-runnable command is not registered as a gate),
-    but named honestly so `done` cannot silently overstate "tested"."""
+    EXECUTED (or a green run reported zero tests). Record it as a distinct,
+    first-class fact and persist it to run_state so the completion path can honestly
+    acknowledge the test was not run — instead of a `done` that silently overstates
+    "tested". This is the same refusal as before (an un-runnable/vacuous command is
+    not registered as a gate); it is NON-BLOCKING by design — blocking `done` on it
+    would wedge a run whose test simply cannot run or cannot be quantified in this
+    environment (the review's blocker: no recovery path exists to lift such a block).
+    A recoverable hard gate is deferred (SPEC-34 follow-on)."""
     try:
         store.record_decision(
             title="acceptance test present but not executed",
             context="gate_bootstrap", choice="test_runtime_unavailable",
             rationale=(f"the authored acceptance test {cmd_id!r} "
-                       f"(argv={spec.get('argv')}) could not run — {reason}. Its "
-                       "runtime is not provisioned, so it is not registered as a "
-                       "gate; rendering is still verified by the web:probe, but the "
-                       "unit acceptance test was NOT executed."))
+                       f"(argv={spec.get('argv')}) was not registered as a gate — "
+                       f"{reason}. Rendering is still verified by the web:probe, but "
+                       "the authored acceptance test was NOT executed; recorded so "
+                       "`done` does not overstate coverage (SPEC-31)."))
     except Exception:  # noqa: BLE001
         pass
     try:

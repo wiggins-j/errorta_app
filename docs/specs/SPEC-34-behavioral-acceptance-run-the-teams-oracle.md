@@ -7,10 +7,11 @@ sinks whether or not the well exists — to `definition_of_done`, as a "working,
 tested game". The same model (Claude), in an ad-hoc seat, caught it in minutes by
 *running the delivered modules and measuring the deflection*. This spec is the
 engine change that would let the council catch its own version of this.
-**Target version:** v0.1 (engine — `gate_bootstrap.py`, `completion.py`,
-`gate_state.py`; optionally `web_probe.py` / `scripts/web-probe.mjs`)
-**Depends on / completes:** [SPEC-31](SPEC-31-in-loop-unit-test-execution.md) (which
-NAMES the un-run test but neither runs nor gates on it)
+**Target version:** v0.1 (engine — `gate_bootstrap.py`, `runner.py`; a follow-on will
+touch `completion.py` / `gate_state.py` for the recoverable hard gate, and
+`web_probe.py` / `scripts/web-probe.mjs` for S5)
+**Relates to / advances:** [SPEC-31](SPEC-31-in-loop-unit-test-execution.md) (which
+NAMES the un-run test but never invokes the declared runner)
 **Relates to:** [SPEC-30](SPEC-30-execution-gate-and-grounded-review.md) (the
 render+input probe this shows is insufficient) · [SPEC-32](SPEC-32-reviewers-read-the-tree.md)
 (grounded review, shown insufficient here) · failure-report Pathology 1
@@ -75,69 +76,98 @@ provision the runtime that entrypoint declares (e.g. `npx playwright test` with 
 injection (respecting `testing._run_one`'s minimal-env contract). This is what SPEC-31
 §1 deferred; S1 is it, corrected: the blocker was invocation, not jsdom.
 
-**S2 — Only register a gate that actually asserted something (anti-gaming).**
-`_smoke_ran_cleanly` registers a command that merely "ran cleanly" — it never checks
-that *assertions executed*. A suite that exits 0 without running any assertion (an
-empty/mis-invoked suite) would register a GREEN acceptance gate that verifies
-nothing — the same "prove-it-works-by-doing-nothing" hole the black-canvas oracle
-had. Require evidence of ≥1 executed assertion / test case (parse the runner's
-"N passed" / TAP / JUnit count) before registering green.
+**S2 — Refuse a green gate only on positive zero-test evidence (anti-gaming, no
+false wedge).** `_bootstrap_acceptance_command` registered a command that merely
+"ran cleanly", so a suite that exits 0 having run nothing would register a GREEN
+gate that verifies nothing — the "prove-it-works-by-doing-nothing" hole. S2 refuses
+registration when the runner's own output *positively reports zero tests* (`0
+passed` / `no tests ran` / `collected 0 items` / `--passWithNoTests`). It does **not**
+refuse a green run whose count is merely unreadable — a silently-passing `node
+assert` script or a head-truncated pytest summary — because that ran and passed;
+refusing it would de-register (and, if it also armed a `done`-block, wedge) a working
+project. A real non-zero failure still registers (a valid red gate). *(Adversarial
+review corrected the first draft here: an "≥1 assertion or refuse" rule wedged
+silently-passing tests and false-refused truncated output.)*
 
-**S3 — Gate `done` on a required-but-unrun acceptance test (completes SPEC-31 §2).**
-SPEC-31 §2 records `acceptance_test_unrun` as a non-blocking advisory. Once S1 makes
-the runner actually work, upgrade it: `completion.py` refuses
-`stop_reason=definition_of_done` while a DoD-required acceptance test is unrun.
-Ordering is load-bearing — gating on unrun **before** S1 re-creates the exact "a
-command that can't run is a red gate forever" wedge `gate_bootstrap` was built to
-avoid, so S3 ships only with S1.
+**S3 — Keep the unrun record a NON-BLOCKING honest ack; defer the hard gate.**
+SPEC-31 records `acceptance_test_unrun` as a non-blocking advisory, and it stays that
+way. The first draft of this spec made it *block* `done`; adversarial review found
+that unsafe: `acceptance_test_unrun` is written by a one-shot bootstrap smoke
+(`gate_cmd_bootstrap_resolved`) and **never cleared**, so blocking on it wedges a run
+**permanently with no recovery** even after the team fixes the test — the exact
+"red gate forever" failure regression lock 3 forbids. A *correct* hard gate must
+block on a **registered acceptance gate that is red** (which the in-loop gate
+re-runs every merge, so recovery is built in) — not on an unrun record — and needs
+reliable isolation of the acceptance result among mixed test runs. That is a larger
+change; it is deferred as a **follow-on**. In the meantime the in-loop gate and the
+delivery review already block a *registered* red acceptance gate during the loop; S4
+(below) keeps the `done` summary from overstating what ran.
 
-**S4 — Stop calling the render/launch gate the "acceptance gate" (naming).** The
-in-loop `web:probe` + `runtime:launch` gate is recorded as "ran the acceptance gate"
-(`d-77336403f655`), which is what let the PM's `completion_summary` claim "verified
-by acceptance tests" while the authored `acceptance.test.js` never ran. Name them
-distinctly (liveness gate vs authored acceptance test) so completion claims cannot
-conflate them.
+**S4 — Record oracle provenance at `done` (naming).** The in-loop `web:probe` +
+`runtime:launch` gate is recorded as "ran the acceptance gate" (`d-77336403f655`),
+which is what let the PM's `completion_summary` claim "verified by acceptance tests"
+while the authored `acceptance.test.js` never ran. At `done`, `_record_completion_oracles`
+records which oracles actually verified the artifact — the **liveness gate** (renders
++ responds, not effect) vs the **authored acceptance test** — and honestly reports
+one of three states: *executed* (an acceptance-scoped gate is registered), *NOT
+executed* (an unrun was recorded), or *none authored*. *(Review corrected the first
+draft: it inferred "executed" from the mere absence of an unrun record, so a project
+that authored no test was labelled "executed" — the very conflation S4 exists to
+prevent.)*
 
-**S5 — (optional, deeper) a behavioral probe.** Extend `web:probe` from "renders +
-responds" to a scripted-shot behavioral assertion — a straight shot must MISS, or
-trajectory curvature must exceed a threshold — so even a project that authors no
-test still has an effect-measuring oracle. This directly closes the "inert but
-render+input-passing" class the analysis names.
+**S5 — (optional, deeper) a behavioral probe (follow-on).** Extend `web:probe` from
+"renders + responds" to a scripted-shot behavioral assertion — a straight shot must
+MISS, or trajectory curvature must exceed a threshold — so even a project that
+authors no test still has an effect-measuring oracle.
+
+## Delivered here vs deferred
+
+**Delivered:** S1 (declared-runner detection), S2 (positive-zero-evidence guard),
+S4 (oracle provenance), and the SPEC-31 non-blocking ack, hardened so an
+unprovisionable `runtime_hint` suite is never registered as a red-forever gate.
+
+**Deferred as follow-on** (each needs infrastructure larger than this change, and
+adversarial review showed a naive version is unsafe): the **recoverable hard `done`
+gate** (block on a *registered, red* acceptance gate with recovery via the in-loop
+re-run — not on the never-cleared unrun record); **network-enabled runtime
+provisioning** (S1's install half — the executor is network-off + minimal-env by
+asserted design in `testing._run_one`); and **S5**.
 
 ## Why this is distinct from SPEC-30/31/32
 
 - **SPEC-30** gave `web:probe` render + input. That passes an inert mechanic (a
   straight-moving ball + a redrawing aim UI still changes the canvas hash). Blind to
   trajectory.
-- **SPEC-31** only *names* the un-run test (`acceptance_test_unrun`); it neither runs
-  it (§1 deferred) nor gates on it. S1+S3 here are its completion, corrected.
+- **SPEC-31** only *names* the un-run test (`acceptance_test_unrun`) and never runs
+  it (§1 deferred). S1 here makes the declared runner actually get invoked, and S4
+  makes the un-run legible at `done`.
 - **SPEC-32** made review grounded — proven insufficient here: grounded, multi-turn
   reading of correct-looking math produced zero findings.
 
-The missing lever none of them provide: **run the team's own behavioral oracle, prove
-it actually asserted, and refuse `done` without it.**
-
 ## Regression locks
 
-1. A project with no authored test behaves exactly as today (probe-only), never
-   blocked by S3 (nothing is "required-but-unrun").
-2. S2's assertion-count check never registers a command that ran but asserted
-   nothing — and never refuses one that genuinely asserted and passed.
-3. S3 ships only with a working S1; on its own it must not re-create the
-   red-gate-forever wedge (a test that *cannot* run in this environment records the
-   inability and does not wedge — the SPEC-31 escape-hatch is preserved for the
-   genuinely-unprovisionable case).
-4. The minimal-env / sandbox contract of `testing._run_one` is not weakened by
-   arbitrary env injection; S1's provisioning is a sanctioned, bounded step.
+1. A project with no authored test behaves exactly as today (probe-only); S4 reports
+   "none authored" and never claims a test executed.
+2. S2 refuses a green registration ONLY on positive zero-test evidence — it never
+   refuses a run that genuinely passed (silent `node assert`, head-truncated pytest
+   summary), and never registers a run whose output says it executed zero tests.
+3. No path wedges `done`: the unrun record is a non-blocking ack, and an
+   unprovisionable (`runtime_hint`) suite that cannot run is recorded, never
+   registered as a red gate.
+4. The minimal-env / sandbox contract of `testing._run_one` is not weakened — no
+   network grant or env injection is added; the browser case is recorded
+   unavailable, not provisioned.
+5. S1's no-`package.json` path is byte-identical to before (`["node", <file>]`), and
+   the pytest fallback is unchanged.
 
 ## Definition of done
 
-- A buildless-web run whose team writes a headless acceptance test has that test
-  **executed with its real runner** on the integrated tree, and `done` is refused
-  until it is green (or its runtime is genuinely unprovisionable, recorded).
-- A suite that exits 0 without asserting anything does NOT register a green gate.
-- Re-running SPEC-28's fixture: a delivered mechanic that renders + responds but is
-  numerically inert (a gravity well that does not bend the path) FAILS the gate —
-  asserted by a fixture whose authored test measures effect size, not presence.
-- Completion summaries can no longer claim "verified by acceptance tests" when only
-  the liveness gate ran.
+- A buildless-web run whose team declares a test runner (`package.json`
+  `scripts.test` / a framework dep / a config) has the **declared runner** proposed
+  and smoke-run, instead of a blind `node <file>` that mis-invokes a framework suite.
+- A green smoke whose output reports zero executed tests does NOT register a gate; a
+  silently-passing test still does.
+- `done` records honest oracle provenance and never claims "verified by acceptance
+  tests" when only the liveness gate ran or no test was authored.
+- No run is wedged by an acceptance test that cannot run or cannot be quantified in
+  this environment.
