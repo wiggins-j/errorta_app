@@ -55,39 +55,52 @@ by the in-loop gate every merge → recovery by construction).
 `latest_gate_run` returns the newest recorded run of ANY kind, but `record_test_run`
 is also called for `web:probe` (web_probe.py:334) and PR-scoped unit runs
 (runner.py:4847) — so it cannot answer "did the ACCEPTANCE gate pass?". Add
-`latest_acceptance_result(store) -> {passed: bool, head: str} | None` that scans
-`list_test_runs()` for the newest session whose per-command `results` include a
+`latest_acceptance_result(store) -> {passed: bool, ran: bool, head: str} | None` that
+scans `list_test_runs()` for the newest session whose per-command `results` include a
 command_id that is **acceptance-scoped in the current registry**
-(`get_test_commands()` → `scope == "acceptance"`), ignoring probe/unit/PR runs.
-Returns `None` when no such run exists. READ-ONLY, fully guarded (SPEC-12-prep style).
+(`get_test_commands()` → `scope == "acceptance"`), ignoring probe/unit/PR runs, and
+reads the acceptance command's OWN per-result fields. `ran` (`status == "completed"`)
+distinguishes a genuine assertion failure from a **launch/provisioning failure**
+(`blocked`/`timed_out`/`failed`). Returns `None` when no such run exists. READ-ONLY,
+fully guarded.
 
 **G2 — The gate status (`completion.acceptance_gate_status`).** A pure, read-only
 classifier `acceptance_gate_status(store, current_head) -> Literal`:
 - `no_gate` — no acceptance-scoped command registered → **allow** (nothing to gate;
   SPEC-34 S4 already reports "none authored"). This is the no-wedge floor.
-- `green` — `latest_acceptance_result.passed` and its `head == current_head` → **allow**.
-- `red` — a result exists at `current_head` and it did not pass → **block (fixable)**.
-- `stale` — a result exists but at a different head (or none yet) while a gate IS
-  registered → **block (needs a fresh run)**.
+- `green` — the acceptance result **ran** and passed AND its `head == current_head` → **allow**.
+- `red` — the acceptance result **ran** and failed at `current_head` → **block
+  (fixable — a real assertion failure the team can fix by editing code)**.
+- `stale` — a gate is registered but has no usable result at this head: it ran at a
+  different head, has never run, **or its latest result at this head did not cleanly
+  execute (a launch/provisioning failure)**. Classifying a launch failure as `stale`
+  (not `red`) is load-bearing: a launch failure is environmental, no code merge flips
+  it green, so a `red` block on it would be a permanent wedge. As `stale` it routes
+  through the bounded arm-and-refuse path (G3/G4).
 
 **G3 — Block + recover at the PM `done` chokepoints (`runner.py`).** Alongside the
 existing `pending_completion_work` refusal, at BOTH done paths (the plan turn and the
 last-word turn):
-- `red` → record `pm_completion_refused` ("acceptance gate is red at head …; fix the
-  test/mechanic") and return `completion_refused`. **Recovery:** the team fixes it,
-  the fix merges, `_arm_gate_after_merge` arms the in-loop gate, the next GateRun
-  re-runs the acceptance command on the new head → `green` → the next `done` passes.
-  No state to clear by hand.
+- `red` → record `pm_completion_refused` and return `completion_refused`. **Recovery:**
+  the team fixes it, the fix merges, `_arm_gate_after_merge` arms the in-loop gate, the
+  next GateRun re-runs the acceptance command on the new head → `green` → the next
+  `done` passes. No state to clear by hand.
 - `stale` → **arm the in-loop gate** (`gate_due=True`, `gate_dirty_head=current_head`)
-  and refuse this `done`, so the loop runs the gate and the next `done` attempt sees a
-  fresh result at head. Bounded (G4).
+  and refuse this `done`, so the loop's next `GateRun` (topology `_due_gate_run` reads
+  `gate_due`) runs the acceptance command at this head and the next `done` attempt
+  sees a fresh result.
 
-**G4 — Bounded, never an infinite arm loop.** The `stale` arm-and-refuse is capped by
-a run-state counter (`acceptance_gate_stale_arms`). If, after N arm→run cycles, no
-result at the current head materializes (the command started failing to LAUNCH
-mid-run — it became unprovisionable), the gate degrades to SPEC-34's non-blocking ack
-**and** escalates to a human-routed `completion_blocked` Problem, rather than
-arming forever. Reaching a fresh result (green or red) resets the counter.
+**G4 — Boundedness via the existing F128 ladder (no private counter).** Every refusal
+above returns through the F128 `completion_refused` ladder
+(`autonomy._handle_completion_refused`): it re-prompts the PM and, at
+`completion_refused_limit`, raises ONE human-routed `completion_blocked` Problem and
+stops the run truthfully. So a `stale` gate that can never produce a usable result
+(the command is permanently unlaunchable) does not arm forever — it escalates to a
+human after the ladder's bound, the **single sanctioned terminal**. This reuses tested
+machinery instead of a second, divergent counter (an earlier draft added its own
+`acceptance_gate_stale_arms` cap that *allowed* `done` at the budget — that both
+diverged from the ladder and could ship `done` on an unverified gate; it was removed
+in review).
 
 ## Recovery invariant (the property SPEC-34's draft lacked)
 
@@ -111,9 +124,11 @@ cycle could ever flip it.
 3. **Recovery, proven.** A `red` refusal lifts on the next green in-loop run at the
    fixed head with NO manual state change — asserted end-to-end by a test that drives
    red → fix/merge → green → `done` allowed.
-4. **Bounded.** The `stale` arm-and-refuse cannot loop forever: after the capped arm
-   cycles with no fresh result it degrades to a non-blocking ack + `completion_blocked`
-   escalation (asserted).
+4. **A launch failure never wedges.** A `blocked`/`timed_out`/`failed` acceptance
+   result (an environmental failure no code merge can fix) is classified `stale`, not
+   `red`, so it routes through the arm-and-refuse path and is bounded by the F128
+   `completion_refused` → `completion_blocked` ladder (a human-routed terminal), never
+   a permanent unbounded block — asserted.
 5. **No sandbox weakening.** No change to `testing._run_one` network/env invariants;
    this spec only reads results the executor already produces.
 

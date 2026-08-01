@@ -128,4 +128,57 @@ def latest_gate_text(store: Any, *, cap: int = _DEFAULT_CAP) -> str:
         return ""
 
 
-__all__ = ["gate_available", "latest_gate_run", "latest_gate_text"]
+def latest_acceptance_result(store: Any) -> dict[str, Any] | None:
+    """SPEC-35 G1: the newest recorded run of an ACCEPTANCE-scoped command, as
+    ``{"passed": bool, "ran": bool, "head": str}``, or ``None`` if none exists.
+
+    Distinct from ``latest_gate_run`` on purpose: ``record_test_run`` is also called
+    for the ``web:probe`` (web_probe.py) and per-PR unit runs (runner.py), so the
+    newest run is frequently NOT the acceptance gate. This isolates the acceptance
+    verdict by (1) resolving which command_ids are ``scope == "acceptance"`` in the
+    LIVE registry and (2) reading the acceptance command's OWN per-result fields
+    within the run — never the session-level verdict, which a mixed unit+acceptance
+    session would contaminate.
+
+    ``ran`` distinguishes a genuine assertion failure (``status == "completed"`` with
+    a non-zero exit) from a launch/provisioning failure (``blocked`` / ``timed_out``
+    / ``failed`` — the interpreter never started, the sandbox was unavailable, the
+    command timed out). The caller MUST treat the launch-failure case as
+    *unverifiable*, never as a fixable ``red``: a launch failure is environmental,
+    no code merge flips it green, so blocking ``done`` on it forever would be a wedge
+    (the SPEC-34 cardinal sin). READ-ONLY and fully guarded (``None`` on any error).
+    """
+    try:
+        cmds = store.get_test_commands() or {}
+        acc_ids = {
+            str(cid) for cid, spec in cmds.items()
+            if str((spec or {}).get("scope", "unit")) == "acceptance"}
+    except Exception:  # noqa: BLE001
+        return None
+    if not acc_ids:
+        return None
+    try:
+        runs = store.list_test_runs()
+    except Exception:  # noqa: BLE001
+        return None
+    if not runs:
+        return None
+    for run in reversed(runs):
+        if not isinstance(run, dict):
+            continue
+        acc_results = [
+            r for r in (run.get("results") or [])
+            if isinstance(r, dict) and str(r.get("command_id")) in acc_ids]
+        if acc_results:
+            return {
+                "passed": all(bool(r.get("passed")) for r in acc_results),
+                "ran": all(
+                    str(r.get("status") or "") == "completed" for r in acc_results),
+                "head": str(run.get("head") or "")}
+    return None
+
+
+__all__ = [
+    "gate_available", "latest_gate_run", "latest_gate_text",
+    "latest_acceptance_result",
+]

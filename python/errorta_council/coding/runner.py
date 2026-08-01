@@ -42,7 +42,11 @@ from .autonomy import (
     run_coding_loop,
     window_counters_to_dict,
 )
-from .completion import pending_completion_work, summarize_open_items
+from .completion import (
+    acceptance_gate_status,
+    pending_completion_work,
+    summarize_open_items,
+)
 from .ledger import LedgerStore, Task, format_focus_lines
 from .orientation import build_orientation_packet
 from .schemas import (
@@ -3437,6 +3441,60 @@ def _record_completion_oracles(store: LedgerStore) -> None:
         pass
 
 
+def _acceptance_gate_blocks_done(
+        store: LedgerStore, workspace: Any) -> Optional[str]:
+    """SPEC-35 G3: should `done` be REFUSED because the project's own acceptance gate
+    is not green at the current master head? Returns a refusal reason, or ``None`` to
+    allow.
+
+    * green / no_gate -> ``None`` (allow).
+    * red   -> block. A genuine assertion failure (the test RAN and failed). The team
+      fixes the test/mechanic; once master advances the stale-then-fresh in-loop
+      GateRun flips it green and this lifts automatically — the recovery property
+      SPEC-34's draft lacked (it blocked on a never-cleared record).
+    * stale -> block, and arm the in-loop gate (``gate_due`` + ``gate_dirty_head``) so
+      the loop runs the acceptance command on this head; the next `done` attempt sees
+      a fresh result. This ALSO covers a launch/provisioning failure (a result that
+      did not cleanly execute — classified ``stale``, never ``red``), so an
+      environmental failure the team cannot fix by editing code never becomes an
+      unbounded block.
+
+    Boundedness is NOT a private counter here: every refusal returns through the F128
+    ``completion_refused`` ladder (``autonomy._handle_completion_refused``), which
+    re-prompts the PM and, at ``completion_refused_limit``, raises ONE human-routed
+    ``completion_blocked`` Problem and stops the run truthfully. That is the single
+    sanctioned terminal — never a silent permanent wedge, never a false ``done``.
+
+    Fail-open: an absent workspace / unresolvable head / any read error returns
+    ``None`` (this never invents a block)."""
+    if workspace is None:
+        return None
+    try:
+        head = str(workspace.head() or "")
+    except Exception:  # noqa: BLE001
+        return None
+    if not head:
+        return None
+    status = acceptance_gate_status(store, head)
+    if status in ("no_gate", "green"):
+        return None
+    if status == "red":
+        return (f"the acceptance gate is RED at master head {head[:12]} — the team's "
+                "own acceptance test RAN and failed; `done` is refused until it is "
+                "green (SPEC-35). Fix the test/mechanic: the in-loop gate re-runs on "
+                "the next merge and lifts this automatically.")
+    # stale: no usable result at this head (never run, ran at a prior head, or a
+    # launch/provisioning failure that did not cleanly execute). Arm the in-loop gate
+    # to produce a fresh result; the completion_refused ladder bounds the retries.
+    try:
+        store.set_run_state(gate_due=True, gate_dirty_head=head)
+    except Exception:  # noqa: BLE001
+        return None
+    return (f"the acceptance gate has no usable result at master head {head[:12]} yet "
+            "(unrun, stale, or it could not launch) — armed the in-loop gate to run "
+            "it; `done` is deferred until it reports green (SPEC-35).")
+
+
 def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
     """SPEC-30 convergence: drop the todo/blocked tasks the PM asked to cancel, so
     it can prune its own over-planned backlog and reach a completion claim.
@@ -5868,6 +5926,15 @@ def build_run_turn(
                             "rationale": ("the PM claimed done, but open work "
                                           "remains: "
                                           f"{summarize_open_items(open_items)}")})
+                gate_block = _acceptance_gate_blocks_done(store, workspace)
+                if gate_block:
+                    store.record_decision(
+                        title="last word completion refused: acceptance gate",
+                        context=f"last_word:{action.detector}",
+                        choice="pm_completion_refused", rationale=gate_block)
+                    return TurnOutcome(
+                        kind="noop", made_progress=False,
+                        last_word={"outcome": "confirmed", "rationale": gate_block})
                 _ack_unrun_acceptance_test(store)
                 _record_completion_oracles(store)
                 store.set_completion(intent.completion_summary)
@@ -5982,6 +6049,19 @@ def build_run_turn(
                     return TurnOutcome(
                         kind="completion_refused", made_progress=False,
                         reason="open_work_remains")
+                # SPEC-35: `done` is also refused while the project's own acceptance
+                # gate is not green at the current master head (red -> fix it; stale
+                # -> arm the in-loop gate). Recoverable by construction: the in-loop
+                # gate re-runs on merges and lifts the block automatically.
+                gate_block = _acceptance_gate_blocks_done(store, workspace)
+                if gate_block:
+                    store.record_decision(
+                        title="completion refused: acceptance gate not green",
+                        context="plan", choice="pm_completion_refused",
+                        rationale=gate_block)
+                    return TurnOutcome(
+                        kind="completion_refused", made_progress=False,
+                        reason="acceptance_gate_not_green")
                 # F093: persist the PM's completion justification so the UI can
                 # show "✓ Complete — here's why". (intent.completion_summary is
                 # validated non-empty when done=true, schemas.py PMPlanIntent.)

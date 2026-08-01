@@ -113,9 +113,65 @@ def count_human_required(items: list[OpenItem]) -> int:
     return sum(1 for it in items if it.human_required)
 
 
+# SPEC-35 G2 — the acceptance gate's verdict for the `done` chokepoint.
+AcceptanceGateStatus = Literal["no_gate", "green", "red", "stale"]
+
+
+def acceptance_gate_status(ledger: Any, current_head: str) -> AcceptanceGateStatus:
+    """SPEC-35 G2: classify the project's acceptance gate at ``current_head``.
+
+    * ``no_gate``  — no acceptance-scoped command is registered (nothing to gate).
+    * ``green``    — the gate's own latest result RAN and passed AT this head.
+    * ``red``      — the gate's own latest result RAN and failed AT this head (a real
+                     assertion failure the team can fix by editing code — fixable).
+    * ``stale``    — a gate is registered but has no usable result at this head: it
+                     ran at a different head, has never run, OR its latest result at
+                     this head did not cleanly execute (a launch/provisioning failure
+                     — timeout, blocked sandbox, missing interpreter). A launch
+                     failure is deliberately NOT ``red``: it is environmental, no
+                     code merge flips it green, so treating it as ``red`` would wedge
+                     ``done`` forever. As ``stale`` it routes through the bounded
+                     arm-and-refuse path (runner) that terminates in a human-routed
+                     ``completion_blocked`` — never a silent permanent block.
+
+    READ-ONLY and fail-open: any read error, or an unresolvable ``current_head``,
+    returns ``no_gate`` so this can never INVENT a block (the module's fail-closed
+    rule applies to open *work*; a `done`-block must fail *open* — a spurious block
+    with no recovery is the wedge SPEC-34's review forbids). Recovery is structural:
+    the in-loop gate re-runs the registered command every merge, so a ``red``/``stale``
+    verdict flips to ``green`` on its own once the tree is fixed.
+    """
+    head = str(current_head or "")
+    if not head:
+        return "no_gate"  # cannot bind a result to a head -> never block
+    try:
+        cmds = ledger.get_test_commands() or {}
+        has_acc = any(
+            str((spec or {}).get("scope", "unit")) == "acceptance"
+            for spec in cmds.values())
+    except Exception:  # noqa: BLE001 — never invent a block
+        return "no_gate"
+    if not has_acc:
+        return "no_gate"
+    try:
+        from .gate_state import latest_acceptance_result
+        res = latest_acceptance_result(ledger)
+    except Exception:  # noqa: BLE001
+        return "no_gate"
+    if not res:
+        return "stale"  # registered but never run -> force a fresh run
+    if str(res.get("head") or "") != head:
+        return "stale"  # a result, but not for the tree we are about to call done
+    if not res.get("ran", False):
+        return "stale"  # a launch/provisioning failure, not a fixable assertion fail
+    return "green" if res.get("passed") else "red"
+
+
 __all__ = [
     "OpenItem",
     "pending_completion_work",
     "summarize_open_items",
     "count_human_required",
+    "acceptance_gate_status",
+    "AcceptanceGateStatus",
 ]
