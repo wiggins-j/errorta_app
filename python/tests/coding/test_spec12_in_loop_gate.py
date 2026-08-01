@@ -304,10 +304,13 @@ def test_maybe_bootstrap_registers_a_runnable_command(
     s = _store("bs1", tmp_path)
     ws = _ws("bs1", s)
     monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
+    # SPEC-34 S2: a GREEN smoke must PROVE it asserted something, so the stub emits
+    # a pass line (a real passing acceptance test always reports its count).
     monkeypatch.setattr(
         gate_bootstrap, "_detect_acceptance_command",
-        lambda files: ("acceptance", {**_OK, "scope": "acceptance",
-                                       "cwd": ".", "label": "acc"}))
+        lambda files, **_kw: ("acceptance", {
+            "argv": [_PY, "-c", "print('1 passed')"], "timeout_seconds": 30,
+            "scope": "acceptance", "cwd": ".", "label": "acc"}))
     gate_bootstrap.maybe_bootstrap(s, ws, CodingAutonomyPolicy())
     assert "acceptance" in s.get_test_commands()
     assert s.get_test_commands()["acceptance"]["scope"] == "acceptance"
@@ -323,7 +326,7 @@ def test_maybe_bootstrap_refuses_an_unrunnable_command(
     monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
     monkeypatch.setattr(
         gate_bootstrap, "_detect_acceptance_command",
-        lambda files: ("acceptance", {
+        lambda files, **_kw: ("acceptance", {
             "argv": ["this-binary-does-not-exist-spec12", "x"],
             "timeout_seconds": 5, "cwd": ".", "scope": "acceptance",
             "label": "acc"}))
@@ -349,7 +352,7 @@ def test_a_refused_candidate_smoke_runs_at_most_once(
     monkeypatch.setattr(s, "get_require_sandbox", lambda: False)
     monkeypatch.setattr(
         gate_bootstrap, "_detect_acceptance_command",
-        lambda files: ("acceptance", {"argv": ["x"], "timeout_seconds": 5,
+        lambda files, **_kw: ("acceptance", {"argv": ["x"], "timeout_seconds": 5,
                                       "cwd": ".", "scope": "acceptance",
                                       "label": "acc"}))
     calls = {"n": 0}
