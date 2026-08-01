@@ -13,8 +13,22 @@ is its deferred S5, redesigned) · [SPEC-30](SPEC-30-execution-gate-and-grounded
 (the probe's render+input phase this extends) · [SPEC-35](SPEC-35-recoverable-acceptance-done-gate.md)
 (the done-gate a probe verdict can feed) · [SPEC-36](SPEC-36-detect-declared-test-and-honest-provenance.md)
 (detection/provenance — necessary but non-blocking)
-**Status:** proposed (design — needs sign-off on the testability contract before
-implementation) · **Owner:** wiggins-j
+**Status:** implemented (v1 — the hook-based win-condition oracle; validated live
+against control fixtures) · **Owner:** wiggins-j
+
+> **Implementation note (v1, as shipped).** O1–O4 landed as: a behavioral phase in
+> `web-probe.mjs` that fires a straight shot at the hole swept across powers via
+> `window.__probe` and reports `mechanic_probe` facts; `web_probe.py`'s
+> `_declares_load_bearing_mechanic` (a keyword signal requiring BOTH a mechanic term
+> and a non-triviality term) gates the fold in `_verdict_to_result` /
+> `_probe_verdict_fields`. Enforcement needs **no DoD-injection plumbing**: the probe
+> verdict already feeds the existing gate → delivery-review loop (exactly like
+> SPEC-30's `interaction_changed`), and the `no_hook` failure names the exact
+> `window.__probe` contract in its reason — so the reviewer/dev is told precisely
+> what to build. O5's real coverage landed as `@pytest.mark.live` control fixtures
+> (`tests/coding/fixtures/spec37/{live,inert,nohook}`) that drive the real
+> `web-probe.mjs`: the live game PASSES, the inert game and the run-11-style
+> no-hook game BLOCK. A partial/unreadable hook is fail-open (no false red).
 
 ---
 

@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><title>fix</title>
+<style>html,body{margin:0;background:#0b1020}</style></head>
+<body><canvas id="c" width="800" height="600"></canvas>
+<script type="module">
+const cv=document.getElementById("c"), g=cv.getContext("2d");
+const DT=1/60, FRICTION=0.995, MIN=10, STOP=0.5, GSCALE=8;
+const tee={x:100,y:300}, hole={x:700,y:300,r:20};
+const wells=[{x:400,y:200,strength:800,r:40}];   // OFF-axis so live gravity deflects
+let ball={x:tee.x,y:tee.y,vx:0,vy:0,r:10}, sank=false;
+function reset(){ball={x:tee.x,y:tee.y,vx:0,vy:0,r:10}; sank=false;}
+function step(){
+  if(sank) return;
+  for(const w of wells){const dx=w.x-ball.x,dy=w.y-ball.y,d=Math.hypot(dx,dy),ed=Math.max(d,MIN);
+    const a=GSCALE*w.strength/(ed*ed); if(d>0){ball.vx+=dx/d*a*DT; ball.vy+=dy/d*a*DT;}}
+  ball.vx*=FRICTION; ball.vy*=FRICTION; ball.x+=ball.vx*DT; ball.y+=ball.vy*DT;
+  if(Math.hypot(ball.x-hole.x,ball.y-hole.y)<=hole.r) sank=true;
+}
+function draw(){g.fillStyle="#0b1020";g.fillRect(0,0,800,600);
+  g.fillStyle="#4af";for(const w of wells){g.beginPath();g.arc(w.x,w.y,w.r,0,7);g.fill();}
+  g.strokeStyle="#5f5";g.lineWidth=3;g.beginPath();g.arc(hole.x,hole.y,hole.r,0,7);g.stroke();
+  g.fillStyle="#fff";g.beginPath();g.arc(ball.x,ball.y,ball.r,0,7);g.fill();}
+function loop(){step();draw();requestAnimationFrame(loop);} loop();
+window.__probe={
+  state:()=>({ball:{x:ball.x,y:ball.y},hole:{...hole},wells:wells.map(w=>({x:w.x,y:w.y,strength:w.strength})),sank,moving:Math.hypot(ball.vx,ball.vy)>STOP}),
+  shoot:(dx,dy,power)=>{const d=Math.hypot(dx,dy)||1;ball.vx=dx/d*power;ball.vy=dy/d*power;},
+  tick:(n)=>{for(let i=0;i<n;i++)step();}, reset,
+};
+</script></body></html>

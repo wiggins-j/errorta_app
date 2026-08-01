@@ -152,6 +152,58 @@ async function main() {
     } catch { /* interaction is best-effort; passive verdict stands */ }
     const interactionError = consoleErrors.length > errsBeforeInteract;
 
+    // SPEC-37: behavioral mechanic oracle. The interaction phase above only proves
+    // the canvas RESPONDS to input — an inert-gravity ball still moves, so a
+    // regular-golf game passes it. To prove a declared mechanic has EFFECT, a game
+    // that declares a load-bearing mechanic must expose a scriptable hook:
+    //   window.__probe = {
+    //     state: () => ({ball:{x,y}, hole:{x,y,r}, wells:[...], sank:bool, moving:bool}),
+    //     shoot: (dx,dy,power) => {},   // launch the ball in a direction at a power
+    //     tick:  (n) => {},             // advance n FIXED physics steps (deterministic)
+    //     reset: () => {},              // return the ball to the tee
+    //   }
+    // Oracle: fire a STRAIGHT shot at the hole, swept across powers; if any straight
+    // shot SINKS the level is straight-line-trivial => the declared mechanic is
+    // inert. web_probe.py folds this into `passed` ONLY when the project DECLARES a
+    // non-trivial mechanic, so a game where a straight shot should sink is never
+    // false-failed, and a declared-mechanic game with NO hook is a fail (the miss
+    // must not be a free pass). Fully guarded — any error leaves has_hook=false.
+    let mechanicProbe = {
+      has_hook: false, ran: false, wells: 0, straight_shot_sank: null, powers: [] };
+    try {
+      const hasHook = await page.evaluate(() => {
+        const p = window.__probe;
+        return !!(p && typeof p.state === "function"
+                  && typeof p.shoot === "function" && typeof p.tick === "function");
+      }).catch(() => false);
+      mechanicProbe.has_hook = hasHook;
+      if (hasHook) {
+        const r = await page.evaluate(() => {
+          const P = window.__probe;
+          const s0 = P.state();
+          const wells = (s0 && Array.isArray(s0.wells)) ? s0.wells.length : 0;
+          if (!s0 || !s0.ball || !s0.hole) return { wells, ran: false };
+          const powers = [150, 300, 500];
+          let sank = false;
+          for (const pow of powers) {
+            if (typeof P.reset === "function") P.reset();
+            const st = P.state();
+            const dx = st.hole.x - st.ball.x, dy = st.hole.y - st.ball.y;
+            P.shoot(dx, dy, pow);
+            for (let i = 0; i < 4000; i++) {
+              P.tick(1);
+              const s = P.state();
+              if (s.sank) { sank = true; break; }
+              if (!s.moving) break;
+            }
+            if (sank) break;
+          }
+          return { wells, ran: true, straight_shot_sank: sank, powers };
+        }).catch(() => ({ wells: 0, ran: false }));
+        Object.assign(mechanicProbe, r);
+      }
+    } catch { /* best-effort; web_probe.py treats an absent hook as no_hook */ }
+
     // Screenshot for the record (best-effort) + compute the verdict.
     let st = { mean: 0, variance: 0, samples: 0 };
     const hasCanvas = await page.evaluate(() => !!document.querySelector("canvas")).catch(() => false);
@@ -202,6 +254,7 @@ async function main() {
       ok, non_black: nonBlack, console_errors: consoleErrors, reason: reason2,
       screenshot: args.screenshot || "",
       interaction_changed: interactionChanged, interaction_error: interactionError,
+      mechanic_probe: mechanicProbe,
     });
   } catch (e) {
     emit({ ok: false, non_black: false, console_errors: consoleErrors, reason: `probe error: ${String(e && e.message || e).slice(0, 300)}`, screenshot: args.screenshot || "" });
