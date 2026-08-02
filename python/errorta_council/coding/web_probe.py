@@ -227,13 +227,13 @@ def _declares_load_bearing_mechanic(store: Any) -> bool:
 # the council can build it — the reviewer sees this and the dev adds it).
 _HOOK_CONTRACT = (
     "expose window.__probe = {state:()=>({ball:{x,y},hole:{x,y,r},wells:[...],"
-    "moving}), shoot:(dx,dy,power)=>{} where (dx,dy) is a direction the game "
-    "normalizes and power is launch speed, tick:(n)=>{} advancing n FIXED "
-    "DETERMINISTIC steps, reset:()=>{} returning the ball to the tee, "
-    "setMechanic:(on)=>{} actually enabling/disabling the mechanic. state() must "
-    "return plain {x,y} number copies, and the game must not auto-advance physics "
-    "while the probe drives the hook — so the probe can verify the mechanic changes "
-    "outcomes (fire the same shot with it on vs off)")
+    "moving}) with ball/hole in canvas intrinsic-pixel coordinates, "
+    "shoot:(dx,dy,power)=>{} where (dx,dy) is a direction the game normalizes and "
+    "power is launch speed, tick:(n)=>{} advancing n FIXED DETERMINISTIC steps, "
+    "reset:()=>{} returning the ball to the tee, setMechanic:(on)=>{} actually "
+    "enabling/disabling the mechanic. state() must return plain {x,y} number copies "
+    "— so the probe can verify the mechanic changes outcomes (fire the same shot "
+    "with it on vs off)")
 
 
 def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool

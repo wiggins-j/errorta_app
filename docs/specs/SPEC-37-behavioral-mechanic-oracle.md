@@ -33,9 +33,11 @@ against control fixtures) · **Owner:** wiggins-j
 > is advisory (never a false red); the phase is time-boxed (Promise.race); the fold
 > applies only to the MASTER arm (`pr_scoped=False`) of a project whose north-star
 > DECLARES a straight-shots-must-fail claim, matched on word/phrase boundaries so a
-> plain web app ("handles validation well … non-trivial") is never gated. The game
-> must yield its render-loop stepping once the probe drives the hook (so `tick()` is
-> the sole deterministic driver). Validated `@pytest.mark.live` against control +
+> plain web app ("handles validation well … non-trivial") is never gated. *(SPEC-39
+> removed the earlier requirement that the game pause its render loop under probe
+> control — the differential runs in one synchronous `page.evaluate`, so the loop is
+> frozen regardless; `tick()` is the deterministic driver either way.)* Validated
+> `@pytest.mark.live` against control +
 > adversarial fixtures (`tests/coding/fixtures/spec37/{live,inert,nohook,stub,
 > noopshoot}`): the live game PASSES; inert, no-hook, stub-hook, and no-op-shoot all
 > BLOCK.

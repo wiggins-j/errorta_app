@@ -100,6 +100,7 @@ async function main() {
     // for the gate to reject. Fully guarded: if we cannot interact, the fields go
     // null and the passive verdict stands (fail-open, never a false red).
     let interactionChanged = null;
+    let hookPresent = false;   // SPEC-38: a probe hook exposed the ball for targeting
     const errsBeforeInteract = consoleErrors.length;
     try {
       const hashCanvas = () => page.evaluate(() => {
@@ -116,38 +117,101 @@ async function main() {
         } catch { return null; }
       }).catch(() => null);
 
-      const box = await page.evaluate(() => {
+      // SPEC-38: fetch the canvas geometry AND (if the game exposes a probe hook)
+      // the ball's position, so the gesture can be TARGETED at the ball. A
+      // fixed-location gesture misses the ball in a grab-to-aim ("positional")
+      // control and false-reds a playable game (run-3). cw/ch are the canvas
+      // intrinsic pixels; ball is in that same space and must be mapped to viewport
+      // CSS px via the rect ratio (a CSS-scaled / hi-dpi canvas would otherwise be
+      // missed).
+      const geo = await page.evaluate(() => {
         const c = document.querySelector("canvas");
         if (!c) return null;
         const r = c.getBoundingClientRect();
-        return { x: r.left, y: r.top, w: r.width, h: r.height };
+        const g = { x: r.left, y: r.top, w: r.width, h: r.height,
+                    cw: c.width, ch: c.height };
+        const P = window.__probe;
+        if (P && typeof P.state === "function") {
+          try {
+            const s = P.state();
+            if (s && s.ball && typeof s.ball.x === "number") {
+              g.ballX = s.ball.x; g.ballY = s.ball.y;
+            }
+          } catch { /* no ball -> blind gesture */ }
+        }
+        return g;
       }).catch(() => null);
 
-      if (box && box.w > 0 && box.h > 0) {
+      const waitFrames = (n) => page.evaluate(
+        (k) => new Promise((resolve) => {
+          let left = k;
+          const tick = () => (--left <= 0 ? resolve() : requestAnimationFrame(tick));
+          requestAnimationFrame(tick);
+        }), n).catch(() => {});
+
+      if (geo && geo.w > 0 && geo.h > 0) {
         const before = await hashCanvas();
-        // A press-drag-release across the canvas interior (trusted events). Kept
-        // >4px from the edges so it never triggers a browser edge gesture, and
-        // spanning a wide arc so a slingshot-style aim registers real power.
-        const x0 = box.x + box.w * 0.35, y0 = box.y + box.h * 0.55;
-        const x1 = box.x + box.w * 0.6, y1 = box.y + box.h * 0.4;
-        await page.mouse.move(x0, y0);
+        const clampX = (v) => Math.min(Math.max(v, geo.x + 4), geo.x + geo.w - 4);
+        const clampY = (v) => Math.min(Math.max(v, geo.y + 4), geo.y + geo.h - 4);
+        const hasBall = typeof geo.ballX === "number" && geo.cw > 0 && geo.ch > 0;
+        hookPresent = hasBall;
+        // SPEC-38: when the ball is known, ISOLATE the pointer test from gravity —
+        // reset() + setMechanic(false) so ONLY a real mouse launch can move the ball
+        // (otherwise a strong always-running gravity loop drifts the ball on its own
+        // and a dead-mouse game would false-pass). Re-read the ball AFTER reset for
+        // accurate targeting. If the hook lacks setMechanic, fall back to a short
+        // window where drift is negligible.
+        let base = { x: geo.ballX, y: geo.ballY }, isolated = false;
+        if (hasBall) {
+          const b = await page.evaluate(() => {
+            try {
+              const P = window.__probe;
+              P.reset();
+              const iso = (typeof P.setMechanic === "function");
+              if (iso) P.setMechanic(false);
+              const s = P.state();
+              return { x: s.ball.x, y: s.ball.y, iso };
+            } catch { return null; }
+          }).catch(() => null);
+          if (b) { base = { x: b.x, y: b.y }; isolated = b.iso; }
+        }
+        let px, py, x1, y1;
+        if (hasBall) {
+          // Press ON the ball (canvas-px -> viewport CSS-px), drag a slingshot pull.
+          px = clampX(geo.x + base.x * (geo.w / geo.cw));
+          py = clampY(geo.y + base.y * (geo.h / geo.ch));
+          x1 = clampX(px + geo.w * 0.25); y1 = clampY(py - geo.h * 0.15);
+        } else {
+          // No hook / no ball: the SPEC-30 blind gesture (unchanged).
+          px = geo.x + geo.w * 0.35; py = geo.y + geo.h * 0.55;
+          x1 = geo.x + geo.w * 0.6; y1 = geo.y + geo.h * 0.4;
+        }
+        await page.mouse.move(px, py);
         await page.mouse.down();
-        await page.mouse.move((x0 + x1) / 2, (y0 + y1) / 2, { steps: 8 });
+        await page.mouse.move((px + x1) / 2, (py + y1) / 2, { steps: 8 });
         await page.mouse.move(x1, y1, { steps: 8 });
         await page.mouse.up();
-        // Also a plain click, in case the control is click-to-act.
-        await page.mouse.click(box.x + box.w * 0.5, box.y + box.h * 0.5);
-        // Let the reaction play out (physics, transitions) — bounded frames.
-        await page.evaluate(
-          (n) => new Promise((resolve) => {
-            let left = n;
-            const tick = () => (--left <= 0 ? resolve() : requestAnimationFrame(tick));
-            requestAnimationFrame(tick);
-          }),
-          Math.max(30, args.frames)
-        ).catch(() => {});
+        if (!hasBall) await page.mouse.click(geo.x + geo.w * 0.5, geo.y + geo.h * 0.5);
+        // With gravity isolated, no drift → any move is the mouse launch → a longer
+        // window is safe; otherwise use a short window so drift stays sub-threshold.
+        await waitFrames(hasBall && !isolated ? 6 : Math.max(30, args.frames));
+        // SPEC-38: judge by whether the TRUSTED gesture actually moved the ball (the
+        // human pointer path) via the hook — a working hook + a dead mouse must still
+        // RED (never defer to the mechanic phase). Fall back to the canvas hash only
+        // when the ball can't be read.
+        let moved = null;
+        if (hasBall) {
+          moved = await page.evaluate((b) => {
+            try {
+              const s = window.__probe.state();
+              if (typeof window.__probe.setMechanic === "function") window.__probe.setMechanic(true);
+              return Math.hypot(s.ball.x - b.x, s.ball.y - b.y) > 5;
+            } catch { return null; }
+          }, base).catch(() => null);
+        }
         const after = await hashCanvas();
-        if (before !== null && after !== null) interactionChanged = before !== after;
+        const hashChanged = (before !== null && after !== null) ? before !== after : null;
+        interactionChanged = (moved === null) ? hashChanged : moved;
       }
     } catch { /* interaction is best-effort; passive verdict stands */ }
     const interactionError = consoleErrors.length > errsBeforeInteract;
@@ -312,7 +376,9 @@ async function main() {
     // clause so `gate_state.latest_gate_text` shows the reviewer WHY it failed.
     let reason2 = reason;
     if (interactionError) reason2 += "; crashed on interaction (see console)";
-    else if (interactionChanged === false) reason2 += "; canvas did not respond to input (inert)";
+    else if (interactionChanged === false) reason2 += hookPresent
+      ? "; the ball-targeted pointer gesture moved nothing — the mouse control path (mousedown/aim/shoot) appears unwired; the probe hook works but a human cannot play with the mouse"
+      : "; canvas did not respond to input (inert)";
     else if (interactionChanged === true) reason2 += "; responded to input";
     emit({
       ok, non_black: nonBlack, console_errors: consoleErrors, reason: reason2,
