@@ -38,49 +38,84 @@ input".
 
 ## Principle
 
-> Prove input-responsiveness by **exercising the control where the control is**, and
-> by **deferring to stronger evidence** when it exists. A hook the SPEC-37 phase has
-> already driven to move the ball is stronger proof of responsiveness than a
-> location-blind gesture — the gate must not red an artifact that phase proved live.
+> Prove input-responsiveness by **exercising the pointer control where the control
+> is** — the real human path, end to end. Do NOT substitute the SPEC-37 hook's
+> programmatic evidence for it: the hook proves the *mechanic* responds to *code*, and
+> says nothing about whether the *mouse* is wired. A game with a perfect hook and a
+> dead mouse must still fail.
+
+*(Design note: an earlier draft added an S2 that deferred the gate to "the mechanic
+phase ran." Two independent adversarial reviews found this **unsound** — it disables
+the pipeline's only end-to-end pointer check and would ship a game with a working
+hook but a broken/absent mouse handler (the SPEC-30 "renders but ignores input" hole,
+reopened for exactly the declared-mechanic class). It is also unnecessary: S1 alone
+flips run-3 green. S2 is dropped.)*
 
 ## What this spec does
 
-**S1 — a hook-aware, targeted gesture (primary).** When `window.__probe` is present,
-the interaction phase reads `state().ball` and presses/drags **at the ball's actual
-position** (a slingshot pull from the ball), so the gesture exercises the real
-positional control. This is a genuine end-to-end pointer test — it keeps SPEC-30's
-"renders but ignores input" catch (the empty-gradient "big square") intact — but
-aimed where input is accepted.
+**S1 — a hook-aware, targeted gesture.** When `window.__probe` is present, the
+interaction phase reads `state().ball` and drives the **trusted** pointer gesture
+(press → drag → release, a slingshot pull) **at the ball's actual position**, then
+verifies a real response — a `state()` delta (ball moved) and/or a canvas-hash
+change. This exercises the real positional ("grab-the-ball") control end to end.
+When no hook is present, the existing SPEC-30 blind gesture is unchanged (its
+"renders but ignores input" catch stays intact for hook-less artifacts).
 
-**S2 — defer to hook-proven responsiveness (fallback).** If the targeted gesture
-still shows no change (e.g. the control is not pointer-driven, or the ball can't be
-located) BUT the SPEC-37 mechanic phase **ran** (`mechanic_probe.ran is True` — it
-drove `shoot()`/`tick()` and observed the ball move), treat interaction as
-satisfied: hook-driven movement is strictly stronger evidence than a synthetic
-gesture. Fold this in `web_probe.py` (`_verdict_to_result` **and**
-`_probe_verdict_fields`, kept identical). No hook + no interaction change still reds
-(the SPEC-30 catch is preserved for hook-less inert artifacts).
+*Coordinate transform (load-bearing):* `state().ball` is in **canvas intrinsic-pixel**
+space; `page.mouse` consumes viewport CSS pixels. The probe MUST map
+`pageX = rect.left + ball.x * (rect.width / canvas.width)` (and the y analog), so a
+CSS-scaled / hi-dpi canvas (`canvas.width=1600`, `style width:800px`) is still hit —
+a naive `rect.left + ball.x` only works by coincidence when there is no CSS scaling.
+Clamp the mapped point ≥4px inside the rect (preserve the edge-gesture guard). Add a
+coordinate-space clause to `_HOOK_CONTRACT`: `state().ball`/`hole` are canvas
+intrinsic-pixel coordinates.
 
-**S3 — an honest reason.** Never emit `"inert"` when a hook proved the ball moved.
-Replace it with a control-aware message (e.g. `"a location-blind gesture caused no
-change; the game exposes a probe hook that DID move the ball — treat as responsive"`
-or, when no hook, `"canvas did not respond to input"`), so reviewers are not
-misdirected into fixing rendering.
+**S2 — an honest reason.** Never emit `"inert"` when a hook is present. Replace it
+with a control-aware message: with a hook, `"the ball-targeted pointer gesture caused
+no response — the mouse control path (mousedown/aim/shoot) appears unwired; the probe
+hook works but a human cannot play"`; with no hook, the existing `"canvas did not
+respond to input"`. This is what keeps reviewers from being misdirected into fixing
+rendering (run-3: a dev blocked with `missing_context`, unable to tell from "inert"
+what input the probe sent).
 
 ## Regression locks
 
 1. A hook-less web artifact that renders but ignores input (the SPEC-30 target)
-   still reds — S2 only defers when the mechanic phase actually ran.
-2. A game whose targeted gesture genuinely moves the ball passes on S1 alone (no
-   dependence on S2).
-3. Non-web / non-hook projects are byte-identical to today; `_verdict_to_result` and
-   `_probe_verdict_fields` keep the same folded `passed`.
-4. The reason string never says "inert" when `mechanic_probe.has_hook && ran`.
+   still reds — S1's no-hook path is the unchanged blind gesture.
+2. **A hook-PRESENT artifact whose pointer path is dead** (working `__probe`,
+   `mechanic_ok=True`, but no/broken mouse handler) still **reds** — this is the hole
+   the dropped S2 would have opened; a fixture locks it.
+3. A grab-to-aim game whose ball-targeted gesture genuinely responds passes the
+   interaction gate — asserted against a fixture the *old blind* gesture fails.
+4. Non-web / non-hook projects are byte-identical to today; `_verdict_to_result` and
+   `_probe_verdict_fields` stay identical to each other.
+5. The reason never says "inert" when `mechanic_probe.has_hook`.
+
+## Testability (there is no interaction-phase test today)
+
+`grep` shows no existing test drives the SPEC-30 interaction phase; SPEC-38 must
+create the first one, on the `_serve`/`_probe` scaffold in
+`test_spec37_behavioral_oracle.py`. Two new `@pytest.mark.live` fixtures:
+- **grab-to-aim** — `mousedown` arms a shot only if it lands within the ball radius
+  (unlike the current `live` fixture, which shoots on any click): the *blind* gesture
+  fails (baseline red), the *targeted* gesture passes on S1 alone.
+- **mouse-dead** — the `live` fixture minus its `addEventListener` lines: renders,
+  hook works (`mechanic_ok=True`), but the targeted gesture gets no response → must
+  stay **RED** (locks regression #2). Plus a unit test feeding a synthetic verdict
+  through `_verdict_to_result` to lock the fold.
+
+## Scope
+
+The interaction gate asserts a **pointer** control path. A legitimately
+keyboard-only game has no pointer handler and would red under S1 — an accepted trade
+for the mouse-aim golf domain (the DoD requires "Mouse aim + power"); non-pointer
+controls are explicitly out of scope rather than silently waved through.
 
 ## Definition of done
 
 - Re-running run 3's delivered game (a positional grab-to-aim control with a working
-  hook) yields `interaction` satisfied — the run is no longer red-flagged as inert
-  and can converge — asserted by a live fixture whose control is grab-the-ball.
+  hook) yields `interaction` satisfied on S1 — the run is no longer red-flagged as
+  inert and can converge — asserted by the grab-to-aim fixture.
 - A hook-less renders-but-inert artifact still fails the interaction gate.
-- No probe reason says "inert" for an artifact whose hook moved the ball.
+- A hook-present but mouse-dead artifact still fails the interaction gate.
+- No probe reason says "inert" for an artifact that exposes a hook.

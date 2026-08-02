@@ -39,27 +39,47 @@ manufactured the noise that hid it.)
 ## What this spec does
 
 - **Remove the pause clause** from `_HOOK_CONTRACT` in `web_probe.py` (the string named
-  in the probe's fail reason) and from the gravity-golf DoD template. The hook stays
-  `{state, shoot, tick, reset, setMechanic}` with `tick(n)` deterministic; the game
-  is no longer told to pause its render/physics loop.
+  in the probe's fail reason), from the gravity-golf DoD template, AND from
+  [SPEC-37](SPEC-37-behavioral-mechanic-oracle.md)'s own prose (§ "the game must yield
+  its render-loop stepping once the probe drives the hook") — otherwise the spec
+  corpus stays self-contradictory. The hook stays `{state, shoot, tick, reset,
+  setMechanic}` with `tick(n)` deterministic; the game is no longer told to pause its
+  render/physics loop.
 - Keep the existing determinism guard in `web-probe.mjs` (the OFF-vs-OFF check): it
   already catches a genuinely nondeterministic `tick()`, which is the only thing the
-  pause clause was gesturing at.
+  pause clause was gesturing at. *(Verified: the probe never even calls
+  `setProbeMode` — the pause path was never exercised in run 3, yet the clause caused
+  most of the PR churn.)*
+- **Add an invariant lock (code comment + regression note):** the SPEC-37 differential
+  MUST remain within one synchronous `page.evaluate` — that is what actually freezes
+  the game's loop (a sync evaluate blocks ALL main-thread callbacks: rAF, setTimeout,
+  setInterval). If a future change ever makes it `await` mid-sweep (e.g. an async
+  SPEC-38 gesture bleeding in), a per-shot determinism guarantee must be restored.
 
 ## Regression locks
 
 1. The SPEC-37 differential still runs deterministically for a game whose `tick(n)`
-   is deterministic (verified by the existing live `live`/`inert` fixtures, which no
-   longer need to pause any loop).
+   is deterministic — asserted by an **always-stepping** fixture (see below), not one
+   that pauses.
 2. The determinism guard still rejects a nondeterministic `tick()` (the `nondet`
    fixture still BLOCKs).
 3. No change to the mechanic verdict, the fold, or the gate wiring — this is
-   contract-text only.
+   contract-text + one fixture edit only.
+
+## Testability (make the lock non-vacuous)
+
+The current `fixtures/spec37/live` fixture pauses via a `probeControl` flag
+(`if(!probeControl) step()`), so it does NOT actually demonstrate "renders every
+frame." Drop `probeControl` from it (or add an always-stepping sibling) so a fixture
+whose loop keeps running during probe control still passes the mechanic phase —
+proving the pause clause is unnecessary. (Confirmed feasible: the differential is
+synchronous, so a free-running loop is frozen during the evaluate regardless.)
 
 ## Definition of done
 
-- `_HOOK_CONTRACT` and the DoD template no longer mention pausing the render/physics
-  loop; the SPEC-37 live/inert/nondet fixtures still pass/fail as before with their
-  render loops running normally.
-- A game that renders every frame (never pausing on probe control) is accepted by
-  the mechanic phase.
+- `_HOOK_CONTRACT`, the DoD template, and SPEC-37's prose no longer mention pausing
+  the render/physics loop.
+- An **always-stepping** fixture (no `probeControl` pause) passes the SPEC-37 mechanic
+  phase; the `nondet` fixture still fails.
+- The single-synchronous-`page.evaluate` invariant is recorded as a lock so a later
+  refactor can't silently reintroduce loop interleaving.
