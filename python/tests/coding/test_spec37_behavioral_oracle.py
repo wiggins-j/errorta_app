@@ -86,6 +86,12 @@ def test_declares_no_false_match_on_ordinary_words() -> None:
         dod="A non-trivial form app that handles validation well and feels great.")))
     assert not _declares_load_bearing_mechanic(_Store(_Proj(
         dod="Force a clean, non-trivial UX; the CTA must matter to users.")))
+    # RE-REVIEW LOCK: a physics project that never forbids straight-line solutions
+    # must NOT be gated just because it pairs a physics term with "non-trivial".
+    assert not _declares_load_bearing_mechanic(_Store(_Proj(
+        dod="A non-trivial physics particle sandbox / screensaver.")))
+    assert not _declares_load_bearing_mechanic(_Store(_Proj(
+        dod="An orbit-based puzzle; each level should feel non-trivial.")))
 
 
 def test_declares_fail_open_on_error() -> None:
@@ -226,7 +232,7 @@ _LIVE_CASES = [
     ("inert", True, True, False, False),    # on == off -> inert -> BLOCK
     ("nohook", False, False, None, False),  # no hook -> BLOCK (declared)
     ("stub", True, False, None, False),     # hook present but state lacks ball/hole
-    ("noopshoot", True, False, None, False),  # shoot() is a no-op
+    ("nondet", True, False, None, False),   # two identical shots diverge -> unusable
 ]
 
 

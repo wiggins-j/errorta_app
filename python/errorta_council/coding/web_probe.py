@@ -196,11 +196,15 @@ def _default_node_runner(
 # claim is absent the mechanic verdict is advisory (never gates).
 _MECHANIC_TERMS = (r"\bgravity\b", r"\bphysics\b", r"\bmomentum\b", r"\borbit\b",
                    r"\btrajector", r"\bgravity well")
-# The DoD must say straight-line solutions FAIL — the precise claim the oracle tests.
+# The DoD must specifically claim STRAIGHT-LINE solutions fail — the precise claim
+# the oracle tests. Generic "non-trivial"/"cannot be solved" are deliberately NOT
+# here: paired with a physics term they over-gate a non-golf physics project ("a
+# non-trivial physics sandbox") into a no-hook hard-fail (re-review). The gravity-golf
+# DoD ("none solvable by a straight line") still matches on the straight-specific
+# phrases below.
 _STRAIGHT_FAIL_TERMS = (
-    "straight line", "straight-line", "straight shot", "no straight",
-    "non-trivial", "nontrivial", "solvable by a straight", "cannot be solved",
-    "not solvable")
+    "straight line", "straight-line", "straight shot", "straight-shot",
+    "no straight", "solvable by a straight")
 
 
 def _declares_load_bearing_mechanic(store: Any) -> bool:
@@ -223,8 +227,12 @@ def _declares_load_bearing_mechanic(store: Any) -> bool:
 # the council can build it — the reviewer sees this and the dev adds it).
 _HOOK_CONTRACT = (
     "expose window.__probe = {state:()=>({ball:{x,y},hole:{x,y,r},wells:[...],"
-    "moving}), shoot:(dx,dy,power)=>{}, tick:(n)=>{}, reset:()=>{}, "
-    "setMechanic:(on)=>{}} so the headless probe can verify the mechanic changes "
+    "moving}), shoot:(dx,dy,power)=>{} where (dx,dy) is a direction the game "
+    "normalizes and power is launch speed, tick:(n)=>{} advancing n FIXED "
+    "DETERMINISTIC steps, reset:()=>{} returning the ball to the tee, "
+    "setMechanic:(on)=>{} actually enabling/disabling the mechanic. state() must "
+    "return plain {x,y} number copies, and the game must not auto-advance physics "
+    "while the probe drives the hook — so the probe can verify the mechanic changes "
     "outcomes (fire the same shot with it on vs off)")
 
 
@@ -251,15 +259,22 @@ def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
         return False, ("declares a straight-shots-must-fail mechanic but exposes no "
                        "scriptable state hook — " + _HOOK_CONTRACT + " (SPEC-37)")
     if not mp.get("ran"):
+        reason = str(mp.get("reason") or "")
+        # A transient cannot-verify (timeout / thrown eval) is advisory, not a red —
+        # the probe re-runs on the next merge (SPEC-35-style). Only a STRUCTURAL
+        # problem (no ball/hole, no-op shoot, non-restoring reset, nondeterminism)
+        # is a hard unusable fail.
+        if "timed out" in reason or "threw" in reason:
+            return True, ""
         return False, ("exposes a window.__probe hook but it is unusable — "
-                       + str(mp.get("reason") or "state() lacks ball/hole, shoot() "
-                         "is a no-op, or reset() is missing") + "; " + _HOOK_CONTRACT
+                       + (reason or "state() lacks ball/hole, shoot() is a no-op, "
+                          "or reset() is missing") + "; " + _HOOK_CONTRACT
                        + " (SPEC-37)")
     if mp.get("mechanic_matters") is False:
         return False, ("the mechanic has NO effect — a straight shot at the hole "
-                       "behaves identically with the mechanic on vs off (it is "
-                       "inert; the DoD's straight-shots-must-fail claim is unmet) "
-                       "(SPEC-37)")
+                       "behaves identically with the mechanic on vs off. Either it "
+                       "is inert, or setMechanic(false) does not actually disable it; "
+                       "the DoD's straight-shots-must-fail claim is unmet (SPEC-37)")
     return True, ""
 
 

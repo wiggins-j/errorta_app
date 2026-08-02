@@ -202,45 +202,64 @@ async function main() {
           if (!s0 || !s0.ball || !s0.hole || typeof s0.hole.r !== "number") {
             return { wells, ran: false, reason: "state() lacks ball/hole/radius" };
           }
-          const tee = { x: s0.ball.x, y: s0.ball.y };
+          const tee = { x: s0.ball.x, y: s0.ball.y };   // primitive snapshot (no aliasing)
           const D = dist(tee, s0.hole);
           if (!(D > 0)) return { wells, ran: false, reason: "ball already at hole" };
-          const dir = { x: (s0.hole.x - tee.x), y: (s0.hole.y - tee.y) };
-          // Fire the SAME straight shot with the mechanic ON, then OFF, and simulate
-          // each to rest; return {sank, end:{x,y}}. Movement/sink from geometry. The
-          // reset check compares to the canonical tee, so a no-op reset (which leaves
-          // the ball where the previous shot ended) is caught.
+          // Pass a NORMALIZED direction + a separate power (speed), so a game that
+          // does vx = dx*power gets a sane launch speed regardless of |tee->hole|.
+          const dir = { x: (s0.hole.x - tee.x) / D, y: (s0.hole.y - tee.y) / D };
+          const holeR = s0.hole.r;
+          // Fire the SAME straight shot at a given power with the mechanic on/off and
+          // simulate to rest; returns {sank, end:{x,y}, maxMove}. sink + movement +
+          // rest are all GEOMETRIC (never a game flag): the loop exits when the ball
+          // stops moving over a window of ticks, so a wrong state().moving cannot cut
+          // the observation short. Coordinates are snapshotted as primitives so a
+          // state() that returns a live ball reference cannot zero the movement metric.
           const runShot = (power, on) => {
             P.reset();
-            const start = P.state().ball;
+            const st = P.state().ball;
+            const start = { x: st.x, y: st.y };
             if (dist(start, tee) > 2) return null;   // reset() failed / no-op
             P.setMechanic(on);
             P.shoot(dir.x, dir.y, power);
-            let sank = false, minD = dist(P.state().ball, s0.hole), maxMove = 0, end = start;
+            let sank = false, minD = D, maxMove = 0;
+            let prev = { x: start.x, y: start.y }, still = 0;
+            let end = { x: start.x, y: start.y };
             for (let i = 0; i < 6000; i++) {
               P.tick(1);
-              const s = P.state();
-              end = s.ball;
-              maxMove = Math.max(maxMove, dist(s.ball, start));
-              minD = Math.min(minD, dist(s.ball, s.hole));
-              if (minD <= s.hole.r) { sank = true; break; }
-              if (!s.moving) break;
+              const b = P.state().ball;
+              const cur = { x: b.x, y: b.y };
+              end = cur;
+              maxMove = Math.max(maxMove, dist(cur, start));
+              minD = Math.min(minD, dist(cur, s0.hole));
+              if (minD <= holeR) { sank = true; break; }
+              // geometric rest: still for several consecutive ticks
+              still = (dist(cur, prev) < 0.05) ? still + 1 : 0;
+              prev = cur;
+              if (still >= 20) break;
             }
             return { sank, end, maxMove };
           };
           const powers = [0.8, 1.3, 2.0].map((k) => k * D);
-          let matters = false, anyMoved = false, resetOk = true;
+          let matters = false, anyMoved = false, resetOk = true, nondet = false;
           for (const pow of powers) {
             const on = runShot(pow, true);
             const off = runShot(pow, false);
-            if (on === null || off === null) { resetOk = false; break; }
+            const off2 = runShot(pow, false);   // determinism/causation guard
+            if (on === null || off === null || off2 === null) { resetOk = false; break; }
             if (on.maxMove > 2 || off.maxMove > 2) anyMoved = true;
-            if (on.sank !== off.sank || dist(on.end, off.end) > s0.hole.r) {
+            // If two IDENTICAL (off) shots diverge, the game is nondeterministic —
+            // the on/off difference cannot be attributed to the mechanic. Bail.
+            if (off.sank !== off2.sank || dist(off.end, off2.end) > holeR / 2) {
+              nondet = true; break;
+            }
+            if (on.sank !== off.sank || dist(on.end, off.end) > holeR) {
               matters = true; break;
             }
           }
           P.setMechanic(true);   // restore
           if (!resetOk) return { wells, ran: false, reason: "reset() did not return the ball" };
+          if (nondet) return { wells, ran: false, reason: "non-deterministic (two identical shots diverged) — tick()/shoot() must be deterministic for headless verification" };
           if (!anyMoved) return { wells, ran: false, reason: "shoot() did not move the ball" };
           return { wells, ran: true, mechanic_matters: matters,
                    powers: powers.map((p) => Math.round(p)) };
