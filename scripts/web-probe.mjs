@@ -149,69 +149,76 @@ async function main() {
           requestAnimationFrame(tick);
         }), n).catch(() => {});
 
+      // SPEC-38: a probe hook is present if state() is callable — independent of ball
+      // readability, so a hook-present-but-ball-unreadable artifact never gets the
+      // no-hook "inert" reason (review lock #5).
+      hookPresent = await page.evaluate(
+        () => !!(window.__probe && typeof window.__probe.state === "function")
+      ).catch(() => false);
+
       if (geo && geo.w > 0 && geo.h > 0) {
         const before = await hashCanvas();
         const clampX = (v) => Math.min(Math.max(v, geo.x + 4), geo.x + geo.w - 4);
         const clampY = (v) => Math.min(Math.max(v, geo.y + 4), geo.y + geo.h - 4);
         const hasBall = typeof geo.ballX === "number" && geo.cw > 0 && geo.ch > 0;
-        hookPresent = hasBall;
-        // SPEC-38: when the ball is known, ISOLATE the pointer test from gravity —
-        // reset() + setMechanic(false) so ONLY a real mouse launch can move the ball
-        // (otherwise a strong always-running gravity loop drifts the ball on its own
-        // and a dead-mouse game would false-pass). Re-read the ball AFTER reset for
-        // accurate targeting. If the hook lacks setMechanic, fall back to a short
-        // window where drift is negligible.
-        let base = { x: geo.ballX, y: geo.ballY }, isolated = false;
-        if (hasBall) {
-          const b = await page.evaluate(() => {
-            try {
-              const P = window.__probe;
-              P.reset();
-              const iso = (typeof P.setMechanic === "function");
-              if (iso) P.setMechanic(false);
-              const s = P.state();
-              return { x: s.ball.x, y: s.ball.y, iso };
-            } catch { return null; }
-          }).catch(() => null);
-          if (b) { base = { x: b.x, y: b.y }; isolated = b.iso; }
-        }
-        let px, py, x1, y1;
-        if (hasBall) {
-          // Press ON the ball (canvas-px -> viewport CSS-px), drag a slingshot pull.
-          px = clampX(geo.x + base.x * (geo.w / geo.cw));
-          py = clampY(geo.y + base.y * (geo.h / geo.ch));
-          x1 = clampX(px + geo.w * 0.25); y1 = clampY(py - geo.h * 0.15);
-        } else {
-          // No hook / no ball: the SPEC-30 blind gesture (unchanged).
-          px = geo.x + geo.w * 0.35; py = geo.y + geo.h * 0.55;
-          x1 = geo.x + geo.w * 0.6; y1 = geo.y + geo.h * 0.4;
-        }
-        await page.mouse.move(px, py);
-        await page.mouse.down();
-        await page.mouse.move((px + x1) / 2, (py + y1) / 2, { steps: 8 });
-        await page.mouse.move(x1, y1, { steps: 8 });
-        await page.mouse.up();
-        if (!hasBall) await page.mouse.click(geo.x + geo.w * 0.5, geo.y + geo.h * 0.5);
-        // With gravity isolated, no drift → any move is the mouse launch → a longer
-        // window is safe; otherwise use a short window so drift stays sub-threshold.
-        await waitFrames(hasBall && !isolated ? 6 : Math.max(30, args.frames));
-        // SPEC-38: judge by whether the TRUSTED gesture actually moved the ball (the
-        // human pointer path) via the hook — a working hook + a dead mouse must still
-        // RED (never defer to the mechanic phase). Fall back to the canvas hash only
-        // when the ball can't be read.
         let moved = null;
+
         if (hasBall) {
-          moved = await page.evaluate((b) => {
-            try {
-              const s = window.__probe.state();
-              if (typeof window.__probe.setMechanic === "function") window.__probe.setMechanic(true);
-              return Math.hypot(s.ball.x - b.x, s.ball.y - b.y) > 5;
-            } catch { return null; }
-          }, base).catch(() => null);
+          // SPEC-38 (drift-subtracted, review-hardened): the human pointer path is
+          // judged by whether a ball-TARGETED trusted gesture moves the ball
+          // MATERIALLY MORE than it drifts on its own — with the mechanic left in its
+          // NORMAL (on) state. This depends on NOTHING about setMechanic (a game may
+          // couple all integration to that flag), so it neither false-fails such a
+          // game nor false-passes a dead mouse whose gravity ignores the flag.
+          const readBall = () => page.evaluate(() => {
+            try { const s = window.__probe.state(); return { x: s.ball.x, y: s.ball.y }; }
+            catch { return null; }
+          }).catch(() => null);
+          const doGesture = async (start) => {
+            const px = clampX(geo.x + start.x * (geo.w / geo.cw));
+            const py = clampY(geo.y + start.y * (geo.h / geo.ch));
+            const x1 = clampX(px + geo.w * 0.25), y1 = clampY(py - geo.h * 0.15);
+            await page.mouse.move(px, py);
+            await page.mouse.down();
+            await page.mouse.move((px + x1) / 2, (py + y1) / 2, { steps: 8 });
+            await page.mouse.move(x1, y1, { steps: 8 });
+            await page.mouse.up();
+          };
+          const W = Math.max(20, args.frames);
+          // control run: reset, NO gesture, measure baseline drift over W frames.
+          let drift = null;
+          await page.evaluate(() => { try { window.__probe.reset(); } catch { /* */ } });
+          let b0 = await readBall();
+          if (b0) { await waitFrames(W); const b1 = await readBall();
+            if (b1) drift = Math.hypot(b1.x - b0.x, b1.y - b0.y); }
+          // gesture run: reset, TARGETED gesture at the ball, measure over W frames.
+          let withG = null;
+          await page.evaluate(() => { try { window.__probe.reset(); } catch { /* */ } });
+          const g0 = await readBall();
+          if (g0) { await doGesture(g0); await waitFrames(W); const g1 = await readBall();
+            if (g1) withG = Math.hypot(g1.x - g0.x, g1.y - g0.y); }
+          if (drift !== null && withG !== null) {
+            // the gesture must add substantial motion beyond drift (launch >> drift).
+            moved = withG > drift + 20 && withG > drift * 2;
+          }
         }
-        const after = await hashCanvas();
-        const hashChanged = (before !== null && after !== null) ? before !== after : null;
-        interactionChanged = (moved === null) ? hashChanged : moved;
+
+        if (moved === null) {
+          // No usable hook/ball: the SPEC-30 blind gesture + canvas-hash verdict.
+          const px = geo.x + geo.w * 0.35, py = geo.y + geo.h * 0.55;
+          const x1 = geo.x + geo.w * 0.6, y1 = geo.y + geo.h * 0.4;
+          await page.mouse.move(px, py);
+          await page.mouse.down();
+          await page.mouse.move((px + x1) / 2, (py + y1) / 2, { steps: 8 });
+          await page.mouse.move(x1, y1, { steps: 8 });
+          await page.mouse.up();
+          await page.mouse.click(geo.x + geo.w * 0.5, geo.y + geo.h * 0.5);
+          await waitFrames(Math.max(30, args.frames));
+          const after = await hashCanvas();
+          interactionChanged = (before !== null && after !== null) ? before !== after : null;
+        } else {
+          interactionChanged = moved;
+        }
       }
     } catch { /* interaction is best-effort; passive verdict stands */ }
     const interactionError = consoleErrors.length > errsBeforeInteract;
@@ -255,6 +262,12 @@ async function main() {
         const withTimeout = (pr, ms) => Promise.race([
           pr, new Promise((res) => setTimeout(() => res({ ran: false,
             reason: "mechanic phase timed out" }), ms))]);
+        // SPEC-39 INVARIANT (do not break): this differential MUST stay within ONE
+        // synchronous page.evaluate — a sync evaluate blocks the page's rAF /
+        // setTimeout / setInterval callbacks, so the game's own loop is frozen for
+        // the whole on/off/off2 sweep and tick() is the sole driver. If this is ever
+        // split or made to `await` mid-sweep, a per-shot pause/determinism guarantee
+        // must be restored (the pause clause SPEC-39 removed relied on this).
         const r = await withTimeout(page.evaluate(() => {
           const P = window.__probe;
           const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
