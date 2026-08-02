@@ -27,6 +27,7 @@ probe result deterministically.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -184,12 +185,106 @@ def _default_node_runner(
 # --------------------------------------------------------------------------- #
 # The probe verdict -> a recorded runtime-test session
 # --------------------------------------------------------------------------- #
-def _verdict_to_result(verdict: dict[str, Any]) -> TestRunResult:
+# SPEC-37: a project DECLARES a load-bearing mechanic that FORBIDS straight-line
+# solutions when its north-star/DoD names a physics mechanic (gravity/physics/…)
+# AND asserts a straight shot must fail. Both are required, matched on WORD/PHRASE
+# boundaries (not bare substrings — an earlier draft's "well"/"force"/"must matter"
+# false-matched a plain CRUD DoD like "handles validation well ... non-trivial" and
+# hard-blocked it). The behavioral assertion is scoped precisely to the
+# straight-shot-must-fail claim, so a high-power straight shot that sinks is a REAL
+# violation (a straight-line solution the DoD forbids), not a false red; when the
+# claim is absent the mechanic verdict is advisory (never gates).
+_MECHANIC_TERMS = (r"\bgravity\b", r"\bphysics\b", r"\bmomentum\b", r"\borbit\b",
+                   r"\btrajector", r"\bgravity well")
+# The DoD must specifically claim STRAIGHT-LINE solutions fail — the precise claim
+# the oracle tests. Generic "non-trivial"/"cannot be solved" are deliberately NOT
+# here: paired with a physics term they over-gate a non-golf physics project ("a
+# non-trivial physics sandbox") into a no-hook hard-fail (re-review). The gravity-golf
+# DoD ("none solvable by a straight line") still matches on the straight-specific
+# phrases below.
+_STRAIGHT_FAIL_TERMS = (
+    "straight line", "straight-line", "straight shot", "straight-shot",
+    "no straight", "solvable by a straight")
+
+
+def _declares_load_bearing_mechanic(store: Any) -> bool:
+    """SPEC-37 north-star signal: does the project declare a physics mechanic AND
+    assert that straight-line solutions must fail? Only then is "a straight shot
+    sinks => the mechanic is inert" a sound verdict. Word/phrase-boundary matched;
+    fully guarded → False (never invents the gate)."""
+    try:
+        proj = store.get_project()
+        text = (str(getattr(proj, "north_star", "") or "") + " "
+                + str(getattr(proj, "definition_of_done", "") or "")).lower()
+    except Exception:  # noqa: BLE001
+        return False
+    has_mechanic = any(re.search(p, text) for p in _MECHANIC_TERMS)
+    forbids_straight = any(t in text for t in _STRAIGHT_FAIL_TERMS)
+    return has_mechanic and forbids_straight
+
+
+# The exact hook a declared-mechanic game must expose (named in the fail reason so
+# the council can build it — the reviewer sees this and the dev adds it).
+_HOOK_CONTRACT = (
+    "expose window.__probe = {state:()=>({ball:{x,y},hole:{x,y,r},wells:[...],"
+    "moving}), shoot:(dx,dy,power)=>{} where (dx,dy) is a direction the game "
+    "normalizes and power is launch speed, tick:(n)=>{} advancing n FIXED "
+    "DETERMINISTIC steps, reset:()=>{} returning the ball to the tee, "
+    "setMechanic:(on)=>{} actually enabling/disabling the mechanic. state() must "
+    "return plain {x,y} number copies, and the game must not auto-advance physics "
+    "while the probe drives the hook — so the probe can verify the mechanic changes "
+    "outcomes (fire the same shot with it on vs off)")
+
+
+def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
+                      ) -> tuple[bool, str]:
+    """SPEC-37 fold. Returns ``(mechanic_ok, reason)``. Only gates when the project
+    DECLARES a load-bearing mechanic that forbids straight-line solutions:
+    * mechanic_probe field ABSENT -> advisory (the probe errored / an older script;
+      cannot-verify, never a false red — do not append a misleading hook reason);
+    * no hook -> fail (the miss must not be a free pass; names the contract);
+    * hook present but the phase could not run it (state lacks ball/hole, a no-op
+      shoot, a missing reset) -> fail as UNUSABLE (a stub hook must not buy a pass);
+    * a straight shot sinks -> fail (the mechanic is inert / a straight-line
+      solution the DoD forbids);
+    * a straight shot misses at every swept power -> ok."""
+    if not declares_mechanic:
+        return True, ""
+    if "mechanic_probe" not in verdict:
+        return True, ""  # phase did not run (probe error) -> advisory, never a red
+    mp = verdict.get("mechanic_probe")
+    if not isinstance(mp, dict):
+        mp = {}
+    if not mp.get("has_hook"):
+        return False, ("declares a straight-shots-must-fail mechanic but exposes no "
+                       "scriptable state hook — " + _HOOK_CONTRACT + " (SPEC-37)")
+    if not mp.get("ran"):
+        reason = str(mp.get("reason") or "")
+        # A transient cannot-verify (timeout / thrown eval) is advisory, not a red —
+        # the probe re-runs on the next merge (SPEC-35-style). Only a STRUCTURAL
+        # problem (no ball/hole, no-op shoot, non-restoring reset, nondeterminism)
+        # is a hard unusable fail.
+        if "timed out" in reason or "threw" in reason:
+            return True, ""
+        return False, ("exposes a window.__probe hook but it is unusable — "
+                       + (reason or "state() lacks ball/hole, shoot() is a no-op, "
+                          "or reset() is missing") + "; " + _HOOK_CONTRACT
+                       + " (SPEC-37)")
+    if mp.get("mechanic_matters") is False:
+        return False, ("the mechanic has NO effect — a straight shot at the hole "
+                       "behaves identically with the mechanic on vs off. Either it "
+                       "is inert, or setMechanic(false) does not actually disable it; "
+                       "the DoD's straight-shots-must-fail claim is unmet (SPEC-37)")
+    return True, ""
+
+
+def _verdict_to_result(verdict: dict[str, Any],
+                       declares_mechanic: bool = False) -> TestRunResult:
     """Fold the node probe's JSON into a synthetic ``web:probe`` ``TestRunResult``
-    — ``passed`` only when console-clean AND non-black. The reason + console
-    errors go into ``stderr_preview`` VERBATIM so ``gate_state.latest_gate_text``
-    surfaces the real "frame is uniformly black" line to the reviewer, not a
-    paraphrase of it."""
+    — ``passed`` only when console-clean AND non-black AND (SPEC-37) the declared
+    mechanic has effect. The reason + console errors go into ``stderr_preview``
+    VERBATIM so ``gate_state.latest_gate_text`` surfaces the real failing line to
+    the reviewer, not a paraphrase of it."""
     non_black = bool(verdict.get("non_black"))
     console_errors = [str(e) for e in (verdict.get("console_errors") or [])]
     # SPEC-30 (S1): an artifact that renders but IGNORES input (the empty
@@ -198,9 +293,12 @@ def _verdict_to_result(verdict: dict[str, Any]) -> TestRunResult:
     # nothing moved (inert); a crash surfaces as a console error above. `None` =
     # could not interact -> fail-open, the passive verdict stands.
     interaction_changed = verdict.get("interaction_changed")
+    mechanic_ok, mechanic_reason = _mechanic_verdict(verdict, declares_mechanic)
     passed = (bool(verdict.get("ok")) and non_black and not console_errors
-              and interaction_changed is not False)
+              and interaction_changed is not False and mechanic_ok)
     reason = str(verdict.get("reason") or "")
+    if not mechanic_ok and mechanic_reason:
+        reason = (reason + "; " if reason else "") + mechanic_reason
     parts = [f"non_black={non_black}", f"console_errors={len(console_errors)}"]
     if reason:
         parts.append(reason)
@@ -215,21 +313,27 @@ def _verdict_to_result(verdict: dict[str, Any]) -> TestRunResult:
         reason="" if passed else (reason or "web probe failed"))
 
 
-def _probe_verdict_fields(verdict: dict[str, Any], *, head: str) -> dict[str, Any]:
+def _probe_verdict_fields(verdict: dict[str, Any], *, head: str,
+                          declares_mechanic: bool = False) -> dict[str, Any]:
     """The additive PR-record fields (Item 3): console-error count, non-black,
     screenshot ref, pass/fail, and the head the probe ran against. Absent →
-    falsy, so a probe-less PR is byte-identical to today."""
+    falsy, so a probe-less PR is byte-identical to today. ``probe_passed`` folds the
+    SPEC-37 mechanic verdict so the PR record matches the recorded run."""
     console_errors = [str(e) for e in (verdict.get("console_errors") or [])]
     non_black = bool(verdict.get("non_black"))
     interaction_changed = verdict.get("interaction_changed")
+    mechanic_ok, _ = _mechanic_verdict(verdict, declares_mechanic)
     passed = (bool(verdict.get("ok")) and non_black and not console_errors
-              and interaction_changed is not False)
+              and interaction_changed is not False and mechanic_ok)
+    mp = verdict.get("mechanic_probe") if isinstance(verdict.get("mechanic_probe"), dict) else {}
     return {
         "probe_passed": passed,
         "probe_non_black": non_black,
         "probe_console_errors": len(console_errors),
         "probe_interacted": interaction_changed is not None,
         "probe_interaction_changed": bool(interaction_changed),
+        "probe_mechanic_ok": mechanic_ok,
+        "probe_mechanic_has_hook": bool(mp.get("has_hook")),
         "probe_screenshot": str(verdict.get("screenshot") or ""),
         "probe_reason": str(verdict.get("reason") or "")[:500],
         "probe_head": str(head),
@@ -326,7 +430,13 @@ def run_and_record(
         if not isinstance(verdict, dict):
             return None  # probe could not run: fail-open (cannot-verify)
 
-        result = _verdict_to_result(verdict)
+        # SPEC-37: gate on the behavioral mechanic verdict only for the MASTER /
+        # delivery arm of a project that DECLARES a straight-shots-must-fail
+        # mechanic. NOT for a per-PR probe (pr_scoped): a partial-module PR mid-build
+        # legitimately has no whole-game hook yet, and failing it would red every
+        # in-progress PR. The whole-artifact verdict is the master arm's job.
+        declares_mechanic = (not pr_scoped) and _declares_load_bearing_mechanic(store)
+        result = _verdict_to_result(verdict, declares_mechanic)
         probe_session = TestRunSession(
             command_ids=[PROBE_COMMAND_ID], results=[result], unknown_ids=[],
             passed=bool(result.passed), sandbox="")
@@ -339,7 +449,10 @@ def run_and_record(
             return None
         try:
             _attach_verdict_to_prs(
-                store, _probe_verdict_fields(verdict, head=head), head=head)
+                store,
+                _probe_verdict_fields(verdict, head=head,
+                                      declares_mechanic=declares_mechanic),
+                head=head)
         except Exception:  # noqa: BLE001
             pass
         return run

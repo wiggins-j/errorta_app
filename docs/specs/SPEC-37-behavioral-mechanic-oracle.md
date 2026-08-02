@@ -13,8 +13,32 @@ is its deferred S5, redesigned) · [SPEC-30](SPEC-30-execution-gate-and-grounded
 (the probe's render+input phase this extends) · [SPEC-35](SPEC-35-recoverable-acceptance-done-gate.md)
 (the done-gate a probe verdict can feed) · [SPEC-36](SPEC-36-detect-declared-test-and-honest-provenance.md)
 (detection/provenance — necessary but non-blocking)
-**Status:** proposed (design — needs sign-off on the testability contract before
-implementation) · **Owner:** wiggins-j
+**Status:** implemented (v1 — the hook-based win-condition oracle; validated live
+against control fixtures) · **Owner:** wiggins-j
+
+> **Implementation note (v1, as shipped — DIFFERENTIAL, hardened by review).** An
+> adversarial review disproved the first cut (an absolute "a straight shot must miss"
+> win-condition: it depends on the game's unknown power cap + hole geometry — a
+> super-max straight shot reaches any straight-clear hole regardless of gravity, and
+> an on-axis well never deflects by symmetry). Shipped instead as a **differential**
+> oracle in `web-probe.mjs`: via `window.__probe` (now requiring
+> `state/shoot/tick/reset/setMechanic`), fire the SAME straight shot at the hole with
+> the mechanic ON vs OFF across a distance-scaled power sweep; if the outcome is
+> materially different (different sink, or endpoints apart by > hole.r) at ANY power,
+> the mechanic MATTERS — power-cap- and geometry-independent. Hardening (each a review
+> finding, each tested): sinking + movement are computed in the probe from ball/hole
+> coordinates (never a game flag); a missing hook, a state without ball/hole, a no-op
+> `shoot()`, or a non-restoring `reset()` are recorded `ran=false` and FAIL as
+> UNUSABLE (a stub hook buys no pass); an absent `mechanic_probe` field (probe error)
+> is advisory (never a false red); the phase is time-boxed (Promise.race); the fold
+> applies only to the MASTER arm (`pr_scoped=False`) of a project whose north-star
+> DECLARES a straight-shots-must-fail claim, matched on word/phrase boundaries so a
+> plain web app ("handles validation well … non-trivial") is never gated. The game
+> must yield its render-loop stepping once the probe drives the hook (so `tick()` is
+> the sole deterministic driver). Validated `@pytest.mark.live` against control +
+> adversarial fixtures (`tests/coding/fixtures/spec37/{live,inert,nohook,stub,
+> noopshoot}`): the live game PASSES; inert, no-hook, stub-hook, and no-op-shoot all
+> BLOCK.
 
 ---
 

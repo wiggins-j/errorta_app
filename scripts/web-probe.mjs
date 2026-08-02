@@ -152,6 +152,122 @@ async function main() {
     } catch { /* interaction is best-effort; passive verdict stands */ }
     const interactionError = consoleErrors.length > errsBeforeInteract;
 
+    // SPEC-37: behavioral mechanic oracle (DIFFERENTIAL). The interaction phase
+    // above only proves the canvas RESPONDS to input — an inert-gravity ball still
+    // moves, so a regular-golf game passes it. To prove a declared mechanic has
+    // EFFECT, a game whose DoD forbids straight-line solutions must expose a hook:
+    //   window.__probe = {
+    //     state:       () => ({ball:{x,y}, hole:{x,y,r}, wells:[...], moving:bool}),
+    //     shoot:       (dx,dy,power) => {},  // launch the ball in a direction/power
+    //     tick:        (n) => {},            // advance n FIXED steps (deterministic)
+    //     reset:       () => {},             // return the ball to the tee (REQUIRED)
+    //     setMechanic: (on) => {},           // enable/disable the mechanic (REQUIRED)
+    //   }
+    // Why DIFFERENTIAL and not "a straight shot must miss": an absolute win-condition
+    // depends on the game's (unknown) power cap and hole geometry — a super-max
+    // straight shot reaches any straight-clear hole regardless of gravity, and an
+    // on-axis well never deflects by symmetry (both would false-fail a live game).
+    // Instead: fire the SAME straight shot at the hole with the mechanic ON vs OFF;
+    // if the outcome is materially DIFFERENT (different sink result, or endpoints
+    // apart by > hole.r) at ANY swept power, the mechanic MATTERS. If ON and OFF are
+    // identical at every power, it is inert. This is power-cap- and geometry-
+    // independent. Hardened against a gamed hook: sinking + movement are computed
+    // HERE from ball/hole coordinates (never a game flag), a no-op shoot / missing
+    // state / non-resetting reset / no-op setMechanic is ran=false (web_probe.py
+    // fails it as UNUSABLE, not a free pass), and the phase is time-boxed. Folded
+    // only for the MASTER arm of a project that DECLARES straight-shots-must-fail.
+    let mechanicProbe = {
+      has_hook: false, ran: false, wells: 0, mechanic_matters: null,
+      powers: [], reason: "" };
+    try {
+      const hasHook = await page.evaluate(() => {
+        const p = window.__probe;
+        return !!(p && typeof p.state === "function" && typeof p.shoot === "function"
+                  && typeof p.tick === "function" && typeof p.reset === "function"
+                  && typeof p.setMechanic === "function");
+      }).catch(() => false);
+      mechanicProbe.has_hook = hasHook;
+      if (hasHook) {
+        const withTimeout = (pr, ms) => Promise.race([
+          pr, new Promise((res) => setTimeout(() => res({ ran: false,
+            reason: "mechanic phase timed out" }), ms))]);
+        const r = await withTimeout(page.evaluate(() => {
+          const P = window.__probe;
+          const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+          // Take control + go to a canonical start; the SPEC-30 interaction phase
+          // ran first, so read the tee AFTER a reset, not from the drifted state.
+          P.reset();
+          const s0 = P.state();
+          const wells = (s0 && Array.isArray(s0.wells)) ? s0.wells.length : 0;
+          if (!s0 || !s0.ball || !s0.hole || typeof s0.hole.r !== "number") {
+            return { wells, ran: false, reason: "state() lacks ball/hole/radius" };
+          }
+          const tee = { x: s0.ball.x, y: s0.ball.y };   // primitive snapshot (no aliasing)
+          const D = dist(tee, s0.hole);
+          if (!(D > 0)) return { wells, ran: false, reason: "ball already at hole" };
+          // Pass a NORMALIZED direction + a separate power (speed), so a game that
+          // does vx = dx*power gets a sane launch speed regardless of |tee->hole|.
+          const dir = { x: (s0.hole.x - tee.x) / D, y: (s0.hole.y - tee.y) / D };
+          const holeR = s0.hole.r;
+          // Fire the SAME straight shot at a given power with the mechanic on/off and
+          // simulate to rest; returns {sank, end:{x,y}, maxMove}. sink + movement +
+          // rest are all GEOMETRIC (never a game flag): the loop exits when the ball
+          // stops moving over a window of ticks, so a wrong state().moving cannot cut
+          // the observation short. Coordinates are snapshotted as primitives so a
+          // state() that returns a live ball reference cannot zero the movement metric.
+          const runShot = (power, on) => {
+            P.reset();
+            const st = P.state().ball;
+            const start = { x: st.x, y: st.y };
+            if (dist(start, tee) > 2) return null;   // reset() failed / no-op
+            P.setMechanic(on);
+            P.shoot(dir.x, dir.y, power);
+            let sank = false, minD = D, maxMove = 0;
+            let prev = { x: start.x, y: start.y }, still = 0;
+            let end = { x: start.x, y: start.y };
+            for (let i = 0; i < 6000; i++) {
+              P.tick(1);
+              const b = P.state().ball;
+              const cur = { x: b.x, y: b.y };
+              end = cur;
+              maxMove = Math.max(maxMove, dist(cur, start));
+              minD = Math.min(minD, dist(cur, s0.hole));
+              if (minD <= holeR) { sank = true; break; }
+              // geometric rest: still for several consecutive ticks
+              still = (dist(cur, prev) < 0.05) ? still + 1 : 0;
+              prev = cur;
+              if (still >= 20) break;
+            }
+            return { sank, end, maxMove };
+          };
+          const powers = [0.8, 1.3, 2.0].map((k) => k * D);
+          let matters = false, anyMoved = false, resetOk = true, nondet = false;
+          for (const pow of powers) {
+            const on = runShot(pow, true);
+            const off = runShot(pow, false);
+            const off2 = runShot(pow, false);   // determinism/causation guard
+            if (on === null || off === null || off2 === null) { resetOk = false; break; }
+            if (on.maxMove > 2 || off.maxMove > 2) anyMoved = true;
+            // If two IDENTICAL (off) shots diverge, the game is nondeterministic —
+            // the on/off difference cannot be attributed to the mechanic. Bail.
+            if (off.sank !== off2.sank || dist(off.end, off2.end) > holeR / 2) {
+              nondet = true; break;
+            }
+            if (on.sank !== off.sank || dist(on.end, off.end) > holeR) {
+              matters = true; break;
+            }
+          }
+          P.setMechanic(true);   // restore
+          if (!resetOk) return { wells, ran: false, reason: "reset() did not return the ball" };
+          if (nondet) return { wells, ran: false, reason: "non-deterministic (two identical shots diverged) — tick()/shoot() must be deterministic for headless verification" };
+          if (!anyMoved) return { wells, ran: false, reason: "shoot() did not move the ball" };
+          return { wells, ran: true, mechanic_matters: matters,
+                   powers: powers.map((p) => Math.round(p)) };
+        }).catch(() => ({ ran: false, reason: "mechanic phase threw" })), 20000);
+        Object.assign(mechanicProbe, r);
+      }
+    } catch { /* best-effort; web_probe.py treats an absent hook as no_hook */ }
+
     // Screenshot for the record (best-effort) + compute the verdict.
     let st = { mean: 0, variance: 0, samples: 0 };
     const hasCanvas = await page.evaluate(() => !!document.querySelector("canvas")).catch(() => false);
@@ -202,6 +318,7 @@ async function main() {
       ok, non_black: nonBlack, console_errors: consoleErrors, reason: reason2,
       screenshot: args.screenshot || "",
       interaction_changed: interactionChanged, interaction_error: interactionError,
+      mechanic_probe: mechanicProbe,
     });
   } catch (e) {
     emit({ ok: false, non_black: false, console_errors: consoleErrors, reason: `probe error: ${String(e && e.message || e).slice(0, 300)}`, screenshot: args.screenshot || "" });
