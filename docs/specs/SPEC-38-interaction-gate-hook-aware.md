@@ -12,7 +12,8 @@ gesture never hit the ball, so `interaction_changed=False` red-flagged every one
 blind press-drag interaction gate this corrects) · [SPEC-37](SPEC-37-behavioral-mechanic-oracle.md)
 (the hook whose evidence this gate should defer to) · [SPEC-39](SPEC-39-drop-probe-pause-clause.md)
 (the contract-wording cleanup from the same tangle)
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** landed (merged in PR #80; `web-probe.mjs` drives the drift-subtracted,
+ball-targeted gesture) · **Owner:** wiggins-j
 
 ---
 

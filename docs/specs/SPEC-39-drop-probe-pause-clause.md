@@ -10,7 +10,8 @@ gravity-golf DoD template used for demo runs)
 **Relates to:** [SPEC-37](SPEC-37-behavioral-mechanic-oracle.md) (authored the clause)
 · [SPEC-38](SPEC-38-interaction-gate-hook-aware.md) (the real stall fix; this is the
 companion cleanup)
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** landed (merged in PR #80; the pause clause is gone from `_HOOK_CONTRACT` and
+the single-synchronous-`page.evaluate` invariant lock is in place) · **Owner:** wiggins-j
 
 ---
 
