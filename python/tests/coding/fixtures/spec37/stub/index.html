@@ -25,5 +25,5 @@ function draw(){g.fillStyle="#0b1020";g.fillRect(0,0,800,600);
   g.strokeStyle="#5f5";g.lineWidth=3;g.beginPath();g.arc(hole.x,hole.y,hole.r,0,7);g.stroke();
   g.fillStyle="#fff";g.beginPath();g.arc(ball.x,ball.y,ball.r,0,7);g.fill();}
 function loop(){ if(!probeControl) step(); draw(); requestAnimationFrame(loop);} loop();
-/* no window.__probe */
+window.__probe={ state:()=>({foo:1}), shoot:()=>{}, tick:()=>{}, reset:()=>{}, setMechanic:()=>{} };
 </script></body></html>

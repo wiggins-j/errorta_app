@@ -16,19 +16,29 @@ is its deferred S5, redesigned) · [SPEC-30](SPEC-30-execution-gate-and-grounded
 **Status:** implemented (v1 — the hook-based win-condition oracle; validated live
 against control fixtures) · **Owner:** wiggins-j
 
-> **Implementation note (v1, as shipped).** O1–O4 landed as: a behavioral phase in
-> `web-probe.mjs` that fires a straight shot at the hole swept across powers via
-> `window.__probe` and reports `mechanic_probe` facts; `web_probe.py`'s
-> `_declares_load_bearing_mechanic` (a keyword signal requiring BOTH a mechanic term
-> and a non-triviality term) gates the fold in `_verdict_to_result` /
-> `_probe_verdict_fields`. Enforcement needs **no DoD-injection plumbing**: the probe
-> verdict already feeds the existing gate → delivery-review loop (exactly like
-> SPEC-30's `interaction_changed`), and the `no_hook` failure names the exact
-> `window.__probe` contract in its reason — so the reviewer/dev is told precisely
-> what to build. O5's real coverage landed as `@pytest.mark.live` control fixtures
-> (`tests/coding/fixtures/spec37/{live,inert,nohook}`) that drive the real
-> `web-probe.mjs`: the live game PASSES, the inert game and the run-11-style
-> no-hook game BLOCK. A partial/unreadable hook is fail-open (no false red).
+> **Implementation note (v1, as shipped — DIFFERENTIAL, hardened by review).** An
+> adversarial review disproved the first cut (an absolute "a straight shot must miss"
+> win-condition: it depends on the game's unknown power cap + hole geometry — a
+> super-max straight shot reaches any straight-clear hole regardless of gravity, and
+> an on-axis well never deflects by symmetry). Shipped instead as a **differential**
+> oracle in `web-probe.mjs`: via `window.__probe` (now requiring
+> `state/shoot/tick/reset/setMechanic`), fire the SAME straight shot at the hole with
+> the mechanic ON vs OFF across a distance-scaled power sweep; if the outcome is
+> materially different (different sink, or endpoints apart by > hole.r) at ANY power,
+> the mechanic MATTERS — power-cap- and geometry-independent. Hardening (each a review
+> finding, each tested): sinking + movement are computed in the probe from ball/hole
+> coordinates (never a game flag); a missing hook, a state without ball/hole, a no-op
+> `shoot()`, or a non-restoring `reset()` are recorded `ran=false` and FAIL as
+> UNUSABLE (a stub hook buys no pass); an absent `mechanic_probe` field (probe error)
+> is advisory (never a false red); the phase is time-boxed (Promise.race); the fold
+> applies only to the MASTER arm (`pr_scoped=False`) of a project whose north-star
+> DECLARES a straight-shots-must-fail claim, matched on word/phrase boundaries so a
+> plain web app ("handles validation well … non-trivial") is never gated. The game
+> must yield its render-loop stepping once the probe drives the hook (so `tick()` is
+> the sole deterministic driver). Validated `@pytest.mark.live` against control +
+> adversarial fixtures (`tests/coding/fixtures/spec37/{live,inert,nohook,stub,
+> noopshoot}`): the live game PASSES; inert, no-hook, stub-hook, and no-op-shoot all
+> BLOCK.
 
 ---
 

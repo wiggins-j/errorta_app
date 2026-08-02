@@ -27,6 +27,7 @@ probe result deterministically.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -184,61 +185,81 @@ def _default_node_runner(
 # --------------------------------------------------------------------------- #
 # The probe verdict -> a recorded runtime-test session
 # --------------------------------------------------------------------------- #
-# SPEC-37: a project DECLARES a load-bearing, non-trivial mechanic when its
-# north-star/DoD names a mechanic (gravity/physics/force/…) AND asserts it must
-# matter (straight-line solutions fail / non-trivial / must matter). BOTH are
-# required so the behavioral assertion never fires on a plain game whose DoD merely
-# happens to contain one of these words. When false, the mechanic verdict is
-# advisory (never gates) — a game where a straight shot should legitimately sink is
-# never false-failed.
-_MECHANIC_TERMS = ("gravity", "physics", "force", "well", "momentum",
-                   "orbit", "mechanic")
-_NONTRIVIAL_TERMS = ("straight line", "straight-line", "non-trivial", "nontrivial",
-                     "must matter", "solvable by a straight", "cannot be solved",
-                     "no straight")
+# SPEC-37: a project DECLARES a load-bearing mechanic that FORBIDS straight-line
+# solutions when its north-star/DoD names a physics mechanic (gravity/physics/…)
+# AND asserts a straight shot must fail. Both are required, matched on WORD/PHRASE
+# boundaries (not bare substrings — an earlier draft's "well"/"force"/"must matter"
+# false-matched a plain CRUD DoD like "handles validation well ... non-trivial" and
+# hard-blocked it). The behavioral assertion is scoped precisely to the
+# straight-shot-must-fail claim, so a high-power straight shot that sinks is a REAL
+# violation (a straight-line solution the DoD forbids), not a false red; when the
+# claim is absent the mechanic verdict is advisory (never gates).
+_MECHANIC_TERMS = (r"\bgravity\b", r"\bphysics\b", r"\bmomentum\b", r"\borbit\b",
+                   r"\btrajector", r"\bgravity well")
+# The DoD must say straight-line solutions FAIL — the precise claim the oracle tests.
+_STRAIGHT_FAIL_TERMS = (
+    "straight line", "straight-line", "straight shot", "no straight",
+    "non-trivial", "nontrivial", "solvable by a straight", "cannot be solved",
+    "not solvable")
 
 
 def _declares_load_bearing_mechanic(store: Any) -> bool:
-    """SPEC-37 north-star signal: does the project declare a mechanic whose effect
-    is load-bearing (straight-line solutions must fail)? Fully guarded → False."""
+    """SPEC-37 north-star signal: does the project declare a physics mechanic AND
+    assert that straight-line solutions must fail? Only then is "a straight shot
+    sinks => the mechanic is inert" a sound verdict. Word/phrase-boundary matched;
+    fully guarded → False (never invents the gate)."""
     try:
         proj = store.get_project()
         text = (str(getattr(proj, "north_star", "") or "") + " "
                 + str(getattr(proj, "definition_of_done", "") or "")).lower()
     except Exception:  # noqa: BLE001
         return False
-    return (any(m in text for m in _MECHANIC_TERMS)
-            and any(n in text for n in _NONTRIVIAL_TERMS))
+    has_mechanic = any(re.search(p, text) for p in _MECHANIC_TERMS)
+    forbids_straight = any(t in text for t in _STRAIGHT_FAIL_TERMS)
+    return has_mechanic and forbids_straight
 
 
 # The exact hook a declared-mechanic game must expose (named in the fail reason so
 # the council can build it — the reviewer sees this and the dev adds it).
 _HOOK_CONTRACT = (
     "expose window.__probe = {state:()=>({ball:{x,y},hole:{x,y,r},wells:[...],"
-    "sank,moving}), shoot:(dx,dy,power)=>{}, tick:(n)=>{}, reset:()=>{}} so the "
-    "headless probe can verify the mechanic has effect")
+    "moving}), shoot:(dx,dy,power)=>{}, tick:(n)=>{}, reset:()=>{}, "
+    "setMechanic:(on)=>{}} so the headless probe can verify the mechanic changes "
+    "outcomes (fire the same shot with it on vs off)")
 
 
 def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
                       ) -> tuple[bool, str]:
     """SPEC-37 fold. Returns ``(mechanic_ok, reason)``. Only gates when the project
-    DECLARES a load-bearing mechanic:
-    * no hook          -> fail (the miss must not be a free pass; names the contract)
-    * a straight shot sinks -> fail (the mechanic is inert / levels are trivial)
-    * a straight shot misses -> ok
-    * hook present but state unreadable -> ok (fail-open; a partial hook is not a
-      false red — the no-hook and inert cases are the enforceable ones)."""
+    DECLARES a load-bearing mechanic that forbids straight-line solutions:
+    * mechanic_probe field ABSENT -> advisory (the probe errored / an older script;
+      cannot-verify, never a false red — do not append a misleading hook reason);
+    * no hook -> fail (the miss must not be a free pass; names the contract);
+    * hook present but the phase could not run it (state lacks ball/hole, a no-op
+      shoot, a missing reset) -> fail as UNUSABLE (a stub hook must not buy a pass);
+    * a straight shot sinks -> fail (the mechanic is inert / a straight-line
+      solution the DoD forbids);
+    * a straight shot misses at every swept power -> ok."""
     if not declares_mechanic:
         return True, ""
+    if "mechanic_probe" not in verdict:
+        return True, ""  # phase did not run (probe error) -> advisory, never a red
     mp = verdict.get("mechanic_probe")
     if not isinstance(mp, dict):
         mp = {}
     if not mp.get("has_hook"):
-        return False, ("declares a load-bearing mechanic but exposes no scriptable "
-                       "state hook — " + _HOOK_CONTRACT + " (SPEC-37)")
-    if mp.get("ran") and mp.get("straight_shot_sank") is True:
-        return False, ("a straight shot sinks the hole — the declared mechanic is "
-                       "inert / levels are straight-line-trivial (SPEC-37)")
+        return False, ("declares a straight-shots-must-fail mechanic but exposes no "
+                       "scriptable state hook — " + _HOOK_CONTRACT + " (SPEC-37)")
+    if not mp.get("ran"):
+        return False, ("exposes a window.__probe hook but it is unusable — "
+                       + str(mp.get("reason") or "state() lacks ball/hole, shoot() "
+                         "is a no-op, or reset() is missing") + "; " + _HOOK_CONTRACT
+                       + " (SPEC-37)")
+    if mp.get("mechanic_matters") is False:
+        return False, ("the mechanic has NO effect — a straight shot at the hole "
+                       "behaves identically with the mechanic on vs off (it is "
+                       "inert; the DoD's straight-shots-must-fail claim is unmet) "
+                       "(SPEC-37)")
     return True, ""
 
 
@@ -394,9 +415,12 @@ def run_and_record(
         if not isinstance(verdict, dict):
             return None  # probe could not run: fail-open (cannot-verify)
 
-        # SPEC-37: only gate on the behavioral mechanic verdict when the project
-        # DECLARES a load-bearing non-trivial mechanic (else it is advisory).
-        declares_mechanic = _declares_load_bearing_mechanic(store)
+        # SPEC-37: gate on the behavioral mechanic verdict only for the MASTER /
+        # delivery arm of a project that DECLARES a straight-shots-must-fail
+        # mechanic. NOT for a per-PR probe (pr_scoped): a partial-module PR mid-build
+        # legitimately has no whole-game hook yet, and failing it would red every
+        # in-progress PR. The whole-artifact verdict is the master arm's job.
+        declares_mechanic = (not pr_scoped) and _declares_load_bearing_mechanic(store)
         result = _verdict_to_result(verdict, declares_mechanic)
         probe_session = TestRunSession(
             command_ids=[PROBE_COMMAND_ID], results=[result], unknown_ids=[],
