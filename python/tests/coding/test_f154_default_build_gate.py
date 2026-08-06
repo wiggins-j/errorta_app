@@ -81,6 +81,44 @@ def test_unreadable_root_manifest_does_not_abandon_the_scan(tmp_path: Path) -> N
     assert cwd == app
 
 
+def test_real_build_outranks_compileall_across_directories(tmp_path: Path) -> None:
+    """"A real build is strictly stronger than compileall" must hold ACROSS dirs.
+
+    `docs/` sorts before `web/`, so a first-hit-wins sweep returned `compileall`
+    on the docs tree and never saw the real `vite build`. The precedence table is
+    only meaningful as a GLOBAL ranking.
+    """
+    (tmp_path / "package.json").write_text('{"private": true}')
+    docs = tmp_path / "adocs"       # sorts before "web"
+    docs.mkdir()
+    (docs / "conf.py").write_text("project = 'x'\n")
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "package.json").write_text('{"scripts": {"build": "vite build"}}')
+
+    argv, cwd = _default_verify_command(tmp_path)
+    assert argv == ["npm", "run", "build"]
+    assert cwd == web
+
+
+def test_vendored_trees_are_never_scanned(tmp_path: Path) -> None:
+    """`compileall` RECURSES, so vendored code must not be reachable.
+
+    Once a bare root manifest stopped ending the scan, every sibling became a
+    candidate. A single Python-2-syntax file under `third_party/` would file a
+    "fix delivery build" task against code the team never wrote — the phantom
+    finding the function's docstring exists to prevent.
+    """
+    (tmp_path / "package.json").write_text('{"private": true}')
+    for name in ("node_modules", "vendor", "third_party", "examples", "docs"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "legacy.py").write_text("print 'py2'\n")
+        (d / "package.json").write_text('{"scripts": {"build": "nope"}}')
+
+    assert _default_verify_command(tmp_path) is None
+
+
 def test_derives_compileall_for_python(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("x = 1\n")
     argv, cwd = _default_verify_command(tmp_path)
@@ -426,6 +464,62 @@ def test_dep_needing_build_without_deps_is_cannot_verify(tmp_path: Path) -> None
     # ...and with node_modules present the marker check passes.
     (tmp_path / "node_modules").mkdir()
     assert (Path(cwd) / "node_modules").exists()
+
+
+def test_hoisted_node_modules_satisfies_a_workspace_member(tmp_path: Path) -> None:
+    """CRITICAL. npm workspaces hoist `node_modules` to the ROOT.
+
+    Once the scan learned to walk into a workspace member, the derived cwd became
+    `<root>/app` — which has no `node_modules` of its own in a hoisted install.
+    Probing only cwd therefore reported "dependencies absent" for a correctly
+    installed monorepo, and `build_cannot_verify` blocks `done` while filing NO
+    task, so no code change could ever clear it: the run wedged on `no_progress`.
+    That is strictly worse than the silently-skipped gate it replaced.
+
+    This drives the REAL probe (`_missing_build_dep`) rather than re-implementing
+    the check, which is how the original bug survived a green suite.
+    """
+    import errorta_council.coding.runner as R
+
+    (tmp_path / "package.json").write_text(
+        '{"private": true, "workspaces": ["app"]}')
+    (tmp_path / "node_modules").mkdir()          # hoisted, as npm actually installs
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "package.json").write_text('{"scripts": {"build": "vite build"}}')
+
+    argv, cwd = R._default_verify_command(tmp_path)
+    assert argv == ["npm", "run", "build"] and cwd == app
+    # The member has no node_modules of its own...
+    assert not (app / "node_modules").exists()
+    # ...but the hoisted root install satisfies it, so this is verifiable.
+    assert R._missing_build_dep(argv, cwd, tmp_path) is None
+
+
+def test_missing_deps_still_reported_when_absent_everywhere(tmp_path: Path) -> None:
+    # The walk must not become a blanket pass: with no node_modules at ANY level
+    # up to the root, cannot-verify still fires.
+    import errorta_council.coding.runner as R
+
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "vite build"}}')
+    argv, cwd = R._default_verify_command(tmp_path)
+    assert R._missing_build_dep(argv, cwd, tmp_path) == ("npm", "node_modules")
+
+
+def test_dep_walk_stops_at_the_delivered_root(tmp_path: Path) -> None:
+    # The walk must NOT escape the delivered tree — a node_modules in a parent
+    # outside the project (a developer's home dir, the CI workspace) must not be
+    # read as this project's dependencies.
+    import errorta_council.coding.runner as R
+
+    outer = tmp_path / "outer"
+    (outer / "node_modules").mkdir(parents=True)
+    root = outer / "project"
+    root.mkdir()
+    (root / "package.json").write_text('{"scripts": {"build": "vite build"}}')
+
+    argv, cwd = R._default_verify_command(root)
+    assert R._missing_build_dep(argv, cwd, root) == ("npm", "node_modules")
 
 
 def test_python_floor_needs_no_deps_and_is_not_gated() -> None:

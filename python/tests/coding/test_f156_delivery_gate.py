@@ -284,6 +284,33 @@ def test_not_applicable_count_does_not_leak_across_runs(
     assert "tests_not_applicable_over_limit" not in choices, choices
 
 
+def test_not_applicable_count_survives_a_resume(tmp_errorta_home: Path) -> None:
+    """The KEEP half of the rule: a carried-counters resume must not clear it.
+
+    Without this, moving the reset out of the `counters is None` guard (or
+    dropping the guard) leaves the whole suite green while a resume silently
+    restarts the count mid-run.
+
+    Note the guard is a proxy for "fresh start", not a run identity: a
+    resume-after-INTERRUPTION arrives with counters None and is still treated as
+    fresh. That limitation is documented at the reset site; this test pins the
+    carried-counters path, which is the one the guard actually distinguishes.
+    """
+    from errorta_council.coding.autonomy import LoopCounters
+
+    store = _make("f156-g5-resume", _PASS_CMD)
+    save_policy(store, CodingAutonomyPolicy(not_applicable_soft_limit=99))
+    store.set_run_state(tests_not_applicable_count=5)
+
+    CodingRunner("f156-g5-resume", MEMBERS,
+                 _Fake(tester_not_applicable=True, n_tasks=1),
+                 guardrail_enabled=True).run(
+        CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF, max_iterations=40),
+        counters=LoopCounters())
+
+    assert store.get_run_state().get("tests_not_applicable_count", 0) == 6
+
+
 def test_not_applicable_limit_zero_disables_escalation(
         tmp_errorta_home: Path) -> None:
     """The escape hatch: 0 restores today's always-non-blocking alert."""

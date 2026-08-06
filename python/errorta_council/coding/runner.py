@@ -4166,48 +4166,70 @@ def _default_verify_command(root: Any) -> Optional[tuple[list[str], Any]]:
         if not base.is_dir():
             return None
         # The root itself first, then immediate subdirectories (sorted, so the
-        # choice is deterministic across runs).
+        # choice is deterministic across runs). `_SCAN_DENY_DIRS` keeps the sweep
+        # on code the team actually wrote: once a bare workspaces root stopped
+        # ending the scan, every sibling became reachable, and `compileall` is
+        # RECURSIVE — one Python-2-syntax file under `vendor/` or `third_party/`
+        # would have filed a "fix delivery build" task against code nobody here
+        # owns. That is the phantom finding this function's docstring warns about.
         candidates = [base] + sorted(
-            (p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            (p for p in base.iterdir()
+             if p.is_dir() and not p.name.startswith(".")
+             and p.name not in _SCAN_DENY_DIRS),
             key=lambda p: p.name)
     except Exception:  # noqa: BLE001 — an unreadable tree derives nothing
         return None
 
+    def _derive(d: Any) -> Optional[tuple[int, list[str], Any]]:
+        """(strength, argv, cwd) for one candidate, or None. Lower is stronger."""
+        pkg = d / "package.json"
+        if pkg.is_file():
+            try:
+                scripts = (_json.loads(pkg.read_text("utf-8")) or {}).get(
+                    "scripts") or {}
+            except Exception:  # noqa: BLE001 — unreadable manifest -> no guess
+                return None
+            if isinstance(scripts, dict) and scripts.get("build"):
+                return 0, ["npm", "run", "build"], d
+            if (d / "tsconfig.json").is_file():
+                # No build script but TypeScript is configured -> typecheck only.
+                return 0, ["npx", "--no-install", "tsc", "--noEmit"], d
+            # Nothing safe to run FOR THIS CANDIDATE — yield nothing rather than
+            # abandoning the sweep. A workspaces root carries a `package.json`
+            # with no `build` and no `tsconfig.json`, so returning early here
+            # disabled the gate for the whole monorepo even though `<root>/app`
+            # had a real build.
+            return None
+        if (d / "Cargo.toml").is_file():
+            return 0, ["cargo", "build", "--quiet"], d
+        if (d / "go.mod").is_file():
+            return 0, ["go", "build", "./..."], d
+        if ((d / "pyproject.toml").is_file() or (d / "setup.py").is_file()
+                or any(d.glob("*.py"))):
+            # Syntax-level only, and honestly so: it needs no dependencies and
+            # cannot fail for environmental reasons. A project wanting type/name
+            # checking registers real test commands.
+            return 1, [_sys.executable, "-m", "compileall", "-q", str(d)], d
+        return None
+
+    # Strength is a GLOBAL ranking, not a per-directory one. The precedence table
+    # is only meaningful if "a real build is strictly stronger than compileall"
+    # holds ACROSS candidates too: scanning directory-by-directory and returning
+    # the first hit let an alphabetically earlier `docs/conf.py` win over a real
+    # `vite build` in `web/`. Ties keep the old order (root first, then sorted).
+    best: Optional[tuple[int, list[str], Any]] = None
     for d in candidates:
         try:
-            pkg = d / "package.json"
-            if pkg.is_file():
-                try:
-                    scripts = (_json.loads(pkg.read_text("utf-8")) or {}).get(
-                        "scripts") or {}
-                except Exception:  # noqa: BLE001 — unreadable manifest -> no guess
-                    continue
-                if isinstance(scripts, dict) and scripts.get("build"):
-                    return ["npm", "run", "build"], d
-                if (d / "tsconfig.json").is_file():
-                    # No build script but TypeScript is configured -> typecheck only.
-                    return ["npx", "--no-install", "tsc", "--noEmit"], d
-                # Nothing safe to run FOR THIS CANDIDATE — keep scanning rather
-                # than abandoning the sweep. A workspaces root carries a
-                # `package.json` with no `build` and no `tsconfig.json`, so
-                # returning here disabled the gate for the whole monorepo even
-                # though `<root>/app` had a real build. `continue` can only ever
-                # find more than the old code did: the loop still falls through
-                # to `return None` when no candidate matches.
-                continue
-            if (d / "Cargo.toml").is_file():
-                return ["cargo", "build", "--quiet"], d
-            if (d / "go.mod").is_file():
-                return ["go", "build", "./..."], d
-            if ((d / "pyproject.toml").is_file() or (d / "setup.py").is_file()
-                    or any(d.glob("*.py"))):
-                # Syntax-level only, and honestly so: it needs no dependencies and
-                # cannot fail for environmental reasons. A project wanting type/name
-                # checking registers real test commands.
-                return [_sys.executable, "-m", "compileall", "-q", str(d)], d
+            found = _derive(d)
         except Exception:  # noqa: BLE001 — a bad candidate is skipped, never fatal
             continue
-    return None
+        if found is not None and (best is None or found[0] < best[0]):
+            best = found
+            if best[0] == 0:  # nothing outranks a real build; stop early
+                break
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def _ensure_delivery_setup(store: LedgerStore, workspace: Any) -> tuple[bool, str]:
@@ -4273,12 +4295,59 @@ def _ensure_delivery_setup(store: LedgerStore, workspace: Any) -> tuple[bool, st
 # So for a stack whose build must resolve dependencies, running the build without
 # them present would fail for an ENVIRONMENTAL reason and be filed as a code
 # finding. Absent the marker, the honest answer is "cannot verify".
+_SCAN_DENY_DIRS: frozenset[str] = frozenset({
+    # Dependency trees, vendored code, and sample/doc trees. None of these are
+    # the delivered program, and `compileall` recurses — see `_default_verify_command`.
+    "node_modules", "vendor", "third_party", "thirdparty", "bower_components",
+    "examples", "example", "samples", "fixtures", "testdata", "docs", "doc",
+    "dist", "build", "target", "out", "__pycache__", "site-packages", "venv",
+})
+
 _BUILD_DEP_MARKERS: tuple[tuple[str, str], ...] = (
     ("npm", "node_modules"),
     ("npx", "node_modules"),
     ("cargo", "target"),
     ("go", "go.sum"),
 )
+
+
+def _missing_build_dep(
+    argv: list[str], cwd: Any, root: Any,
+) -> Optional[tuple[str, str]]:
+    """F154: ``(tool, marker)`` when a build's dependencies are absent, else None.
+
+    The marker is resolved by walking UP from ``cwd`` to the delivered ``root``,
+    because that is how the toolchains themselves resolve it. npm workspaces HOIST
+    `node_modules` to the repo root, so a workspace member legitimately has none of
+    its own; probing only ``cwd`` reported "dependencies absent" for a correctly
+    installed monorepo. That mattered because ``build_cannot_verify`` blocks `done`
+    and files NO task — no code change could clear it, so the run wedged and stopped
+    on `no_progress` with nothing telling the team why.
+
+    Extracted from ``_run_default_build`` so the invariant is testable directly: the
+    original probe was inline, and the test for it re-implemented the check instead
+    of calling it, which is how the hoisted-layout bug survived a green suite."""
+    from pathlib import Path as _P
+
+    tool = str(argv[0]).lower() if argv else ""
+    try:
+        root_stop = _P(str(root)).resolve()
+    except Exception:  # noqa: BLE001 — an unresolvable root just stops the walk
+        root_stop = None
+    for prefix, marker in _BUILD_DEP_MARKERS:
+        if not tool.endswith(prefix):
+            continue
+        try:
+            here = _P(str(cwd)).resolve()
+        except Exception:  # noqa: BLE001
+            return prefix, marker
+        while True:
+            if (here / marker).exists():
+                return None
+            if here == here.parent or (root_stop is not None and here == root_stop):
+                return prefix, marker
+            here = here.parent
+    return None
 
 
 def _run_default_build(
@@ -4318,14 +4387,13 @@ def _run_default_build(
     # and be filed as a code finding — the exact false-finding risk F154 was
     # sequenced as a fast-follow to avoid. Report cannot-verify instead.
     try:
-        from pathlib import Path as _P
-        tool = str(argv[0]).lower() if argv else ""
-        for prefix, marker in _BUILD_DEP_MARKERS:
-            if tool.endswith(prefix) and not (_P(str(cwd)) / marker).exists():
-                return False, True, (
-                    f"{prefix} build needs dependencies and {marker!r} is absent; "
-                    "the delivery executor is network-off and only provisions a "
-                    "Python venv, so this cannot be verified here")
+        missing = _missing_build_dep(argv, cwd, workspace.root())
+        if missing is not None:
+            prefix, marker = missing
+            return False, True, (
+                f"{prefix} build needs dependencies and {marker!r} is absent; "
+                "the delivery executor is network-off and only provisions a "
+                "Python venv, so this cannot be verified here")
     except Exception:  # noqa: BLE001 — a marker probe failure must not block
         pass
     from pathlib import Path as _Path
@@ -8248,8 +8316,18 @@ class CodingRunner:
                 # is documented as "per run" and the escalation it drives is
                 # phrased "N slices in THIS run". It was never cleared, so a
                 # second run inherited run 1's total and escalated on its FIRST
-                # legitimate declaration. A resume keeps it, because a resume IS
-                # the same run.
+                # legitimate declaration.
+                #
+                # KNOWN LIMITATION, shared with every key cleared here: `counters
+                # is None` is a proxy for "fresh start", not a run identity. The
+                # counters block is persisted only at a CLEAN terminal stop, so a
+                # resume-after-interruption (the only state `/run/resume` accepts)
+                # arrives with counters None and is treated as fresh. That resets
+                # this counter mid-run, and the escalation for the remainder of
+                # the run under-counts. It degrades observability only — no merge
+                # or delivery decision reads this key — so it is not worth a
+                # run-identity token here; fixing the proxy is a change to all
+                # five keys and belongs with SPEC-23/27, not with F156.
                 self.store.set_run_state(
                     last_words=None, narrow_ladder=None,
                     integration_only=False, planning_clamped=False,
