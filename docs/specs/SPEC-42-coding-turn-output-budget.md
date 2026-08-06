@@ -291,9 +291,43 @@ policy-free global switch to cover them would be a config surface with no consum
   want different budgets; nothing measured says what they are.
 - **Improving the marker heuristic** (a capability flag on the route/catalog instead of
   substring matching on the model id) — moved verbatim here, worth doing, not here.
-- **The empty-`model` observation.** On the non-worker turn paths (runner.py:5508,
-  5635) the member carries no `model`, so runner.py:7620 sends `model=""` to
-  `/api/chat` for a local PM/review turn. This spec routes *around* it (Move 2 reads the
-  route id) but does not fix it; it is a separate live bug on all-local coding teams.
+- ~~**The empty-`model` observation.**~~ **FIXED SEPARATELY, 2026-08-06.** On the
+  non-worker turn paths (`runner.py:5508`, `:5635`) the member carried no `model`, so
+  `runner.py:7620` sent `model=""` to `/api/chat` for a local PM/review turn. Verified
+  against the reference box: Ollama answers `HTTP 400 {"error":"model is required"}`,
+  which `_ollama_dispatch` maps to `FatalError("gateway_4xx: 400")` (the message lacks
+  "not found", so it is not even reported as `model_not_found`). Fixed by
+  `runner._member_model_id`, which derives the id from the `gateway_route_id` suffix
+  using `bind_member_route`'s own derivation; regression tests in
+  `tests/coding/test_unbound_member_model_id.py`. This spec still reads the route id
+  rather than `member["model"]` — correct independently, and it keeps the budget
+  resolver working for a member that is unbound for any other reason.
+
+## Validation sequencing — do not reorder
+
+The local path has been evaluated through **two** plumbing defects, so any prior
+"we ran it locally" evidence is uninterpretable. Both must land before the outstanding
+model-quality questions can be answered:
+
+| # | Defect | State |
+|---|---|---|
+| 1 | Unbound members send `model=""` → every PM-governance / governance-review turn of an all-local team hard-fails | **fixed** (`_member_model_id`) |
+| 2 | Coding turns send `num_predict=2048` vs a measured 2197-token mean → every reasoning turn truncates | **this spec** |
+
+**Only after both:**
+
+* **Re-test F001's judge-schema failure.** F001 records `qwen3.5:9b` "emitting
+  wrong-schema JSON" and proposes a 15 GB `mistral-small3.1` judge. That observation may
+  be an artefact of defect 1, defect 2, or neither. Run a real coding turn on the
+  reference box with `qwen3.5:9b` in a judge seat and score whether it persists. If it
+  vanishes, the judge recommendation is unfounded on the coding path too; if it
+  persists, it stands on its own merits and the truncation must stop being cited as the
+  explanation.
+* **The benchmark's own highest-value follow-up** — a real council run scored on
+  merge-gate pass rate rather than isolated function correctness — can share that
+  harness. It is also the only thing that can answer whether `think:false` and
+  `format:"json"` cost verdict *usefulness* rather than merely fixing shape.
+
+Running either earlier produces a number that cannot be attributed.
 - **A VRAM-fit check** for the larger generation window — belongs with model
   availability, as SPEC-41 already notes.
