@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -39,6 +40,34 @@ def provider_class(route_id: str) -> str:
     return rid.split(".", 1)[0] if "." in rid else rid
 
 
+# Transport segments some registries prefix onto the model id. The local handler's
+# own default routes are `local.ollama.<model>` (`providers/async_local.py`), and
+# `resolve_team` writes whatever `list_available_routes` hands it straight into
+# `gateway_route_id` — so BOTH `local.qwen3.5:9b` and `local.ollama.qwen3.5:9b`
+# occur in persisted configs.
+_TRANSPORT_PREFIXES = ("ollama.",)
+
+
+def model_id_from_route(route_id: str) -> str:
+    """The provider-side model id for a route id.
+
+    ``local.qwen3.5:9b`` and ``local.ollama.qwen3.5:9b`` both yield ``qwen3.5:9b``;
+    a route with no provider prefix yields itself. Sending the un-stripped form to
+    Ollama produces a 404 ``model not found``, so every consumer that derives a model
+    id from a route must strip the transport segment — `model_availability` and
+    `routes/model_gateway` already did this independently, which is why the
+    inconsistency went unnoticed.
+    """
+    rid = str(route_id or "").strip()
+    if not rid:
+        return ""
+    model = rid.split(".", 1)[1] if "." in rid else rid
+    for prefix in _TRANSPORT_PREFIXES:
+        if model.startswith(prefix):
+            return model[len(prefix):]
+    return model
+
+
 def default_cost_tier(route_id: str) -> int:
     provider = provider_class(route_id)
     low = route_id.lower()
@@ -55,11 +84,55 @@ def default_cost_tier(route_id: str) -> int:
     return 3
 
 
+# Parameter count in a model id, ANCHORED. The previous implementation tested bare
+# substrings ("3b", "7b", "70b"), which is wrong for every two-digit size that ends
+# in one of them: "27b" contains "7b" and "13b" contains "3b", so `gemma3:27b` and
+# `deepseek-r1:13b` were both tagged smallest-and-fastest. Since every local route
+# ties on cost_tier=0 and capability_tier=mid, selection falls through to size_rank —
+# so the mis-hint actively chose the LARGEST model as the cheapest, i.e. the one that
+# does not fit in 16 GB VRAM. Requiring a separator before the digits and a word
+# boundary after the "b" makes the match positional rather than incidental.
+_PARAM_BILLIONS_RE = re.compile(r"[:\-_/](\d+(?:\.\d+)?)b\b")
+
+# Bucket edges in billions of parameters. These decide relative ORDERING only —
+# they are NOT a VRAM fit check (nothing here knows the card). 24B is the large
+# edge rather than 32B so that a 27B sorts ABOVE a 14B: on the 16 GB reference card
+# a 27B (~17 GB) is the model that does not fit, and ranking it as merely "medium"
+# is what let the selector reach for it.
+_SMALL_MAX_B = 8.0
+_LARGE_MIN_B = 24.0
+
+
+def param_billions(route_id: str) -> float | None:
+    """Parameter count parsed from a model id, or ``None`` when it declares none.
+
+    ``local.qwen2.5-coder:7b`` -> 7.0; ``local.gemma3:27b`` -> 27.0;
+    ``local.mistral-small3.1:latest`` -> None (the "3.1" is a version, not a size).
+    """
+    m = _PARAM_BILLIONS_RE.search(str(route_id or "").lower())
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:  # pragma: no cover — the regex only matches numerics
+        return None
+
+
 def _default_hints(route_id: str, capability: str) -> tuple[int, int]:
     low = route_id.lower()
-    if any(token in low for token in ("nano", "mini", "haiku", "flash", "lite", "3b", "7b")):
+    # A declared parameter count is the strongest signal and beats the name tokens:
+    # a hosted "mini" is small by convention, but "gemma3:27b" states its size.
+    billions = param_billions(low)
+    if billions is not None:
+        if billions <= _SMALL_MAX_B:
+            return 0, 0
+        if billions >= _LARGE_MIN_B:
+            return 2, 2
+        return 1, 1
+    # No parameter count — fall back to the vendor's size vocabulary.
+    if any(token in low for token in ("nano", "mini", "haiku", "flash", "lite")):
         return 0, 0
-    if any(token in low for token in ("opus", "xhigh", "-max", "70b")):
+    if any(token in low for token in ("opus", "xhigh", "-max")):
         return 2, 2
     rank = {LIGHT: 0, MID: 1, STRONG: 2}.get(capability, 1)
     return rank, rank

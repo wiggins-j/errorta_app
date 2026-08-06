@@ -77,6 +77,12 @@ class LocalCouncilModelResult:
     # repo) from ungrounded (reflex). Optional/additive — a boundary field on the
     # Council-invariant result type; None when the provider doesn't report one.
     num_turns: int | None = None
+    # SPEC-41 Move 1: the model hit its output cap before finishing
+    # (`done_reason == "length"`). Distinct from `is_thinking_burn`, which means the
+    # model produced ONLY a reasoning trace and finished normally. A truncation is
+    # not an answer, and must not be dressed up as one — see the marker suppression
+    # in `_ollama_dispatch`.
+    truncated: bool = False
 
 
 # Legacy Phase-1 providers. F034 extends this dynamically via the
@@ -347,6 +353,31 @@ class LocalGateway:
                 "temperature": request.temperature,
             },
         }
+        # SPEC-41 Moves 2+3 — structured turns.
+        #
+        # The gateway stays dumb: it honours a flag on the request metadata and does
+        # NOT infer turn semantics from the role. The flag is set by the caller, which
+        # is the layer that knows the turn emits a JSON envelope.
+        #
+        # Move 2 (`think: false`). Measured on the reference box (`qwen3.5:9b`,
+        # `/api/chat`, 6 cache-busted trials/arm): reviewer-verdict schema compliance
+        # is 4/6 with thinking on at a sufficient budget vs 6/6 with it off, and mean
+        # generated tokens fall 2197 -> 33 — a ~66x reduction, which on a single local
+        # GPU is a ~100s turn becoming near-instant. Verified harmless on models with
+        # no thinking channel: `qwen2.5-coder:7b` and `gemma3:27b` both return HTTP 200
+        # with correct content when sent the field, so it is unconditional.
+        #
+        # Move 3 (`format: "json"`) is COUPLED to Move 2, not independent. Issue #84's
+        # warning is that constraining the output channel while the thinking channel is
+        # live is the combination that empties `content`; so `format` is sent only when
+        # thinking is also being suppressed. An earlier draft made them orthogonal
+        # knobs, which made the harmful pairing a supported configuration.
+        if request.metadata.get("structured_output"):
+            think_off = bool(request.metadata.get("local_think_false", True))
+            if think_off:
+                body["think"] = False
+                if request.metadata.get("local_structured_format", True):
+                    body["format"] = "json"
         start = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=request.timeout_seconds) as client:
@@ -387,7 +418,18 @@ class LocalGateway:
         # THINKING_TRACE_MARKER + text so it's distinguishable from a normal
         # answer. The scheduler stamps is_thinking_burn=True on the result so
         # the frontend can detect it structurally instead of matching the string.
-        if not content.strip():
+        # SPEC-41 Move 1: a TRUNCATION is not a thinking-burn, and must not be
+        # disguised as one. `done_reason == "length"` means the model hit num_predict
+        # before finishing — measured on the reference box, `qwen3.5:9b` spends ~2,000
+        # tokens reasoning before it answers, so a budget below that clips it
+        # mid-thought. Substituting MARKER+thinking there hands the council a partial
+        # reasoning trace PRESENTED AS AN ANSWER, which is exactly how a truncation
+        # surfaces downstream as F001's "wrong-schema JSON".
+        #
+        # The marker is kept for its actual purpose: a model that finished normally
+        # (`done_reason == "stop"`) having emitted only a reasoning trace.
+        truncated = str((data or {}).get("done_reason") or "") == "length"
+        if not content.strip() and not truncated:
             thinking = message.get("thinking")
             if isinstance(thinking, str) and thinking.strip():
                 content = f"{THINKING_TRACE_MARKER} {thinking.strip()}"
@@ -409,6 +451,7 @@ class LocalGateway:
             duration_ms=duration_ms,
             raw_usage_available=(input_tokens is not None and output_tokens is not None),
             is_thinking_burn=content.startswith(THINKING_TRACE_MARKER),
+            truncated=truncated,
         )
 
     async def is_reachable(self) -> bool:

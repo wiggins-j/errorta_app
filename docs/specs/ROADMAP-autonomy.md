@@ -44,6 +44,14 @@ Count the primitives. The engine can end a run **~12 ways** — `no_progress`,
 `budget_exhausted`. It can **recover roughly two** ways: the F127 escalate-up
 ladder and GL04's convergence clamp.
 
+**On an all-local deployment it recovers one way.** Every `local.*` route is
+hardcoded to the `mid` tier, and the escalate-up ladder requires *strictly*
+greater capability — so it can never fire against a local pool
+([#82](https://github.com/wiggins-j/errorta_app/issues/82), verified by
+executing the selector). Local-only runs face the same ~12 stop reasons with
+half the recovery surface. Evidence:
+[`docs/coding/LOCAL_MODEL_SELECTION_RX9060XT.md`](../coding/LOCAL_MODEL_SELECTION_RX9060XT.md).
+
 That asymmetry is the product defect. It was earned honestly — the 2026-07-24
 run looped forever, so the batch that followed added stop conditions. We
 over-corrected into a system that halts eagerly on runs that are working. **For
@@ -115,6 +123,23 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
 | **SPEC-26** | Role capability closure | Make grant-or-delete binding at seat time: a role whose duty needs an executor either gets one or is not seated (explicit override allowed). Closes G4 — and retires an advisory that has fired on every run and never resolved. |
 | **SPEC-27** | Convergence as control, not kill | Rework the detector family so the default action is to *narrow* — clamp fan-out, escalate, re-plan — and terminate only when interventions are exhausted. GL04's hysteretic clamp is the model; generalise it across the ~12 stop reasons. |
 
+**Local-runtime correctness (unscheduled).** Four measured defects that make the
+local gateway behave differently from the remote one. These are integration
+bugs, not model-capability questions — see the note under *Explicitly not in
+scope*. Full data and repro:
+[`docs/coding/LOCAL_MODEL_SELECTION_RX9060XT.md`](../coding/LOCAL_MODEL_SELECTION_RX9060XT.md).
+
+| Issue | Defect | Why it belongs here |
+|---|---|---|
+| [#82](https://github.com/wiggins-j/errorta_app/issues/82) | All `local.*` routes hardcoded to `mid` | Kills the F127 escalate-up ladder — one of only two recovery mechanisms — and makes `difficulty_tier: "strong"` unservable locally. Closest fit to SPEC-27. |
+| [#81](https://github.com/wiggins-j/errorta_app/issues/81) | Thinking models return empty `response`; output lands in `thinking` | A structural expressibility failure of the G1 kind: the agent answered correctly and the harness discarded it. Likely the real cause of the F001 judge-schema drift. |
+| [#83](https://github.com/wiggins-j/errorta_app/issues/83) | `"27b"` matches `"7b"` in size hints | Selector picks a model too large for the GPU, so the run stalls in CPU offload — a silent `dispatch_wedged` source. |
+| [#84](https://github.com/wiggins-j/errorta_app/issues/84) | Constrained decoding never used | Structured turns depend on regex extraction; 0/6 clean without `format`. Feeds schema-rejection idleness, which SPEC-25 is trying to stop counting. |
+
+Sequencing note: #81 and #83 are small and independent. #82 overlaps SPEC-27 and
+should be folded into it rather than fixed twice. #84 must not ship before #81 —
+enabling `format` on a thinking route makes the empty-`response` failure worse.
+
 ### Phase 4 — Prove it
 
 | Spec | Title | Why |
@@ -138,7 +163,10 @@ Four phases, seven specs. Ordered so each phase makes the next one verifiable.
   found no accuracy edge for multi-agent, but that is a product question, not
   this roadmap's.
 - Model/provider changes. Every failure here reproduced on a frontier model in
-  every seat; none is a capability problem.
+  every seat; none is a capability problem. **This still holds** — the
+  local-runtime items above are not model swaps. They are defects in how the
+  gateway tiers, selects, and decodes, and each reproduces regardless of which
+  local model is seated. Which local model to *prefer* remains out of scope.
 - Retuning thresholds. Tuning is what produced this state — the point is to
   change what a threshold *does*, not what it equals.
 - Backfilling docs for Spec 20/21 (shipped code-only). Worth doing; not on the

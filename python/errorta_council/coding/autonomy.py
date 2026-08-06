@@ -373,6 +373,32 @@ class CodingAutonomyPolicy:
     # frozen but the dict is not — treat it as read-only; `policy_from_dict` always
     # builds a fresh copy so a persisted policy can never alias a caller's dict.
     capability_overrides: dict[str, Any] = field(default_factory=dict)
+    # SPEC-42: resolve a coding turn's output budget from the model instead of the
+    # hardcoded 2048 in `gateway_member_caller`. A reasoning model spends its budget on
+    # a hidden trace BEFORE the answer — `qwen3.5:9b` averages 2197 generated tokens on
+    # a reviewer verdict — so 2048 truncated every such turn, and gateway_local's
+    # THINKING_TRACE_MARKER substitution then handed the council the reasoning trace
+    # disguised as an answer. Applies to LOCAL routes only: hosted handlers treat
+    # max_output_tokens as a hard cap, and raising it there would change paid-token
+    # behaviour this spec puts out of scope.
+    #
+    # False SUPPRESSES the model-derived default — falling through to today's
+    # `turn_limits`-or-2048 resolution. It must never IMPOSE the legacy literals: real
+    # teams persist 8192/6144 with no timeout_seconds, so stamping 2048 over those
+    # would be a 4x demotion of a deliberate operator budget.
+    reasoning_output_budget: bool = True
+    # SPEC-41 Move 2: send `think: false` on structured LOCAL turns. Measured on the
+    # reference box: reviewer-verdict schema compliance 4/6 -> 6/6, and mean generated
+    # tokens 2197 -> 33 (~66x), i.e. a ~100s turn becoming near-instant. Verified
+    # harmless on models with no thinking channel. False leaves thinking on.
+    local_think_false: bool = True
+    # SPEC-41 Move 3: send `format: "json"` on structured LOCAL turns. Models emit
+    # valid JSON but fence-wrapped 0/6 of the time without it, so every structured
+    # turn currently rides on extraction heuristics. GATED on local_think_false —
+    # issue #84's warning is that constraining the output channel while the thinking
+    # channel is live is what empties `content`, so the harmful pairing is unreachable
+    # rather than merely discouraged. False sends no `format`.
+    local_structured_format: bool = True
     # F156 (G5): how many PRs in ONE run may merge on a tester `not_applicable`
     # declaration before the run surfaces an operator-visible escalation instead of a
     # deduped non-blocking alert. Deliberately NOT a hard cap: a partial slice
@@ -476,6 +502,11 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         # Copy: the returned dict is persisted/serialized by callers, and handing
         # out the policy's own dict would let a caller mutate a frozen policy.
         "capability_overrides": dict(p.capability_overrides),
+        # SPEC-42 — the model-derived per-turn output budget.
+        "reasoning_output_budget": p.reasoning_output_budget,
+        # SPEC-41 — structured-turn decoding.
+        "local_think_false": p.local_think_false,
+        "local_structured_format": p.local_structured_format,
         # F156 (G5) — bound the tester's not_applicable escape.
         "not_applicable_soft_limit": p.not_applicable_soft_limit,
         # F154 — the zero-config compile floor for test-less projects.
@@ -627,6 +658,13 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # degrade to "no overrides" rather than crash policy load for the whole run.
         capability_overrides=_coerce_overrides(
             d.get("capability_overrides"), base.capability_overrides),
+        # SPEC-42: a plain bool; absent key -> the dataclass default (ON).
+        reasoning_output_budget=bool(
+            d.get("reasoning_output_budget", base.reasoning_output_budget)),
+        local_think_false=bool(
+            d.get("local_think_false", base.local_think_false)),
+        local_structured_format=bool(
+            d.get("local_structured_format", base.local_structured_format)),
         # F156 (G5): `max(0, …)` — NOT max(1) — so 0 disables the escalation
         # entirely, matching the gate_stall_limit / plan_streak_limit convention.
         not_applicable_soft_limit=max(

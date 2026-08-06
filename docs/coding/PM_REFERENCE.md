@@ -632,6 +632,29 @@ and FastAPI routers. Update the prose and this contract together.
 > `governance_proximity`, `{}` for `capability_overrides` — is required to
 > reproduce today's behaviour exactly, and stays required after its spec lands.
 
+> **SPEC-42 — `reasoning_output_budget` (true).** Resolve a coding turn's output
+> budget from the model rather than the hardcoded 2048. A reasoning model spends its
+> budget on a hidden trace *before* the visible answer — `qwen3.5:9b` averages 2197
+> generated tokens on a reviewer verdict — so 2048 truncated every such turn, and the
+> empty `content` then reached the council disguised as an answer by the
+> `THINKING_TRACE_MARKER` substitution. A matched model gets 8192 and a 300 s timeout
+> floor. **Local routes only:** hosted handlers treat `max_output_tokens` as a hard
+> cap, so raising it there would change paid-token behaviour. An explicit
+> `turn_limits.max_output_tokens` always wins. Disable value `false` **suppresses** the
+> derived default (falling back to today's resolution) — it never imposes the legacy
+> literals, because real teams persist 8192/6144 and stamping 2048 over those would be
+> a 4× demotion.
+
+> **SPEC-41 — `local_think_false` (true) and `local_structured_format` (true).**
+> Structured LOCAL turns send `think: false`, and `format: "json"` with it.
+> Measured on the reference box: reviewer-verdict schema compliance 4/6 -> 6/6 with
+> thinking off, and mean generated tokens 2197 -> 33 (~66x — a ~100 s turn becoming
+> near-instant on one GPU). Without `format`, models emit valid JSON but fence-wrapped
+> 0/6 of the time, so every structured turn otherwise rides on extraction heuristics.
+> **The two are coupled, not independent:** `format` is sent only when thinking is
+> also suppressed, because constraining the output channel while the thinking channel
+> is live is the combination that empties `content` (issue #84). Disabling
+> `local_think_false` therefore also suppresses `format`.
 > **F156 (G5) — `not_applicable_soft_limit` (3).** How many PRs in ONE run may merge
 > on a tester `not_applicable` declaration before the run records an
 > operator-visible `tests_not_applicable_over_limit` decision instead of only the
@@ -701,6 +724,8 @@ and FastAPI routers. Update the prose and this contract together.
     "hot_file_freeze_stall_limit": 15,
     "hot_file_threshold": 2,
     "last_word_limit": 2,
+    "local_structured_format": true,
+    "local_think_false": true,
     "max_iterations": 200,
     "max_model_calls": null,
     "max_parallel_workers": null,
@@ -712,6 +737,7 @@ and FastAPI routers. Update the prose and this contract together.
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
+    "reasoning_output_budget": true,
     "probe_adaptive_sweep": true,
     "probe_mechanic_advisory": true,
     "probe_pr_gating": true,

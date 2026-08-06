@@ -140,16 +140,23 @@ def _exc_detail(exc: BaseException, *, limit: int = 500) -> str:
 # a hidden reasoning trace before the visible answer and need a larger default
 # output budget or they thinking-burn (no visible answer). Matched case-insensitively
 # against the member's model id; a per-member max_output_tokens always overrides.
-_REASONING_MODEL_MARKERS = (
-    "qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "r1-", "-r1",
-    "thinking", "reasoning", "o1", "o3", "gpt-5-thinking",
+# SPEC-42: the marker list and the budget constants moved to the stdlib-only leaf
+# `errorta_council.reasoning_budget` so the CODING council can share them — it builds
+# its own gateway request in `coding/runner.py` and never dispatched through this
+# class, so it was hardcoding 2048 against a measured 2197-token mean. Re-exported
+# here under the original private names: the scheduler's behaviour is unchanged, and
+# `_is_reasoning_model` stays a module-level symbol because existing tests and the
+# eval scripts' headers name it.
+from errorta_council import reasoning_budget as _rb  # noqa: E402
+
+# Re-exported under the original private names: existing tests and the eval scripts'
+# headers reference both, so they stay importable from `scheduler`.
+from errorta_council.reasoning_budget import (  # noqa: E402,F401
+    REASONING_MODEL_MARKERS as _REASONING_MODEL_MARKERS,
 )
-
-
-def _is_reasoning_model(model: str) -> bool:
-    name = model.lower()
-    return any(marker in name for marker in _REASONING_MODEL_MARKERS)
-
+from errorta_council.reasoning_budget import (  # noqa: E402
+    is_reasoning_model as _is_reasoning_model,
+)
 
 _CREDIBILITY_TYPE_BY_SUFFIX: tuple[tuple[str, str], ...] = (
     (".gov", "government"),
@@ -1729,13 +1736,17 @@ class TurnScheduler:
     # models get 2048; known reasoning families default higher so they finish
     # thinking AND answer. Either way, a per-member turn_limits.max_output_tokens
     # always wins.
-    DEFAULT_MAX_OUTPUT_TOKENS = 2048
-    REASONING_MAX_OUTPUT_TOKENS = 8192
+    # SPEC-42: bound to the shared leaf's constants rather than re-declared, so the
+    # scheduler and the coding council cannot drift. These stay CLASS attributes —
+    # they are read as `self.DEFAULT_MAX_OUTPUT_TOKENS` below and are overridable per
+    # instance, which moving them to bare module reads would have broken.
+    DEFAULT_MAX_OUTPUT_TOKENS = _rb.DEFAULT_MAX_OUTPUT_TOKENS
+    REASONING_MAX_OUTPUT_TOKENS = _rb.REASONING_MAX_OUTPUT_TOKENS
     # Reasoning models generate a long hidden trace before answering, so they
     # need more wall-clock than a normal turn. Give them at least this many
     # seconds regardless of the (smaller) policy default, or the bigger budget
     # just trades a thinking-burn for a timeout.
-    REASONING_TIMEOUT_FLOOR_SECONDS = 300
+    REASONING_TIMEOUT_FLOOR_SECONDS = _rb.REASONING_TIMEOUT_FLOOR_SECONDS
 
     def _base_output_tokens_for(self, member: dict) -> int:
         explicit = member.get("max_output_tokens")
@@ -2777,7 +2788,12 @@ class TurnScheduler:
                 timeout=self._per_turn_timeout_for(judge_turn),
             )
             text = str(getattr(result, "content", "") or "").strip()
-            if text and not getattr(result, "is_thinking_burn", False):
+            # SPEC-41 Move 1: a TRUNCATED result is not an answer either. Before the
+            # marker suppression a clipped turn arrived prefixed and was rejected by
+            # the is_thinking_burn test; now it arrives as bare partial text, so the
+            # truncation flag has to carry that rejection.
+            if (text and not getattr(result, "is_thinking_burn", False)
+                    and not getattr(result, "truncated", False)):
                 self._credibility_judge_answer = text
         except Exception:
             self._credibility_judge_answer = ""
@@ -2971,7 +2987,11 @@ class TurnScheduler:
                 self._gateway.call(request),
                 timeout=self._per_turn_timeout_for(synth_member),
             )
-            if getattr(result, "is_thinking_burn", False) or not str(result.content).strip():
+            # SPEC-41 Move 1: `truncated` joins the existing burn/blank rejection —
+            # a clipped finalizer output is not a finalizer answer.
+            if (getattr(result, "is_thinking_burn", False)
+                    or getattr(result, "truncated", False)
+                    or not str(result.content).strip()):
                 return None
             return {
                 "content": result.content,
@@ -3951,7 +3971,15 @@ class TurnScheduler:
             # Record the answer-of-record for the terminal FINAL_ANSWER event.
             # Thinking-burn outputs (no visible answer) never become the
             # final answer. A finalizer's message takes precedence.
-            if not result.is_thinking_burn:
+            #
+            # SPEC-41 Move 1: this gate checked ONLY is_thinking_burn, so it was the
+            # one that regressed two ways once the marker stopped being substituted
+            # on a truncation — a clipped answer would be recorded as complete, and
+            # an EMPTY one would be recorded at all (the other two gates already test
+            # blankness independently; this one never did).
+            if (not result.is_thinking_burn
+                    and not getattr(result, "truncated", False)
+                    and str(result.content).strip()):
                 answer = {
                     "content": result.content,
                     "member_id": member["id"],

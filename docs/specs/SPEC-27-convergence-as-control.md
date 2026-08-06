@@ -561,6 +561,58 @@ recorded no-op that advances the rung without consuming `narrow_limit`.
   count of ways to *die*") is what this spec is measured against: it takes the
   recovery count from 2 to 2 + one bounded ladder per heuristic reason.
 
+## Amendment — issue #82: the escalate rung is structurally dead on an all-local pool
+
+**Folded in here rather than patched separately**, because it is not a bug in the
+F127/F129 ladder's logic — it is this spec's `Escalate` rung being *unreachable* on a
+whole class of deployment, which invalidates the boundedness accounting in Item 4.
+
+**Measured** (see `docs/coding/LOCAL_MODEL_SELECTION_RX9060XT.md`, issue #82):
+
+- `model_tier.tier_for_route` (`model_tier.py:42-43`) returns `MID` for any route
+  starting `local.` / `fake.`, **before** any marker matching. Every local route is
+  therefore exactly `mid`, whatever its size.
+- `next_escalation_assignment` (`model_assignment.py:167-171`) selects with
+  `minimum_rank_exclusive=current_rank` — **strictly** greater capability. On an
+  all-local pool no candidate can satisfy that, so `select()` returns
+  `NoCapableModel`, the function returns `None`, and the F129 stronger-route rung
+  is skipped.
+
+**Why this spec owns it.** ROADMAP-autonomy counts ~12 ways to halt against two ways
+to recover. On an all-local pool one of those two is structurally impossible, so the
+real count is **one**. Worse for Item 4's bound: the rung does not *fail*, it
+*vanishes* — `next_escalation_assignment` returning `None` is indistinguishable from
+"this rung was never applicable", so a ladder that silently loses a rung still
+reports a full, bounded ladder. The intervention budget is over-counted exactly on
+the deployments with the least headroom.
+
+**The fix, in two parts.**
+
+1. **Derive a real capability tier for local routes** instead of the blanket `MID`.
+   The signal now exists: issue #83 added `model_catalog.param_billions()`, which
+   parses an anchored parameter count from a model id. Map it —
+   `≤8B → light`, `9–23B → mid`, `≥24B → strong` — so a pool of
+   `qwen2.5-coder:7b` / `qwen3.5:9b` / `gemma3:27b` presents three distinct ranks
+   and the strictly-greater comparison can actually be satisfied. A route that
+   declares no parameter count keeps today's `MID` default (never assume), and an
+   explicit `metadata.model_tier` override still wins.
+2. **Make an unavailable rung observable rather than silent.** When a ladder rung
+   cannot be applied because no candidate exists — not because it was tried and
+   failed — record it (a `rung_unavailable` decision naming the rung and the
+   reason) and advance to the next rung explicitly. This keeps Item 4's bound
+   honest: the ladder's recorded length is then the ladder actually walked.
+
+**Deliberately NOT in this amendment.** A VRAM-fit check. `param_billions` gives a
+size *ordering*, not a fit decision — nothing in the catalog knows the card, and a
+27B route is legitimately `strong` on a machine that can run it. Escalating to a
+model that will not fit is a real risk on the 16 GB reference box, but it belongs
+with model availability, not with the convergence ladder.
+
+**Acceptance.** On a pool of three local routes of different sizes, a task that
+exhausts its corrective retries escalates to a strictly larger local model at least
+once (today: never). With a single local route the rung is recorded as unavailable
+rather than silently skipped, and the ladder still terminates exactly as it does now.
+
 ## Out of scope / follow-ups
 
 - **SPEC-24 (governance visibility).** Rendering live ladder state — "you are on

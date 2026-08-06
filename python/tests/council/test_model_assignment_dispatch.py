@@ -67,7 +67,11 @@ def test_bind_member_route_static_remote_to_local() -> None:
 
     assert bound["provider_kind"] == "local"
     assert bound["gateway_route_id"] == "local.ollama.qwen:7b"
-    assert bound["model"] == "ollama.qwen:7b"
+    # The route keeps its transport segment; the model id must NOT. `ollama.` is
+    # how the registry names the transport, not part of the model's name, and
+    # POSTing {"model": "ollama.qwen:7b"} to /api/chat is a 404 at Ollama.
+    assert bound["model"] == "qwen:7b"
+    assert bound["model_display"] == "qwen:7b"
 
 
 def _scheduler_source() -> str:
