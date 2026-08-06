@@ -373,6 +373,20 @@ class CodingAutonomyPolicy:
     # frozen but the dict is not — treat it as read-only; `policy_from_dict` always
     # builds a fresh copy so a persisted policy can never alias a caller's dict.
     capability_overrides: dict[str, Any] = field(default_factory=dict)
+    # SPEC-42: resolve a coding turn's output budget from the model instead of the
+    # hardcoded 2048 in `gateway_member_caller`. A reasoning model spends its budget on
+    # a hidden trace BEFORE the answer — `qwen3.5:9b` averages 2197 generated tokens on
+    # a reviewer verdict — so 2048 truncated every such turn, and gateway_local's
+    # THINKING_TRACE_MARKER substitution then handed the council the reasoning trace
+    # disguised as an answer. Applies to LOCAL routes only: hosted handlers treat
+    # max_output_tokens as a hard cap, and raising it there would change paid-token
+    # behaviour this spec puts out of scope.
+    #
+    # False SUPPRESSES the model-derived default — falling through to today's
+    # `turn_limits`-or-2048 resolution. It must never IMPOSE the legacy literals: real
+    # teams persist 8192/6144 with no timeout_seconds, so stamping 2048 over those
+    # would be a 4x demotion of a deliberate operator budget.
+    reasoning_output_budget: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -429,6 +443,8 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         # Copy: the returned dict is persisted/serialized by callers, and handing
         # out the policy's own dict would let a caller mutate a frozen policy.
         "capability_overrides": dict(p.capability_overrides),
+        # SPEC-42 — the model-derived per-turn output budget.
+        "reasoning_output_budget": p.reasoning_output_budget,
     }
 
 
@@ -571,6 +587,9 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # degrade to "no overrides" rather than crash policy load for the whole run.
         capability_overrides=_coerce_overrides(
             d.get("capability_overrides"), base.capability_overrides),
+        # SPEC-42: a plain bool; absent key -> the dataclass default (ON).
+        reasoning_output_budget=bool(
+            d.get("reasoning_output_budget", base.reasoning_output_budget)),
     )
 
 

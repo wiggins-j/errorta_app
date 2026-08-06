@@ -55,6 +55,41 @@ from ._residency_proxy import refuse_local_dataplane_if_remote
 
 router = APIRouter(prefix="/coding", tags=["coding"])
 
+# SPEC-42 Move 4: the interactive turn-timeout ceiling, and the reasoning floor.
+_INTERACTIVE_TIMEOUT_CEILING_SECONDS = 120
+
+
+def _interactive_turn_timeout(member: dict[str, Any], configured: int) -> int:
+    """Bound an interactive (pm-ask / directive-interpreter) turn's wall clock.
+
+    Non-reasoning routes keep today's behaviour exactly: ``min(configured, 120)``.
+
+    A reasoning route gets a FLOOR of 240 s instead. It cannot be expressed as a
+    looser ceiling — ``min()`` can only lower a value, and persisted coding members
+    carry no ``turn_limits`` at all, so ``configured`` *is* the 90/120 default and
+    ``min(90, 240)`` would still be 90. The model needs ~2,000 tokens of reasoning
+    before it answers; at 90 s it is cut off mid-thought.
+
+    240 s is a deliberate ceiling, not headroom: a full 8192-token burn is ~370 s at
+    the ~22 tok/s measured on the reference box, so a pathological interactive turn
+    still times out. That is the intended trade — an interactive chat that hangs for
+    six minutes is a worse product than one that reports a timeout. The loop path is
+    unaffected and keeps 600 s.
+
+    The model id is resolved the way the gateway seam resolves it: a persisted member
+    has no ``model`` key, so testing ``member.get("model")`` would never fire on the
+    very members this targets.
+    """
+    from errorta_council.coding.runner import _member_model_id
+    from errorta_council.reasoning_budget import (
+        INTERACTIVE_REASONING_TIMEOUT_SECONDS,
+        is_reasoning_model,
+    )
+
+    if is_reasoning_model(_member_model_id(member)):
+        return INTERACTIVE_REASONING_TIMEOUT_SECONDS
+    return min(configured, _INTERACTIVE_TIMEOUT_CEILING_SECONDS)
+
 
 def _alpha_enforce_not_locked() -> None:
     from errorta_alpha.state import enforce_not_locked
@@ -1878,7 +1913,16 @@ def pm_ask(project_id: str, body: dict[str, Any], request: Request) -> dict[str,
             configured = int(tl.get("timeout_seconds", 90) or 90)
         except (TypeError, ValueError):
             configured = 90
-        tl["timeout_seconds"] = min(configured, 120)
+        # SPEC-42 Move 4: a reasoning model spends ~2,000 tokens thinking before it
+        # answers, so 90s/120s cuts an interactive PM turn off mid-reasoning. It needs
+        # a FLOOR, not a tighter ceiling — an earlier draft proposed changing the
+        # clamp to min(configured, 240), which is a literal no-op because min() cannot
+        # raise a value (min(90, 240) == 90).
+        #
+        # Resolve the model the same way the gateway seam does: a persisted member
+        # carries no `model` key, so keying on m.get("model") would never fire on the
+        # exact members this targets.
+        tl["timeout_seconds"] = _interactive_turn_timeout(m, configured)
         m["turn_limits"] = tl
         from errorta_council.coding.runner import gateway_member_caller
         from errorta_council.gateway_local import LocalGateway
@@ -2168,7 +2212,8 @@ def _pm_complete(store: Any) -> "Any":
         configured = int(tl.get("timeout_seconds", 120) or 120)
     except (TypeError, ValueError):
         configured = 120
-    tl["timeout_seconds"] = min(configured, 120)
+    # SPEC-42 Move 4 — see the note on the pm-ask path; same floor, same reason.
+    tl["timeout_seconds"] = _interactive_turn_timeout(m, configured)
     m["turn_limits"] = tl
     caller = gateway_member_caller(LocalGateway())
     return lambda prompt: caller(m, prompt)

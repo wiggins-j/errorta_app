@@ -107,6 +107,11 @@ def _member_vendor(member: dict[str, Any]) -> str:
     return route_id or str(member.get("provider_kind") or "")
 
 
+from errorta_council.reasoning_budget import (  # noqa: E402
+    resolve_turn_budget as _resolve_turn_budget,
+)
+
+
 def _member_model_id(member: dict[str, Any]) -> str:
     """The provider-side model id for a member's gateway request.
 
@@ -5337,6 +5342,14 @@ def build_run_turn(
     guardrail_enabled: bool,
     should_cancel: Optional[Callable[[], bool]] = None,
     dev_repo_read: bool = False,
+    # SPEC-42: policy gate for the model-derived per-turn output budget. Reaches the
+    # turn by the same route as `dev_repo_read` — the seam
+    # `gateway_member_caller(gateway) -> (member, prompt) -> str` takes no policy, so
+    # the flag rides the per-turn member copy set in the shadowing `caller` below.
+    # Default True so the six in-loop call sites get the fix; the paths that build
+    # their own caller (wizard, pm-ask, the directive interpreter, the scripts) also
+    # get it, since the seam defaults the flag on when the member does not carry it.
+    reasoning_output_budget: bool = True,
     reviewer_repo_read: bool = False,
     review_min_latency_ms: int = 0,
     role_closure_state: Optional["RoleClosure"] = None,
@@ -5383,6 +5396,12 @@ def build_run_turn(
 
     def caller(member: dict[str, Any], prompt: str) -> str:  # noqa: F811 (intentional shadow)
         _cap = _cap_of()
+        # SPEC-42: carry the policy gate on the per-turn member copy. Suppression
+        # only — never stamp a budget literal into `turn_limits`: two live teams
+        # persist an operator-set 8192/6144, and writing the legacy 2048 over those
+        # would be a 4x demotion of a deliberate choice.
+        if not reasoning_output_budget:
+            member = {**member, "reasoning_output_budget": False}
         # F120: a member CALL that fails (logged-out CLI, missing binary, 401/429,
         # unparseable output) raises a gateway FatalError/RetryableError here. We
         # classify it into a typed MemberFailure and re-raise a control-flow
@@ -7647,13 +7666,32 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
         if (isinstance(repo_read_root, str) and repo_read_root.strip()
                 and _vendor_honors_repo_read(member)):
             metadata["repo_read_root"] = repo_read_root.strip()
+        # SPEC-42: resolve the per-turn budget from the model instead of hardcoding
+        # 2048. A reasoning model spends its budget on a hidden trace BEFORE the
+        # answer — `qwen3.5:9b` averages 2197 generated tokens on a reviewer verdict —
+        # so 2048 truncated every such turn and the empty `content` then arrived at
+        # the council disguised as an answer by gateway_local's THINKING_TRACE_MARKER
+        # substitution. An explicit `turn_limits` value always wins.
+        #
+        # The vendor gate is mandatory, not a refinement: this seam is
+        # provider-agnostic and the marker list matches real HOSTED ids
+        # (`openai.o1`/`o3`, `*-thinking`), whose handlers treat max_output_tokens as
+        # a hard cap — raising it there would silently change paid-token behaviour
+        # that SPEC-42 puts out of scope.
+        _model_id = _member_model_id(member)
+        _budget = _resolve_turn_budget(
+            _model_id,
+            explicit=tl,
+            enabled=(_member_vendor(member) == "local"
+                     and bool(member.get("reasoning_output_budget", True))),
+        )
         req = LocalCouncilModelRequest(
             role=str(member.get("role", "answerer")),
             route_id=str(member.get("gateway_route_id", "")),
             provider=str(member.get("provider_kind", "local")),
-            model=_member_model_id(member),
+            model=_model_id,
             messages=[{"role": "user", "content": prompt}],
-            max_output_tokens=int(tl.get("max_output_tokens", 2048) or 2048),
+            max_output_tokens=_budget[0],
             temperature=float(gen.get("temperature", 0.3) or 0.3),
             metadata=metadata,
             # CLI-backed members (claude_cli/codex_cli/cursor_cli) run a full agentic loop per
@@ -7661,7 +7699,7 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
             # constantly (each crash requeues the task, so the team spun without
             # landing anything). Default to 10 min; per-room override via
             # turn_limits.timeout_seconds.
-            timeout_seconds=int(tl.get("timeout_seconds", 600) or 600),
+            timeout_seconds=_budget[1],
         )
         from errorta_model_gateway.loop_bridge import run_coro
         result = run_coro(gateway.call(req))
@@ -7861,6 +7899,8 @@ class CodingRunner:
             guardrail_enabled=self.guardrail_enabled,
             should_cancel=should_cancel,
             dev_repo_read=bool(getattr(policy, "dev_repo_read", False)),
+            reasoning_output_budget=bool(
+                getattr(policy, "reasoning_output_budget", True)),
             reviewer_repo_read=bool(getattr(policy, "reviewer_repo_read", False)),
             review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)),
             role_closure_state=role_closure_state)

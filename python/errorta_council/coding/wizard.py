@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from errorta_council.reasoning_budget import (
+    INTERACTIVE_REASONING_TIMEOUT_SECONDS,
+    is_reasoning_model,
+)
+
 from .ledger import _atomic_write_json, _now
 
 MODALITIES = ("static", "server", "cli", "desktop", "binary", "container")
@@ -215,11 +220,28 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 def _synthetic_member(route: str) -> dict[str, Any]:
     provider = route.split(".", 1)[0] if "." in route else "local"
+    # SPEC-42 Move 4: this is the Wizard's OWN conversational PM, built fresh per call
+    # and never persisted to a team. It is also the only one of the three interactive
+    # paths that ASSIGNS its limits directly (pm-ask and the directive interpreter
+    # clamp with `min()`), so it is the only one where a literal here has any effect.
+    #
+    # `max_output_tokens` is dropped entirely: with it absent, `gateway_member_caller`
+    # resolves the model-derived budget, so a reasoning route gets 8192 instead of
+    # being truncated at 2048 mid-reasoning. A hardcoded 2048 here would have
+    # out-ranked that resolution, because explicit always wins.
+    #
+    # The timeout is a floor for reasoning routes only. 240 s is a deliberate CEILING
+    # against a full 8192 burn (~370 s at the ~22 tok/s measured on the reference
+    # box), not headroom — an interactive chat that hangs for six minutes is a worse
+    # product than one that reports a timeout.
+    model_id = route.split(".", 1)[1] if "." in route else route
+    timeout = (INTERACTIVE_REASONING_TIMEOUT_SECONDS
+               if is_reasoning_model(model_id) else 120)
     return {
         "id": "wizard", "role": "answerer", "coding_role": "pm",
         "gateway_route_id": route, "provider_kind": provider,
         "model_mode": "single",
-        "turn_limits": {"timeout_seconds": 120, "max_output_tokens": 2048},
+        "turn_limits": {"timeout_seconds": timeout},
     }
 
 

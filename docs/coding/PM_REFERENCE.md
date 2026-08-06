@@ -632,6 +632,19 @@ and FastAPI routers. Update the prose and this contract together.
 > `governance_proximity`, `{}` for `capability_overrides` — is required to
 > reproduce today's behaviour exactly, and stays required after its spec lands.
 
+> **SPEC-42 — `reasoning_output_budget` (true).** Resolve a coding turn's output
+> budget from the model rather than the hardcoded 2048. A reasoning model spends its
+> budget on a hidden trace *before* the visible answer — `qwen3.5:9b` averages 2197
+> generated tokens on a reviewer verdict — so 2048 truncated every such turn, and the
+> empty `content` then reached the council disguised as an answer by the
+> `THINKING_TRACE_MARKER` substitution. A matched model gets 8192 and a 300 s timeout
+> floor. **Local routes only:** hosted handlers treat `max_output_tokens` as a hard
+> cap, so raising it there would change paid-token behaviour. An explicit
+> `turn_limits.max_output_tokens` always wins. Disable value `false` **suppresses** the
+> derived default (falling back to today's resolution) — it never imposes the legacy
+> literals, because real teams persist 8192/6144 and stamping 2048 over those would be
+> a 4× demotion.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -676,6 +689,7 @@ and FastAPI routers. Update the prose and this contract together.
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
+    "reasoning_output_budget": true,
     "review_min_latency_ms": 0,
     "review_screenshot": false,
     "revert_overlap": 0.7,
