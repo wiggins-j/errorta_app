@@ -272,6 +272,74 @@ symptom.
 **Recommended:** set `think: false` on every structured turn, then re-evaluate
 whether the `mistral-small3.1` judge fallback is needed at all.
 
+---
+
+#### 4.1a Follow-up validation — the mechanism above is wrong; the cause is the token budget
+
+The §4.1 measurement used `/api/generate`. The council does **not** use that route:
+`gateway_local._ollama_dispatch` posts to `/api/chat`. Re-running on `/api/chat`
+against the same model on the same box changes the conclusion.
+
+**The stated mechanism does not reproduce.** On `/api/chat`, thinking-on returns an
+empty `content` with **or without** `format`, and the thinking channel holds *prose*,
+not the `{"action": "generate_response", …}` JSON §4.1 captured. So "the JSON
+constraint is applied to the thinking channel" is not what is happening here —
+`format` is not the trigger.
+
+**What is actually happening: the generation is truncated.** Repro scripts:
+[`model-eval/thinking_format_matrix.py`](model-eval/thinking_format_matrix.py),
+[`model-eval/decisive_budget_test.py`](model-eval/decisive_budget_test.py),
+[`model-eval/budget_vs_think.py`](model-eval/budget_vs_think.py).
+
+| `num_predict` | thinking | `format` | `content` | `done_reason` | schema |
+|---|---|---|---|---|---|
+| 512 | on | off | **empty** | `length` | — |
+| 512 | on | on | **empty** | `length` | — |
+| 800 (harness) | on | off | 1/6 valid | `length` ×5, `stop` ×1 | 1/6 |
+| **8192 (council)** | **on** | off | **274 chars** | **`stop`** | **valid** |
+| 8192 | on | on | 274 chars | `stop` | valid |
+
+`qwen3.5:9b` emits ~8.3k characters (~1,950 tokens) of thinking before it answers.
+Any budget under ~2,000 truncates it mid-thought — `done_reason: length`, not a
+malformed model. **The eval harnesses used `num_predict: 800`**
+([`schema_test.py:105`](model-eval/schema_test.py), [`retest_qwen35.py:61`](model-eval/retest_qwen35.py))
+and `1600` ([`correctness.py:543`](model-eval/correctness.py)) — roughly a tenth of
+what the council sends.
+
+**The council was never affected on this path.** `scheduler._is_reasoning_model`
+matches `"qwen3"`, so a real turn already gets
+`REASONING_MAX_OUTPUT_TOKENS = 8192` plus a 300 s timeout floor. The comment at
+`scheduler.py:1727` names this exact failure mode: a low budget "makes them emit a
+thinking-burn with no answer."
+
+**Consequences.**
+
+* **F001's `mistral-small3.1` recommendation is unfounded** *on this evidence*. The
+  judge-schema failure it cites is reproduced by a harness misconfiguration, not by
+  the model. The 15 GB co-residency cost buys nothing here. (It does not follow that
+  F001's *observed* judge problems were all this — they were seen through a
+  different harness. It follows that §4.1 is not the evidence for them.)
+* **`think: false` is not required, and would mask this.** It "works" because
+  suppressing thinking frees the budget for the answer — the same reason a larger
+  budget works. Shipping it would leave the truncation bug in place for any long
+  turn.
+* **The `THINKING_TRACE_MARKER` workaround (`gateway_local.py:25`) is the real
+  smell.** When `content` is empty it substitutes `MARKER + thinking`, so the
+  council receives the reasoning trace *presented as an answer* — which is exactly
+  how a truncated thinking model would show up as F001's "wrong-schema JSON".
+
+**Recommended instead:** keep thinking on; make the truncation loud rather than
+silent. Specifically — fail a turn whose `done_reason == "length"` on a structured
+route instead of passing the marker-prefixed thinking text downstream as if it were
+a verdict, and raise `num_predict` for any route whose observed thinking regularly
+approaches the cap.
+
+**Caveats.** One model (`qwen3.5:9b`), one prompt shape, on a box concurrently
+serving the FastAPI LLM service, so timings are contended. The 8192 + `format` cell
+returned `eval_count=52` on an identical repeated prompt — almost certainly KV-cache
+reuse — so that row is weaker than the `format`-off row (`eval_count=1958`); the
+6-trial re-run uses per-trial nonces to defeat caching.
+
 ### 4.2 All local routes are hardcoded to `mid`
 
 **Severity: high for all-local deployments.**
