@@ -183,7 +183,15 @@ def test_pr_flow_merges_without_test_commands(tmp_errorta_home: Path) -> None:
     assert all(p["reviewer_approved"] for p in prs)
     # no tester tasks were ever created — nothing to run
     assert not any(t.role == "tester" for t in store.list_tasks())
-    assert store.list_test_runs() == []
+    # F154 CHANGED THIS DELIBERATELY. This used to assert `list_test_runs() == []`:
+    # a project with an empty registry ran nothing at all, which is precisely the gap
+    # F154 closes (it could reach `done` with nothing ever compiled). The delivery
+    # gate now derives a build and records it under `delivery-build`. What must still
+    # hold is the property this test is really about — no run of the COUNCIL's
+    # registered suite, because there is no registered suite.
+    runs = store.list_test_runs()
+    assert all(r.get("task_id") == "delivery-build" for r in runs), runs
+    assert all(r.get("command_ids") == ["build:default"] for r in runs), runs
     # master ACCUMULATED both functions (the work actually landed)
     runner.workspace.checkout("master")
     final = runner.workspace._ws.read_file("calc.py")

@@ -3953,6 +3953,12 @@ _DELIVERY_TASK_ID = "delivery-review"
 # registry id (which the council chooses) so the two can never collide, and so the
 # build's recorded run is identifiable on the ledger.
 _DEFAULT_BUILD_COMMAND_ID = "build:default"
+# ...and its own task_id, NOT _DELIVERY_TASK_ID. The delivery task_id identifies runs
+# of the council's REGISTERED suite; filing the engine-derived build under it makes
+# "did the delivery suite pass?" unanswerable by task_id alone (a green build would
+# read as a green suite). Keeping them separate also means the build cannot perturb
+# any detector that partitions runs by task.
+_DEFAULT_BUILD_TASK_ID = "delivery-build"
 
 
 class DeliveryReviewResult(NamedTuple):
@@ -4232,7 +4238,7 @@ def _run_default_build(
     except Exception as exc:  # noqa: BLE001 — could not execute -> cannot verify
         return False, True, f"default build could not run: {exc}"
     try:
-        store.record_test_run(session, task_id=_DELIVERY_TASK_ID, head=head)
+        store.record_test_run(session, task_id=_DEFAULT_BUILD_TASK_ID, head=head)
     except Exception:  # noqa: BLE001 — recording is best-effort
         pass
     if session.passed:
