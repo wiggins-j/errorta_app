@@ -4184,13 +4184,36 @@ def _ensure_delivery_setup(store: LedgerStore, workspace: Any) -> tuple[bool, st
         try:
             if not mgr._setup_pending_venv_missing(profile, profile.profile_id):
                 continue
-            session = mgr.setup(profile.profile_id)
+            # `setup()` is the BACKGROUND variant — it returns a `starting` session
+            # for the caller to poll. Grading it with `_setup_succeeded` (which
+            # requires a TERMINAL `stopped` + exit 0) therefore always failed, AND
+            # left a `pip install` running that raced the launch probe: the probe
+            # re-checks the same gate, sees the venv interpreter the racing
+            # `python -m venv` just created, skips its own setup, and starts against
+            # a half-installed venv — filing a phantom "fix runtime launch crash"
+            # against correct code. `_setup_sync` runs it inline and returns the
+            # terminal session, which is what this gate needs.
             from .runtime_process import _setup_succeeded
+            session = mgr._setup_sync(profile.profile_id)
             if not _setup_succeeded(session):
                 return False, f"{profile.profile_id}: dependency setup failed"
         except Exception as exc:  # noqa: BLE001 — cannot set up -> cannot verify
             return False, f"{profile.profile_id}: setup error: {exc}"
     return True, ""
+
+
+# Dependency markers per stack. `_ensure_delivery_setup` only stands up a PYTHON
+# venv — `_setup_pending_venv_missing` keys on `_is_pip_install_step`, which is
+# pip-only — and `run_test_commands` runs with `network_allowed=False` by contract.
+# So for a stack whose build must resolve dependencies, running the build without
+# them present would fail for an ENVIRONMENTAL reason and be filed as a code
+# finding. Absent the marker, the honest answer is "cannot verify".
+_BUILD_DEP_MARKERS: tuple[tuple[str, str], ...] = (
+    ("npm", "node_modules"),
+    ("npx", "node_modules"),
+    ("cargo", "target"),
+    ("go", "go.sum"),
+)
 
 
 def _run_default_build(
@@ -4223,6 +4246,23 @@ def _run_default_build(
     setup_ok, setup_detail = _ensure_delivery_setup(store, workspace)
     if not setup_ok:
         return False, True, f"dependency setup failed: {setup_detail}"
+    # A build that must resolve dependencies cannot run here without them: the
+    # executor is network-off by contract (`testing._run_one`), and
+    # `_ensure_delivery_setup` only stands up a Python venv. Running anyway would
+    # fail environmentally (cargo 101, go module fetch, npm's missing script binary)
+    # and be filed as a code finding — the exact false-finding risk F154 was
+    # sequenced as a fast-follow to avoid. Report cannot-verify instead.
+    try:
+        from pathlib import Path as _P
+        tool = str(argv[0]).lower() if argv else ""
+        for prefix, marker in _BUILD_DEP_MARKERS:
+            if tool.endswith(prefix) and not (_P(str(cwd)) / marker).exists():
+                return False, True, (
+                    f"{prefix} build needs dependencies and {marker!r} is absent; "
+                    "the delivery executor is network-off and only provisions a "
+                    "Python venv, so this cannot be verified here")
+    except Exception:  # noqa: BLE001 — a marker probe failure must not block
+        pass
     from pathlib import Path as _Path
     try:
         rel = str(_Path(str(cwd)).relative_to(_Path(str(workspace.root())))) or "."
@@ -4257,8 +4297,22 @@ def _run_default_build(
     appendix = _failed_stderr_appendix(session.results)
     if appendix:
         detail += f"\n\nBuild output:\n{appendix}"
-    unusable = any(r.status in ("blocked", "timed_out") or r.exit_code == 127
-                   for r in session.results)
+    # An earlier revision keyed only on `blocked`/`timed_out`/exit-127 and MISSED the
+    # actual missing-toolchain shape. Execution is argv-only with no shell
+    # (`testing._run_one`), so an absent `npm`/`cargo`/`go` never yields 127 — it
+    # raises FileNotFoundError in `create_subprocess_exec`, which the runner reports
+    # as `status="failed"` with **`exit_code=None`**. That was being read as a real
+    # build failure and filed as "fix delivery build" against code that is fine.
+    #
+    #   exit_code is None  -> spawn/exec failure (toolchain absent, spawn refused)
+    #   exit_code < 0      -> killed by signal (OOM)
+    #   126 / 127          -> not executable / command-not-found from inside a script
+    unusable = any(
+        r.status in ("blocked", "timed_out")
+        or r.exit_code is None
+        or (isinstance(r.exit_code, int) and r.exit_code < 0)
+        or r.exit_code in (126, 127)
+        for r in session.results)
     if unusable:
         return False, True, f"default build could not run: {detail}"
     return False, False, detail
@@ -7870,7 +7924,9 @@ def build_run_turn(
                         "without console errors AND visibly responds to input: "
                         f"{probe_detail}"))
             filed = True
-        reason = "launch_cannot_verify" if launch_cannot_verify else "rejected"
+        reason = ("launch_cannot_verify" if launch_cannot_verify
+                  else "build_cannot_verify" if build_cannot_verify
+                  else "rejected")
         return DeliveryReviewResult(passed=False, filed_findings=filed,
                                     reason=reason)
 

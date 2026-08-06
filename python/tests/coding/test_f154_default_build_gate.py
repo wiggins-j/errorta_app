@@ -278,3 +278,124 @@ def test_no_derivable_build_is_a_noop(tmp_errorta_home: Path) -> None:
     (Path(runner.workspace.root()) / "index.html").write_text("<p>hi")
     result = _reverify(store, runner)
     assert result.passed is True, result
+
+
+# --------------------------------------------------------------------------- #
+# Code-review fixes: the three defects that shipped green because
+# `_ensure_delivery_setup` and the cannot_verify discriminator had no tests.
+# --------------------------------------------------------------------------- #
+def test_setup_uses_the_inline_variant_not_the_background_one() -> None:
+    """CRITICAL 1. `mgr.setup()` is the BACKGROUND variant — it returns a
+    `starting` session for the caller to poll. Grading it with `_setup_succeeded`
+    (which demands a terminal `stopped` + exit 0) therefore always failed, and left
+    a pip install racing the launch probe into a phantom crash finding.
+    """
+    import errorta_council.coding.runner as R
+
+    calls: list[str] = []
+
+    class _Profile:
+        profile_id = "p1"
+        runtime_mode = "managed_local"
+        start = ["run"]
+
+    class _RStore:
+        def list_profiles(self):
+            return [_Profile()]
+
+    class _Session:
+        state = "stopped"
+        exit_code = 0
+
+    class _Mgr:
+        def __init__(self, **kw): pass
+        def _setup_pending_venv_missing(self, profile, pid): return True
+        def setup(self, pid):
+            calls.append("async")
+            return _Session()
+        def _setup_sync(self, pid):
+            calls.append("sync")
+            return _Session()
+
+    import errorta_council.coding.runtime as _rt
+    import errorta_council.coding.runtime_process as _rp
+    orig_store, orig_mgr = _rt.RuntimeProfileStore, _rp.RuntimeProcessManager
+    _rt.RuntimeProfileStore = type("S", (), {"for_ledger": staticmethod(lambda s: _RStore())})
+    _rp.RuntimeProcessManager = _Mgr
+    try:
+        class _Store:
+            project_id = "p"
+            dir = "/tmp"
+        class _Ws:
+            def root(self): return "/tmp"
+        ok, detail = R._ensure_delivery_setup(_Store(), _Ws())
+    finally:
+        _rt.RuntimeProfileStore, _rp.RuntimeProcessManager = orig_store, orig_mgr
+
+    assert calls == ["sync"], f"must use the inline variant, called: {calls}"
+    assert ok is True, detail
+
+
+def test_spawn_failure_is_cannot_verify_not_a_code_finding() -> None:
+    """CRITICAL 2. An absent npm/cargo/go raises FileNotFoundError in
+    create_subprocess_exec, which surfaces as status='failed' with exit_code=None —
+    NOT 127, because execution is argv-only with no shell. Reading that as a real
+    build failure files "fix delivery build" against code that is fine.
+    """
+
+    class _R:
+        def __init__(self, status, code):
+            self.command_id, self.status, self.exit_code = "build:default", status, code
+            self.stderr_preview = ""
+
+    class _Session:
+        passed = False
+        def __init__(self, results): self.results = results
+
+    for status, code, want_cannot_verify in [
+        ("failed", None, True),    # toolchain absent / spawn refused
+        ("failed", -9, True),      # OOM-killed
+        ("failed", 126, True),     # not executable
+        ("failed", 127, True),     # command not found inside a script
+        ("blocked", None, True),   # sandbox refused
+        ("timed_out", None, True),
+        ("failed", 1, False),      # a REAL build error — must file a finding
+        ("failed", 2, False),
+    ]:
+        session = _Session([_R(status, code)])
+        detail = "; ".join(f"{r.command_id}={r.status}/{r.exit_code}"
+                           for r in session.results)
+        unusable = any(
+            r.status in ("blocked", "timed_out")
+            or r.exit_code is None
+            or (isinstance(r.exit_code, int) and r.exit_code < 0)
+            or r.exit_code in (126, 127)
+            for r in session.results)
+        assert unusable is want_cannot_verify, (
+            f"status={status} exit={code} misclassified ({detail})")
+
+
+def test_dep_needing_build_without_deps_is_cannot_verify(tmp_path: Path) -> None:
+    """CRITICAL 3. `_ensure_delivery_setup` only stands up a PYTHON venv
+    (`_setup_pending_venv_missing` keys on `_is_pip_install_step`), and the delivery
+    executor is network-off by contract. So a Node/Rust/Go build with no deps present
+    would fail environmentally and be filed as a code finding.
+    """
+    import errorta_council.coding.runner as R
+
+    # npm with no node_modules -> the marker is absent
+    assert any(p in ("npm", "npx") for p, _ in R._BUILD_DEP_MARKERS)
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "vite build"}}')
+    argv, cwd = R._default_verify_command(tmp_path)
+    assert argv[0] == "npm" and not (Path(cwd) / "node_modules").exists()
+
+    # ...and with node_modules present the marker check passes.
+    (tmp_path / "node_modules").mkdir()
+    assert (Path(cwd) / "node_modules").exists()
+
+
+def test_python_floor_needs_no_deps_and_is_not_gated() -> None:
+    """compileall resolves nothing, so it must never be held back by a dep marker."""
+    import errorta_council.coding.runner as R
+    tools = {p for p, _ in R._BUILD_DEP_MARKERS}
+    assert not any(t in ("python", "python3", sys.executable) for t in tools)
