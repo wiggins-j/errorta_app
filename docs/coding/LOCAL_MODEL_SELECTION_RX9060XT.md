@@ -312,27 +312,54 @@ matches `"qwen3"`, so a real turn already gets
 `scheduler.py:1727` names this exact failure mode: a low budget "makes them emit a
 thinking-burn with no answer."
 
+**The 6-trial comparison — budget and `think:false` are NOT interchangeable.**
+
+| Arm (6 trials, cache-busted) | schema ok | `done_reason` | mean `eval_count` |
+|---|---|---|---|
+| harness budget (800), thinking **on** | 1/6 | `length` ×5, `stop` ×1 | 727 |
+| council budget (8192), thinking **on** | 4/6 | `stop` ×6 | 2197 |
+| harness budget (800), **`think:false`** | **6/6** | `stop` ×6 | **33** |
+
+Raising the budget removes the *truncation* completely — every trial ends on `stop`.
+It does **not** deliver reliable structured output: 4/6. `think:false` does, at 6/6.
+
+So the two failures are separable and both real:
+
+1. **truncation** (`done_reason: length`) — caused purely by too small a budget, and
+   the sole cause of the empty-`content` symptom §4.1 describes;
+2. **schema compliance** — genuinely better without thinking, independent of budget.
+
 **Consequences.**
 
-* **F001's `mistral-small3.1` recommendation is unfounded** *on this evidence*. The
-  judge-schema failure it cites is reproduced by a harness misconfiguration, not by
-  the model. The 15 GB co-residency cost buys nothing here. (It does not follow that
-  F001's *observed* judge problems were all this — they were seen through a
-  different harness. It follows that §4.1 is not the evidence for them.)
-* **`think: false` is not required, and would mask this.** It "works" because
-  suppressing thinking frees the budget for the answer — the same reason a larger
-  budget works. Shipping it would leave the truncation bug in place for any long
-  turn.
-* **The `THINKING_TRACE_MARKER` workaround (`gateway_local.py:25`) is the real
-  smell.** When `content` is empty it substitutes `MARKER + thinking`, so the
-  council receives the reasoning trace *presented as an answer* — which is exactly
-  how a truncated thinking model would show up as F001's "wrong-schema JSON".
+* **§4.1's recommendation stands; its mechanism does not.** `think: false` is the
+  right setting, but not because "the JSON constraint is applied to the thinking
+  channel" — that does not happen on `/api/chat`. It is right because a thinking
+  model's verdict turn is both less schema-reliable and vastly more expensive.
+* **The cost argument is the strongest one, and §4.1 missed it.** Mean generated
+  tokens per reviewer verdict: **2197 with thinking, 33 without — a ~66× reduction.**
+  On a single local GPU that is the difference between a ~100 s verdict turn and a
+  near-instant one. This dominates the schema argument.
+* **F001's `mistral-small3.1` recommendation is unfounded** *on this evidence*.
+  `qwen3.5:9b` with `think:false` is 6/6 on the reviewer verdict. The 15 GB
+  co-residency cost buys nothing here. (It does not follow that F001's *observed*
+  judge problems were all this — they were seen through a different harness. It
+  follows that §4.1 is not the evidence for them.)
+* **The `THINKING_TRACE_MARKER` workaround (`gateway_local.py:25`) is still a real
+  defect, and independent of the above.** When `content` is empty it substitutes
+  `MARKER + thinking`, so the council receives the reasoning trace *presented as an
+  answer* — which is exactly how a truncated thinking model surfaces as F001's
+  "wrong-schema JSON". `think:false` makes it rare; it does not make it correct.
 
-**Recommended instead:** keep thinking on; make the truncation loud rather than
-silent. Specifically — fail a turn whose `done_reason == "length"` on a structured
-route instead of passing the marker-prefixed thinking text downstream as if it were
-a verdict, and raise `num_predict` for any route whose observed thinking regularly
-approaches the cap.
+**Recommended.** All three, in this order:
+
+1. set `think: false` on structured turns for thinking-capable local routes (§4.1's
+   recommendation, now supported by the 6/6 and the 66× token saving);
+2. fail a structured turn whose `done_reason == "length"` instead of passing
+   marker-prefixed thinking text downstream as a verdict — so a truncation is loud
+   rather than silently mis-parsed;
+3. keep the reasoning budget for routes that legitimately think (a thinking turn
+   still needs ~2,000 tokens when it is wanted); do not lower it on the strength of
+   `think:false`.
 
 **Caveats.** One model (`qwen3.5:9b`), one prompt shape, on a box concurrently
 serving the FastAPI LLM service, so timings are contended. The 8192 + `format` cell
