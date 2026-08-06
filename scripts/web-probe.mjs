@@ -469,7 +469,15 @@ async function main() {
                      reason: "" };
     if (args.whitebox) {
       try {
-        const r = await page.evaluate(() => {
+        // Bounded like the differential above. Without a race, a hanging `won()` or
+        // `tick()` runs until the 45s subprocess kill, at which point the engine gets
+        // NO probe evidence at all — losing the liveness verdict too, not just the
+        // mechanic one.
+        const wbTimeout = (pr, ms) => Promise.race([
+          pr, new Promise((res) => setTimeout(() => res({
+            has_contract: false, ran: false,
+            reason: "white-box phase timed out" }), ms))]);
+        const r = await wbTimeout(page.evaluate(() => {
           const P = window.__probe;
           const ok = (f) => P && typeof P[f] === "function";
           if (!(ok("won") && ok("solution") && ok("shoot") && ok("tick")
@@ -511,7 +519,7 @@ async function main() {
           return { has_contract: true, ran: true, solved_on: solvedOn,
                    solved_off: solvedOff };
         }).catch(() => ({ has_contract: false, ran: false,
-                          reason: "white-box phase threw" }));
+                          reason: "white-box phase threw" })), 20000);
         Object.assign(whitebox, r);
       } catch { /* best-effort; an absent phase falls through to path 3/4 */ }
     }

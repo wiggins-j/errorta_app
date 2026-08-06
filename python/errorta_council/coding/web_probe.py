@@ -429,18 +429,28 @@ _EVIDENCE_KEY = "probe_mechanic_evidence"
 
 
 def record_mechanic_evidence(store: Any, *, head: str,
-                             verdict: dict[str, Any]) -> None:
+                             verdict: dict[str, Any],
+                             declares: bool = False) -> None:
     """SPEC-40 (item E) — persist the structured mechanic evidence the done-gate reads.
 
     Written only for the MASTER arm, bound to the head it was measured at, so
     ``completion.mechanic_gate_status`` can refuse evidence that describes a different
     tree. Best-effort and never raises: a write failure degrades to "no evidence",
-    which the gate treats as advisory (it must never INVENT a block)."""
+    which the gate treats as advisory (it must never INVENT a block).
+
+    ``declares`` is the project's own straight-shots-must-fail signal and MUST be
+    persisted. An earlier revision hardcoded ``True`` here, which made every ordinary
+    web project — a CRUD app, a dashboard, anything with no ``window.__probe`` — look
+    like a declared-mechanic game with a missing hook. That is item E path 3b, so the
+    done-gate refused those projects and told them to expose a golf hook. The gate now
+    requires this flag, and the recorder no longer speaks for a project that never
+    made the claim."""
     wb_status, wb_reason = _whitebox_verdict(verdict)
     mp = verdict.get("mechanic_probe") if isinstance(verdict.get("mechanic_probe"), dict) else {}
-    mechanic_ok, mechanic_reason = _mechanic_verdict(verdict, True)
+    mechanic_ok, mechanic_reason = _mechanic_verdict(verdict, bool(declares))
     payload = {
         "head": str(head or ""),
+        "declares": bool(declares),
         "whitebox": wb_status,
         "whitebox_reason": wb_reason[:500],
         "mechanic_matters": mp.get("mechanic_matters"),
@@ -612,7 +622,8 @@ def run_and_record(
         # MASTER arm only. A per-PR head is a branch tip, not the tree we would call
         # done, so letting it write here would let a branch decide delivery.
         if not pr_scoped:
-            record_mechanic_evidence(store, head=head, verdict=verdict)
+            record_mechanic_evidence(store, head=head, verdict=verdict,
+                                     declares=declares)
         return run
     finally:
         _stop_quiet(mgr, profile.profile_id)

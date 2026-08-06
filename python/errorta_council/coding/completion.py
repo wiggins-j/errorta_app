@@ -224,6 +224,15 @@ def mechanic_gate_status(ledger: Any, current_head: str) -> MechanicGateStatus:
     ev = _mechanic_evidence(ledger, current_head)
     if ev is None:
         return "advisory"
+    # The project must have MADE the claim before it can be judged against it. An
+    # earlier revision omitted this and `record_mechanic_evidence` hardcoded
+    # "declares", so every ordinary web project — a CRUD app, a dashboard, anything
+    # with no `window.__probe` — fell into path 3b and was refused `done` with a
+    # message about exposing a golf hook. A fail-CLOSED wedge in the one place this
+    # spec insists must fail open. Evidence written before this field existed has no
+    # `declares` key and is treated as not-declaring, which is the safe reading.
+    if not ev.get("declares"):
+        return "advisory"
     wb = str(ev.get("whitebox") or "absent")
     if wb == "green":
         return "ok"
@@ -238,8 +247,16 @@ def mechanic_gate_status(ledger: Any, current_head: str) -> MechanicGateStatus:
     # `mechanic_matters is None` so a game that DID produce a reading is judged by
     # path 3's confidence rule and never sneaks a block in through here.
     if (ev.get("mechanic_matters") is None
-            and ev.get("mechanic_ok") is False
-            and not ev.get("has_hook")):
+            and ev.get("mechanic_ok") is False):
+        # `has_hook` is deliberately NOT required. Requiring it left a five-line
+        # bypass: a STUB hook (present, but a no-op `shoot()` or a non-restoring
+        # `reset()`) yields has_hook=True, ran=False, mechanic_matters=None — so it
+        # matched neither path 3 nor 3b and shipped on `advisory`. That is a strictly
+        # easier escape than golf-2's no-hook shape which 3b exists to catch, and it
+        # contradicts `_mechanic_verdict`'s own "a stub hook must not buy a pass".
+        # The `mechanic_matters is None` guard still keeps this from becoming a back
+        # door around path 3's confidence rule: a game that produced a READING is
+        # judged there, not here.
         return "red"
     return "advisory"
 
@@ -261,7 +278,8 @@ def mechanic_gate_reason(ledger: Any, current_head: str) -> str:
                 "game's own usable range — a straight shot behaves identically with "
                 "the mechanic on vs off")
     # Path 3b — SPEC-37's reason already names the hook contract to build.
-    if ev.get("mechanic_matters") is None and not ev.get("has_hook"):
+    if (ev.get("mechanic_matters") is None
+            and ev.get("mechanic_ok") is False):
         return str(ev.get("mechanic_reason") or "").strip()
     return ""
 

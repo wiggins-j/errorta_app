@@ -176,7 +176,8 @@ class _FakeLedger:
 def _ev(**kw) -> dict:
     base = {"head": _HEAD, "whitebox": "absent", "whitebox_reason": "",
             "mechanic_matters": None, "confident": False, "reason": "",
-            "has_hook": True, "mechanic_ok": True, "mechanic_reason": ""}
+            "has_hook": True, "mechanic_ok": True, "mechanic_reason": "",
+            "declares": True}
     base.update(kw)
     return base
 
@@ -497,3 +498,79 @@ def test_legacy_sweep_flag_is_passed_through() -> None:
     if "argv" in seen:
         assert "--legacy-sweep" in seen["argv"]
         assert "--no-whitebox" in seen["argv"]
+
+
+# --------------------------------------------------------------------------- #
+# Code-review fixes — the declares guard and the stub-hook bypass
+# --------------------------------------------------------------------------- #
+def test_a_project_that_never_declared_a_mechanic_is_never_blocked() -> None:
+    """THE WORST DEFECT FOUND IN REVIEW, and it was mine.
+
+    `record_mechanic_evidence` hardcoded `declares=True`, so a perfectly healthy
+    NON-golf web project — renders, no console errors, responds to input, and of
+    course no `window.__probe` because it is a CRUD app — produced
+    mechanic_ok=False / has_hook=False / mechanic_matters=None, landed on path 3b,
+    and was refused `done` with a message telling it to expose a golf hook.
+
+    A fail-CLOSED wedge in the one place SPEC-40 repeatedly insists must fail open.
+    No fixture or unit test covered a non-declaring project, which is why it shipped
+    green.
+    """
+    from errorta_council.coding.completion import mechanic_gate_status
+    healthy_crud_app = _ev(declares=False, has_hook=False, mechanic_ok=False,
+                           mechanic_matters=None,
+                           mechanic_reason="declares a straight-shots-must-fail "
+                                           "mechanic but exposes no hook")
+    assert mechanic_gate_status(_FakeLedger(healthy_crud_app), _HEAD) == "advisory"
+
+
+def test_evidence_predating_the_declares_field_is_treated_as_not_declaring() -> None:
+    """Forward-compat: persisted evidence without the key must not block."""
+    from errorta_council.coding.completion import mechanic_gate_status
+    old = {"head": _HEAD, "whitebox": "absent", "mechanic_matters": None,
+           "confident": False, "has_hook": False, "mechanic_ok": False}
+    assert "declares" not in old
+    assert mechanic_gate_status(_FakeLedger(old), _HEAD) == "advisory"
+
+
+def test_a_stub_hook_does_not_buy_a_pass() -> None:
+    """A hook that is PRESENT but unusable (no-op shoot, non-restoring reset) yields
+    has_hook=True, ran=False, mechanic_matters=None. Requiring `not has_hook` in path
+    3b let that ship on advisory — a strictly easier escape than golf-2's no-hook
+    shape, and a direct contradiction of `_mechanic_verdict`'s own docstring."""
+    from errorta_council.coding.completion import mechanic_gate_status
+    stub = _ev(declares=True, has_hook=True, mechanic_ok=False,
+               mechanic_matters=None,
+               mechanic_reason="exposes a window.__probe hook but it is unusable")
+    assert mechanic_gate_status(_FakeLedger(stub), _HEAD) == "red"
+
+
+def test_the_declares_guard_does_not_weaken_the_golf2_protection() -> None:
+    """Regression lock 1 must survive the guard: golf-2 DID declare the claim."""
+    from errorta_council.coding.completion import mechanic_gate_status
+    golf2 = _ev(declares=True, has_hook=False, mechanic_ok=False,
+                mechanic_matters=None)
+    assert mechanic_gate_status(_FakeLedger(golf2), _HEAD) == "red"
+    inert = _ev(declares=True, mechanic_matters=False, confident=True)
+    assert mechanic_gate_status(_FakeLedger(inert), _HEAD) == "red"
+
+
+def test_record_mechanic_evidence_persists_declares() -> None:
+    """The recorder must not speak for a project that never made the claim."""
+    from errorta_council.coding.web_probe import record_mechanic_evidence
+
+    class _Store:
+        def __init__(self): self.state = {}
+        def set_run_state(self, **kw): self.state.update(kw)
+
+    verdict = {"ok": True, "non_black": True, "console_errors": [],
+               "interaction_changed": True, "reason": "rendered",
+               "mechanic_probe": {"has_hook": False, "ran": False}}
+    for declares in (True, False):
+        s = _Store()
+        record_mechanic_evidence(s, head=_HEAD, verdict=verdict, declares=declares)
+        ev = s.state["probe_mechanic_evidence"]
+        assert ev["declares"] is declares
+        # ...and mechanic_ok is judged against the project's OWN claim, not a
+        # hardcoded True.
+        assert ev["mechanic_ok"] is (False if declares else True)
