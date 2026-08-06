@@ -384,6 +384,14 @@ class CodingAutonomyPolicy:
     # build, so this is about visibility, not the last line of defence. 0 disables the
     # escalation entirely, restoring today's always-non-blocking alert.
     not_applicable_soft_limit: int = 3
+    # F154: when a project has NO registered test commands, run an auto-derived
+    # build/typecheck at the delivered head and treat its failure like a failed test.
+    # A greenfield project's empty registry currently reads as success at BOTH gates
+    # (per-PR `tests_ok` is vacuously satisfied; delivery sets tests_passed=True), so
+    # a project can reach `done` with nothing ever compiled. False restores that
+    # vacuous-clean behaviour exactly. Note this never fires when the registry is
+    # non-empty — the strict reviewer-AND-tests gate is untouched.
+    default_build_gate: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -442,6 +450,8 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "capability_overrides": dict(p.capability_overrides),
         # F156 (G5) — bound the tester's not_applicable escape.
         "not_applicable_soft_limit": p.not_applicable_soft_limit,
+        # F154 — the zero-config compile floor for test-less projects.
+        "default_build_gate": p.default_build_gate,
     }
 
 
@@ -589,6 +599,9 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         not_applicable_soft_limit=max(
             0, int(d.get("not_applicable_soft_limit",
                          base.not_applicable_soft_limit))),
+        # F154: a plain bool gate; False restores today's vacuous-clean behaviour.
+        default_build_gate=bool(
+            d.get("default_build_gate", base.default_build_gate)),
     )
 
 

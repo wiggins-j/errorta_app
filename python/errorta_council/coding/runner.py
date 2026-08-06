@@ -4068,6 +4068,73 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str,
 
 # --- F146 Slice C: runtime launch evidence for the delivered head ------------
 
+def _default_verify_command(root: Any) -> Optional[tuple[list[str], Any]]:
+    """F154: derive a build/typecheck command for a project with NO registered test
+    commands. Returns ``(argv, cwd)``, or ``None`` when nothing is safe to run.
+
+    Why this exists: a greenfield project starts with an EMPTY registry, and two
+    gates read that emptiness as success — ``_set_mergeable_if_ready``'s ``tests_ok``
+    is vacuously satisfied (so every PR merges on a reviewer model-approval with zero
+    compilation ever run) and ``delivery_review`` sets ``tests_passed=True``
+    unconditionally. F152/F153 catch an app that fails to *serve or start*; neither
+    can catch a compile or type error on a code path never requested at launch. This
+    is the zero-config floor that does.
+
+    The table is deliberately SMALL and conservative. ``None`` preserves today's
+    behaviour exactly, so an unknown stack costs nothing; a wrong rule, by contrast,
+    files a phantom code finding against work that is fine. Order matters — a real
+    build is strictly stronger than ``compileall``, which only catches syntax errors.
+
+    The manifest is searched at ``root`` and then one level down, because the CLI
+    delivers into a subdirectory; ``cwd`` follows the manifest it found. Fully
+    guarded: any read/parse failure yields ``None`` rather than raising into the
+    delivery gate."""
+    import json as _json
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    try:
+        base = _Path(str(root))
+        if not base.is_dir():
+            return None
+        # The root itself first, then immediate subdirectories (sorted, so the
+        # choice is deterministic across runs).
+        candidates = [base] + sorted(
+            (p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            key=lambda p: p.name)
+    except Exception:  # noqa: BLE001 — an unreadable tree derives nothing
+        return None
+
+    for d in candidates:
+        try:
+            pkg = d / "package.json"
+            if pkg.is_file():
+                try:
+                    scripts = (_json.loads(pkg.read_text("utf-8")) or {}).get(
+                        "scripts") or {}
+                except Exception:  # noqa: BLE001 — unreadable manifest -> no guess
+                    return None
+                if isinstance(scripts, dict) and scripts.get("build"):
+                    return ["npm", "run", "build"], d
+                if (d / "tsconfig.json").is_file():
+                    # No build script but TypeScript is configured -> typecheck only.
+                    return ["npx", "--no-install", "tsc", "--noEmit"], d
+                return None  # a Node project with neither: nothing safe to run
+            if (d / "Cargo.toml").is_file():
+                return ["cargo", "build", "--quiet"], d
+            if (d / "go.mod").is_file():
+                return ["go", "build", "./..."], d
+            if ((d / "pyproject.toml").is_file() or (d / "setup.py").is_file()
+                    or any(d.glob("*.py"))):
+                # Syntax-level only, and honestly so: it needs no dependencies and
+                # cannot fail for environmental reasons. A project wanting type/name
+                # checking registers real test commands.
+                return [_sys.executable, "-m", "compileall", "-q", str(d)], d
+        except Exception:  # noqa: BLE001 — a bad candidate is skipped, never fatal
+            continue
+    return None
+
+
 def _delivery_launch_evidence(
     store: LedgerStore, workspace: Any, head: str,
     *, should_cancel: Optional[Callable[[], bool]] = None,

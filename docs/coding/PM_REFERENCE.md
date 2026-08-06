@@ -641,6 +641,14 @@ and FastAPI routers. Update the prose and this contract together.
 > merging on review alone. The delivered head is still gated deterministically by the
 > delivery review's full-registry run and F154's default build. Disable value: `0`.
 
+> **F154 — `default_build_gate` (true).** When a project has **no registered test
+> commands**, the delivery review derives a build/typecheck from the detected stack
+> (`npm run build` → `tsc --noEmit` → `cargo build` → `go build` → `compileall`) and
+> treats its failure like a failed test. Without it a greenfield project's empty
+> registry reads as success at both gates and it can reach `done` with nothing ever
+> compiled. Never fires when the registry is non-empty, and derives `None` (skipping
+> silently) for any stack with no safe rule. Disable value: `false`.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -662,6 +670,7 @@ and FastAPI routers. Update the prose and this contract together.
     "convergence_release_ratio": 0.35,
     "convergence_stall_limit": 20,
     "convergence_window": 20,
+    "default_build_gate": true,
     "delivery_review_round_limit": 3,
     "dev_repo_read": false,
     "diff_deadlock": true,
