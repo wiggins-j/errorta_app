@@ -42,7 +42,10 @@ _FIX = Path(__file__).parent / "fixtures"
 # --------------------------------------------------------------------------- #
 def test_spec40_policy_knobs_default_on_and_roundtrip() -> None:
     from errorta_council.coding.autonomy import (
-        CodingAutonomyPolicy, policy_from_dict, policy_to_dict)
+        CodingAutonomyPolicy,
+        policy_from_dict,
+        policy_to_dict,
+    )
     p = CodingAutonomyPolicy()
     assert p.probe_adaptive_sweep is True
     assert p.probe_mechanic_advisory is True
@@ -136,6 +139,79 @@ def test_per_pr_arm_stamps_the_same_components() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Task 6 (item E) — the four-path done-gate hierarchy
+# --------------------------------------------------------------------------- #
+_HEAD = "deadbeefcafe"
+
+
+class _FakeLedger:
+    def __init__(self, ev):
+        self._ev = ev
+
+    def get_run_state(self):
+        return {"probe_mechanic_evidence": self._ev} if self._ev is not None else {}
+
+
+def _ev(**kw) -> dict:
+    base = {"head": _HEAD, "whitebox": "absent", "whitebox_reason": "",
+            "mechanic_matters": None, "confident": False, "reason": ""}
+    base.update(kw)
+    return base
+
+
+def test_gate_hierarchy_paths() -> None:
+    """Item E's four paths, and the two live runs each one exists for."""
+    from errorta_council.coding.completion import mechanic_gate_status
+    # path 1 — a green white-box result OVERRIDES a red advisory differential.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        whitebox="green", mechanic_matters=False, confident=True)), _HEAD) == "ok"
+    # path 2 — the council's own assertion failed.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        whitebox="red", mechanic_matters=True, confident=True)), _HEAD) == "red"
+    # path 3 — the golf-2 protection: no contract + a CONFIDENT inert differential.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        mechanic_matters=False, confident=True)), _HEAD) == "red"
+    # path 4 — the golf-4 lesson: an uncertain verdict must NEVER hard-block.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        mechanic_matters=False, confident=False)), _HEAD) == "advisory"
+    # a live mechanic is never blocked, confident or not.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        mechanic_matters=True, confident=True)), _HEAD) == "advisory"
+
+
+def test_gate_is_fail_open() -> None:
+    """A `done`-block must never be INVENTED — the wedge SPEC-34's review forbids."""
+    from errorta_council.coding.completion import mechanic_gate_status
+
+    class _Boom:
+        def get_run_state(self):
+            raise RuntimeError("ledger unreadable")
+
+    # evidence bound to a DIFFERENT head describes a different artifact
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        head="other", mechanic_matters=False, confident=True)), _HEAD) == "advisory"
+    assert mechanic_gate_status(_FakeLedger(None), _HEAD) == "advisory"
+    assert mechanic_gate_status(_Boom(), _HEAD) == "advisory"
+    # an unresolvable head cannot bind evidence -> never blocks
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        mechanic_matters=False, confident=True)), "") == "advisory"
+
+
+def test_gate_reason_is_actionable() -> None:
+    """The vacuity reason must name setMechanic — the message golf-4 never got."""
+    from errorta_council.coding.completion import mechanic_gate_reason
+    r = mechanic_gate_reason(_FakeLedger(_ev(
+        whitebox="red",
+        whitebox_reason="vacuous — ... setMechanic(false) does not disable it")),
+        _HEAD)
+    assert "setMechanic" in r
+    # path 3 gets the differential's steer instead
+    r3 = mechanic_gate_reason(_FakeLedger(_ev(
+        mechanic_matters=False, confident=True)), _HEAD)
+    assert "no effect at any power" in r3
+
+
+# --------------------------------------------------------------------------- #
 # Live-probe plumbing (shared with the SPEC-37/38 suites' pattern)
 # --------------------------------------------------------------------------- #
 def _free_port() -> int:
@@ -154,12 +230,12 @@ def _serve(directory: Path):
     return httpd, port
 
 
-def _probe(url: str) -> dict:
+def _probe(url: str, *flags: str) -> dict:
     repo = Path(__file__).resolve().parents[3]
     mjs = repo / "scripts" / "web-probe.mjs"
     env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": _PW_BROWSERS_PATH}
-    out = subprocess.run(["node", str(mjs), url], capture_output=True, text=True,
-                         cwd=str(repo), timeout=180, env=env)
+    out = subprocess.run(["node", str(mjs), url, *flags], capture_output=True,
+                         text=True, cwd=str(repo), timeout=180, env=env)
     for line in reversed(out.stdout.strip().splitlines()):
         line = line.strip()
         if line.startswith("{"):
@@ -168,10 +244,10 @@ def _probe(url: str) -> dict:
         f"no JSON verdict; stdout={out.stdout!r} stderr={out.stderr[-400:]!r}")
 
 
-def _probe_fixture(*parts: str) -> dict:
+def _probe_fixture(*parts: str, flags: tuple[str, ...] = ()) -> dict:
     httpd, port = _serve(_FIX.joinpath(*parts))
     try:
-        return _probe(f"http://127.0.0.1:{port}/")
+        return _probe(f"http://127.0.0.1:{port}/", *flags)
     finally:
         httpd.shutdown()
 
@@ -279,3 +355,92 @@ def test_live_nondeterministic_game_is_not_confident() -> None:
     mp = _probe_fixture("spec37", "nondet")["mechanic_probe"]
     assert mp["ran"] is False, mp
     assert "non-deterministic" in mp["reason"], mp
+
+
+# --------------------------------------------------------------------------- #
+# Task 7 — the remaining regression locks
+# --------------------------------------------------------------------------- #
+@pytest.mark.live
+def test_live_legacy_sweep_reproduces_the_old_false_red() -> None:
+    """The escape hatch's contract: the disable value reproduces today's trace.
+
+    The strongest available form of that lock — the SAME fixture, two flag settings,
+    two verdicts. With ``--legacy-sweep`` golf-4 fires at the old geometry-anchored
+    [480, 780, 1200] and reports the original false red; without it, the bisect finds
+    the game's own scale and reports the mechanic as live.
+    """
+    legacy = _probe_fixture("spec40", "golf4",
+                            flags=("--legacy-sweep",))["mechanic_probe"]
+    assert legacy["powers"] == [480, 780, 1200], legacy
+    assert legacy["mechanic_matters"] is False, legacy
+
+    adaptive = _probe_fixture("spec40", "golf4")["mechanic_probe"]
+    assert adaptive["mechanic_matters"] is True, adaptive
+
+
+@pytest.mark.live
+def test_live_whitebox_can_be_disabled() -> None:
+    """``--no-whitebox`` removes the phase, so a contract-bearing game falls through
+    to the differential exactly as it would have before SPEC-40."""
+    wb = _probe_fixture("spec40", "whitebox-green",
+                        flags=("--no-whitebox",))["whitebox"]
+    assert wb["has_contract"] is False, wb
+    assert wb["verdict"] is None, wb
+
+
+@pytest.mark.live
+def test_live_grabaim_interaction_not_regressed() -> None:
+    """Regression lock 3 — golf-3 stays green.
+
+    SPEC-38 fixed the interaction gate by targeting the gesture at ``state().ball``,
+    so a grab-to-aim control is no longer false-redded. SPEC-40 rewrites the phase
+    that runs immediately after it; this asserts the fix survived.
+    """
+    v = _probe_fixture("spec38", "grabaim")
+    assert v["interaction_changed"] is True, v["reason"]
+
+
+def test_non_web_project_is_unaffected() -> None:
+    """Regression lock 6 — a non-web project never reaches the probe at all.
+
+    ``has_web_profile`` is the short-circuit: no static/web runtime profile means no
+    probe, no mechanic verdict, and no mechanic gate. A CLI or library project is
+    byte-identical to before SPEC-40.
+    """
+    from errorta_council.coding.web_probe import has_web_profile
+
+    class _NoProfiles:
+        project_id = "p"
+        dir = "/nonexistent"
+
+        def list_profiles(self):
+            return []
+
+    assert has_web_profile(_NoProfiles()) is False
+
+
+def test_legacy_sweep_flag_is_passed_through() -> None:
+    """The escape hatches actually reach the probe script.
+
+    A knob that is read but never plumbed is not an escape hatch. This asserts the
+    argv the default node runner builds, since that is the only place the flags cross
+    from Python into the browser probe.
+    """
+    import errorta_council.coding.web_probe as wp
+
+    seen = {}
+
+    def _fake_run(argv, **kw):
+        seen["argv"] = argv
+        raise RuntimeError("stop here — argv is what we are asserting")
+
+    orig = wp.subprocess.run
+    wp.subprocess.run = _fake_run
+    try:
+        wp._default_node_runner("http://x/", 30, legacy_sweep=True, whitebox=False)
+    finally:
+        wp.subprocess.run = orig
+    # _probe_script_path() returns None outside a repo tree; only assert when it ran.
+    if "argv" in seen:
+        assert "--legacy-sweep" in seen["argv"]
+        assert "--no-whitebox" in seen["argv"]

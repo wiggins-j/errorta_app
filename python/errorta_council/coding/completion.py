@@ -167,6 +167,86 @@ def acceptance_gate_status(ledger: Any, current_head: str) -> AcceptanceGateStat
     return "green" if res.get("passed") else "red"
 
 
+# SPEC-40 (item E) — the declared-mechanic gate's verdict for the `done` chokepoint.
+MechanicGateStatus = Literal["ok", "red", "advisory"]
+
+_EVIDENCE_KEY = "probe_mechanic_evidence"
+
+
+def _mechanic_evidence(ledger: Any, current_head: str) -> dict[str, Any] | None:
+    """The newest MASTER-arm probe evidence, but only if it describes THIS tree.
+
+    Evidence bound to a different head is evidence about a different artifact, so it
+    is discarded rather than reused — the same head-binding discipline
+    ``acceptance_gate_status`` applies. READ-ONLY; ``None`` on any read failure."""
+    head = str(current_head or "")
+    if not head:
+        return None
+    try:
+        raw = ledger.get_run_state().get(_EVIDENCE_KEY)
+    except Exception:  # noqa: BLE001 — never invent a block
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if str(raw.get("head") or "") != head:
+        return None
+    return raw
+
+
+def mechanic_gate_status(ledger: Any, current_head: str) -> MechanicGateStatus:
+    """SPEC-40 item E: the four-path hierarchy for a declared-mechanic project.
+
+    1. white-box contract present and GREEN -> ``ok``. This OVERRIDES a red advisory
+       differential: a white-box, council-authored, game-native assertion is strictly
+       stronger evidence than a black-box endpoint heuristic.
+    2. contract present and RED -> ``red`` (recoverable; the caller routes it through
+       the bounded ``completion_refused`` ladder).
+    3. no contract + a CONFIDENT calibrated-inert differential -> ``red``. This is the
+       golf-2 protection: a genuinely inert declared-mechanic game must not ship.
+    4. no contract + a marginal/uncertain differential -> ``advisory``. Never a hard
+       block, never an anchor regression. This is the golf-4 lesson — the oracle
+       itself may be the thing that is wrong, so an uncertain verdict must not
+       terminate a healthy run.
+
+    READ-ONLY and FAIL-OPEN: missing evidence, a head mismatch, or any read error
+    returns ``advisory``. The module's fail-closed rule governs open *work*; a
+    ``done``-block must fail OPEN, because a spurious block with no recovery is
+    precisely the wedge SPEC-34's review forbids.
+    """
+    ev = _mechanic_evidence(ledger, current_head)
+    if ev is None:
+        return "advisory"
+    wb = str(ev.get("whitebox") or "absent")
+    if wb == "green":
+        return "ok"
+    if wb == "red":
+        return "red"
+    # No usable contract: fall back to the differential, and only a CONFIDENT inert
+    # verdict may block.
+    if ev.get("mechanic_matters") is False and bool(ev.get("confident")):
+        return "red"
+    return "advisory"
+
+
+def mechanic_gate_reason(ledger: Any, current_head: str) -> str:
+    """The actionable half of a ``red`` from :func:`mechanic_gate_status`.
+
+    Returns the specific white-box arm's reason when there is one (naming
+    ``setMechanic`` for the vacuity case — the message golf-4 needed and never got),
+    or the path-3 steer otherwise. Empty string when there is nothing to say."""
+    ev = _mechanic_evidence(ledger, current_head)
+    if ev is None:
+        return ""
+    reason = str(ev.get("whitebox_reason") or "").strip()
+    if str(ev.get("whitebox") or "") == "red" and reason:
+        return reason
+    if ev.get("mechanic_matters") is False and bool(ev.get("confident")):
+        return ("the calibrated differential found no effect at any power in the "
+                "game's own usable range — a straight shot behaves identically with "
+                "the mechanic on vs off")
+    return ""
+
+
 __all__ = [
     "OpenItem",
     "pending_completion_work",
@@ -174,4 +254,7 @@ __all__ = [
     "count_human_required",
     "acceptance_gate_status",
     "AcceptanceGateStatus",
+    "mechanic_gate_status",
+    "mechanic_gate_reason",
+    "MechanicGateStatus",
 ]
