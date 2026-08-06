@@ -7325,93 +7325,101 @@ def build_run_turn(
         if rs.get("delivery_reviewed_head") == head:
             return DeliveryReviewResult(
                 passed=bool(rs.get("delivery_review_passed")), reason="cached")
-        # A reviewer (falling back to the PM) is required for a real review. With
-        # neither configured we cannot verify — record NOTHING (the accept gate
-        # honestly stays unreviewed) and preserve prior done behavior for such
-        # minimal teams; this is not a rubber-stamp (no verdict is fabricated).
+        # A reviewer (falling back to the PM) gives a real REVIEW VERDICT. With
+        # neither configured no verdict is fabricated — but F156 (G7): that must skip
+        # ONLY the verdict. The old early return sat here, BEFORE steps 2 and 3, so
+        # "no reviewer" silently also meant "no tests, no launch probe, no web probe",
+        # and a team with neither REVIEWER nor PM reached `project_done` with ZERO
+        # delivery verification. `approved` therefore defaults True (a team that
+        # cannot produce a verdict must not be blocked by its absence) while every
+        # deterministic check below still runs for real, so `passed` continues to
+        # require a delivered head that builds, launches and renders.
         reviewer_members = members_by_role.get(REVIEWER) or members_by_role.get(PM)
-        if not reviewer_members:
-            return DeliveryReviewResult(passed=True, reason="no_reviewer")
-        reviewer_member = reviewer_members[0]
+        reviewer_member = reviewer_members[0] if reviewer_members else None
+        approved = True
+        findings: list[dict[str, Any]] = []
 
         # 1) Reviewer over the WHOLE delivered diff, bound to `head`. A preview
         #    failure means a corrupt/missing worktree (F087-15 M1) — do NOT review
         #    a blank diff and pass; block done as an unverifiable delivery.
-        try:
-            diff = str((workspace.preview() or {}).get("diff") or "")
-        except Exception:  # noqa: BLE001
-            return _cannot_verify("delivered diff unavailable (preview failed)")
-        approved = False
-        findings: list[dict[str, Any]] = []
-        # SPEC-30 fix: ground the delivery reviewer in the delivered tree so it
-        # cannot invent file paths (run 7's "Missing acceptance test file
-        # test/test.js" wedge). Mount the master working tree read-only when
-        # reviewer_repo_read honors this vendor; fall back to the plain member.
-        delivery_reviewer = reviewer_member
-        delivery_repo_read = False
-        if _member_honors_repo_read(reviewer_member, reviewer_repo_read):
+        #    The preview + its fail-closed guard live INSIDE this branch on purpose:
+        #    with no reviewer there is no diff to review, and failing delivery on an
+        #    unreadable preview nobody would have read would be a new false block.
+        if reviewer_member is not None:
+            approved = False
             try:
-                delivery_reviewer = {**reviewer_member,
-                                     "repo_read_root": str(workspace.root())}
-                delivery_repo_read = True
-            except Exception:  # noqa: BLE001 — grounding is best-effort
-                delivery_reviewer, delivery_repo_read = reviewer_member, False
-        try:
-            parsed = _parse_member_turn(
-                REVIEWER, _DELIVERY_TASK_ID, delivery_reviewer,
-                _delivery_review_prompt(store, head, diff,
-                                        repo_read=delivery_repo_read),
-                context="delivery_review", related_task_ids=[])
-        except _MemberCallFailed as exc:
-            # Could not run the reviewer -> do NOT mark done and record NO verdict
-            # (the gate stays unreviewed). A genuine inability to verify, not a
-            # rubber-stamp; the loop retries on the next completion claim.
-            store.record_decision(
-                title="delivery review could not run",
-                context="delivery_review", choice="delivery_review_error",
-                rationale=f"reviewer call failed: {exc.failure.status}")
-            return DeliveryReviewResult(passed=False, filed_findings=False,
-                                        reason="reviewer_call_failed")
-        if isinstance(parsed, TurnParseError):
-            store.record_decision(
-                title="delivery review rejected (unparseable)",
-                context="delivery_review", choice="review_rejected",
-                rationale=f"{parsed.code.value}: {parsed.detail}",
-                extra={"reviewed_head": head})
-            approved = False
-        elif isinstance(parsed.intent, BlockedIntent):
-            # Spec 25: the delivery reviewer said it could not review the delivered
-            # head. Recorded as a NON-verdict (the same fail-closed treatment as a
-            # stale head): `done` does not stick, and nothing is fabricated in
-            # either direction.
-            store.record_decision(
-                title="delivery review blocked",
-                context="delivery_review", choice="blocked",
-                rationale=_blocked_reason_text(parsed.intent),
-                extra={"reviewed_head": head})
-            approved = False
-        elif parsed.intent.reviewed_head != head:
-            # Reviewed a different head than delivered -> stale, does not count.
-            # Recorded as a NON-verdict so the gate stays unreviewed (fail-closed).
-            store.record_decision(
-                title="delivery review stale head",
-                context="delivery_review", choice="stale_review_head",
-                rationale=(f"reviewed_head {parsed.intent.reviewed_head!r} != "
-                           f"delivered head {head!r}"))
-            approved = False
-        else:
-            approved = bool(parsed.intent.approved)
-            findings = [
-                {"severity": f.severity, "title": f.title, "body": f.body,
-                 "path": f.path, "blocking": f.severity == "blocking"}
-                for f in parsed.intent.findings
-            ]
-            store.record_decision(
-                title="delivery review verdict",
-                context="delivery_review",
-                choice="review_approved" if approved else "review_rejected",
-                rationale=f"delivery reviewer verdict (approved={approved})",
-                extra={"reviewed_head": head})
+                diff = str((workspace.preview() or {}).get("diff") or "")
+            except Exception:  # noqa: BLE001
+                return _cannot_verify("delivered diff unavailable (preview failed)")
+            # SPEC-30 fix: ground the delivery reviewer in the delivered tree so it
+            # cannot invent file paths (run 7's "Missing acceptance test file
+            # test/test.js" wedge). Mount the master working tree read-only when
+            # reviewer_repo_read honors this vendor; fall back to the plain member.
+            delivery_reviewer = reviewer_member
+            delivery_repo_read = False
+            if _member_honors_repo_read(reviewer_member, reviewer_repo_read):
+                try:
+                    delivery_reviewer = {**reviewer_member,
+                                         "repo_read_root": str(workspace.root())}
+                    delivery_repo_read = True
+                except Exception:  # noqa: BLE001 — grounding is best-effort
+                    delivery_reviewer, delivery_repo_read = reviewer_member, False
+            try:
+                parsed = _parse_member_turn(
+                    REVIEWER, _DELIVERY_TASK_ID, delivery_reviewer,
+                    _delivery_review_prompt(store, head, diff,
+                                            repo_read=delivery_repo_read),
+                    context="delivery_review", related_task_ids=[])
+            except _MemberCallFailed as exc:
+                # Could not run the reviewer -> do NOT mark done and record NO verdict
+                # (the gate stays unreviewed). A genuine inability to verify, not a
+                # rubber-stamp; the loop retries on the next completion claim.
+                store.record_decision(
+                    title="delivery review could not run",
+                    context="delivery_review", choice="delivery_review_error",
+                    rationale=f"reviewer call failed: {exc.failure.status}")
+                return DeliveryReviewResult(passed=False, filed_findings=False,
+                                            reason="reviewer_call_failed")
+            if isinstance(parsed, TurnParseError):
+                store.record_decision(
+                    title="delivery review rejected (unparseable)",
+                    context="delivery_review", choice="review_rejected",
+                    rationale=f"{parsed.code.value}: {parsed.detail}",
+                    extra={"reviewed_head": head})
+                approved = False
+            elif isinstance(parsed.intent, BlockedIntent):
+                # Spec 25: the delivery reviewer said it could not review the delivered
+                # head. Recorded as a NON-verdict (the same fail-closed treatment as a
+                # stale head): `done` does not stick, and nothing is fabricated in
+                # either direction.
+                store.record_decision(
+                    title="delivery review blocked",
+                    context="delivery_review", choice="blocked",
+                    rationale=_blocked_reason_text(parsed.intent),
+                    extra={"reviewed_head": head})
+                approved = False
+            elif parsed.intent.reviewed_head != head:
+                # Reviewed a different head than delivered -> stale, does not count.
+                # Recorded as a NON-verdict so the gate stays unreviewed (fail-closed).
+                store.record_decision(
+                    title="delivery review stale head",
+                    context="delivery_review", choice="stale_review_head",
+                    rationale=(f"reviewed_head {parsed.intent.reviewed_head!r} != "
+                               f"delivered head {head!r}"))
+                approved = False
+            else:
+                approved = bool(parsed.intent.approved)
+                findings = [
+                    {"severity": f.severity, "title": f.title, "body": f.body,
+                     "path": f.path, "blocking": f.severity == "blocking"}
+                    for f in parsed.intent.findings
+                ]
+                store.record_decision(
+                    title="delivery review verdict",
+                    context="delivery_review",
+                    choice="review_approved" if approved else "review_rejected",
+                    rationale=f"delivery reviewer verdict (approved={approved})",
+                    extra={"reviewed_head": head})
 
         # 2) Tests: run ALL registered commands for real against the delivered
         #    master root, bound to `head`. Deterministic (no model command
@@ -7500,7 +7508,12 @@ def build_run_turn(
             except Exception:  # noqa: BLE001
                 pass
         if passed:
-            return DeliveryReviewResult(passed=True, reason="reviewed")
+            # F156 (G7): a distinct reason keeps the reviewer-less path visible in
+            # the record — it passed on deterministic evidence alone, with no verdict.
+            return DeliveryReviewResult(
+                passed=True,
+                reason=("reviewed" if reviewer_member is not None
+                        else "reviewed_no_reviewer"))
 
         # Fail-closed: file the failure as dev work so Slice E's `_has_open_work`
         # re-opens the run. The team fixes it, the head changes, and the next
