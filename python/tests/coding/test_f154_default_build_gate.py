@@ -110,3 +110,171 @@ def test_default_build_gate_knob_roundtrips() -> None:
     assert d["default_build_gate"] is True
     assert policy_from_dict({**d, "default_build_gate": False}
                             ).default_build_gate is False
+
+
+# --------------------------------------------------------------------------- #
+# The gate itself — the build blocks `done`, end to end
+# --------------------------------------------------------------------------- #
+import json  # noqa: E402
+import re  # noqa: E402
+
+from errorta_council.coding.autonomy import save_policy  # noqa: E402
+from errorta_council.coding.ledger import LedgerStore  # noqa: E402
+from errorta_council.coding.runner import (  # noqa: E402
+    CodingRunner,
+    build_run_turn,
+    members_by_coding_role,
+)
+
+MEMBERS = [
+    {"id": "m-pm", "enabled": True, "metadata": {"coding_role": "pm"}},
+    {"id": "m-dev", "enabled": True, "metadata": {"coding_role": "dev"}},
+    {"id": "m-rev", "enabled": True, "metadata": {"coding_role": "reviewer"}},
+    {"id": "m-test", "enabled": True, "metadata": {"coding_role": "tester"}},
+]
+
+_GOOD_PY = "def add(a, b):\n    return a + b\n"
+# `compileall` is a SYNTAX-level check — this is what it can honestly catch.
+_BAD_PY = "def broken(:\n    return\n"
+
+
+def _task_id(prompt: str, role: str) -> str:
+    return re.search(rf"{role} for task id '([^']+)'", prompt).group(1)
+
+
+def _pr_head(prompt: str) -> str:
+    return re.search(r"PR head you are reviewing is '([^']*)'", prompt).group(1)
+
+
+def _delivery_head(prompt: str) -> str:
+    return re.search(r"delivered head you are reviewing is '([^']*)'", prompt).group(1)
+
+
+def _rev_env(task_id: str, head: str) -> str:
+    return json.dumps({
+        "schema_version": "coding_turn.v1", "role": "reviewer", "task_id": task_id,
+        "intent": {"kind": "review_verdict", "reviewed_head": head,
+                   "approved": True, "findings": []}})
+
+
+class _Fake:
+    """One dev task writing `content`, then done. No test commands are ever
+    registered — the empty-registry case F154 exists for."""
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.pm_calls = 0
+
+    def __call__(self, member: dict, prompt: str) -> str:
+        if "DELIVERY reviewer" in prompt:
+            return _rev_env("delivery-review", _delivery_head(prompt))
+        if "You are the PM" in prompt:
+            self.pm_calls += 1
+            intent = ({"kind": "plan", "done": False,
+                       "tasks": [{"title": "implement add", "role": "dev"}]}
+                      if self.pm_calls == 1 else
+                      {"kind": "plan", "done": True, "completion_summary": "done"})
+            return json.dumps({"schema_version": "coding_turn.v1", "role": "pm",
+                               "intent": intent})
+        if "You are a developer" in prompt:
+            return json.dumps({
+                "schema_version": "coding_turn.v1", "role": "dev",
+                "task_id": _task_id(prompt, "developer"),
+                "intent": {"kind": "tool_plan", "task_type": "implementation",
+                           "tool_calls": [{"tool": "code_write",
+                                           "args": {"path": "calc.py",
+                                                    "content": self.content}}]}})
+        if "You are a reviewer" in prompt:
+            return _rev_env(_task_id(prompt, "reviewer"), _pr_head(prompt))
+        if "You are a tester" in prompt:
+            return json.dumps({
+                "schema_version": "coding_turn.v1", "role": "tester",
+                "task_id": _task_id(prompt, "tester"),
+                "intent": {"kind": "test_plan", "command_ids": [],
+                           "scope": "full_project", "not_applicable": True,
+                           "rationale": "no commands registered"}})
+        return "{}"
+
+
+def _run(pid: str, content: str, **policy_kw):
+    store = LedgerStore(pid)
+    store.create_project(north_star="calc", definition_of_done="add works",
+                         target="new", repo_path=None)
+    if policy_kw:
+        save_policy(store, CodingAutonomyPolicy(**policy_kw))
+    runner = CodingRunner(pid, MEMBERS, _Fake(content), guardrail_enabled=True)
+    runner.run(CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF,
+                                    max_iterations=40, **policy_kw))
+    return store, runner
+
+
+def _reverify(store, runner):
+    """Bust the once-per-head cache and re-run the verifier directly."""
+    store.set_run_state(delivery_reviewed_head="__stale__")
+    rt = build_run_turn(store, runner.workspace, members_by_coding_role(MEMBERS),
+                        lambda m, p: _rev_env("delivery-review",
+                                              _delivery_head(p)),
+                        guardrail_enabled=True)
+    return rt.delivery_review(store)
+
+
+def test_python_syntax_error_blocks_done(tmp_errorta_home: Path) -> None:
+    """The gap F154 closes: an empty registry read as success.
+
+    No test commands are ever registered, so before F154 `tests_passed` was
+    unconditionally True and this tree — which does not even parse — reached the
+    delivery gate clean.
+    """
+    store, runner = _run("f154-bad", _BAD_PY)
+    result = _reverify(store, runner)
+    assert result.passed is False, result
+    assert any(t.title == "fix delivery build" for t in store.list_tasks())
+    choices = [d.get("choice") for d in store.list_decisions()]
+    assert "built_fail" in choices, choices
+
+
+def test_clean_python_passes(tmp_errorta_home: Path) -> None:
+    """The control: a tree that compiles is not blocked by the new gate."""
+    store, runner = _run("f154-good", _GOOD_PY)
+    result = _reverify(store, runner)
+    assert result.passed is True, result
+    assert not any(t.title == "fix delivery build" for t in store.list_tasks())
+
+
+def test_registered_commands_skip_the_default_build(
+        tmp_errorta_home: Path) -> None:
+    """No behaviour change when the council registered real commands.
+
+    They are the stronger signal; no build is injected on top of them.
+    """
+    store, runner = _run("f154-registered", _BAD_PY)
+    store.set_test_commands({"unit": {
+        "argv": [sys.executable, "-c", "pass"], "cwd": ".",
+        "timeout_seconds": 30}})
+    # Scope to decisions made AFTER registering: the initial run had an empty
+    # registry, so it legitimately recorded a build failure of its own.
+    before = len(store.list_decisions())
+    result = _reverify(store, runner)
+    assert result.passed is True, result
+    new_choices = [d.get("choice") for d in store.list_decisions()[before:]]
+    assert not any(c and c.startswith("built_") for c in new_choices), new_choices
+    assert "delivery_build_error" not in new_choices, new_choices
+
+
+def test_gate_off_restores_todays_behaviour(tmp_errorta_home: Path) -> None:
+    """The escape hatch: `default_build_gate=False` reproduces the old pass."""
+    store, runner = _run("f154-off", _BAD_PY, default_build_gate=False)
+    result = _reverify(store, runner)
+    assert result.passed is True, result
+    assert not any(t.title == "fix delivery build" for t in store.list_tasks())
+
+
+def test_no_derivable_build_is_a_noop(tmp_errorta_home: Path) -> None:
+    """A stack with no rule derives None and is vacuously clean, as today."""
+    store, runner = _run("f154-static", _GOOD_PY)
+    # Remove every .py so nothing is derivable from the delivered tree.
+    for p in Path(runner.workspace.root()).rglob("*.py"):
+        p.unlink()
+    (Path(runner.workspace.root()) / "index.html").write_text("<p>hi")
+    result = _reverify(store, runner)
+    assert result.passed is True, result

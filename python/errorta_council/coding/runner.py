@@ -3949,6 +3949,10 @@ def _review_pr_prompt_segments(
 # A stable synthetic task_id for delivery-review turns (the reviewer echoes it;
 # parse_coding_turn requires envelope.task_id == this for a non-PM role).
 _DELIVERY_TASK_ID = "delivery-review"
+# F154: the synthetic command id for the auto-derived build. Distinct from any
+# registry id (which the council chooses) so the two can never collide, and so the
+# build's recorded run is identifiable on the ledger.
+_DEFAULT_BUILD_COMMAND_ID = "build:default"
 
 
 class DeliveryReviewResult(NamedTuple):
@@ -4133,6 +4137,125 @@ def _default_verify_command(root: Any) -> Optional[tuple[list[str], Any]]:
         except Exception:  # noqa: BLE001 — a bad candidate is skipped, never fatal
             continue
     return None
+
+
+def _ensure_delivery_setup(store: LedgerStore, workspace: Any) -> tuple[bool, str]:
+    """F154 §3: install dependencies ONCE before the default build runs.
+
+    ``npm run build`` / ``cargo build`` need deps present. Without this, a build that
+    fails only because dependencies were never installed would be filed as a code
+    finding against work that is perfectly fine — the exact false-finding risk that
+    made F154 a fast-follow rather than part of the original F152 PR.
+
+    Idempotent by construction: ``_setup_pending_venv_missing`` is the same gate
+    ``launch_probe`` consults, so running setup here makes the later launch probe's
+    own setup a no-op, and a project already set up is untouched.
+
+    Returns ``(ok, detail)``. A project with **no runnable profile** is ``(True, "")``
+    — there is nothing to set up, and a static site's build needs no deps. A setup
+    FAILURE is ``(False, detail)``, which the caller turns into ``cannot_verify``:
+    it blocks ``done`` but files NO dev task, exactly as today's launch-setup failure
+    does."""
+    try:
+        from .runtime import RuntimeProfileStore
+        rstore = RuntimeProfileStore.for_ledger(store)
+        profiles = rstore.list_profiles()
+    except Exception:  # noqa: BLE001 — can't enumerate -> nothing to set up
+        return True, ""
+    runnable = [p for p in profiles
+                if getattr(p, "runtime_mode", "") == "managed_local"
+                and getattr(p, "start", None)]
+    if not runnable:
+        return True, ""
+    try:
+        from .runtime_process import RuntimeProcessManager
+        mgr = RuntimeProcessManager(
+            project_id=store.project_id, rstore=rstore,
+            workspace_root=workspace.root(), work_root=store.dir)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"setup could not start: {exc}"
+    for profile in runnable:
+        try:
+            if not mgr._setup_pending_venv_missing(profile, profile.profile_id):
+                continue
+            session = mgr.setup(profile.profile_id)
+            from .runtime_process import _setup_succeeded
+            if not _setup_succeeded(session):
+                return False, f"{profile.profile_id}: dependency setup failed"
+        except Exception as exc:  # noqa: BLE001 — cannot set up -> cannot verify
+            return False, f"{profile.profile_id}: setup error: {exc}"
+    return True, ""
+
+
+def _run_default_build(
+    store: LedgerStore, workspace: Any, head: str,
+    *, should_cancel: Optional[Callable[[], bool]] = None,
+) -> tuple[bool, bool, str]:
+    """F154: run the auto-derived build/typecheck at the delivered head.
+
+    Returns ``(built_clean, cannot_verify, detail)`` — deliberately the same
+    tri-state shape ``_delivery_launch_evidence`` uses, so the caller's fail-closed
+    handling is symmetric:
+
+    * nothing derivable for this stack -> ``(True, False, "")`` (skipped, vacuously
+      clean — today's exact behaviour);
+    * deps could not be installed -> ``(False, True, detail)`` — a verify error, NOT
+      a build failure, so no phantom code finding is filed;
+    * the build ran and failed -> ``(False, False, detail)`` — a real code finding;
+    * the build ran clean -> ``(True, False, "")``.
+
+    Runs through the same sandboxed executor and ``require_sandbox`` posture as the
+    registry path, and records a synthetic test run bound to ``head`` so the evidence
+    is on the ledger like any other."""
+    try:
+        derived = _default_verify_command(workspace.root())
+    except Exception:  # noqa: BLE001 — a resolver failure derives nothing
+        derived = None
+    if derived is None:
+        return True, False, ""
+    argv, cwd = derived
+    setup_ok, setup_detail = _ensure_delivery_setup(store, workspace)
+    if not setup_ok:
+        return False, True, f"dependency setup failed: {setup_detail}"
+    from pathlib import Path as _Path
+    try:
+        rel = str(_Path(str(cwd)).relative_to(_Path(str(workspace.root())))) or "."
+    except Exception:  # noqa: BLE001 — a non-relative cwd falls back to the root
+        rel = "."
+    registry = {_DEFAULT_BUILD_COMMAND_ID: {
+        "argv": [str(a) for a in argv], "cwd": rel, "timeout_seconds": 600}}
+    try:
+        session = run_test_commands(
+            workspace.root(), registry, [_DEFAULT_BUILD_COMMAND_ID],
+            should_cancel=should_cancel,
+            require_sandbox=store.get_require_sandbox())
+    except Exception as exc:  # noqa: BLE001 — could not execute -> cannot verify
+        return False, True, f"default build could not run: {exc}"
+    try:
+        store.record_test_run(session, task_id=_DELIVERY_TASK_ID, head=head)
+    except Exception:  # noqa: BLE001 — recording is best-effort
+        pass
+    if session.passed:
+        return True, False, ""
+    # Distinguish "the build ran and reported errors" from "the command could not
+    # run at all". The latter is environmental — no code merge flips it green — so it
+    # must be cannot_verify, never a phantom code finding.
+    #
+    # The executor reports `blocked` (sandbox refused) and `timed_out` for the
+    # environmental cases; a command that RAN and exited non-zero is `failed` with a
+    # real exit code, which is exactly the compile error we want to catch. Exit 127
+    # is the other environmental shape — the toolchain is simply not installed (no
+    # npm, no cargo, no go), which is not the council's defect.
+    detail = "; ".join(f"{r.command_id}={r.status}/{r.exit_code}"
+                       for r in session.results)
+    appendix = _failed_stderr_appendix(session.results)
+    if appendix:
+        detail += f"\n\nBuild output:\n{appendix}"
+    unusable = any(r.status in ("blocked", "timed_out") or r.exit_code == 127
+                   for r in session.results)
+    if unusable:
+        return False, True, f"default build could not run: {detail}"
+    return False, False, detail
 
 
 def _delivery_launch_evidence(
@@ -7571,6 +7694,35 @@ def build_run_turn(
                     rationale=str(exc))
                 tests_passed = False
 
+        # 2') F154: the zero-config compile floor. A greenfield project's EMPTY
+        #     registry currently reads as success at both gates — `tests_ok` is
+        #     vacuously satisfied per-PR and `tests_passed` is unconditionally True
+        #     here — so a project can reach `done` with nothing ever compiled.
+        #     F152/F153 catch an app that fails to serve or start; neither catches a
+        #     compile error on a path never requested at launch. Only when the
+        #     registry is empty: when the council registered real commands they are
+        #     the stronger signal and no build is injected on top.
+        built_clean, build_cannot_verify, build_detail = True, False, ""
+        try:
+            from .autonomy import load_policy
+            default_build_gate = bool(getattr(
+                load_policy(store), "default_build_gate", True))
+        except Exception:  # noqa: BLE001 — unreadable policy -> the default (on)
+            default_build_gate = True
+        if not registry and default_build_gate:
+            built_clean, build_cannot_verify, build_detail = _run_default_build(
+                store, workspace, head, should_cancel=should_cancel)
+            if build_detail or not built_clean:
+                try:
+                    store.record_decision(
+                        title="delivery build", context="delivery_review",
+                        choice=("built_pass" if built_clean
+                                else "build_cannot_verify" if build_cannot_verify
+                                else "built_fail"),
+                        rationale=build_detail[:1000] or "default build clean")
+                except Exception:  # noqa: BLE001
+                    pass
+
         # 3) Runtime launch evidence (F146 Slice C): for a runnable managed_local
         #    profile, LAUNCH the delivered program headless + bounded and require
         #    it to get past startup without a traceback — catching runtime-only
@@ -7604,12 +7756,14 @@ def build_run_turn(
         # `passed` requires a clean launch AND a non-red web probe. A launch or
         # probe cannot_verify (None) leaves its flag True (fail-open); only a
         # definitive red fails `passed`.
-        passed = approved and tests_passed and launched_clean and probe_ok
+        passed = (approved and tests_passed and launched_clean and probe_ok
+                  and built_clean)
         # Cache once-per-head ONLY for a real verdict. A cannot_verify (inability
-        # to launch) is NOT cached, so the next completion claim retries the launch
-        # instead of resting on a false negative (matches _cannot_verify above; a
-        # persistent failure stops via no_progress, never a false `done`).
-        if not launch_cannot_verify:
+        # to launch, or to install deps for the F154 build) is NOT cached, so the
+        # next completion claim retries instead of resting on a false negative
+        # (matches _cannot_verify above; a persistent failure stops via no_progress,
+        # never a false `done`).
+        if not launch_cannot_verify and not build_cannot_verify:
             try:
                 store.set_run_state(delivery_reviewed_head=head,
                                     delivery_review_passed=passed)
@@ -7648,6 +7802,26 @@ def build_run_turn(
                 reason_summary="Delivery tests failed",
                 detail=("The registered test suite failed against the delivered "
                         f"head. Make the tests pass: {tests_failed_detail}."))
+            filed = True
+        if build_cannot_verify:
+            # F154: deps could not be installed, or the toolchain is absent. This is
+            # environmental — no code merge flips it green — so it records a decision
+            # and files NO dev task, mirroring the launch-error branch below. It
+            # still blocks `done` and is not cached, so the next claim retries.
+            store.record_decision(
+                title="delivery build could not run",
+                context="delivery_review", choice="delivery_build_error",
+                rationale=build_detail[:1000])
+        elif not built_clean:
+            # A build that RAN and reported errors is a real delivered-code defect —
+            # exactly the compile/type error F152's launch probe cannot see because
+            # the faulting path is never requested at startup.
+            store.add_task(
+                title="fix delivery build", role=DEV,
+                reason_summary="The delivered code does not build",
+                detail=("The project has no registered test commands, so delivery "
+                        "ran an auto-derived build/typecheck at the delivered head "
+                        f"and it FAILED. Fix the build errors: {build_detail}"))
             filed = True
         if launch_cannot_verify:
             # An INABILITY to launch the runnable delivered program (setup/sandbox/
