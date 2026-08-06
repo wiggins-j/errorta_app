@@ -1,7 +1,29 @@
 # F159 — Hot-file serialization: stop parallel writers thrashing a shared file
 
 **Target version:** v0.1 (engine)
-**Status:** proposed
+**Status:** **implemented** — all five items are live; verified 2026-08-06 against
+the tree (17 tests in `python/tests/coding/test_f159_hot_file.py`, all passing).
+The status line said `proposed` long after the work landed, because the items
+shipped inside the GL05 / SPEC-29 dispatch commits rather than under an
+F159-named commit — so a `git log --grep F159` audit reports nothing and reads as
+unimplemented. It is not. Where each item lives:
+
+| Item | Where |
+|---|---|
+| 1 — touched-files signal | `coding/paths.py` (`normalize_path`, `declared_target_paths`, `task_touched_paths`, `paths_intersect`); `target_files` in `Task._extras`; `changed_paths` persisted on the PR record |
+| 2 — hot-file map | `autonomy.hot_files(ledger, *, threshold)`; knobs `hot_file_threshold` (2), `hot_file_escalation_threshold` (4), `hot_file_freeze_stall_limit` (15) |
+| 3 — merge-scoped ownership gate | `topology.plan_next_batch` params `hot_paths` / `hot_blocked` / `hot_blocked_by_task` / `frozen` / `frozen_owner_task_id`, enforced in the fan-out loop |
+| 4 — plan-time serialization | `path_deps` in `runner._materialize_pm_tasks` |
+| 5 — centralize + freeze | `runner._maybe_escalate_hot_files`, `run_state.frozen_paths`, `hot_file_escalated` decision, `autonomy.frozen_paths`, force-lift on the stall limit |
+
+**Beyond the spec:** the implementation carries a hardening pass the spec does not
+describe ("F159 teeth", `topology.py`). A freeze only bites tasks whose touched
+paths are *known* to hit the frozen file — but the real `mockData.ts` writers
+declared no `target_files` and named the file nowhere, so `tp` was empty and the
+freeze was inert against exactly the tasks it existed to hold. While a freeze is
+active, prose-silent DEV writers are now held too; reviewers/testers and DEV tasks
+with a known non-colliding path set are unaffected, and the state is bounded by
+`hot_file_freeze_stall_limit`.
 **Owner:** wiggins-j
 
 > Feature number is provisional — confirm against the F-registry before merge.
