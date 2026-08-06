@@ -17,12 +17,18 @@
 // Usage: node web-probe.mjs <url> [frames] [--screenshot <path>] [--timeout-ms N]
 
 function parseArgs(argv) {
-  const out = { url: "", frames: 30, screenshot: "", timeoutMs: 15000 };
+  const out = { url: "", frames: 30, screenshot: "", timeoutMs: 15000,
+                legacySweep: false, whitebox: true };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--screenshot") out.screenshot = argv[++i] || "";
     else if (a === "--timeout-ms") out.timeoutMs = parseInt(argv[++i] || "15000", 10);
+    // SPEC-40 escape hatches, passed through by web_probe.py from the policy knobs.
+    // `--legacy-sweep` restores the geometry-anchored [0.8,1.3,2.0]xD powers exactly;
+    // `--no-whitebox` skips the white-box phase entirely (today's emitted JSON).
+    else if (a === "--legacy-sweep") out.legacySweep = true;
+    else if (a === "--no-whitebox") out.whitebox = false;
     else rest.push(a);
   }
   if (rest[0]) out.url = rest[0];
@@ -249,7 +255,13 @@ async function main() {
     // only for the MASTER arm of a project that DECLARES straight-shots-must-fail.
     let mechanicProbe = {
       has_hook: false, ran: false, wells: 0, mechanic_matters: null,
-      powers: [], reason: "" };
+      powers: [], reason: "",
+      // SPEC-40 (item A/B): the calibration + confidence metadata. `p_sink` is the
+      // bisected minimum power at which a mechanic-OFF straight shot reaches the hole
+      // (null when the bracket never converged); `confident` is the four-part rule
+      // that decides whether an INERT verdict may hard-block (item E path 3) or is
+      // advisory only (path 4); `straight_sank` is the SEPARATE straight-line claim.
+      p_sink: null, confident: false, max_gap: 0, straight_sank: null };
     try {
       const hasHook = await page.evaluate(() => {
         const p = window.__probe;
@@ -268,7 +280,7 @@ async function main() {
         // the whole on/off/off2 sweep and tick() is the sole driver. If this is ever
         // split or made to `await` mid-sweep, a per-shot pause/determinism guarantee
         // must be restored (the pause clause SPEC-39 removed relied on this).
-        const r = await withTimeout(page.evaluate(() => {
+        const r = await withTimeout(page.evaluate((legacySweep) => {
           const P = window.__probe;
           const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
           // Take control + go to a canonical start; the SPEC-30 interaction phase
@@ -302,7 +314,8 @@ async function main() {
             let sank = false, minD = D, maxMove = 0;
             let prev = { x: start.x, y: start.y }, still = 0;
             let end = { x: start.x, y: start.y };
-            for (let i = 0; i < 6000; i++) {
+            let i = 0;
+            for (; i < 6000; i++) {
               P.tick(1);
               const b = P.state().ball;
               const cur = { x: b.x, y: b.y };
@@ -315,32 +328,110 @@ async function main() {
               prev = cur;
               if (still >= 20) break;
             }
-            return { sank, end, maxMove };
+            return { sank, end, maxMove, ticks: i };
           };
-          const powers = [0.8, 1.3, 2.0].map((k) => k * D);
-          let matters = false, anyMoved = false, resetOk = true, nondet = false;
-          for (const pow of powers) {
-            const on = runShot(pow, true);
-            const off = runShot(pow, false);
-            const off2 = runShot(pow, false);   // determinism/causation guard
-            if (on === null || off === null || off2 === null) { resetOk = false; break; }
-            if (on.maxMove > 2 || off.maxMove > 2) anyMoved = true;
-            // If two IDENTICAL (off) shots diverge, the game is nondeterministic —
-            // the on/off difference cannot be attributed to the mechanic. Bail.
-            if (off.sank !== off2.sank || dist(off.end, off2.end) > holeR / 2) {
-              nondet = true; break;
+
+          // SPEC-40 (item A) — CALIBRATE the sweep to the GAME's usable power range.
+          //
+          // The old sweep anchored to hole GEOMETRY (`[0.8,1.3,2.0] x D`) and fed the
+          // result to a `shoot()` that means a SPEED. On gravity-golf-4 that launched
+          // the ball at 28,800 px/tick: it crossed the whole 600px course in ~one tick,
+          // before gravity could integrate, so ON was identical to OFF and a live
+          // mechanic was reported inert. The mechanic demonstrably mattered — but only
+          // in a power band the sweep never sampled.
+          //
+          // So: BISECT for `P_sink`, the minimum power at which a mechanic-OFF straight
+          // shot first reaches the hole. This is sound precisely because the OFF arm is
+          // MONOTONIC in power — with the mechanic disabled the ball travels a straight
+          // line at the hole and its reach grows with launch speed, so "does it sink"
+          // flips exactly once. The ON arm is NOT monotonic (that is the mechanic's
+          // whole point), which is why the bracket must be built on OFF.
+          let ticks = 0;
+          const TICK_BUDGET = 400000;
+          const sinksOff = (p) => {
+            const r = runShot(p, false);
+            if (r === null) return null;
+            ticks += r.ticks;
+            return r.sank;
+          };
+          let lo = 0, hi = 0, bracketed = false, resetOk = true;
+          if (!legacySweep) {
+            for (let p = 1, i = 0; i < 14 && ticks < TICK_BUDGET; i++, p *= 2) {
+              const s = sinksOff(p);
+              if (s === null) { resetOk = false; break; }
+              if (s) { hi = p; bracketed = true; break; }
+              lo = p;
             }
-            if (on.sank !== off.sank || dist(on.end, off.end) > holeR) {
-              matters = true; break;
+          }
+          let pSink = null;
+          if (bracketed) {
+            for (let i = 0; i < 12 && ticks < TICK_BUDGET; i++) {
+              const mid = (lo + hi) / 2;
+              const s = sinksOff(mid);
+              if (s === null) { resetOk = false; break; }
+              if (s) hi = mid; else lo = mid;
+              if ((hi - lo) / hi < 0.01) break;
+            }
+            pSink = hi;
+          }
+          // Sweep the band AT and BELOW P_sink: that is where the ball is slow enough
+          // for the mechanic to have integration time to bend it. Log-spaced over
+          // [0.15, 1.5] x P_sink. With no bracket we fall back to the old geometry
+          // sweep AND report `confident:false`, so the verdict can only be advisory.
+          const powers = (pSink && !legacySweep)
+            ? Array.from({ length: 7 },
+                (_, i) => pSink * 0.15 * Math.pow(10, i / 6))
+            : [0.8, 1.3, 2.0].map((k) => k * D);
+
+          let matters = false, anyMoved = false, nondet = false;
+          let completed = 0, maxGap = 0, greyBand = false, straightSank = false;
+          if (resetOk) {
+            for (const pow of powers) {
+              if (ticks > TICK_BUDGET) break;
+              const on = runShot(pow, true);
+              const off = runShot(pow, false);
+              const off2 = runShot(pow, false);   // determinism/causation guard
+              if (on === null || off === null || off2 === null) { resetOk = false; break; }
+              ticks += on.ticks + off.ticks + off2.ticks;
+              if (on.maxMove > 2 || off.maxMove > 2) anyMoved = true;
+              // If two IDENTICAL (off) shots diverge, the game is nondeterministic —
+              // the on/off difference cannot be attributed to the mechanic. Bail.
+              if (off.sank !== off2.sank || dist(off.end, off2.end) > holeR / 2) {
+                nondet = true; break;
+              }
+              completed++;
+              // A straight-at-hole shot that sinks WITH the mechanic on is a
+              // straight-line solution — a DISTINCT claim from "the mechanic matters"
+              // (both can be true at once), so it is tracked separately and never
+              // derived from `matters`.
+              if (on.sank) straightSank = true;
+              const gap = dist(on.end, off.end);
+              maxGap = Math.max(maxGap, gap);
+              if (on.sank !== off.sank || gap > holeR) matters = true;
+              else if (gap > holeR / 2) greyBand = true;  // near-threshold -> uncertain
             }
           }
           P.setMechanic(true);   // restore
           if (!resetOk) return { wells, ran: false, reason: "reset() did not return the ball" };
           if (nondet) return { wells, ran: false, reason: "non-deterministic (two identical shots diverged) — tick()/shoot() must be deterministic for headless verification" };
           if (!anyMoved) return { wells, ran: false, reason: "shoot() did not move the ball" };
+          // SPEC-40 (item B) — the CONFIDENCE rule. An INERT verdict may hard-block
+          // delivery (item E path 3) only when all four hold; anything else is
+          // advisory (path 4). The failure mode is therefore a MISSED block, never a
+          // false red — which is the property golf-4 needed and did not have.
+          // In LEGACY mode the confidence concept does not apply — today's trace
+          // hard-gates the differential unconditionally, and the 3-power sweep could
+          // never satisfy `completed >= 5`. So legacy reports confident, preserving
+          // the escape hatch's "reproduces today exactly" contract.
+          const confident = legacySweep
+            || (bracketed && completed >= 5 && !greyBand && !nondet
+                && ticks <= TICK_BUDGET);
           return { wells, ran: true, mechanic_matters: matters,
-                   powers: powers.map((p) => Math.round(p)) };
-        }).catch(() => ({ ran: false, reason: "mechanic phase threw" })), 20000);
+                   powers: powers.map((p) => Math.round(p * 100) / 100),
+                   p_sink: pSink === null ? null : Math.round(pSink * 100) / 100,
+                   confident, max_gap: Math.round(maxGap),
+                   straight_sank: straightSank };
+        }, args.legacySweep).catch(() => ({ ran: false, reason: "mechanic phase threw" })), 20000);
         Object.assign(mechanicProbe, r);
       }
     } catch { /* best-effort; web_probe.py treats an absent hook as no_hook */ }

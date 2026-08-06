@@ -365,13 +365,25 @@ Four of the five original open questions were closed by revision 2 (see the scop
 the **white-box contract** is `solution()`/`won()`; the **`power` unit migration** is not
 needed; the **confident-vs-marginal boundary** is the four-part rule in item B. Remaining:
 
-- **Adaptive sweep robustness.** Validate the bisect on weak-but-real gravity, on-axis
-  wells (zero deflection by symmetry), multi-well S-curves, and wall-bounce levels, so it
-  neither false-reds a live game nor false-greens an inert one. Note this is now much less
-  load-bearing than in revision 1 — the differential is advisory, and a game exposing the
-  contract bypasses it entirely — but path 3 still rests on it for contract-less projects.
-  Bounded by construction: every uncertainty routes to advisory, so the failure mode is a
-  missed block, not a false red.
+- **Adaptive sweep robustness.** Validate the bisect on on-axis wells (zero deflection by
+  symmetry), multi-well S-curves, and wall-bounce levels, so it neither false-reds a live
+  game nor false-greens an inert one. Note this is now much less load-bearing than in
+  revision 1 — the differential is advisory, and a game exposing the contract bypasses it
+  entirely — but path 3 still rests on it for contract-less projects. Bounded by
+  construction: every uncertainty routes to advisory, so the failure mode is a missed
+  block, not a false red.
+
+  **Weak-but-real gravity: validated during implementation, and it moved a fixture.**
+  `fixtures/spec37/inert` turns out to be misleadingly named — its `GSCALE=8` is weak but
+  REAL gravity, measurably deflecting the ball ~14px against a 20px hole radius. SPEC-37's
+  `gap > holeR` rule reads that as a flat "no effect": a false red of exactly golf-4's
+  kind, only smaller, and it had been sitting in the fixture corpus as the *control*.
+  Under SPEC-40 it classifies as UNCERTAIN (14px is inside the `(holeR/2, holeR]` grey
+  band) and is therefore advisory — it can neither hard-block nor drive an anchor
+  regression. Loosening the band to call it "confidently inert" would re-open golf-4, so
+  the band stands and the honest verdict is uncertainty. The golf-2 negative control moved
+  to a new `fixtures/spec40/inert-true`, whose `step()` never reads `mechanicOn` at all —
+  the defect golf-2 actually shipped — measuring `max_gap <= 1` and `confident: true`.
 - **Node-executed browser tests (flavor b).** Deferred, and revision 2 weakens the case for
   it further: with no council-authored executable test there is nothing that *wants* a node
   process. Revisit only if a declared mechanic appears that the shot-shaped verbs cannot

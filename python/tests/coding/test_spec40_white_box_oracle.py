@@ -96,3 +96,71 @@ def _probe_fixture(*parts: str) -> dict:
         return _probe(f"http://127.0.0.1:{port}/")
     finally:
         httpd.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 (item A) — the adaptive sweep, live
+# --------------------------------------------------------------------------- #
+@pytest.mark.live
+def test_live_golf4_adaptive_sweep_finds_the_band() -> None:
+    """Regression lock 2 — golf-4 becomes winnable.
+
+    The golf-4 false red: the geometry-anchored ``[0.8,1.3,2.0] x D`` sweep fires at
+    480/780/1200, where ``shoot()`` (a SPEED) launches at 28,800 px/tick and the ball
+    crosses the 600px course in ~one tick, so ON is identical to OFF. Measured on this
+    fixture the endpoint gap at those powers is 1-5px; at every power <= 15 it is
+    755-3688px. The adaptive sweep must bisect into the game's own scale and sample
+    the live band.
+    """
+    mp = _probe_fixture("spec40", "golf4")["mechanic_probe"]
+    assert mp["ran"] is True, mp
+    assert mp["mechanic_matters"] is True, mp
+    assert mp["p_sink"] is not None and mp["p_sink"] < 100, mp
+    assert max(mp["powers"]) < 100, mp
+
+
+@pytest.mark.live
+def test_live_truly_inert_is_false_and_confident() -> None:
+    """Regression lock 1 — the golf-2 protection survives the recalibration.
+
+    A game whose ``step()`` never reads ``mechanicOn`` (the shipped-inert defect
+    golf-2 actually had) must report ``mechanic_matters`` False and CONFIDENTLY so:
+    path 3 can only hard-block on a confident verdict, so an inert game that came back
+    "uncertain" would ship — exactly the golf-2 failure.
+    """
+    mp = _probe_fixture("spec40", "inert-true")["mechanic_probe"]
+    assert mp["ran"] is True, mp
+    assert mp["mechanic_matters"] is False, mp
+    assert mp["confident"] is True, mp
+    assert mp["max_gap"] <= 1, mp
+
+
+@pytest.mark.live
+def test_live_weak_but_real_gravity_is_uncertain_not_inert() -> None:
+    """The grey band, doing its job — and why it is NOT tuned away.
+
+    ``fixtures/spec37/inert`` is misleadingly named: ``GSCALE=8`` is weak but REAL
+    gravity, measurably deflecting the ball ~14px against a 20px hole radius. Under
+    SPEC-37's ``gap > holeR`` rule that reads as a flat "no effect" — a false red of
+    exactly golf-4's kind, just smaller. SPEC-40 classifies it as UNCERTAIN, so it is
+    advisory and can never hard-block or drive an anchor regression.
+
+    Loosening the ``holeR/2`` grey band to make this "confidently inert" would re-open
+    the golf-4 false red, so the band stays and the honest verdict is uncertainty.
+    """
+    mp = _probe_fixture("spec37", "inert")["mechanic_probe"]
+    assert mp["ran"] is True, mp
+    assert mp["confident"] is False, mp
+
+
+@pytest.mark.live
+def test_live_nondeterministic_game_is_not_confident() -> None:
+    """Regression lock 4 — a nondeterministic game routes to UNCERTAIN, not red.
+
+    The determinism guard already refuses to attribute an on/off difference to the
+    mechanic. Under SPEC-40 that must surface as ``ran: False`` (advisory), never as a
+    confident inert verdict that could hard-block.
+    """
+    mp = _probe_fixture("spec37", "nondet")["mechanic_probe"]
+    assert mp["ran"] is False, mp
+    assert "non-deterministic" in mp["reason"], mp
