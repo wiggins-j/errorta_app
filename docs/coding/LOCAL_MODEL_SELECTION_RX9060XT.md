@@ -23,10 +23,22 @@ implementation costs a full extra cycle.
 Three defects were found along the way. The first is more valuable than the model
 choice itself:
 
-1. **F001's "qwen3.5:9b is unreliable at the judge schema" is a thinking-mode
-   integration bug, not a model weakness.** Setting `think: false` fixes it
-   completely. The proposed mitigation of shipping `mistral-small3.1` (15 GB) as
-   the default judge is likely unnecessary.
+1. **F001's "qwen3.5:9b is unreliable at the judge schema" is an integration bug,
+   not a model weakness.** The proposed mitigation of shipping `mistral-small3.1`
+   (15 GB) as the default judge is unnecessary.
+
+   > **Correction (2026-08-06, after the SPEC-42 re-test).** This item originally
+   > read "a thinking-mode integration bug… setting `think: false` fixes it
+   > completely." The mechanism was misidentified. The controlled re-test
+   > (`model-eval/f001_judge_retest.py`, 8 trials/arm on `/api/chat`) shows the
+   > primary cause is the **output-token budget**: at 2048 with thinking on,
+   > qwen3.5:9b scored 2/8 with **6/8 turns returning `done_reason: "length"`** —
+   > truncated mid-trace, with `THINKING_TRACE_MARKER` substitution passing the
+   > fragment off as an answer. Raising the budget to 8192 *with thinking still
+   > on* recovers 7/8. `think:false` is a real improvement on top (8/8, and 91 vs
+   > 1455 generated tokens) but it is not what fixes the schema failure, and
+   > citing it as the cause would have left the truncation live everywhere
+   > structured output is not involved. See SPEC-42 for the full matrix.
 2. **Two model-selector bugs** make automatic route selection unusable on an
    all-local pool.
 3. **Constrained decoding is off.** Enabling `format` takes clean, directly
@@ -368,6 +380,15 @@ So the two failures are separable and both real:
   co-residency cost buys nothing here. (It does not follow that F001's *observed*
   judge problems were all this — they were seen through a different harness. It
   follows that §4.1 is not the evidence for them.)
+
+  > **Resolved 2026-08-06.** The caveat above was the right one to leave open, and
+  > the dedicated re-test closes it: run through the council's own `/api/chat` path
+  > under F001's actual conditions, qwen3.5:9b reproduces the failure (2/8) and the
+  > fixed configuration clears it (8/8). `mistral-small3.1` scores 8/8 in *every*
+  > arm including the broken one, because it has no thinking channel to truncate —
+  > so F001's comparison was measuring immunity to truncation, not schema skill.
+  > The recommendation is now unfounded on the measured evidence, not merely
+  > unsupported by §4.1.
 * **The `THINKING_TRACE_MARKER` workaround (`gateway_local.py:25`) is still a real
   defect, and independent of the above.** When `content` is empty it substitutes
   `MARKER + thinking`, so the council receives the reasoning trace *presented as an

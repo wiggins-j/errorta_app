@@ -50,8 +50,37 @@ Already largely built in AIAR. Errorta's v0.1 work is **polish + extension**, no
   - The "Accept LLM Judge Evaluation" button (added 2026-05-28; we built this)
 
 - **New work for Errorta v0.1:**
-  - **Better judge prompts.** The current judge schema is `{rating, reason, failure_tags, confidence}` but some local models (e.g. qwen3.5:9b at 9B params) emit `{verdict: "false", ...}` instead — schema drift. Fix: stricter prompt, schema validation with retry, fallback model tier.
-  - **Separate judge model.** Add `EVAL_JUDGE_MODEL` env (and corresponding UI dropdown). When unset, judge uses the active model. When set, judge uses the named model. Pipeline change in `aiar.eval.judge`.
+  - ~~**Better judge prompts.**~~ **Re-measured 2026-08-06 — the premise was
+    wrong.** This item recorded qwen3.5:9b "emitting wrong-schema JSON" and led to
+    the separate-judge proposal below. SPEC-42 required re-testing it once the
+    coding turn's output budget was fixed, and the result attributes it to
+    truncation, not schema drift. Three arms, 8 trials, reviewer-verdict shape,
+    on `/api/chat` (`docs/coding/model-eval/f001_judge_retest.py`):
+
+    | arm | qwen3.5:9b | mistral-small3.1 |
+    |---|---|---|
+    | A — 2048 budget, thinking on (F001's conditions) | **2/8**, 6/8 truncated | 8/8 |
+    | B — 8192 budget, thinking on | 7/8, 0 truncated | 8/8 |
+    | C — 8192 + `think:false` + `format:"json"` (shipped) | **8/8**, 91 tok | 8/8, 172 tok |
+
+    qwen3.5:9b spends its budget on a hidden reasoning trace BEFORE the answer, so
+    2048 cut 6 of 8 turns mid-trace and `THINKING_TRACE_MARKER` substitution handed
+    back the fragment as if it were the answer. The model was never emitting a wrong
+    schema. No prompt change, retry loop, or fallback tier is needed.
+  - **Separate judge model.** Add `EVAL_JUDGE_MODEL` env (and corresponding UI
+    dropdown). When unset, judge uses the active model. When set, judge uses the
+    named model. Pipeline change in `aiar.eval.judge`.
+
+    **The 15 GB `mistral-small3.1` judge this originally argued for is no longer
+    justified by schema compliance.** The re-test above measured it under the same
+    three arms: it was immune to the truncation (no thinking channel, ~89 generated
+    tokens, so 2048 was never a constraint), which is exactly why it looked so much
+    better than qwen3.5:9b — under F001's conditions the comparison really was 8/8
+    vs 2/8. That measurement was sound; its *attribution* was not. With the budget
+    fixed the two tie at 8/8, and qwen3.5:9b is the cheaper of the two (91 vs 172
+    generated tokens) while already resident. The knob may still be worth having
+    for verdict QUALITY — which this test does not measure, since it scores shape
+    only — but not for schema compliance.
   - **Calmer correction-review UX.** Currently the user clicks Accept and the verdict goes straight to grounding. Add an inline "review correction text" pre-confirmation step: show the proposed correction in an editable text field, let the user trim/edit before submitting.
   - **Verdict metrics dashboard.** A new page that shows: pass rate over time, judge model agreement vs human override rate, most-frequently-corrected prompts. Lives at `/metrics` in the Errorta UI.
   - **Source-jump UI** (overlaps F004): clicking a chunk citation in the answer opens the source document at the right page.
