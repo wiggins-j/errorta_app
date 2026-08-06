@@ -44,6 +44,8 @@ from .autonomy import (
 )
 from .completion import (
     acceptance_gate_status,
+    mechanic_gate_reason,
+    mechanic_gate_status,
     pending_completion_work,
     summarize_open_items,
 )
@@ -3526,6 +3528,25 @@ def _acceptance_gate_blocks_done(
         return None
     if not head:
         return None
+    # SPEC-40 (item E): the declared-mechanic gate, checked BEFORE the acceptance gate
+    # so its far more actionable reason wins when both are unhappy. Only `red` blocks:
+    # `advisory` is the uncertain/marginal verdict that must never terminate a healthy
+    # run (the golf-4 lesson — the oracle itself may be the thing that is wrong), and
+    # `ok` means the council's own white-box assertion proved the mechanic. Recovery
+    # is structural and identical to the acceptance gate's: the probe re-runs on the
+    # next merge, so a fixed tree lifts this on its own, and every refusal is bounded
+    # by the F128 `completion_refused` ladder.
+    if mechanic_gate_status(store, head) == "red":
+        why = mechanic_gate_reason(store, head)
+        return (f"the declared mechanic is not proven at master head {head[:12]}"
+                + (f" — {why}" if why else "")
+                + ". `done` is refused until it is proven. The fastest way: expose "
+                "window.__probe.solution() (a shot that clears the level, in the same "
+                "units shoot() takes) and window.__probe.won() (your own win "
+                "predicate) — the probe fires your solution with the mechanic ON "
+                "(must win) and the identical shot with it OFF (must NOT win). Or fix "
+                "the mechanic. The probe re-runs on the next merge and lifts this "
+                "automatically (SPEC-40).")
     status = acceptance_gate_status(store, head)
     if status in ("no_gate", "green"):
         return None

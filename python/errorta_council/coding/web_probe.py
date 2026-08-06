@@ -148,7 +148,7 @@ def _probe_script_path() -> Optional[Path]:
 
 def _default_node_runner(
     url: str, frames: int, *, screenshot_path: str = "",
-    timeout_ms: int = 15000,
+    timeout_ms: int = 15000, legacy_sweep: bool = False, whitebox: bool = True,
 ) -> Optional[dict[str, Any]]:
     """Shell out to Node + Playwright to run the black-canvas oracle. Returns the
     parsed JSON verdict, or ``None`` when the probe could not run (node missing,
@@ -161,6 +161,13 @@ def _default_node_runner(
             "--timeout-ms", str(int(timeout_ms))]
     if screenshot_path:
         argv += ["--screenshot", screenshot_path]
+    # SPEC-40 escape hatches. Absent flags = the new behaviour (the defaults);
+    # `--legacy-sweep` restores the geometry-anchored powers and `--no-whitebox`
+    # removes the phase, each reproducing today's trace for that half.
+    if legacy_sweep:
+        argv.append("--legacy-sweep")
+    if not whitebox:
+        argv.append("--no-whitebox")
     try:
         proc = subprocess.run(  # noqa: S603 — trusted engine script, argv-only
             argv, cwd=str(script.parent.parent), capture_output=True,
@@ -233,7 +240,18 @@ _HOOK_CONTRACT = (
     "reset:()=>{} returning the ball to the tee, setMechanic:(on)=>{} actually "
     "enabling/disabling the mechanic. state() must return plain {x,y} number copies "
     "— so the probe can verify the mechanic changes outcomes (fire the same shot "
-    "with it on vs off)")
+    "with it on vs off)"
+    # SPEC-40 (item D): the white-box contract. Deliberately worded as the FAST,
+    # UNAMBIGUOUS path rather than a mandate — a game whose mechanic demonstrably
+    # works still clears the gate on the differential alone (item E path 3), and
+    # making these mandatory would re-create the instrumentation burden this spec
+    # exists to retire.
+    "; BEST: also expose won:()=>bool (your own win predicate for the current level — "
+    "the same one that draws your win banner) and solution:()=>({dx,dy,power}) "
+    "returning a shot that clears the level, in the SAME units shoot() takes. That is "
+    "the fastest and least ambiguous way to prove the mechanic: the probe fires your "
+    "solution with the mechanic ON (must win) and the identical shot with it OFF (must "
+    "NOT win), so no power calibration or endpoint heuristic is involved (SPEC-40)")
 
 
 def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
@@ -264,7 +282,12 @@ def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
         # the probe re-runs on the next merge (SPEC-35-style). Only a STRUCTURAL
         # problem (no ball/hole, no-op shoot, non-restoring reset, nondeterminism)
         # is a hard unusable fail.
-        if "timed out" in reason or "threw" in reason:
+        # SPEC-40 adds "exhausted its simulation budget" to this set: like a timeout
+        # it is a CANNOT-VERIFY, not a structural defect in the hook, so it must stay
+        # advisory. Treating a budget exhaustion as an unusable-hook red would blame
+        # the council for the probe running out of ticks.
+        if ("timed out" in reason or "threw" in reason
+                or "cannot verify" in reason):
             return True, ""
         return False, ("exposes a window.__probe hook but it is unusable — "
                        + (reason or "state() lacks ball/hole, shoot() is a no-op, "
@@ -278,8 +301,45 @@ def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
     return True, ""
 
 
+def _whitebox_verdict(verdict: dict[str, Any]) -> tuple[str, str]:
+    """SPEC-40 (item D) — classify the white-box phase as
+    ``("green" | "red" | "absent", reason)``.
+
+    ``absent`` covers every cannot-verify shape — the ``whitebox`` key is missing (an
+    older probe script), the game exposes no ``solution()``/``won()`` contract, or the
+    phase could not run (a throwing ``won()``, a malformed ``solution()``). All of them
+    fall through to item E path 3/4 rather than becoming a red: the new verbs are the
+    FAST path, never a toll gate, so their absence must never fail a project.
+
+    ``green``/``red`` mirror the phase's own verdict, which the probe script composes
+    from the three arms. Fully guarded — a malformed payload reads as ``absent``.
+    """
+    wb = verdict.get("whitebox")
+    if not isinstance(wb, dict):
+        return "absent", ""
+    if not wb.get("has_contract") or not wb.get("ran"):
+        return "absent", str(wb.get("reason") or "")
+    v = str(wb.get("verdict") or "")
+    if v not in ("green", "red"):
+        return "absent", str(wb.get("reason") or "")
+    return v, str(wb.get("reason") or "")
+
+
+def _mechanic_confident(verdict: dict[str, Any]) -> bool:
+    """SPEC-40 (item B) — did the differential produce a CONFIDENT verdict?
+
+    Only a confident INERT verdict may hard-block delivery (item E path 3). An older
+    probe script that emits no ``confident`` field reads as NOT confident, so a stale
+    script degrades to advisory rather than to a block it cannot justify."""
+    mp = verdict.get("mechanic_probe")
+    if not isinstance(mp, dict):
+        return False
+    return bool(mp.get("confident"))
+
+
 def _verdict_to_result(verdict: dict[str, Any],
-                       declares_mechanic: bool = False) -> TestRunResult:
+                       declares_mechanic: bool = False,
+                       *, mechanic_advisory: bool = True) -> TestRunResult:
     """Fold the node probe's JSON into a synthetic ``web:probe`` ``TestRunResult``
     — ``passed`` only when console-clean AND non-black AND (SPEC-37) the declared
     mechanic has effect. The reason + console errors go into ``stderr_preview``
@@ -294,11 +354,24 @@ def _verdict_to_result(verdict: dict[str, Any],
     # could not interact -> fail-open, the passive verdict stands.
     interaction_changed = verdict.get("interaction_changed")
     mechanic_ok, mechanic_reason = _mechanic_verdict(verdict, declares_mechanic)
+    # SPEC-40 (item B): the ANCHORED verdict tracks LIVENESS only — renders non-black,
+    # console-clean, responds to input. The mechanic differential is deliberately NOT
+    # folded in here, because `anchors.reconcile` keys on this exact boolean: a
+    # marginal differential that flips green<->red on a sub-threshold tweak was setting
+    # `anchor_regressed`, which fed `revise_livelock` and actively PUNISHED the tuning
+    # that flipped it (gravity-golf-4, decisions #197/#231). The mechanic verdict still
+    # travels in `stderr_preview` below (so `gate_state.latest_gate_text` shows the
+    # reviewer the real line) and on the PR record, and the done-gate composes it
+    # there — see `completion.mechanic_gate_status`.
     passed = (bool(verdict.get("ok")) and non_black and not console_errors
-              and interaction_changed is not False and mechanic_ok)
+              and interaction_changed is not False
+              and (mechanic_ok or mechanic_advisory))
     reason = str(verdict.get("reason") or "")
     if not mechanic_ok and mechanic_reason:
         reason = (reason + "; " if reason else "") + mechanic_reason
+    wb_status, wb_reason = _whitebox_verdict(verdict)
+    if wb_status == "red" and wb_reason:
+        reason = (reason + "; " if reason else "") + wb_reason
     parts = [f"non_black={non_black}", f"console_errors={len(console_errors)}"]
     if reason:
         parts.append(reason)
@@ -326,6 +399,7 @@ def _probe_verdict_fields(verdict: dict[str, Any], *, head: str,
     passed = (bool(verdict.get("ok")) and non_black and not console_errors
               and interaction_changed is not False and mechanic_ok)
     mp = verdict.get("mechanic_probe") if isinstance(verdict.get("mechanic_probe"), dict) else {}
+    wb_status, wb_reason = _whitebox_verdict(verdict)
     return {
         "probe_passed": passed,
         "probe_non_black": non_black,
@@ -337,7 +411,66 @@ def _probe_verdict_fields(verdict: dict[str, Any], *, head: str,
         "probe_screenshot": str(verdict.get("screenshot") or ""),
         "probe_reason": str(verdict.get("reason") or "")[:500],
         "probe_head": str(head),
+        # SPEC-40 (item C): the components that GATE delivery, stamped on the PR record
+        # so the reviewer reviews against the real bar. The feedback-locality bug this
+        # closes: the per-PR probe was green while the master differential that gates
+        # delivery stayed red, so the council optimized the visible-but-wrong signal
+        # and merged 22 green PRs that never shipped.
+        "probe_whitebox": wb_status,
+        "probe_whitebox_reason": wb_reason[:500],
+        "probe_mechanic_confident": _mechanic_confident(verdict),
+        "probe_mechanic_matters": mp.get("mechanic_matters"),
     }
+
+
+# The run_state key holding the newest MASTER-arm mechanic evidence. Additive, no
+# migration — the same discipline `anchors.py` uses for `test_anchors`.
+_EVIDENCE_KEY = "probe_mechanic_evidence"
+
+
+def record_mechanic_evidence(store: Any, *, head: str,
+                             verdict: dict[str, Any],
+                             declares: bool = False) -> None:
+    """SPEC-40 (item E) — persist the structured mechanic evidence the done-gate reads.
+
+    Written only for the MASTER arm, bound to the head it was measured at, so
+    ``completion.mechanic_gate_status`` can refuse evidence that describes a different
+    tree. Best-effort and never raises: a write failure degrades to "no evidence",
+    which the gate treats as advisory (it must never INVENT a block).
+
+    ``declares`` is the project's own straight-shots-must-fail signal and MUST be
+    persisted. An earlier revision hardcoded ``True`` here, which made every ordinary
+    web project — a CRUD app, a dashboard, anything with no ``window.__probe`` — look
+    like a declared-mechanic game with a missing hook. That is item E path 3b, so the
+    done-gate refused those projects and told them to expose a golf hook. The gate now
+    requires this flag, and the recorder no longer speaks for a project that never
+    made the claim."""
+    wb_status, wb_reason = _whitebox_verdict(verdict)
+    mp = verdict.get("mechanic_probe") if isinstance(verdict.get("mechanic_probe"), dict) else {}
+    mechanic_ok, mechanic_reason = _mechanic_verdict(verdict, bool(declares))
+    payload = {
+        "head": str(head or ""),
+        "declares": bool(declares),
+        "whitebox": wb_status,
+        "whitebox_reason": wb_reason[:500],
+        "mechanic_matters": mp.get("mechanic_matters"),
+        "confident": _mechanic_confident(verdict),
+        # SPEC-37's verdict, carried through so the gate can distinguish the two very
+        # different ways it can be False. "The differential says inert" is a MEASURED
+        # claim that may be marginal, so it needs `confident` to block (the golf-4
+        # protection). "There is no usable hook at all" is not a measurement — it is an
+        # absence of evidence about a project that DECLARED the claim, and SPEC-37
+        # blocked it. Collapsing the two would let gravity-golf-2, which exposes no
+        # __probe at all, ship on `advisory`.
+        "has_hook": bool(mp.get("has_hook")),
+        "mechanic_ok": mechanic_ok,
+        "mechanic_reason": mechanic_reason[:500],
+        "reason": str(verdict.get("reason") or "")[:500],
+    }
+    try:
+        store.set_run_state(**{_EVIDENCE_KEY: payload})
+    except Exception:  # noqa: BLE001 — evidence is best-effort, never fails a turn
+        pass
 
 
 def _attach_verdict_to_prs(store: Any, fields: dict[str, Any], *, head: str) -> None:
@@ -422,21 +555,48 @@ def run_and_record(
         if not url or not _wait_reachable(url, should_cancel=should_cancel):
             return None  # never served in the window: fail-open, no evidence
         screenshot = _screenshot_path(store, head)
+        # SPEC-40: read the four escape hatches off the policy. Fully guarded — an
+        # unreadable policy means "all on" (the defaults), never a crash.
+        adaptive, advisory, whitebox_on, pr_gating = _probe_knobs(store)
         try:
             verdict = runner(url, int(frames), screenshot_path=screenshot,
-                             timeout_ms=int(_READY_TIMEOUT_S * 1000))
+                             timeout_ms=int(_READY_TIMEOUT_S * 1000),
+                             legacy_sweep=not adaptive, whitebox=whitebox_on)
+        except TypeError:
+            # An injected test seam predating SPEC-40 accepts neither new keyword.
+            # Fall back to the old call shape rather than losing the probe entirely.
+            try:
+                verdict = runner(url, int(frames), screenshot_path=screenshot,
+                                 timeout_ms=int(_READY_TIMEOUT_S * 1000))
+            except Exception:  # noqa: BLE001
+                verdict = None
         except Exception:  # noqa: BLE001 — the seam must never raise into the loop
             verdict = None
         if not isinstance(verdict, dict):
             return None  # probe could not run: fail-open (cannot-verify)
 
-        # SPEC-37: gate on the behavioral mechanic verdict only for the MASTER /
-        # delivery arm of a project that DECLARES a straight-shots-must-fail
-        # mechanic. NOT for a per-PR probe (pr_scoped): a partial-module PR mid-build
-        # legitimately has no whole-game hook yet, and failing it would red every
-        # in-progress PR. The whole-artifact verdict is the master arm's job.
-        declares_mechanic = (not pr_scoped) and _declares_load_bearing_mechanic(store)
-        result = _verdict_to_result(verdict, declares_mechanic)
+        # SPEC-37/SPEC-40 (item C). Two things the original code conflated:
+        #
+        # `declares`     — does the project DECLARE a straight-shots-must-fail
+        #                  mechanic? Drives what we COMPUTE and STAMP, on BOTH arms.
+        # `gates_hard`   — may that verdict FAIL this probe? Still arm-scoped, because
+        #                  a partial-module PR mid-build legitimately has no
+        #                  whole-game hook yet and hard-redding it would red every
+        #                  in-progress PR (the SPEC-37 guard, preserved).
+        #
+        # Splitting them closes the feedback-locality bug: the per-PR probe the
+        # reviewer saw was green while the master differential that gates delivery
+        # stayed red, so the council optimized the visible-but-wrong signal, merged 22
+        # green PRs, and delivery never cleared. Now the per-PR arm surfaces the same
+        # components, and hard-gates once the contract is actually present on that head.
+        declares = _declares_load_bearing_mechanic(store)
+        contract_present = _whitebox_verdict(verdict)[0] != "absent"
+        if pr_gating:
+            gates_hard = declares and (not pr_scoped or contract_present)
+        else:
+            gates_hard = declares and not pr_scoped
+        result = _verdict_to_result(verdict, gates_hard,
+                                    mechanic_advisory=advisory)
         probe_session = TestRunSession(
             command_ids=[PROBE_COMMAND_ID], results=[result], unknown_ids=[],
             passed=bool(result.passed), sandbox="")
@@ -450,14 +610,40 @@ def run_and_record(
         try:
             _attach_verdict_to_prs(
                 store,
+                # SPEC-40 (item C): stamp with `declares`, not `gates_hard`, so BOTH
+                # arms carry the full verdict on the record even when the per-PR arm
+                # declines to fail on it.
                 _probe_verdict_fields(verdict, head=head,
-                                      declares_mechanic=declares_mechanic),
+                                      declares_mechanic=declares),
                 head=head)
         except Exception:  # noqa: BLE001
             pass
+        # SPEC-40 (item E): persist the structured evidence the done-gate reads —
+        # MASTER arm only. A per-PR head is a branch tip, not the tree we would call
+        # done, so letting it write here would let a branch decide delivery.
+        if not pr_scoped:
+            record_mechanic_evidence(store, head=head, verdict=verdict,
+                                     declares=declares)
         return run
     finally:
         _stop_quiet(mgr, profile.profile_id)
+
+
+def _probe_knobs(store: Any) -> tuple[bool, bool, bool, bool]:
+    """SPEC-40 — read the four escape hatches as
+    ``(adaptive_sweep, mechanic_advisory, whitebox, pr_gating)``.
+
+    Fully guarded: an unreadable policy returns all-ON (the dataclass defaults) rather
+    than raising, matching this module's never-fail-the-loop discipline."""
+    try:
+        from .autonomy import load_policy
+        p = load_policy(store)
+    except Exception:  # noqa: BLE001
+        return True, True, True, True
+    return (bool(getattr(p, "probe_adaptive_sweep", True)),
+            bool(getattr(p, "probe_mechanic_advisory", True)),
+            bool(getattr(p, "probe_whitebox", True)),
+            bool(getattr(p, "probe_pr_gating", True)))
 
 
 def _screenshot_path(store: Any, head: str) -> str:
@@ -491,6 +677,7 @@ def has_web_profile(store: Any) -> bool:
 __all__ = [
     "run_and_record",
     "has_web_profile",
+    "record_mechanic_evidence",
     "PROBE_COMMAND_ID",
     "NodeRunner",
 ]

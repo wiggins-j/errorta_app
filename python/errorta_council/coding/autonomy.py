@@ -392,6 +392,34 @@ class CodingAutonomyPolicy:
     # vacuous-clean behaviour exactly. Note this never fires when the registry is
     # non-empty — the strict reviewer-AND-tests gate is untouched.
     default_build_gate: bool = True
+    # --- SPEC-40 — the testability-contract oracle rework ---------------------- #
+    # Same escape-hatch convention as the Spec 22-28 batch above: each knob's DISABLE
+    # value must reproduce today's trace exactly.
+    #
+    # Item A: calibrate the mechanic differential's power sweep to the GAME's usable
+    # range — bisect for the minimum power at which a mechanic-OFF straight shot
+    # sinks, then sweep the band at and below it. The old sweep anchored to the HOLE
+    # GEOMETRY (`[0.8,1.3,2.0] x dist(tee,hole)`), which is 32-80x miscalibrated
+    # against a game whose `shoot()` takes a speed: gravity-golf-4 launched at 28,800
+    # px/tick, crossed a 600px course in ~one tick before gravity could integrate, and
+    # reported a live mechanic as inert. False restores the geometry-anchored sweep.
+    probe_adaptive_sweep: bool = True
+    # Item B: keep the mechanic differential OUT of the anchored `web:probe` passed,
+    # so a marginal verdict flipping green<->red can no longer drive `anchor_regressed`
+    # (and through it `revise_livelock`). The verdict still travels on the recorded
+    # run's stderr_preview and the PR record; the done-gate composes it. False restores
+    # folding `mechanic_ok` into `passed`.
+    probe_mechanic_advisory: bool = True
+    # Item D: run the white-box `solution()`/`won()` acceptance phase — the council's
+    # own win predicate plus a winning shot in the game's own units, with the engine
+    # driving both arms so anti-vacuity is structural. False skips the phase entirely.
+    probe_whitebox: bool = True
+    # Item C: stamp the same verdict components on the PER-PR arm that gate delivery.
+    # The feedback-locality bug this closes: the per-PR probe the reviewer saw was
+    # green while the master differential that gates delivery stayed red, so the
+    # council optimized the visible-but-wrong signal and merged 22 green PRs that never
+    # shipped. False restores today's weaker per-PR verdict.
+    probe_pr_gating: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -452,6 +480,11 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "not_applicable_soft_limit": p.not_applicable_soft_limit,
         # F154 — the zero-config compile floor for test-less projects.
         "default_build_gate": p.default_build_gate,
+        # SPEC-40 — the oracle rework's four escape hatches.
+        "probe_adaptive_sweep": p.probe_adaptive_sweep,
+        "probe_mechanic_advisory": p.probe_mechanic_advisory,
+        "probe_whitebox": p.probe_whitebox,
+        "probe_pr_gating": p.probe_pr_gating,
     }
 
 
@@ -602,6 +635,13 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # F154: a plain bool gate; False restores today's vacuous-clean behaviour.
         default_build_gate=bool(
             d.get("default_build_gate", base.default_build_gate)),
+        # --- SPEC-40 — plain bool gates; absent key -> the dataclass default (ON).
+        probe_adaptive_sweep=bool(
+            d.get("probe_adaptive_sweep", base.probe_adaptive_sweep)),
+        probe_mechanic_advisory=bool(
+            d.get("probe_mechanic_advisory", base.probe_mechanic_advisory)),
+        probe_whitebox=bool(d.get("probe_whitebox", base.probe_whitebox)),
+        probe_pr_gating=bool(d.get("probe_pr_gating", base.probe_pr_gating)),
     )
 
 
