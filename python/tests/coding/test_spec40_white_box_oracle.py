@@ -175,9 +175,42 @@ class _FakeLedger:
 
 def _ev(**kw) -> dict:
     base = {"head": _HEAD, "whitebox": "absent", "whitebox_reason": "",
-            "mechanic_matters": None, "confident": False, "reason": ""}
+            "mechanic_matters": None, "confident": False, "reason": "",
+            "has_hook": True, "mechanic_ok": True, "mechanic_reason": ""}
     base.update(kw)
     return base
+
+
+def test_no_hook_at_all_still_blocks() -> None:
+    """Regression lock 1, path 3b — the shape the REAL gravity-golf-2 tree has.
+
+    Caught by re-probing the actual delivered tree, not by any fixture: golf-2
+    predates the hook contract, so ``__probe`` is absent entirely, the differential
+    never runs, and there is no ``mechanic_matters`` reading to be confident about.
+    An earlier revision of this gate returned ``advisory`` for that shape — meaning
+    golf-2 would have SHIPPED, the exact failure this lock exists to prevent.
+
+    Path 3b is deliberately NOT subject to the confidence rule: an absent hook is not
+    a marginal measurement, it is the total absence of behavioral evidence about a
+    project that declared the claim.
+    """
+    from errorta_council.coding.completion import (
+        mechanic_gate_reason, mechanic_gate_status)
+    golf2 = _ev(has_hook=False, mechanic_ok=False, mechanic_matters=None,
+                confident=False,
+                mechanic_reason="declares a straight-shots-must-fail mechanic but "
+                                "exposes no scriptable state hook — expose "
+                                "window.__probe = {...}")
+    assert mechanic_gate_status(_FakeLedger(golf2), _HEAD) == "red"
+    assert "window.__probe" in mechanic_gate_reason(_FakeLedger(golf2), _HEAD)
+    # ...but a game that HAS a hook and produced a marginal reading stays advisory —
+    # path 3b must not become a back door around the golf-4 protection.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        has_hook=True, mechanic_ok=False,
+        mechanic_matters=False, confident=False)), _HEAD) == "advisory"
+    # ...and a cannot-verify (mechanic_ok True, no reading) is advisory.
+    assert mechanic_gate_status(_FakeLedger(_ev(
+        has_hook=True, mechanic_ok=True, mechanic_matters=None)), _HEAD) == "advisory"
 
 
 def test_gate_hierarchy_paths() -> None:

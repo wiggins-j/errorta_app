@@ -438,12 +438,23 @@ def record_mechanic_evidence(store: Any, *, head: str,
     which the gate treats as advisory (it must never INVENT a block)."""
     wb_status, wb_reason = _whitebox_verdict(verdict)
     mp = verdict.get("mechanic_probe") if isinstance(verdict.get("mechanic_probe"), dict) else {}
+    mechanic_ok, mechanic_reason = _mechanic_verdict(verdict, True)
     payload = {
         "head": str(head or ""),
         "whitebox": wb_status,
         "whitebox_reason": wb_reason[:500],
         "mechanic_matters": mp.get("mechanic_matters"),
         "confident": _mechanic_confident(verdict),
+        # SPEC-37's verdict, carried through so the gate can distinguish the two very
+        # different ways it can be False. "The differential says inert" is a MEASURED
+        # claim that may be marginal, so it needs `confident` to block (the golf-4
+        # protection). "There is no usable hook at all" is not a measurement — it is an
+        # absence of evidence about a project that DECLARED the claim, and SPEC-37
+        # blocked it. Collapsing the two would let gravity-golf-2, which exposes no
+        # __probe at all, ship on `advisory`.
+        "has_hook": bool(mp.get("has_hook")),
+        "mechanic_ok": mechanic_ok,
+        "mechanic_reason": mechanic_reason[:500],
         "reason": str(verdict.get("reason") or "")[:500],
     }
     try:

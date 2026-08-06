@@ -330,6 +330,32 @@ Four knobs on `CodingAutonomyPolicy` (`autonomy.py`), following the batch conven
 | `probe_whitebox` | `True` | no white-box phase at all |
 | `probe_pr_gating` | `True` | today's weaker per-PR verdict (item C off) |
 
+## Validation trio — measured against the three DELIVERED trees
+
+Run with `scripts/validate-spec40-trio.sh` against the real workspaces under
+`~/.errorta/council/apply-workspaces/coding-gravity-golf-{2,3,4}`. Measured 2026-08-06:
+
+| Tree | `--legacy-sweep` (today's trace) | adaptive (SPEC-40) | Lock |
+|---|---|---|---|
+| **golf-2** | no `__probe` hook, `ran=false` | no hook, `ran=false` → **blocked via path 3b** | 1 ✓ |
+| **golf-3** | `matters=true` | `matters=true`, `interaction=true`, `p_sink=2.98` → **green** | 3 ✓ |
+| **golf-4** | `matters=false`, `confident=true`, **`max_gap=2`** | `matters=true`, **`p_sink=5.94`, `max_gap=613`** → **unblocked** | 2 ✓ |
+
+**golf-4 is the whole thesis in one row:** the identical delivered artifact, two sweeps,
+opposite verdicts, endpoint gap moving from 2px to 613px. The false red was never a
+property of the game — it was the sweep firing at 480–1200 in a game whose usable power
+tops out near 15. The bisected `p_sink = 5.94` lands inside the 3–8 band the ledger
+analysis predicted independently, which is a genuine out-of-sample confirmation of the
+root cause.
+
+**Path 3b exists because of this run.** golf-2 exposes no `__probe` at all — it predates
+the hook contract — so the differential never runs and there is no `mechanic_matters`
+reading for the confidence rule to judge. An earlier revision of the gate returned
+`advisory` for that shape, which would have let golf-2 **ship**: regression lock 1 broken
+by the very change meant to protect it. No fixture caught this (every fixture has a hook);
+only re-probing the real tree did. Hence item E path 3b, which blocks on the *absence* of
+behavioral evidence and is deliberately not subject to the confidence rule.
+
 ## Definition of done
 
 - The five moves land behind the switches above, each disable-value reproducing today's

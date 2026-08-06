@@ -202,11 +202,19 @@ def mechanic_gate_status(ledger: Any, current_head: str) -> MechanicGateStatus:
     2. contract present and RED -> ``red`` (recoverable; the caller routes it through
        the bounded ``completion_refused`` ladder).
     3. no contract + a CONFIDENT calibrated-inert differential -> ``red``. This is the
-       golf-2 protection: a genuinely inert declared-mechanic game must not ship.
-    4. no contract + a marginal/uncertain differential -> ``advisory``. Never a hard
-       block, never an anchor regression. This is the golf-4 lesson — the oracle
-       itself may be the thing that is wrong, so an uncertain verdict must not
-       terminate a healthy run.
+       golf-2 protection for a game that HAS a hook: a genuinely inert
+       declared-mechanic game must not ship.
+    3b. no usable ``__probe`` hook AT ALL -> ``red``. Distinct from path 3 and NOT
+       subject to the confidence rule, because this is not a measurement that could be
+       marginal — it is the total absence of behavioral evidence about a project that
+       declared the claim. SPEC-37 blocked this, and the real gravity-golf-2 tree is
+       exactly this shape (it predates the hook contract, so the differential never
+       runs and there is no ``mechanic_matters`` reading to be confident about).
+       Folding it into path 4 would let golf-2 ship on ``advisory`` — the precise
+       failure regression lock 1 exists to prevent.
+    4. everything else -> ``advisory``. Never a hard block, never an anchor
+       regression. This is the golf-4 lesson — the oracle itself may be the thing
+       that is wrong, so an uncertain verdict must not terminate a healthy run.
 
     READ-ONLY and FAIL-OPEN: missing evidence, a head mismatch, or any read error
     returns ``advisory``. The module's fail-closed rule governs open *work*; a
@@ -221,9 +229,17 @@ def mechanic_gate_status(ledger: Any, current_head: str) -> MechanicGateStatus:
         return "ok"
     if wb == "red":
         return "red"
-    # No usable contract: fall back to the differential, and only a CONFIDENT inert
-    # verdict may block.
+    # Path 3 — a MEASURED inert verdict. Marginal readings stay advisory.
     if ev.get("mechanic_matters") is False and bool(ev.get("confident")):
+        return "red"
+    # Path 3b — no measurement was possible at all. `mechanic_ok` is SPEC-37's verdict,
+    # which is False for a missing or structurally unusable hook (and True for every
+    # cannot-verify: a timeout, a thrown evaluation, an exhausted budget). Guarded on
+    # `mechanic_matters is None` so a game that DID produce a reading is judged by
+    # path 3's confidence rule and never sneaks a block in through here.
+    if (ev.get("mechanic_matters") is None
+            and ev.get("mechanic_ok") is False
+            and not ev.get("has_hook")):
         return "red"
     return "advisory"
 
@@ -244,6 +260,9 @@ def mechanic_gate_reason(ledger: Any, current_head: str) -> str:
         return ("the calibrated differential found no effect at any power in the "
                 "game's own usable range — a straight shot behaves identically with "
                 "the mechanic on vs off")
+    # Path 3b — SPEC-37's reason already names the hook contract to build.
+    if ev.get("mechanic_matters") is None and not ev.get("has_hook"):
+        return str(ev.get("mechanic_reason") or "").strip()
     return ""
 
 
