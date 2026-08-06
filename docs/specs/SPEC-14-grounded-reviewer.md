@@ -2,7 +2,10 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S3 (P0)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — Items 1-5 landed; **Item 6 (screenshot evidence) is NOT implemented**
+**Landed evidence:** repo_read_root async_claude_cli.py:182; reviewer tagging runner.py:7104; `cited` flag runner.py:5220 + PR grounding fields ledger.py:1082; num_turns -> _last_turn_grounding runner.py:5174 with retry-once + `review_ungrounded` runner.py:7158
+**NOT landed:** Item 6. `review_screenshot` (autonomy.py:245) is a DEAD KNOB — it serializes through policy_to_dict/policy_from_dict (:478/:593) and is asserted in test_spec12_18_prep.py:175, but is READ NOWHERE and no capture step exists on the review path. The GL01 web-probe writes `probe_screenshot` (ledger.py:1090) but is not gated on this knob and never reaches the review prompt. Note the existing test locks only the SERIALIZATION, so it passes either way — any fix needs a behavioural test.
+**Tests:** tests/coding/test_spec14_grounded_reviewer.py (12 tests, Items 1-4). None for Item 6.
 **Owner:** wiggins-j
 
 > Items 5 and 6 depend on [Spec 12](SPEC-12-in-loop-acceptance-gate.md); Items

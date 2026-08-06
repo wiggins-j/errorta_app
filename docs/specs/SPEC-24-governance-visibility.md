@@ -5,7 +5,9 @@
 [SPEC-23](SPEC-23-continue-by-default.md), which closes G2's *authority* half and
 explicitly defers this one (SPEC-23 "Out of scope", first bullet).
 **Target version:** v0.1 (engine — `errorta_council/coding/`)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** detector_state.py prompt_text:324; publish_detector_state autonomy.py:3144 called from BOTH loops (:4084, :4590); PM prompt runner.py:3063
+**Tests:** tests/coding/test_spec24_governance_visibility.py (~39, incl. both-chain publish + golden-byte kill switch)
 **Owner:** wiggins-j
 
 ---

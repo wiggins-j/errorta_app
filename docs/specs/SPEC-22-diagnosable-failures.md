@@ -5,7 +5,9 @@ it fails silently." Concretely: an `errorta new` `500` that has now survived
 three debugging sessions unexplained, and the on-disk residue every failed
 attempt left behind.
 **Target version:** v0.1 (CLI + sidecar + ledger)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** sidecar rotating/redacted log errorta_cli/sidecar.py:154 wired at :193; _mint_error_id server.py:524 consumed client.py:247; _cleanup_failed_create routes/coding.py:591
+**Tests:** tests/cli/test_spec22_diagnosable.py (10) + tests/coding/test_spec22_diagnosable.py (18)
 **Owner:** wiggins-j
 
 ---

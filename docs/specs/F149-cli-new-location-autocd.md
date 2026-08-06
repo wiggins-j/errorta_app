@@ -1,7 +1,10 @@
 # F149 — `errorta new <id> [location]`: location argument + auto-`cd` shell hook
 
 **Target version:** v0.1 (CLI)
-**Status:** proposed
+**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — core landed; the open/switch/import cd-emit is a deliberate scope cut the spec text does not yet reflect
+**Landed evidence:** _resolve_new_root project.py:91 + positional location :413; server-side guard routes/coding.py:670 -> _validate_delivery_root:160; emit_cd_target project.py:119 called :191; shellinit.py + app.py:162
+**NOT landed:** emit_cd_target is called ONLY from `new`. open/switch/import do not emit a cd target (_open_call project.py:201 writes the binding and returns), though the spec lists them in the same bullet. shellinit.py:11 calls this 'a documented follow-up', so it is intentional — but the spec text still reads as if it shipped.
+**Tests:** tests/cli/test_new_location_and_shellinit.py (12)
 **Owner:** wiggins-j
 
 > Feature number is provisional — confirm against the F-registry before merge.

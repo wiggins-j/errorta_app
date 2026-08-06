@@ -2,7 +2,9 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S2 (P0)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** _buildless_web_ready runner.py:4910 called from foundation_ready runner.py:5111; unlocks_foundation ledger.py:1077 set at runner.py:7064
+**Tests:** tests/coding/test_spec13_buildless_foundation.py (37 tests, incl. reddit-clone lock)
 **Owner:** wiggins-j
 
 ---

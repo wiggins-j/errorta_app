@@ -11,7 +11,10 @@ capable REVIEWER whose turns never dispatched) · [SPEC-27](SPEC-27-convergence-
 **Relates to:** [F159](F159-hot-file-serialization.md) (the sibling merge-scoped
 gate, same role-blindness) · known-open #3, the missing reviewer-less merge path
 ([ROADMAP-autonomy.md](ROADMAP-autonomy.md):193-194)
-**Status:** proposed
+**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — ONLY the GL05 skip predicate; the claim guard, the hot-file exemption, AND the entire test deliverable are absent
+**Landed evidence:** landed: topology.py:585 `if partition_on and role == DEV and tp and paths_intersect(tp, owned_unavailable): continue`
+**NOT landed:** (a) Item 1 CLAIM half — topology.py:611 is still `if partition_on and tp: claimed |= tp` with NO role guard, so a dispatched REVIEWER/TESTER claims paths it never writes and blocks a later DEV in the SAME batch. (b) Item 3 (F159 hot gate) — topology.py:563 is role-blind too, so a merge-scoped hot hold can deadlock a review one conflict later. (c) Item 2 IS THE STATED DELIVERABLE ("the test is the spec") and NO SPEC-29 test exists anywhere: grep over python/ returns only the source comment at topology.py:573. The one landed predicate is itself untested.
+**Tests:** NONE. No test_spec29_*.py; test_gl05_parallelism.py has no dispatch-level reviewer-exemption test.
 **Owner:** wiggins-j
 
 ---

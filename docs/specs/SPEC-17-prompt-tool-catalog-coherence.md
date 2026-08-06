@@ -2,7 +2,9 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S6 (P2)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** tool_catalog_text turn_controller.py:69 called for DEV runner.py:3793 / REVIEWER :3995 / TESTER :4726; last_tool_failure carry-forward ledger.py:408 -> prompt runner.py:3779
+**Tests:** tests/coding/test_spec17_tool_catalog.py (19 tests)
 **Owner:** wiggins-j
 
 > **Δ review** found Item 3's stated delivery mechanism does not exist (a

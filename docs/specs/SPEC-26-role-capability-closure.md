@@ -7,7 +7,10 @@ an invariant and
 [GL05](../../.superpowers/specs/GL05-single-vs-multi-and-parallelism.md) Item 1
 implements as an **advisory**.
 **Target version:** v0.1 (engine — `errorta_council/coding/`; one route pair)
-**Status:** proposed
+**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — Items 1,2,3,5 landed; Item 4's OPERATOR surface is not
+**Landed evidence:** ClosureVerdict capabilities.py:449, role_closure:502; _apply_role_closure runner.py:2799 called on the live path :8377; _reevaluate_role_closure :2851 called :5491
+**NOT landed:** POST /coding/projects/{id}/run-setup/preflight (routes/coding.py:3020) still returns only {'unhealthy': ...} with no 'capability' key, and GET /run-setup likewise. errorta_cli/render/runctl.py has ZERO `capability` references, so `errorta setup --preflight` / `errorta team preflight` never show the verdict or remedy before the operator commits to a run.
+**Tests:** tests/coding/test_spec26_role_closure.py (~29) — none cover the HTTP/CLI surface.
 **Owner:** wiggins-j
 
 ---

@@ -1,7 +1,9 @@
 # F150 — `errorta team` builder: `create` / `add` (roles, counts, multi-model) + `--default`
 
 **Target version:** v0.1 (CLI)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** teamdraft.add_members:172; team.py create:197 / add:211; _assemble_default:154
+**Tests:** tests/cli/test_team_builder.py (18)
 **Owner:** wiggins-j
 
 > Feature number is provisional — confirm against the F-registry before merge.

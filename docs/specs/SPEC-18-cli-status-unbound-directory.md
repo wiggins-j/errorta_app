@@ -2,7 +2,9 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S7 (P2)**
 **Target version:** v0.1 (CLI)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** unbound branch commands/status.py:33; _unbound_project_lines render/status.py:73 called :121
+**Tests:** tests/cli/test_status_unbound.py (12 tests, incl. byte-identical bound render)
 **Owner:** wiggins-j
 
 ---

@@ -2,7 +2,9 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S5 (P1)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** revise_depth/finding_class ledger.py:711 written runner.py:1237; breaker runner.py:1063; _account_revise_livelock autonomy.py:2674 wired into BOTH loops (autonomy.py:4062, :4570)
+**Tests:** tests/coding/test_spec16_revise_breaker.py (20 tests, incl. dead-code lock)
 **Owner:** wiggins-j
 
 ---

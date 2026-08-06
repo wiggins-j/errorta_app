@@ -1,7 +1,9 @@
 # F158 — Talking to the PM from the CLI: interactive chat + ambient presence
 
 **Target version:** v0.1 (CLI)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** per-call timeout client.py:114; interactive loop pm.py:86 with TTY guard :92; pm-chat source poller.py:61
+**Tests:** tests/cli/test_pm_conversation.py (17)
 **Owner:** wiggins-j
 
 > Feature number is provisional — confirm against the F-registry before merge.

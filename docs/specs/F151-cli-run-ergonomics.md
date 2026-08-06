@@ -1,7 +1,9 @@
 # F151 — CLI run ergonomics: `stop` alias, `run --autonomous`, live `log --watch`
 
 **Target version:** v0.1 (CLI)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** Command.aliases registry.py:57 + _ALIASES:90; --autonomous runctl.py:363; streaming tail watch.py:183
+**Tests:** tests/cli/test_run_ergonomics.py (13) + test_poller_tail_diff.py (8)
 **Owner:** wiggins-j
 
 > Feature number is provisional — confirm against the F-registry before merge.

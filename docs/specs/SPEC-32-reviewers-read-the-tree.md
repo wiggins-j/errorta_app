@@ -21,7 +21,10 @@ diff.
 mounting for the delivery + per-PR reviewer)
 **Relates to:** the 2026-07-24 run analysis §4.3 (reviewer tool hunger), known-open
 #2/#3 (ungrounded reviewer)
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — Items 1-2 landed; Item 3 (a legal read step) is not
+**Landed evidence:** reframed prompts runner.py:3856 (per-PR) / :4066 (delivery); reject_for_truncation = truncated and not repo_read runner.py:3894; live call sites pass a real repo_read (:7104, :7812, :7439)
+**NOT landed:** No `read_files` reviewer intent and no bounded pre-verdict read turn. _INTENT_BY_ROLE schemas.py:521 still maps reviewer -> review_verdict only (:580). The implementation FORBIDS the shape in prose (runner.py:3961 "Do NOT emit a tool_plan / tool_calls intent") and leans on the agentic vendor's native Read/Grep — so a tool_calls-shaped reviewer turn still fails validation and still costs a reviewer_turn_correction_retry (runner.py:5861).
+**Tests:** tests/coding/test_spec32_reviewer_reads.py (4, Items 1-2). test_pr_reviewer_with_mount_forbids_toolcalls_turn:57 LOCKS the non-implementation of Item 3.
 
 ---
 

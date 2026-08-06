@@ -2,7 +2,9 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S4 (P1)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** coding/capabilities.py capability_manifest:124 / classify_task_text:205; lint at all three chokepoints runner.py:3336, control_actions.py:378, routes/coding.py:1559
+**Tests:** tests/coding/test_spec15_capability_aware.py (15 tests, incl. re-review-loop lock)
 **Owner:** wiggins-j
 
 > With a gate present, execution-imperative work is *routed*; without one, it is
