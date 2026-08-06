@@ -560,7 +560,21 @@ def plan_next_batch(
                     continue
             hot_unavailable = _unavailable_for(
                 task.task_id, blocked, hot_owner_map, hot_claimed)
-            if hot_unavailable and _paths.paths_intersect(tp, hot_unavailable):
+            # SPEC-29 Item 3: the same non-writer exemption the GL05 gate below
+            # carries. F159's hot hold is GL05's sibling and shares the property
+            # that makes the deadlock possible — hot ownership releases ONLY on
+            # merge, and the merge needs the reviewer_approved that the review this
+            # gate is blocking would produce. It was inert on run 4 (a conflict-free
+            # greenfield run has no hot files) which is why GL05 fired first, but the
+            # moment a file conflicts twice this gate blocks that file's review
+            # exactly as GL05 blocked all six — the same deadlock, one conflict later.
+            #
+            # F159's FREEZE-intersect gate at :543 is deliberately left role-blind:
+            # the freeze is bounded by `hot_file_freeze_stall_limit` and force-lifts,
+            # so it cannot wedge. Only the two merge-scoped, release-on-merge-only
+            # gates need the exemption.
+            if (role == DEV and hot_unavailable
+                    and _paths.paths_intersect(tp, hot_unavailable)):
                 continue
             # GL05 (Item 2): strict a-priori file-ownership partition. A task whose
             # DECLARED paths overlap a path already owned by an in-flight/doing task
@@ -601,6 +615,15 @@ def plan_next_batch(
             worker_assigned = True
             # F159: claim this task's hot paths so a later candidate in the SAME
             # batch touching them waits (cross-tick holds come in via hot_blocked).
+            #
+            # SPEC-29 leaves this claim role-BLIND on purpose, unlike the GL05 claim
+            # below. `hot_claimed` is per-batch (seeded empty at :482), so a reviewer
+            # claiming a hot path costs a later DEV one tick and nothing more — it
+            # cannot deadlock, because the claim does not survive the batch. The two
+            # gates that needed the exemption are the merge-scoped ones whose
+            # ownership releases only on merge. Narrowing this too would be a
+            # scheduling optimisation, not a liveness fix; it is deliberately out of
+            # scope rather than overlooked.
             if hot:
                 hot_claimed |= {
                     hp for hp in hot if _paths.paths_intersect(tp, {hp})
@@ -608,7 +631,14 @@ def plan_next_batch(
             # GL05 (Item 2): claim ALL this task's declared paths (not only hot ones)
             # so a later candidate in the SAME batch can't be handed an overlapping
             # file; cross-tick holds arrive via `owned_paths`.
-            if partition_on and tp:
+            #
+            # SPEC-29 Item 1 (the claim half): gated on `role == DEV` for the same
+            # reason as the skip. A REVIEWER's touched paths are INFERRED from its
+            # title ("review PR: Create ball.js" -> {ball.js}); claiming them would
+            # block a later DEV in this same batch from a file the reviewer never
+            # writes. Exempting non-writers removes zero protection against the
+            # collision GL05 exists to prevent — that collision is two WRITERS.
+            if partition_on and role == DEV and tp:
                 claimed |= tp
             # SPEC-27 `integration_only`: serial drain. One assign this tick, so
             # the run narrows to integrating what it has instead of fanning out
