@@ -58,6 +58,84 @@ def test_spec40_policy_knobs_default_on_and_roundtrip() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Task 4 (item B) — the differential is advisory, not anchored
+# --------------------------------------------------------------------------- #
+def _v(**kw) -> dict:
+    base = {"ok": True, "non_black": True, "console_errors": [],
+            "interaction_changed": True, "reason": "rendered"}
+    base.update(kw)
+    return base
+
+
+def test_marginal_differential_no_longer_reds_the_anchor() -> None:
+    """Item B — the core of regression lock 4.
+
+    ``anchors.reconcile`` keys on this exact boolean, so folding the mechanic verdict
+    into it meant a marginal differential flipping on a sub-threshold tweak set
+    ``anchor_regressed``, which fed ``revise_livelock`` and actively PUNISHED the
+    tuning that flipped it (golf-4, decisions #197/#231).
+    """
+    from errorta_council.coding.web_probe import _verdict_to_result
+    v = _v(mechanic_probe={"has_hook": True, "ran": True,
+                           "mechanic_matters": False, "confident": False})
+    assert _verdict_to_result(v, declares_mechanic=True).passed is True
+    # ...and the escape hatch restores today's fold exactly.
+    assert _verdict_to_result(
+        v, declares_mechanic=True, mechanic_advisory=False).passed is False
+
+
+def test_liveness_failure_still_reds() -> None:
+    """The other half of lock 4: a REAL regression still breaks the lineage."""
+    from errorta_council.coding.web_probe import _verdict_to_result
+    assert _verdict_to_result(_v(non_black=False),
+                              declares_mechanic=True).passed is False
+    assert _verdict_to_result(_v(interaction_changed=False),
+                              declares_mechanic=True).passed is False
+    assert _verdict_to_result(_v(ok=False, console_errors=["boom"]),
+                              declares_mechanic=True).passed is False
+
+
+def test_whitebox_verdict_classification() -> None:
+    from errorta_council.coding.web_probe import _whitebox_verdict
+    # No `whitebox` key at all (an older probe script) -> absent, never a red.
+    assert _whitebox_verdict(_v())[0] == "absent"
+    assert _whitebox_verdict(_v(whitebox={"has_contract": False}))[0] == "absent"
+    assert _whitebox_verdict(_v(whitebox={
+        "has_contract": True, "ran": True, "verdict": "green"}))[0] == "green"
+    status, reason = _whitebox_verdict(_v(whitebox={
+        "has_contract": True, "ran": True, "verdict": "red",
+        "reason": "vacuous — ... setMechanic(false) ..."}))
+    assert status == "red"
+    assert "setMechanic" in reason
+    # A contract that could not RUN is not a red — it falls through to path 3/4.
+    assert _whitebox_verdict(_v(whitebox={
+        "has_contract": True, "ran": False,
+        "reason": "won() threw"}))[0] == "absent"
+
+
+# --------------------------------------------------------------------------- #
+# Task 5 (item C) — the reviewed signal equals the gating signal
+# --------------------------------------------------------------------------- #
+def test_per_pr_arm_stamps_the_same_components() -> None:
+    """Regression lock 7 — the feedback-locality fix.
+
+    22 green PRs merged against a weaker per-PR verdict while the master differential
+    that gates delivery stayed red. Both arms must now stamp the same components.
+    """
+    from errorta_council.coding.web_probe import _probe_verdict_fields
+    v = _v(mechanic_probe={"has_hook": True, "ran": True,
+                           "mechanic_matters": False, "confident": True},
+           whitebox={"has_contract": True, "ran": True, "verdict": "red",
+                     "reason": "vacuous — setMechanic(false) does not disable it"})
+    for declares in (True, False):
+        f = _probe_verdict_fields(v, head="abc", declares_mechanic=declares)
+        assert f["probe_whitebox"] == "red", f
+        assert "setMechanic" in f["probe_whitebox_reason"], f
+        assert f["probe_mechanic_confident"] is True, f
+        assert f["probe_mechanic_matters"] is False, f
+
+
+# --------------------------------------------------------------------------- #
 # Live-probe plumbing (shared with the SPEC-37/38 suites' pattern)
 # --------------------------------------------------------------------------- #
 def _free_port() -> int:
