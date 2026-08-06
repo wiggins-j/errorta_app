@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><title>golf4</title>
+<style>html,body{margin:0;background:#0b1020}</style></head>
+<body><canvas id="c" width="800" height="600"></canvas>
+<script type="module">
+// SPEC-40 fixture — reproduces gravity-golf-4's ACTUAL defect: the human drag clamps
+// to MAX_POWER, but __probe.shoot does NOT. So the old geometry-anchored sweep
+// ([0.8,1.3,2.0] x dist(tee,hole) = 480/780/1200) launches at power*POWER_SCALE =
+// 28,800+ px/tick, crossing the 600px course before gravity can integrate: ON == OFF
+// and a live mechanic reads as inert. Gravity demonstrably matters at power 3-8.
+const cv=document.getElementById("c"), g=cv.getContext("2d");
+const DT=1/60, FRICTION=0.99, MIN=10, GSCALE=9000, BR=10, POWER_SCALE=60, MAX_POWER=15;
+const tee={x:100,y:300}, hole={x:700,y:300,r:20};
+const wells=[{x:400,y:180,strength:900,r:40}];
+let ball={x:tee.x,y:tee.y,vx:0,vy:0,r:BR}, sank=false, mechanicOn=true;
+function reset(){ball={x:tee.x,y:tee.y,vx:0,vy:0,r:BR}; sank=false;}
+function step(){
+  if(sank) return;
+  if(mechanicOn){for(const w of wells){const dx=w.x-ball.x,dy=w.y-ball.y,d=Math.hypot(dx,dy),ed=Math.max(d,MIN);
+    const a=GSCALE*w.strength/(ed*ed); if(d>0){ball.vx+=dx/d*a*DT; ball.vy+=dy/d*a*DT;}}}
+  ball.vx*=FRICTION; ball.vy*=FRICTION; ball.x+=ball.vx*DT; ball.y+=ball.vy*DT;
+  if(Math.hypot(ball.x-hole.x,ball.y-hole.y)<=hole.r) sank=true;
+}
+cv.addEventListener("mousedown",()=>{ball.vx=Math.min(MAX_POWER,10)*POWER_SCALE;ball.vy=0;});
+function draw(){g.fillStyle="#0b1020";g.fillRect(0,0,800,600);
+  g.fillStyle="#4af";for(const w of wells){g.beginPath();g.arc(w.x,w.y,w.r,0,7);g.fill();}
+  g.strokeStyle="#5f5";g.lineWidth=3;g.beginPath();g.arc(hole.x,hole.y,hole.r,0,7);g.stroke();
+  g.fillStyle="#fff";g.beginPath();g.arc(ball.x,ball.y,ball.r,0,7);g.fill();}
+function loop(){step();draw();requestAnimationFrame(loop);} loop();
+window.__probe={
+  state:()=>({ball:{x:ball.x,y:ball.y},hole:{...hole},wells:wells.map(w=>({x:w.x,y:w.y})),moving:Math.hypot(ball.vx,ball.vy)>0.5}),
+  shoot:(dx,dy,power)=>{const d=Math.hypot(dx,dy)||1;ball.vx=dx/d*power*POWER_SCALE;ball.vy=dy/d*power*POWER_SCALE;},
+  tick:(n)=>{for(let i=0;i<n;i++)step();}, reset, setMechanic:(on)=>{mechanicOn=!!on;},
+};
+</script></body></html>

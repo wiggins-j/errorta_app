@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset="utf-8"><title>inert-true</title>
+<style>html,body{margin:0;background:#0b1020}</style></head>
+<body><canvas id="c" width="800" height="600"></canvas>
+<script type="module">
+// SPEC-40 fixture — the golf-2 negative control (regression lock 1): a game that
+// DECLARES a gravity mechanic, draws the wells, and exposes a complete, honest
+// __probe hook — but whose step() never reads `mechanicOn`, so the wells are pure
+// decoration. This is the shipped-inert defect gravity-golf-2 actually had.
+//
+// Distinct from fixtures/spec37/inert, which has GSCALE=8 — WEAK but REAL gravity,
+// measurably deflecting ~14px against a 20px hole radius. That is a genuinely
+// ambiguous case and SPEC-40 routes it to `confident:false` (advisory) on purpose.
+// Only a truly inert mechanic earns a CONFIDENT inert verdict, which is the only
+// verdict item E path 3 lets hard-block delivery.
+const cv=document.getElementById("c"), g=cv.getContext("2d");
+const DT=1/60, FRICTION=0.995, STOP=0.5, BR=10;
+const tee={x:100,y:300}, hole={x:700,y:300,r:20};
+const wells=[{x:400,y:200,strength:800,r:40}];
+let ball={x:tee.x,y:tee.y,vx:0,vy:0,r:BR}, sank=false, mechanicOn=true;
+function reset(){ball={x:tee.x,y:tee.y,vx:0,vy:0,r:BR}; sank=false;}
+function step(){
+  if(sank) return;
+  // THE DEFECT: `mechanicOn` is stored, reported, and toggled — and never read here.
+  ball.vx*=FRICTION; ball.vy*=FRICTION; ball.x+=ball.vx*DT; ball.y+=ball.vy*DT;
+  if(Math.hypot(ball.x-hole.x,ball.y-hole.y)<=hole.r) sank=true;
+}
+function launch(){ball.vx=(hole.x-ball.x)*0.6; ball.vy=(hole.y-ball.y)*0.6-120;}
+cv.addEventListener("mousedown",()=>launch());
+function draw(){g.fillStyle="#0b1020";g.fillRect(0,0,800,600);
+  g.fillStyle="#4af";for(const w of wells){g.beginPath();g.arc(w.x,w.y,w.r,0,7);g.fill();}
+  g.strokeStyle="#5f5";g.lineWidth=3;g.beginPath();g.arc(hole.x,hole.y,hole.r,0,7);g.stroke();
+  g.fillStyle="#fff";g.beginPath();g.arc(ball.x,ball.y,ball.r,0,7);g.fill();}
+function loop(){step();draw();requestAnimationFrame(loop);} loop();
+window.__probe={
+  state:()=>({ball:{x:ball.x,y:ball.y},hole:{...hole},wells:wells.map(w=>({x:w.x,y:w.y,strength:w.strength})),moving:Math.hypot(ball.vx,ball.vy)>STOP}),
+  shoot:(dx,dy,power)=>{const d=Math.hypot(dx,dy)||1;ball.vx=dx/d*power;ball.vy=dy/d*power;},
+  tick:(n)=>{for(let i=0;i<n;i++)step();}, reset, setMechanic:(on)=>{mechanicOn=!!on;},
+};
+</script></body></html>

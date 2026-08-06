@@ -632,6 +632,23 @@ and FastAPI routers. Update the prose and this contract together.
 > `governance_proximity`, `{}` for `capability_overrides` — is required to
 > reproduce today's behaviour exactly, and stays required after its spec lands.
 
+> **SPEC-40 — the testability-contract oracle.** Four `autonomy_defaults` keys,
+> all **live** and all defaulting to `true`. Unlike the batches above, each one's
+> disable value is `false`:
+> * `probe_adaptive_sweep` — calibrate the mechanic differential's power sweep to
+>   the game's own usable range (bisect for the minimum power at which a
+>   mechanic-OFF straight shot sinks) instead of anchoring it to hole geometry.
+>   `false` restores the `[0.8,1.3,2.0] × dist(tee,hole)` sweep, which was 32–80×
+>   miscalibrated against a game whose `shoot()` takes a speed.
+> * `probe_mechanic_advisory` — keep the mechanic verdict OUT of the anchored
+>   `web:probe` pass/fail, so a marginal verdict cannot drive `anchor_regressed`
+>   and through it `revise_livelock`. `false` restores the old fold.
+> * `probe_whitebox` — run the white-box `__probe.solution()` / `__probe.won()`
+>   acceptance phase. `false` skips it entirely.
+> * `probe_pr_gating` — stamp the same verdict components on the per-PR arm that
+>   gate delivery, so the reviewer reviews against the real bar. `false` restores
+>   the weaker per-PR verdict.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -676,6 +693,10 @@ and FastAPI routers. Update the prose and this contract together.
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
+    "probe_adaptive_sweep": true,
+    "probe_mechanic_advisory": true,
+    "probe_pr_gating": true,
+    "probe_whitebox": true,
     "review_min_latency_ms": 0,
     "review_screenshot": false,
     "revert_overlap": 0.7,

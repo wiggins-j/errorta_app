@@ -157,15 +157,35 @@ def _verdict(mp, ok=True, non_black=True, interaction_changed=True):
 
 
 def test_result_blocks_declared_inert_game() -> None:
+    # SPEC-40 (item B) MOVED this block one layer up. The mechanic verdict no longer
+    # folds into the ANCHORED `web:probe` passed, because `anchors.reconcile` keys on
+    # that boolean and a marginal differential was driving `anchor_regressed` ->
+    # `revise_livelock`. The golf-2 protection this test guards now lives in
+    # `completion.mechanic_gate_status` (item E path 3), locked by
+    # test_spec40_white_box_oracle.py::test_gate_hierarchy_paths.
+    #
+    # What is still asserted HERE is the escape hatch: `mechanic_advisory=False` must
+    # reproduce today's fold exactly.
     v = _verdict({"has_hook": True, "ran": True, "mechanic_matters": False})
-    assert _verdict_to_result(v, declares_mechanic=True).passed is False
+    assert _verdict_to_result(
+        v, declares_mechanic=True, mechanic_advisory=False).passed is False
     # SAME verdict passes when the project did not declare the claim.
-    assert _verdict_to_result(v, declares_mechanic=False).passed is True
+    assert _verdict_to_result(
+        v, declares_mechanic=False, mechanic_advisory=False).passed is True
+    # ...and under the SPEC-40 default the differential is advisory, so it passes.
+    assert _verdict_to_result(v, declares_mechanic=True).passed is True
 
 
 def test_result_blocks_declared_no_hook_game() -> None:
-    r = _verdict_to_result(_verdict({"has_hook": False}), declares_mechanic=True)
+    # See the note above — the block moved to the done-gate; the hook contract is
+    # still named in the reason so the council can act on it either way.
+    r = _verdict_to_result(_verdict({"has_hook": False}), declares_mechanic=True,
+                           mechanic_advisory=False)
     assert r.passed is False and "window.__probe" in r.stderr_preview
+    advisory = _verdict_to_result(_verdict({"has_hook": False}),
+                                  declares_mechanic=True)
+    assert advisory.passed is True
+    assert "window.__probe" in advisory.stderr_preview
 
 
 def test_result_passes_declared_live_game() -> None:
