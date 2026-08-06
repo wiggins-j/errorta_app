@@ -158,3 +158,44 @@ def test_no_route_and_no_model_stays_empty() -> None:
     member = {"id": "pm-1", "role": "answerer", "metadata": {"coding_role": "pm"}}
     gateway_member_caller(gw)(member, "hello")
     assert gw.requests[0].model == ""
+
+
+# --------------------------------------------------------------------------- #
+# Code-review fix: `local.ollama.<model>` — the shape the registry ACTUALLY emits
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("route,expected", [
+    ("local.ollama.qwen3.5:9b", "qwen3.5:9b"),
+    ("local.ollama.llama3.2:3b", "llama3.2:3b"),
+    ("local.ollama.qwen2.5:7b", "qwen2.5:7b"),
+    ("local.ollama.mistral:7b", "mistral:7b"),
+])
+def test_registry_transport_prefix_is_stripped(route: str, expected: str) -> None:
+    """THE REVIEW REGRESSION.
+
+    The original fix handled `local.<model>` but not `local.ollama.<model>` — and the
+    latter is what the local handler's own `_DEFAULT_ROUTES` emit
+    (`providers/async_local.py`), which `pm_reference.list_available_routes` forwards
+    unchanged and `recipes.resolve_team` writes straight into `gateway_route_id`. So
+    a wizard-built `private_offline` team persisted the shape the fix did NOT handle,
+    turning Ollama's 400 into a 404. Every original test used `local.<model>`, the
+    shape that already worked — which is why they all passed.
+
+    Two other places in the tree already stripped it independently
+    (`model_availability.py`, `routes/model_gateway.py`); the derivation is now shared.
+    """
+    gw = _CapturingGateway()
+    gateway_member_caller(gw)(_persisted_member(route), "hello")
+    assert gw.requests[0].model == expected
+
+
+def test_bind_member_route_strips_it_too() -> None:
+    """`bind_member_route` carried the identical defect on the worker path."""
+    from errorta_council.coding.model_assignment import ModelAssignment, bind_member_route
+    bound = bind_member_route(
+        {"id": "dev-1"},
+        ModelAssignment(assignment_id="ma-1", route_id="local.ollama.qwen3.5:9b",
+                        difficulty_tier="mid", task_type="implementation",
+                        source="test", task_id="t-1", member_id="dev-1",
+                        rationale="test", assigned_at="2026-08-06T00:00:00Z"))
+    assert bound["model"] == "qwen3.5:9b"
+    assert bound["model_display"] == "qwen3.5:9b"

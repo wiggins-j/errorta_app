@@ -40,6 +40,34 @@ def provider_class(route_id: str) -> str:
     return rid.split(".", 1)[0] if "." in rid else rid
 
 
+# Transport segments some registries prefix onto the model id. The local handler's
+# own default routes are `local.ollama.<model>` (`providers/async_local.py`), and
+# `resolve_team` writes whatever `list_available_routes` hands it straight into
+# `gateway_route_id` — so BOTH `local.qwen3.5:9b` and `local.ollama.qwen3.5:9b`
+# occur in persisted configs.
+_TRANSPORT_PREFIXES = ("ollama.",)
+
+
+def model_id_from_route(route_id: str) -> str:
+    """The provider-side model id for a route id.
+
+    ``local.qwen3.5:9b`` and ``local.ollama.qwen3.5:9b`` both yield ``qwen3.5:9b``;
+    a route with no provider prefix yields itself. Sending the un-stripped form to
+    Ollama produces a 404 ``model not found``, so every consumer that derives a model
+    id from a route must strip the transport segment — `model_availability` and
+    `routes/model_gateway` already did this independently, which is why the
+    inconsistency went unnoticed.
+    """
+    rid = str(route_id or "").strip()
+    if not rid:
+        return ""
+    model = rid.split(".", 1)[1] if "." in rid else rid
+    for prefix in _TRANSPORT_PREFIXES:
+        if model.startswith(prefix):
+            return model[len(prefix):]
+    return model
+
+
 def default_cost_tier(route_id: str) -> int:
     provider = provider_class(route_id)
     low = route_id.lower()

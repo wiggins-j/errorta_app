@@ -53,7 +53,10 @@ def bind_member_route(member: dict[str, Any], assignment: ModelAssignment) -> di
     bound = dict(member)
     route_id = assignment.route_id
     provider = provider_class(route_id)
-    model = route_id.split(".", 1)[1] if "." in route_id else route_id
+    # Strip the transport segment too: the local handler's own routes are
+    # `local.ollama.<model>`, and the un-stripped form is a 404 at Ollama.
+    from .model_catalog import model_id_from_route
+    model = model_id_from_route(route_id)
     bound.update({
         "gateway_route_id": route_id,
         "route_id": route_id,

@@ -140,10 +140,8 @@ def _member_model_id(member: dict[str, Any]) -> str:
     explicit = member.get("model") or member.get("model_display")
     if explicit:
         return str(explicit)
-    route_id = str(member.get("gateway_route_id") or "").strip()
-    if not route_id:
-        return ""
-    return route_id.split(".", 1)[1] if "." in route_id else route_id
+    from .model_catalog import model_id_from_route
+    return model_id_from_route(member.get("gateway_route_id") or "")
 
 
 def _vendor_honors_repo_read(member: dict[str, Any]) -> bool:
