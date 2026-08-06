@@ -282,7 +282,12 @@ def _mechanic_verdict(verdict: dict[str, Any], declares_mechanic: bool
         # the probe re-runs on the next merge (SPEC-35-style). Only a STRUCTURAL
         # problem (no ball/hole, no-op shoot, non-restoring reset, nondeterminism)
         # is a hard unusable fail.
-        if "timed out" in reason or "threw" in reason:
+        # SPEC-40 adds "exhausted its simulation budget" to this set: like a timeout
+        # it is a CANNOT-VERIFY, not a structural defect in the hook, so it must stay
+        # advisory. Treating a budget exhaustion as an unusable-hook red would blame
+        # the council for the probe running out of ticks.
+        if ("timed out" in reason or "threw" in reason
+                or "cannot verify" in reason):
             return True, ""
         return False, ("exposes a window.__probe hook but it is unusable — "
                        + (reason or "state() lacks ball/hole, shoot() is a no-op, "

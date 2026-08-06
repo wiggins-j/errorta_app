@@ -414,6 +414,15 @@ async function main() {
           P.setMechanic(true);   // restore
           if (!resetOk) return { wells, ran: false, reason: "reset() did not return the ball" };
           if (nondet) return { wells, ran: false, reason: "non-deterministic (two identical shots diverged) — tick()/shoot() must be deterministic for headless verification" };
+          // Budget exhaustion is a CANNOT-VERIFY, not a broken shoot(). Reported before
+          // the `anyMoved` check because an exhausted budget breaks out of the sweep
+          // before any power completes, which would otherwise be misreported as "shoot()
+          // did not move the ball" — a wrong and unactionable steer.
+          if (completed === 0 && ticks > TICK_BUDGET) {
+            return { wells, ran: false, p_sink: pSink, confident: false,
+                     reason: "mechanic phase exhausted its simulation budget before "
+                             + "sampling any power — cannot verify" };
+          }
           if (!anyMoved) return { wells, ran: false, reason: "shoot() did not move the ball" };
           // SPEC-40 (item B) — the CONFIDENCE rule. An INERT verdict may hard-block
           // delivery (item E path 3) only when all four hold; anything else is

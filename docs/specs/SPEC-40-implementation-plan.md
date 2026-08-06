@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps
-> use checkbox (`- [ ]`) syntax for tracking.
+> use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make the testability-contract oracle sound, so the council can converge — a
 white-box `solution()`/`won()` acceptance path that is the primary delivery verdict, a
@@ -55,7 +55,7 @@ and instead persists structured evidence to `run_state`, which a new
   `.probe_mechanic_advisory: bool`, `.probe_whitebox: bool`, `.probe_pr_gating: bool`;
   all round-trip through `policy_to_dict` / `policy_from_dict`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_spec40_policy_knobs_default_on_and_roundtrip() -> None:
@@ -75,12 +75,12 @@ def test_spec40_policy_knobs_default_on_and_roundtrip() -> None:
     assert off.probe_adaptive_sweep is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v`
 Expected: FAIL with `AttributeError: 'CodingAutonomyPolicy' object has no attribute 'probe_adaptive_sweep'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `CodingAutonomyPolicy`, following the batch comment convention already used for
 `last_word_limit` / `narrow_limit` (state what the disable value restores):
@@ -106,12 +106,12 @@ Add to `CodingAutonomyPolicy`, following the batch comment convention already us
 
 Then add the four keys to `policy_to_dict` (mirroring the existing `"narrow_limit": p.narrow_limit` lines) and to `policy_from_dict` as `bool(d.get(<key>, base.<key>))`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add python/errorta_council/coding/autonomy.py python/tests/coding/test_spec40_white_box_oracle.py
@@ -138,7 +138,7 @@ git commit -m "feat(coding): SPEC-40 — policy knobs for the oracle rework"
 drag capped at `MAX_POWER = 15`, and a `__probe.shoot` that does **not** clamp. Gravity must
 matter in the 3–8 power band and not at 480+.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 @pytest.mark.live
@@ -173,12 +173,12 @@ def test_live_inert_stays_false_and_confident() -> None:
     assert mp["confident"] is True, mp
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v -m live`
 Expected: FAIL — `KeyError: 'p_sink'` (the field does not exist yet).
 
-- [ ] **Step 3: Implement the sweep inside the existing synchronous `page.evaluate`**
+- [x] **Step 3: Implement the sweep inside the existing synchronous `page.evaluate`**
 
 Replace `const powers = [0.8, 1.3, 2.0].map((k) => k * D);` and the loop below it. Keep
 `runShot` exactly as-is (it is already hardened and geometric). Add before the loop:
@@ -258,7 +258,7 @@ And extend the returned object with `p_sink: pSink, confident, max_gap: Math.rou
 `return { sank, end, maxMove, ticks: i };` and hoist `let i` out of the `for` header so it
 is readable after the loop.
 
-- [ ] **Step 4: Write the golf4 fixture**
+- [x] **Step 4: Write the golf4 fixture**
 
 Create `python/tests/coding/fixtures/spec40/golf4/index.html` modeled on
 `fixtures/spec37/live/index.html`, with golf-4's scale:
@@ -302,12 +302,12 @@ old `[0.8,1.3,2.0]×D` powers, the fixture is not reproducing golf-4 — tune `G
 `strength` / well position until the OLD sweep says false and the NEW sweep says true. That
 contrast IS regression lock 2; a fixture that passes both sweeps proves nothing.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v -m live`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/web-probe.mjs python/tests/coding/fixtures/spec40/golf4/ python/tests/coding/test_spec40_white_box_oracle.py
@@ -330,7 +330,7 @@ git commit -m "feat(coding): SPEC-40 (A) — adaptive power sweep calibrated to 
   `{has_contract: bool, ran: bool, solved_on: bool|null, solved_off: bool|null,
     straight_wins: bool|null, verdict: "green"|"red"|null, reason: string}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 @pytest.mark.live
@@ -365,12 +365,12 @@ def test_live_no_contract_is_not_a_red() -> None:
     assert v["whitebox"]["verdict"] is None, v["whitebox"]
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v -m live -k whitebox`
 Expected: FAIL — `KeyError: 'whitebox'`.
 
-- [ ] **Step 3: Implement the phase**
+- [x] **Step 3: Implement the phase**
 
 Add after the `mechanic_probe` block, inside the same `try`. It MUST be one synchronous
 `page.evaluate` (the SPEC-39 invariant) and MUST snapshot `solution()` before either arm:
@@ -457,7 +457,7 @@ matter while a straight shot still sinks — so do NOT derive one from the other
 
 Finally add `whitebox` to the `emit({...})` call.
 
-- [ ] **Step 4: Write the three fixtures**
+- [x] **Step 4: Write the three fixtures**
 
 All three are copies of the `golf4` fixture with `won` and `solution` added and one
 property varied. `won: () => sank`, and:
@@ -471,12 +471,12 @@ property varied. `won: () => sank`, and:
 - `whitebox-red`: same as green but `solution: () => ({dx: 1, dy: 0, power: 1})` — a shot
   that does not reach the hole under any mechanic state.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v -m live`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/web-probe.mjs python/tests/coding/fixtures/spec40/ python/tests/coding/test_spec40_white_box_oracle.py
@@ -501,7 +501,7 @@ git commit -m "feat(coding): SPEC-40 (D) — white-box solution()/won() acceptan
   {"head": str, "whitebox": str, "whitebox_reason": str, "mechanic_matters": bool|None,
    "confident": bool, "reason": str}`.
 
-- [ ] **Step 1: Write the failing tests (unit — no browser)**
+- [x] **Step 1: Write the failing tests (unit — no browser)**
 
 ```python
 def _v(**kw):
@@ -542,14 +542,14 @@ def test_whitebox_verdict_classification() -> None:
         _v(whitebox={"has_contract": True, "ran": False}))[0] == "absent"
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v`
 Expected: FAIL — `ImportError: cannot import name '_whitebox_verdict'`, and
 `test_marginal_differential_no_longer_reds_the_anchor` fails because `passed` is still
 folding `mechanic_ok`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 1. In `_verdict_to_result`, drop `mechanic_ok` from the `passed` conjunction (keep
    computing it and keep appending `mechanic_reason` to the detail text, so
@@ -575,12 +575,12 @@ folding `mechanic_ok`.
     "same shot with it off (must NOT win) (SPEC-40)"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the existing suites to catch regressions**
+- [x] **Step 5: Run the existing suites to catch regressions**
 
 Run: `cd python && pytest tests/coding/test_spec37_behavioral_oracle.py tests/coding/test_spec38_interaction_gate.py tests/coding/test_gl01_anchors.py -v`
 Expected: PASS. `test_spec37_*` asserts the OLD fold (`mechanic_matters False → passed
@@ -588,7 +588,7 @@ False`); those assertions must be updated to pass `probe_mechanic_advisory=False
 re-pointed at the new done-gate, with a comment naming SPEC-40 as the reason. Do NOT delete
 them — they are the golf-2 protection, now enforced one layer up.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add python/errorta_council/coding/web_probe.py python/tests/coding/
@@ -608,7 +608,7 @@ git commit -m "feat(coding): SPEC-40 (B) — mechanic verdict is advisory, not a
 - Produces: no new symbols; `run_and_record`'s `pr_scoped=True` path now computes and
   stamps the same components as the master arm.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_per_pr_arm_stamps_the_same_components(tmp_path) -> None:
@@ -629,13 +629,13 @@ def test_per_pr_arm_stamps_the_same_components(tmp_path) -> None:
         assert f["probe_mechanic_confident"] is True
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py::test_per_pr_arm_stamps_the_same_components -v`
 Expected: FAIL — the fields are computed but the per-PR arm short-circuits
 `declares_mechanic` to False before they are derived.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `run_and_record`, split the two concerns that `declares_mechanic` currently conflates:
 
@@ -656,12 +656,12 @@ Use `gates_hard` where `declares_mechanic` was passed, and pass `declares` to
 `_probe_verdict_fields` on both arms so the stamped record is always complete. Guard the
 whole change behind `probe_pr_gating`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add python/errorta_council/coding/web_probe.py python/tests/coding/test_spec40_white_box_oracle.py
@@ -682,7 +682,7 @@ git commit -m "feat(coding): SPEC-40 (C) — the reviewed signal equals the gati
 - Produces: `completion.mechanic_gate_status(ledger, current_head) ->
   Literal["ok", "red", "advisory"]` and `completion.mechanic_gate_reason(ledger) -> str`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 class _FakeLedger:
@@ -717,19 +717,19 @@ def test_gate_hierarchy_paths() -> None:
     assert mechanic_gate_status(_FakeLedger({}), H) == "advisory"
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd python && pytest tests/coding/test_spec40_white_box_oracle.py::test_gate_hierarchy_paths -v`
 Expected: FAIL — `ImportError: cannot import name 'mechanic_gate_status'`.
 
-- [ ] **Step 3: Implement `mechanic_gate_status`**
+- [x] **Step 3: Implement `mechanic_gate_status`**
 
 Follow `acceptance_gate_status`'s discipline exactly: READ-ONLY, and **fail-open** (any
 read error, missing evidence, or head mismatch returns `"advisory"` — a `done`-block must
 never be invented, per the module's existing note that a spurious block with no recovery is
 the wedge SPEC-34's review forbids).
 
-- [ ] **Step 4: Wire it into the done chokepoint**
+- [x] **Step 4: Wire it into the done chokepoint**
 
 In `runner._acceptance_gate_blocks_done`, after the existing `acceptance_gate_status`
 handling, add the mechanic gate. It must return a **recoverable** refusal that routes
@@ -747,12 +747,12 @@ human-routed `completion_blocked`, never a silent wedge):
                 "re-runs on the next merge and lifts this automatically (SPEC-40).")
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cd python && pytest tests/coding/ -v -k "spec40 or spec35 or completion"`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add python/errorta_council/coding/completion.py python/errorta_council/coding/runner.py python/tests/coding/test_spec40_white_box_oracle.py
@@ -766,7 +766,7 @@ git commit -m "feat(coding): SPEC-40 (E) — four-path mechanic gate hierarchy"
 **Files:**
 - Test: `python/tests/coding/test_spec40_white_box_oracle.py`
 
-- [ ] **Step 1: Add the explicit lock tests**
+- [x] **Step 1: Add the explicit lock tests**
 
 One test per regression lock in the spec, each named for its lock so a future reader can
 map them: lock 1 (golf-2 blocks via path 3), lock 2 (golf-4 unblocks), lock 3 (golf-3 /
@@ -775,22 +775,22 @@ map them: lock 1 (golf-2 blocks via path 3), lock 2 (golf-4 unblocks), lock 3 (g
 `mechanic_gate_status` returns `advisory`), lock 6 (a non-web project is unaffected —
 `has_web_profile` False short-circuits), lock 7 (both arms stamp the same components).
 
-- [ ] **Step 2: Run the full coding suite**
+- [x] **Step 2: Run the full coding suite**
 
 Run: `cd python && pytest tests/coding/ -q`
 Expected: PASS with no regressions.
 
-- [ ] **Step 3: Run the live suite**
+- [x] **Step 3: Run the live suite**
 
 Run: `cd python && pytest tests/coding/ -q -m live -k spec40`
 Expected: PASS.
 
-- [ ] **Step 4: Lint**
+- [x] **Step 4: Lint**
 
 Run: `cd python && ruff check errorta_council/coding/`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add python/tests/coding/test_spec40_white_box_oracle.py

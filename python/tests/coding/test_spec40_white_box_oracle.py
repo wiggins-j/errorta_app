@@ -98,6 +98,27 @@ def test_liveness_failure_still_reds() -> None:
                               declares_mechanic=True).passed is False
 
 
+def test_budget_exhaustion_is_advisory_not_an_unusable_hook() -> None:
+    """A cannot-verify must never be blamed on the council's hook.
+
+    An exhausted simulation budget breaks out of the sweep before any power
+    completes. That is the probe running out of ticks, not a structural defect in
+    ``__probe`` — so it stays advisory, alongside timeouts and thrown evaluations.
+    """
+    from errorta_council.coding.web_probe import _mechanic_verdict
+    ok, reason = _mechanic_verdict(_v(mechanic_probe={
+        "has_hook": True, "ran": False, "confident": False,
+        "reason": "mechanic phase exhausted its simulation budget before sampling "
+                  "any power — cannot verify"}), True)
+    assert ok is True, reason
+    # ...but a genuinely unusable hook is still a hard fail.
+    bad_ok, bad_reason = _mechanic_verdict(_v(mechanic_probe={
+        "has_hook": True, "ran": False,
+        "reason": "reset() did not return the ball"}), True)
+    assert bad_ok is False
+    assert "unusable" in bad_reason
+
+
 def test_whitebox_verdict_classification() -> None:
     from errorta_council.coding.web_probe import _whitebox_verdict
     # No `whitebox` key at all (an older probe script) -> absent, never a red.
