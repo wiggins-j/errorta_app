@@ -1,15 +1,10 @@
-<!doctype html><html><head><meta charset="utf-8"><title>whitebox-green</title>
+<!doctype html><html><head><meta charset="utf-8"><title>whitebox-vacuous</title>
 <style>html,body{margin:0;background:#0b1020}</style></head>
 <body><canvas id="c" width="800" height="600"></canvas>
 <script type="module">
-// SPEC-40 fixture — the item E path 1 control: a level that is genuinely UNSOLVABLE
-// without the mechanic. A wall spans x=400, y>=WALL_TOP, so any shot that stays low
-// is stopped; the only way through is over the wall, and the gravity well above the
-// gap is what bends the ball back DOWN onto the hole. With the mechanic off the same
-// shot sails straight past. That makes all three white-box arms meaningful:
-//   arm 1  solution() with the mechanic ON  -> wins
-//   arm 2  the SAME shot with it OFF        -> does not win  (anti-vacuity)
-//   arm 3  straight-at-hole, mechanic ON    -> never wins    (hits the wall)
+// SPEC-40 fixture — arm 2 RED (vacuous): setMechanic is a NO-OP, gravity-golf-4's
+// literal defect, so the solution wins in BOTH arms. Derived from whitebox-green;
+// the ONLY difference is setMechanic at the bottom.
 const cv=document.getElementById("c"), g=cv.getContext("2d");
 const DT=1/60, FRICTION=0.999, MIN=20, STOP=0.5, GSCALE=70000, BR=8;
 const WALL_X=400, WALL_TOP=260;

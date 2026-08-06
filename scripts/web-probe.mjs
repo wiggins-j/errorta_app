@@ -439,7 +439,10 @@ async function main() {
                    powers: powers.map((p) => Math.round(p * 100) / 100),
                    p_sink: pSink === null ? null : Math.round(pSink * 100) / 100,
                    confident, max_gap: Math.round(maxGap),
-                   straight_sank: straightSank };
+                   // `bracketed` tells a CALIBRATED sweep from the legacy fallback.
+                   // Arm 3 must not hard-red on the fallback band — that is the very
+                   // miscalibrated regime this spec exists to eliminate.
+                   bracketed, straight_sank: straightSank };
         }, args.legacySweep).catch(() => ({ ran: false, reason: "mechanic phase threw" })), 20000);
         Object.assign(mechanicProbe, r);
       }
@@ -527,7 +530,14 @@ async function main() {
     // so it is read from the differential's separately-tracked straight_sank, never
     // derived from mechanic_matters.
     if (whitebox.ran) {
-      whitebox.straight_wins = (mechanicProbe.ran && mechanicProbe.straight_sank !== null)
+      // Arm 3 is only trustworthy when the sweep was CALIBRATED. When the bisect
+      // failed to bracket, `powers` falls back to the geometry-anchored
+      // [0.8,1.3,2.0]xD band — the 32-80x miscalibration this spec was written to
+      // remove — and a sink observed there would produce a hard white-box RED
+      // measured in precisely the regime we do not trust. Uncalibrated -> unknown.
+      whitebox.straight_wins = (mechanicProbe.ran
+                                && mechanicProbe.bracketed === true
+                                && mechanicProbe.straight_sank !== null)
         ? !!mechanicProbe.straight_sank : null;
       if (!whitebox.solved_on) {
         whitebox.verdict = "red";
