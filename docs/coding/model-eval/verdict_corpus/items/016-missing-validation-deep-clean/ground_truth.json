@@ -1,0 +1,10 @@
+{
+  "id": "016-missing-validation-deep-clean",
+  "kind": "clean",
+  "pair_id": "016",
+  "defect_class": "missing-input-validation",
+  "depth": "deep",
+  "file": "webhooks/partner.py",
+  "expected_verdict": "approve",
+  "note": "verify_signature rejects a signature whose timestamp is more than SIGNATURE_TOLERANCE_SECONDS from now, and SEEN_TTL_SECONDS is defined as twice that, so the dedup table always outlives the window in which a signature is acceptable."
+}

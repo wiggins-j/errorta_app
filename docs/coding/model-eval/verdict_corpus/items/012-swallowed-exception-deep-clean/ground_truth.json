@@ -1,0 +1,10 @@
+{
+  "id": "012-swallowed-exception-deep-clean",
+  "kind": "clean",
+  "pair_id": "012",
+  "defect_class": "swallowed-exception",
+  "depth": "deep",
+  "file": "auth/token_cache.py",
+  "expected_verdict": "approve",
+  "note": "The fallback additionally requires `not self._expired(now)`, so it only reuses a token that is genuinely still valid -- the warmer's path -- and re-raises AuthError on the on-demand path, where the cached token is expired by construction."
+}

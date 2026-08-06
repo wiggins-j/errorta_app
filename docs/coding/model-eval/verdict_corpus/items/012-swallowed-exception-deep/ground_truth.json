@@ -1,0 +1,19 @@
+{
+  "id": "012-swallowed-exception-deep",
+  "kind": "seeded",
+  "pair_id": "012",
+  "defect_class": "swallowed-exception",
+  "depth": "deep",
+  "file": "auth/token_cache.py",
+  "location": "auth/token_cache.py -- the AuthError fallback in _refresh(), wrong only in light of the precondition under which get_token() reaches it",
+  "mechanism": "The fallback returns the cached token on any AuthError without checking whether that token is still valid. get_token() only calls _refresh() once the cached token has already failed the expiry check, so on that path the fallback returns a token it knows to be expired and reports success. A revoked or misconfigured credential therefore produces an unbounded stream of 401s from every downstream service while the AuthError is downgraded to a warning and never propagates to any caller.",
+  "accepted_finding_forms": [
+    "the AuthError fallback hands back the cached token without checking its expiry, and get_token only refreshes when the token is already expired",
+    "swallowing the mint failure returns an expired token as if it were valid; the error never reaches the caller",
+    "the fallback is safe for the warmer's proactive refresh but not for the on-demand path, where the cached token is expired by construction",
+    "a permanently failing IdP is masked forever -- every request gets a stale token and downstream 401s instead of the AuthError",
+    "the error is downgraded to a warning on a path where the cached value is known to be unusable",
+    "the two callers of _refresh have different preconditions and the exception handler is only correct for one of them"
+  ],
+  "expected_verdict": "reject"
+}

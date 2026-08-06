@@ -1,0 +1,18 @@
+{
+  "id": "005-resource-leak-shallow",
+  "kind": "seeded",
+  "pair_id": "005",
+  "defect_class": "resource-leak",
+  "depth": "shallow",
+  "file": "eventstore/segment.py",
+  "location": "eventstore/segment.py, probe() -- the two early returns",
+  "mechanism": "probe() closes the file only on the success path. Both early returns -- a foreign file and a truncated header, the two cases the docstring says are expected -- leave the descriptor open. The compactor probes thousands of files per run, so descriptors accumulate until the process hits its open-file limit and unrelated opens start failing.",
+  "accepted_finding_forms": [
+    "probe() leaks the file handle on its early-return paths; only the success path calls fh.close()",
+    "the file is not closed when the magic check or the short-header check returns None -- a descriptor leak",
+    "open() without with/try-finally: the two None returns skip the close",
+    "file descriptors leak on every non-segment file, and the compactor probes thousands per run, so it will eventually exhaust the fd limit",
+    "resource leak in the new probe helper -- the handle is only released on one of three exits"
+  ],
+  "expected_verdict": "reject"
+}

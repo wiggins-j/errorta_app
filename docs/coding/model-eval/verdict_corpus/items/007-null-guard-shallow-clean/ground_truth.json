@@ -1,0 +1,10 @@
+{
+  "id": "007-null-guard-shallow-clean",
+  "kind": "clean",
+  "pair_id": "007",
+  "defect_class": "null-guard",
+  "depth": "shallow",
+  "file": "ratelimit/config.py",
+  "expected_verdict": "approve",
+  "note": "_configured tests `value is None`, so an explicitly configured zero or empty value is honoured and only a missing key falls back to the default."
+}

@@ -1,0 +1,18 @@
+{
+  "id": "015-missing-validation-shallow",
+  "kind": "seeded",
+  "pair_id": "015",
+  "defect_class": "missing-input-validation",
+  "depth": "shallow",
+  "file": "catalog/query.py",
+  "location": "catalog/query.py, build_order_by() -- the sort field is interpolated unvalidated",
+  "mechanism": "The sort direction is whitelisted but the column name is not: the caller-supplied field is interpolated straight into the SQL string. Because an identifier cannot be bound as a parameter, this is a direct SQL injection point on an unauthenticated-input path -- a ?sort= value of `id) UNION SELECT ...` or a subselect ordering predicate lets a client read rows belonging to other tenants.",
+  "accepted_finding_forms": [
+    "the sort field is interpolated into the SQL without being checked against SORTABLE_COLUMNS -- SQL injection",
+    "only the direction is validated; the column name comes straight from the query string into the ORDER BY clause",
+    "user input reaches the statement unescaped and unbound, so a crafted ?sort= parameter can inject SQL",
+    "missing whitelist check on the sort column; SORTABLE_COLUMNS is defined but never enforced",
+    "the ORDER BY identifier is attacker-controlled and cannot be parameterised, so it must be validated and is not"
+  ],
+  "expected_verdict": "reject"
+}

@@ -1,0 +1,82 @@
+diff --git a/taskq/worker.py b/taskq/worker.py
+--- a/taskq/worker.py
++++ b/taskq/worker.py
+@@ -1,10 +1,10 @@
+ """Queue worker loop.
+ 
+ The worker pulls one message at a time and dispatches it to a registered
+-handler.  There is no redelivery accounting yet: a failing message is
+-nacked back onto the queue and tried again forever.
++handler.  Redelivery is now accounted for so that a message which cannot
++succeed is retired to the dead-letter queue instead of cycling forever.
+ """
+ 
+ from __future__ import annotations
+ 
+ import logging
+@@ -18,29 +18,64 @@
+ 
+ class HandlerNotFound(Exception):
+     """Raised when no handler is registered for a message kind."""
+ 
+ 
++class Attempts:
++    """Per-message delivery accounting.
++
++    ``record`` is called on every failure that puts a message back on the
++    queue, and its return value is what decides whether the message is still
++    worth redelivering.  A message that is never recorded is, by
++    construction, never poisoned -- it will be redelivered without limit.
++    """
++
++    def __init__(self, max_attempts: int = 5):
++        self._max = max_attempts
++        self._counts: dict[str, int] = {}
++
++    def record(self, message_id: str) -> bool:
++        count = self._counts.get(message_id, 0) + 1
++        self._counts[message_id] = count
++        return count < self._max
++
++    def clear(self, message_id: str) -> None:
++        self._counts.pop(message_id, None)
++
++
+ class Worker:
+-    def __init__(self, broker, handlers, poll_timeout: float = 1.0):
++    def __init__(self, broker, handlers, poll_timeout: float = 1.0, max_attempts: int = 5):
+         self._broker = broker
+         self._handlers = dict(handlers)
+         self._poll_timeout = poll_timeout
++        self._attempts = Attempts(max_attempts)
+ 
+     def _handle(self, message) -> None:
+         handler = self._handlers.get(message.kind)
+         if handler is None:
+             raise HandlerNotFound(message.kind)
+         handler(message.payload)
+ 
++    def _retry_or_retire(self, message) -> None:
++        if self._attempts.record(message.id):
++            self._broker.nack(message, requeue=True)
++        else:
++            self._broker.dead_letter(message)
++            self._attempts.clear(message.id)
++
+     def run_once(self) -> bool:
+         message = self._broker.receive(timeout=self._poll_timeout)
+         if message is None:
+             return False
+         try:
+             self._handle(message)
++        except TransientError as exc:
++            logger.warning("transient failure for %s: %s", message.id, exc)
++            self._retry_or_retire(message)
++            return True
+         except Exception:
+             logger.exception("handler failed for %s", message.id)
+             self._broker.nack(message, requeue=True)
+             return True
+         self._broker.ack(message)
++        self._attempts.clear(message.id)
+         return True

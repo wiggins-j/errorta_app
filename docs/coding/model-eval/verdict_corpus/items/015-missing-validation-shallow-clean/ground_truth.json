@@ -1,0 +1,10 @@
+{
+  "id": "015-missing-validation-shallow-clean",
+  "kind": "clean",
+  "pair_id": "015",
+  "defect_class": "missing-input-validation",
+  "depth": "shallow",
+  "file": "catalog/query.py",
+  "expected_verdict": "approve",
+  "note": "build_order_by checks the requested column against SORTABLE_COLUMNS and raises BadRequest on anything else, so only a fixed set of identifiers can ever be interpolated into the statement."
+}

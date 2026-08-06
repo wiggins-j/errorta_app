@@ -1,0 +1,18 @@
+{
+  "id": "011-swallowed-exception-shallow",
+  "kind": "seeded",
+  "pair_id": "011",
+  "defect_class": "swallowed-exception",
+  "depth": "shallow",
+  "file": "telemetry/exporter.py",
+  "location": "telemetry/exporter.py, Exporter.flush() -- the except block around the sink write",
+  "mechanism": "The sink write is wrapped in `except Exception: pass`. The batch has already been detached from the buffer, so it is lost; nothing is logged, `dropped` is not incremented and `last_error` is never set, so `healthy` stays True and stats() reports a clean pipeline. A sink that is down or misconfigured discards every metric indefinitely with no signal anywhere, and flush() still reports the batch as written.",
+  "accepted_finding_forms": [
+    "`except Exception: pass` swallows every sink failure -- the batch is lost with no log, no counter and no error recorded",
+    "the swallowed exception leaves last_error unset, so `healthy` stays True while the exporter is shipping nothing",
+    "flush returns len(batch) even when the write failed, reporting points as exported that were dropped",
+    "a total metrics outage is invisible because the failure path neither logs nor increments dropped",
+    "bare swallow of the sink error: the failure is neither surfaced, retried, nor counted"
+  ],
+  "expected_verdict": "reject"
+}

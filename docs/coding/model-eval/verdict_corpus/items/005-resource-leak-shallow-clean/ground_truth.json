@@ -1,0 +1,10 @@
+{
+  "id": "005-resource-leak-shallow-clean",
+  "kind": "clean",
+  "pair_id": "005",
+  "defect_class": "resource-leak",
+  "depth": "shallow",
+  "file": "eventstore/segment.py",
+  "expected_verdict": "approve",
+  "note": "probe() wraps the reads in try/finally so the descriptor is released on every exit, including both early returns. The explicit close is deliberate and commented rather than a `with` block."
+}

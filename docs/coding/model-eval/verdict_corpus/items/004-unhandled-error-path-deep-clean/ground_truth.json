@@ -1,0 +1,10 @@
+{
+  "id": "004-unhandled-error-path-deep-clean",
+  "kind": "clean",
+  "pair_id": "004",
+  "defect_class": "unhandled-error-path",
+  "depth": "deep",
+  "file": "taskq/worker.py",
+  "expected_verdict": "approve",
+  "note": "Both failure branches route through _retry_or_retire, so every requeue is counted and a message that exhausts max_attempts is dead-lettered regardless of which exception it raised."
+}

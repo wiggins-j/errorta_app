@@ -1,0 +1,10 @@
+{
+  "id": "006-resource-leak-deep-clean",
+  "kind": "clean",
+  "pair_id": "006",
+  "defect_class": "resource-leak",
+  "depth": "deep",
+  "file": "db/pool.py",
+  "expected_verdict": "approve",
+  "note": "discard() pops the connection's entry out of the cursor cache and closes each cached cursor before closing the connection, so retiring a connection releases everything it owns."
+}

@@ -1,0 +1,19 @@
+{
+  "id": "006-resource-leak-deep",
+  "kind": "seeded",
+  "pair_id": "006",
+  "defect_class": "resource-leak",
+  "depth": "deep",
+  "file": "db/pool.py",
+  "location": "db/pool.py -- ConnectionPool.discard(), wrong only in light of the connection-keyed cursor cache introduced in prepared()",
+  "mechanism": "prepared() caches cursors in a dict keyed by the connection object, but discard() closes the connection without removing its entry. The cache keeps a strong reference to every retired connection and to its server-side cursors forever: the driver's prepared statements are never freed and the dict grows without bound for the life of the process, so a pool that recycles connections steadily leaks both memory and server-side statement handles.",
+  "accepted_finding_forms": [
+    "discard() closes the connection but never removes its entry from the cursor cache, so the cursors and the dead connection are retained forever",
+    "the new prepared-cursor cache is keyed by connection and is never pruned on connection retirement -- unbounded growth",
+    "cursors created by prepared() are never closed; retiring a connection leaks its prepared statements",
+    "the cache added here has no eviction path, so every recycled connection leaks memory and a server-side statement handle",
+    "resource leak spanning the two new pieces: the cursor cache outlives the connections it is keyed on",
+    "nothing removes entries from _cursors, so the pool's memory grows with every discarded connection"
+  ],
+  "expected_verdict": "reject"
+}

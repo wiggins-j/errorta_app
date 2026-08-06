@@ -1,0 +1,56 @@
+diff --git a/catalog/row_cache.py b/catalog/row_cache.py
+--- a/catalog/row_cache.py
++++ b/catalog/row_cache.py
+@@ -14,13 +14,13 @@
+ 
+ 
+ class RowCache:
+     """Process-local cache of catalogue rows.
+ 
+-    Reads are served from memory for up to ``ttl`` seconds.  There is no
+-    write path yet: callers that mutate a row write straight to the database
+-    and wait out the TTL.
++    Reads are served from memory for up to ``ttl`` seconds.  Writes go
++    through ``update``, which is required to give the caller read-your-writes:
++    once update() returns, no subsequent get() may serve the pre-write row.
+     """
+ 
+     def __init__(self, db, ttl: float = 30.0, clock=time.monotonic):
+         self._db = db
+         self._ttl = ttl
+@@ -36,13 +36,34 @@
+             if entry is not None and now - entry.stored_at < self._ttl:
+                 return entry.row
+         return self._load(key)
+ 
+     def _load(self, key: str) -> dict:
++        """Fetch a row from the database and publish it to the cache.
++
++        The database round trip deliberately happens with the lock dropped;
++        holding it across a network call would serialise every reader.  The
++        version stamp taken before the read is what makes that safe -- a load
++        that started before someone else's write refuses to publish the row
++        it read, and simply returns it to its own caller.
++        """
++        with self._lock:
++            seen_version = self._version
+         row = self._db.get_row(key)
+         with self._lock:
+-            self._entries[key] = Entry(row, self._clock())
++            if self._version == seen_version:
++                self._entries[key] = Entry(row, self._clock())
+         return row
+ 
++    def invalidate(self, key: str) -> None:
++        with self._lock:
++            self._version += 1
++            self._entries.pop(key, None)
++
++    def update(self, key: str, values: dict) -> None:
++        """Write a row through to the database and drop the cached copy."""
++        self._db.update_row(key, values)
++        self.invalidate(key)
++
+     def stats(self) -> dict:
+         with self._lock:
+             return {"size": len(self._entries), "version": self._version}

@@ -1,0 +1,19 @@
+{
+  "id": "016-missing-validation-deep",
+  "kind": "seeded",
+  "pair_id": "016",
+  "defect_class": "missing-input-validation",
+  "depth": "deep",
+  "file": "webhooks/partner.py",
+  "location": "webhooks/partner.py -- verify_signature() never validates the parsed timestamp; only wrong given the bounded lifetime of the dedup table in WebhookHandler",
+  "mechanism": "The timestamp is parsed and signed but never checked for freshness, so a captured request stays valid indefinitely. The only thing standing between a replay and a second dispatch is the _seen dedup table, and _prune deliberately bounds that table to SEEN_TTL_SECONDS. Anyone who captures one delivery can therefore replay it unchanged after the TTL and have the event dispatched again, repeatedly and forever -- exactly the outcome the constant's own comment says the design must avoid.",
+  "accepted_finding_forms": [
+    "the signature timestamp is parsed but never validated, so a captured request can be replayed indefinitely",
+    "no freshness/tolerance check on the signed timestamp -- signatures never expire",
+    "replay protection relies on the dedup table, but that table is pruned after a TTL while the signature stays valid forever",
+    "SIGNATURE_TOLERANCE_SECONDS is never enforced against the request; the comment describes an invariant the code does not implement",
+    "the two halves of the anti-replay design do not meet: the dedup window is bounded and the signature validity window is not",
+    "an attacker who records one webhook delivery can resubmit it after the dedup entry expires and it will be dispatched again"
+  ],
+  "expected_verdict": "reject"
+}

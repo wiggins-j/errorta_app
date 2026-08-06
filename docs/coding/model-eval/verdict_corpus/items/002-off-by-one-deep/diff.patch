@@ -1,0 +1,92 @@
+diff --git a/mediasvc/http_range.py b/mediasvc/http_range.py
+--- a/mediasvc/http_range.py
++++ b/mediasvc/http_range.py
+@@ -9,28 +9,81 @@
+     ".mp4": "video/mp4",
+     ".m4a": "audio/mp4",
+     ".vtt": "text/vtt",
+ }
+ 
++RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+ 
++
+ def content_type_for(path: str) -> str:
+     _, ext = os.path.splitext(path)
+     return CHUNK_TYPES.get(ext, "application/octet-stream")
+ 
+ 
++def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:
++    """Parse a single RFC 7233 byte-range header.
++
++    Returns an *inclusive* ``(first, last)`` pair -- an HTTP range names the
++    last byte the client wants, not the byte after it -- or None when the
++    header is absent, malformed or unsatisfiable.
++    """
++    if not header:
++        return None
++    match = RANGE_RE.match(header.strip())
++    if not match:
++        return None
++    lo, hi = match.group(1), match.group(2)
++    if lo == "":
++        if hi == "":
++            return None
++        suffix = int(hi)
++        if suffix == 0:
++            return None
++        first = max(0, size - suffix)
++        last = size - 1
++    else:
++        first = int(lo)
++        last = int(hi) if hi else size - 1
++    if first >= size or last < first:
++        return None
++    return first, min(last, size - 1)
++
++
++def _read_span(path: str, first: int, last: int) -> bytes:
++    with open(path, "rb") as fh:
++        fh.seek(first)
++        return fh.read(last - first)
++
++
+ def handle_get(path: str, headers: dict[str, str]):
+-    """Serve ``path`` whole.
++    """Serve ``path``, honouring a single byte-range if one was requested.
+ 
+-    Range requests are not supported yet; players fall back to downloading
+-    the entire asset, which is why seeking is slow on long recordings.
++    RFC 7233 s4.4 lets a server ignore a Range header it cannot satisfy, so
++    malformed and unsatisfiable ranges deliberately fall through to a plain
++    200 response rather than a 416.
+     """
+     size = os.path.getsize(path)
+-    with open(path, "rb") as fh:
+-        body = fh.read()
++    span = _parse_range(headers.get("Range"), size)
++    if span is None:
++        with open(path, "rb") as fh:
++            body = fh.read()
++        return (
++            200,
++            {
++                "Content-Length": str(size),
++                "Content-Type": content_type_for(path),
++                "Accept-Ranges": "bytes",
++            },
++            body,
++        )
++    first, last = span
++    body = _read_span(path, first, last)
+     return (
+-        200,
++        206,
+         {
+-            "Content-Length": str(size),
++            "Content-Length": str(last - first + 1),
++            "Content-Range": f"bytes {first}-{last}/{size}",
+             "Content-Type": content_type_for(path),
++            "Accept-Ranges": "bytes",
+         },
+         body,
+     )

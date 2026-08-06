@@ -1,0 +1,19 @@
+{
+  "id": "004-unhandled-error-path-deep",
+  "kind": "seeded",
+  "pair_id": "004",
+  "defect_class": "unhandled-error-path",
+  "depth": "deep",
+  "file": "taskq/worker.py",
+  "location": "taskq/worker.py -- the generic except branch of Worker.run_once(), wrong only in light of the accounting contract documented on Attempts",
+  "mechanism": "Only the TransientError branch goes through the attempt counter. The generic failure branch requeues directly, so a permanently failing message -- for example HandlerNotFound for a kind this deployment does not register -- is never counted and therefore never dead-lettered. It is redelivered without limit, pinning a worker in a hot poison-message loop that the new retry budget was added to prevent.",
+  "accepted_finding_forms": [
+    "the generic except branch bypasses the attempt counter, so non-transient failures are redelivered forever and never dead-lettered",
+    "only transient errors are counted toward max_attempts; every other failure re-queues without limit",
+    "a poison message (e.g. an unregistered kind) loops forever because that path calls nack directly instead of _retry_or_retire",
+    "the dead-letter path is unreachable for the failures that most need it -- the retry budget only applies to TransientError",
+    "the two failure paths disagree: one honours the retry accounting, the other silently re-queues, so the new limit does not bind",
+    "the retry budget introduced here does not cover the error path that is most likely to be permanent"
+  ],
+  "expected_verdict": "reject"
+}

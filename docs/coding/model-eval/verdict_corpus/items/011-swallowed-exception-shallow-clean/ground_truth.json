@@ -1,0 +1,10 @@
+{
+  "id": "011-swallowed-exception-shallow-clean",
+  "kind": "clean",
+  "pair_id": "011",
+  "defect_class": "swallowed-exception",
+  "depth": "shallow",
+  "file": "telemetry/exporter.py",
+  "expected_verdict": "approve",
+  "note": "The broad except is retained deliberately and justified in a comment, but it records the failure: it counts the dropped points, stores last_error so `healthy` goes false, logs at ERROR with a traceback, and returns 0 rather than claiming the batch was written."
+}

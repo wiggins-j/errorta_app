@@ -1,0 +1,10 @@
+{
+  "id": "002-off-by-one-deep-clean",
+  "kind": "clean",
+  "pair_id": "002",
+  "defect_class": "off-by-one",
+  "depth": "deep",
+  "file": "mediasvc/http_range.py",
+  "expected_verdict": "approve",
+  "note": "_read_span reads last - first + 1 bytes, matching the inclusive range contract documented on _parse_range and the Content-Length emitted by handle_get."
+}

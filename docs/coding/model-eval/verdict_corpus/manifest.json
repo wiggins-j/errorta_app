@@ -1,0 +1,363 @@
+{
+  "corpus": "spec43-verdict-usefulness",
+  "spec": "docs/specs/SPEC-43-verdict-usefulness-under-think-false.md",
+  "schema_version": 1,
+  "language": "python",
+  "authored_before_any_model_run": true,
+  "counts": {
+    "items": 32,
+    "seeded": 16,
+    "clean": 16,
+    "pairs": 16,
+    "seeded_by_depth": {
+      "shallow": 8,
+      "deep": 8
+    },
+    "seeded_by_class": {
+      "missing-input-validation": 2,
+      "null-guard": 2,
+      "off-by-one": 2,
+      "race-ordering": 2,
+      "resource-leak": 2,
+      "swallowed-exception": 2,
+      "unhandled-error-path": 2,
+      "wrong-comparison-operator": 2
+    }
+  },
+  "defect_classes": [
+    "missing-input-validation",
+    "null-guard",
+    "off-by-one",
+    "race-ordering",
+    "resource-leak",
+    "swallowed-exception",
+    "unhandled-error-path",
+    "wrong-comparison-operator"
+  ],
+  "depths": [
+    "shallow",
+    "deep"
+  ],
+  "items": [
+    {
+      "id": "001-off-by-one-shallow",
+      "kind": "seeded",
+      "pair_id": "001",
+      "defect_class": "off-by-one",
+      "depth": "shallow",
+      "file": "warehouse/bulk_writer.py",
+      "diff": "items/001-off-by-one-shallow/diff.patch",
+      "ground_truth": "items/001-off-by-one-shallow/ground_truth.json"
+    },
+    {
+      "id": "001-off-by-one-shallow-clean",
+      "kind": "clean",
+      "pair_id": "001",
+      "defect_class": "off-by-one",
+      "depth": "shallow",
+      "file": "warehouse/bulk_writer.py",
+      "diff": "items/001-off-by-one-shallow-clean/diff.patch",
+      "ground_truth": "items/001-off-by-one-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "002-off-by-one-deep",
+      "kind": "seeded",
+      "pair_id": "002",
+      "defect_class": "off-by-one",
+      "depth": "deep",
+      "file": "mediasvc/http_range.py",
+      "diff": "items/002-off-by-one-deep/diff.patch",
+      "ground_truth": "items/002-off-by-one-deep/ground_truth.json"
+    },
+    {
+      "id": "002-off-by-one-deep-clean",
+      "kind": "clean",
+      "pair_id": "002",
+      "defect_class": "off-by-one",
+      "depth": "deep",
+      "file": "mediasvc/http_range.py",
+      "diff": "items/002-off-by-one-deep-clean/diff.patch",
+      "ground_truth": "items/002-off-by-one-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "003-unhandled-error-path-shallow",
+      "kind": "seeded",
+      "pair_id": "003",
+      "defect_class": "unhandled-error-path",
+      "depth": "shallow",
+      "file": "configsvc/remote_config.py",
+      "diff": "items/003-unhandled-error-path-shallow/diff.patch",
+      "ground_truth": "items/003-unhandled-error-path-shallow/ground_truth.json"
+    },
+    {
+      "id": "003-unhandled-error-path-shallow-clean",
+      "kind": "clean",
+      "pair_id": "003",
+      "defect_class": "unhandled-error-path",
+      "depth": "shallow",
+      "file": "configsvc/remote_config.py",
+      "diff": "items/003-unhandled-error-path-shallow-clean/diff.patch",
+      "ground_truth": "items/003-unhandled-error-path-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "004-unhandled-error-path-deep",
+      "kind": "seeded",
+      "pair_id": "004",
+      "defect_class": "unhandled-error-path",
+      "depth": "deep",
+      "file": "taskq/worker.py",
+      "diff": "items/004-unhandled-error-path-deep/diff.patch",
+      "ground_truth": "items/004-unhandled-error-path-deep/ground_truth.json"
+    },
+    {
+      "id": "004-unhandled-error-path-deep-clean",
+      "kind": "clean",
+      "pair_id": "004",
+      "defect_class": "unhandled-error-path",
+      "depth": "deep",
+      "file": "taskq/worker.py",
+      "diff": "items/004-unhandled-error-path-deep-clean/diff.patch",
+      "ground_truth": "items/004-unhandled-error-path-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "005-resource-leak-shallow",
+      "kind": "seeded",
+      "pair_id": "005",
+      "defect_class": "resource-leak",
+      "depth": "shallow",
+      "file": "eventstore/segment.py",
+      "diff": "items/005-resource-leak-shallow/diff.patch",
+      "ground_truth": "items/005-resource-leak-shallow/ground_truth.json"
+    },
+    {
+      "id": "005-resource-leak-shallow-clean",
+      "kind": "clean",
+      "pair_id": "005",
+      "defect_class": "resource-leak",
+      "depth": "shallow",
+      "file": "eventstore/segment.py",
+      "diff": "items/005-resource-leak-shallow-clean/diff.patch",
+      "ground_truth": "items/005-resource-leak-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "006-resource-leak-deep",
+      "kind": "seeded",
+      "pair_id": "006",
+      "defect_class": "resource-leak",
+      "depth": "deep",
+      "file": "db/pool.py",
+      "diff": "items/006-resource-leak-deep/diff.patch",
+      "ground_truth": "items/006-resource-leak-deep/ground_truth.json"
+    },
+    {
+      "id": "006-resource-leak-deep-clean",
+      "kind": "clean",
+      "pair_id": "006",
+      "defect_class": "resource-leak",
+      "depth": "deep",
+      "file": "db/pool.py",
+      "diff": "items/006-resource-leak-deep-clean/diff.patch",
+      "ground_truth": "items/006-resource-leak-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "007-null-guard-shallow",
+      "kind": "seeded",
+      "pair_id": "007",
+      "defect_class": "null-guard",
+      "depth": "shallow",
+      "file": "ratelimit/config.py",
+      "diff": "items/007-null-guard-shallow/diff.patch",
+      "ground_truth": "items/007-null-guard-shallow/ground_truth.json"
+    },
+    {
+      "id": "007-null-guard-shallow-clean",
+      "kind": "clean",
+      "pair_id": "007",
+      "defect_class": "null-guard",
+      "depth": "shallow",
+      "file": "ratelimit/config.py",
+      "diff": "items/007-null-guard-shallow-clean/diff.patch",
+      "ground_truth": "items/007-null-guard-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "008-null-guard-deep",
+      "kind": "seeded",
+      "pair_id": "008",
+      "defect_class": "null-guard",
+      "depth": "deep",
+      "file": "ingest/normalize.py",
+      "diff": "items/008-null-guard-deep/diff.patch",
+      "ground_truth": "items/008-null-guard-deep/ground_truth.json"
+    },
+    {
+      "id": "008-null-guard-deep-clean",
+      "kind": "clean",
+      "pair_id": "008",
+      "defect_class": "null-guard",
+      "depth": "deep",
+      "file": "ingest/normalize.py",
+      "diff": "items/008-null-guard-deep-clean/diff.patch",
+      "ground_truth": "items/008-null-guard-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "009-race-ordering-shallow",
+      "kind": "seeded",
+      "pair_id": "009",
+      "defect_class": "race-ordering",
+      "depth": "shallow",
+      "file": "ratelimit/counters.py",
+      "diff": "items/009-race-ordering-shallow/diff.patch",
+      "ground_truth": "items/009-race-ordering-shallow/ground_truth.json"
+    },
+    {
+      "id": "009-race-ordering-shallow-clean",
+      "kind": "clean",
+      "pair_id": "009",
+      "defect_class": "race-ordering",
+      "depth": "shallow",
+      "file": "ratelimit/counters.py",
+      "diff": "items/009-race-ordering-shallow-clean/diff.patch",
+      "ground_truth": "items/009-race-ordering-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "010-race-ordering-deep",
+      "kind": "seeded",
+      "pair_id": "010",
+      "defect_class": "race-ordering",
+      "depth": "deep",
+      "file": "catalog/row_cache.py",
+      "diff": "items/010-race-ordering-deep/diff.patch",
+      "ground_truth": "items/010-race-ordering-deep/ground_truth.json"
+    },
+    {
+      "id": "010-race-ordering-deep-clean",
+      "kind": "clean",
+      "pair_id": "010",
+      "defect_class": "race-ordering",
+      "depth": "deep",
+      "file": "catalog/row_cache.py",
+      "diff": "items/010-race-ordering-deep-clean/diff.patch",
+      "ground_truth": "items/010-race-ordering-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "011-swallowed-exception-shallow",
+      "kind": "seeded",
+      "pair_id": "011",
+      "defect_class": "swallowed-exception",
+      "depth": "shallow",
+      "file": "telemetry/exporter.py",
+      "diff": "items/011-swallowed-exception-shallow/diff.patch",
+      "ground_truth": "items/011-swallowed-exception-shallow/ground_truth.json"
+    },
+    {
+      "id": "011-swallowed-exception-shallow-clean",
+      "kind": "clean",
+      "pair_id": "011",
+      "defect_class": "swallowed-exception",
+      "depth": "shallow",
+      "file": "telemetry/exporter.py",
+      "diff": "items/011-swallowed-exception-shallow-clean/diff.patch",
+      "ground_truth": "items/011-swallowed-exception-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "012-swallowed-exception-deep",
+      "kind": "seeded",
+      "pair_id": "012",
+      "defect_class": "swallowed-exception",
+      "depth": "deep",
+      "file": "auth/token_cache.py",
+      "diff": "items/012-swallowed-exception-deep/diff.patch",
+      "ground_truth": "items/012-swallowed-exception-deep/ground_truth.json"
+    },
+    {
+      "id": "012-swallowed-exception-deep-clean",
+      "kind": "clean",
+      "pair_id": "012",
+      "defect_class": "swallowed-exception",
+      "depth": "deep",
+      "file": "auth/token_cache.py",
+      "diff": "items/012-swallowed-exception-deep-clean/diff.patch",
+      "ground_truth": "items/012-swallowed-exception-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "013-wrong-comparison-shallow",
+      "kind": "seeded",
+      "pair_id": "013",
+      "defect_class": "wrong-comparison-operator",
+      "depth": "shallow",
+      "file": "sync/incremental.py",
+      "diff": "items/013-wrong-comparison-shallow/diff.patch",
+      "ground_truth": "items/013-wrong-comparison-shallow/ground_truth.json"
+    },
+    {
+      "id": "013-wrong-comparison-shallow-clean",
+      "kind": "clean",
+      "pair_id": "013",
+      "defect_class": "wrong-comparison-operator",
+      "depth": "shallow",
+      "file": "sync/incremental.py",
+      "diff": "items/013-wrong-comparison-shallow-clean/diff.patch",
+      "ground_truth": "items/013-wrong-comparison-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "014-wrong-comparison-deep",
+      "kind": "seeded",
+      "pair_id": "014",
+      "defect_class": "wrong-comparison-operator",
+      "depth": "deep",
+      "file": "cache/bounded.py",
+      "diff": "items/014-wrong-comparison-deep/diff.patch",
+      "ground_truth": "items/014-wrong-comparison-deep/ground_truth.json"
+    },
+    {
+      "id": "014-wrong-comparison-deep-clean",
+      "kind": "clean",
+      "pair_id": "014",
+      "defect_class": "wrong-comparison-operator",
+      "depth": "deep",
+      "file": "cache/bounded.py",
+      "diff": "items/014-wrong-comparison-deep-clean/diff.patch",
+      "ground_truth": "items/014-wrong-comparison-deep-clean/ground_truth.json"
+    },
+    {
+      "id": "015-missing-validation-shallow",
+      "kind": "seeded",
+      "pair_id": "015",
+      "defect_class": "missing-input-validation",
+      "depth": "shallow",
+      "file": "catalog/query.py",
+      "diff": "items/015-missing-validation-shallow/diff.patch",
+      "ground_truth": "items/015-missing-validation-shallow/ground_truth.json"
+    },
+    {
+      "id": "015-missing-validation-shallow-clean",
+      "kind": "clean",
+      "pair_id": "015",
+      "defect_class": "missing-input-validation",
+      "depth": "shallow",
+      "file": "catalog/query.py",
+      "diff": "items/015-missing-validation-shallow-clean/diff.patch",
+      "ground_truth": "items/015-missing-validation-shallow-clean/ground_truth.json"
+    },
+    {
+      "id": "016-missing-validation-deep",
+      "kind": "seeded",
+      "pair_id": "016",
+      "defect_class": "missing-input-validation",
+      "depth": "deep",
+      "file": "webhooks/partner.py",
+      "diff": "items/016-missing-validation-deep/diff.patch",
+      "ground_truth": "items/016-missing-validation-deep/ground_truth.json"
+    },
+    {
+      "id": "016-missing-validation-deep-clean",
+      "kind": "clean",
+      "pair_id": "016",
+      "defect_class": "missing-input-validation",
+      "depth": "deep",
+      "file": "webhooks/partner.py",
+      "diff": "items/016-missing-validation-deep-clean/diff.patch",
+      "ground_truth": "items/016-missing-validation-deep-clean/ground_truth.json"
+    }
+  ]
+}

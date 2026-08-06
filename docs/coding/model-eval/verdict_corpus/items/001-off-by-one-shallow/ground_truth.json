@@ -1,0 +1,18 @@
+{
+  "id": "001-off-by-one-shallow",
+  "kind": "seeded",
+  "pair_id": "001",
+  "defect_class": "off-by-one",
+  "depth": "shallow",
+  "file": "warehouse/bulk_writer.py",
+  "location": "warehouse/bulk_writer.py, BulkWriter._batches() batch-size computation",
+  "mechanism": "The batch size is one row larger than the bind limit allows, so every full batch binds len(columns) parameters more than MAX_BIND_PARAMS and SQLite raises OperationalError('too many SQL variables') on any write large enough to fill a batch.",
+  "accepted_finding_forms": [
+    "_batches adds one to the rows-per-batch, so a full batch exceeds the 999 bound-parameter limit",
+    "off-by-one in the batch size: MAX_BIND_PARAMS // len(columns) + 1 rows bind more than MAX_BIND_PARAMS parameters",
+    "the +1 in per_batch makes each statement one row too big and SQLite will reject it with 'too many SQL variables'",
+    "batch sizing is wrong -- it over-counts by one row, defeating the very limit the batching was added to respect",
+    "the new batching still exceeds the parameter cap because per_batch is computed as floor(limit/cols)+1"
+  ],
+  "expected_verdict": "reject"
+}
