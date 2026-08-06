@@ -107,6 +107,40 @@ def _member_vendor(member: dict[str, Any]) -> str:
     return route_id or str(member.get("provider_kind") or "")
 
 
+def _member_model_id(member: dict[str, Any]) -> str:
+    """The provider-side model id for a member's gateway request.
+
+    Prefers an explicit ``model`` / ``model_display``, then falls back to the
+    ``gateway_route_id`` suffix — the SAME derivation ``bind_member_route`` uses
+    (``model_assignment.py:54-56``), so an unbound member behaves like a bound one.
+
+    Why the fallback is needed: a PERSISTED coding member has neither key.
+    ``recipes.resolve_team`` writes only id/role/enabled/metadata/model_mode/
+    gateway_route_id, and ``bind_member_route`` — the only thing that sets ``model``
+    — has one call site, ``runner.py``'s **Assign** (worker task) path. PM governance
+    and governance review turns pass the raw member from ``_member(...)``, so before
+    this fallback they sent ``model=""``.
+
+    That was not harmless on a local route. ``LocalGateway.call`` does not divert a
+    ``local.*`` route to ``_registry_dispatch`` (which derives the model from the
+    route id at ``gateway_local.py:285``) because ``local`` is an allowed legacy
+    provider; it falls through to ``_ollama_dispatch``, which posts the empty string.
+    Ollama answers ``HTTP 400 {"error":"model is required"}``, which
+    ``_ollama_dispatch`` maps to ``FatalError("gateway_4xx: 400")`` — a hard failure
+    on every PM-governance and governance-review turn of an all-local team.
+
+    Returns ``""`` when there is nothing to derive from: this resolves an id, it
+    never invents one.
+    """
+    explicit = member.get("model") or member.get("model_display")
+    if explicit:
+        return str(explicit)
+    route_id = str(member.get("gateway_route_id") or "").strip()
+    if not route_id:
+        return ""
+    return route_id.split(".", 1)[1] if "." in route_id else route_id
+
+
 def _vendor_honors_repo_read(member: dict[str, Any]) -> bool:
     """True when the member's vendor actually runs the read-only cwd invocation
     ``repo_read`` promises (i.e. consumes ``repo_read_root`` metadata)."""
@@ -7617,7 +7651,7 @@ def gateway_member_caller(gateway: Any) -> MemberCaller:
             role=str(member.get("role", "answerer")),
             route_id=str(member.get("gateway_route_id", "")),
             provider=str(member.get("provider_kind", "local")),
-            model=str(member.get("model") or member.get("model_display") or ""),
+            model=_member_model_id(member),
             messages=[{"role": "user", "content": prompt}],
             max_output_tokens=int(tl.get("max_output_tokens", 2048) or 2048),
             temperature=float(gen.get("temperature", 0.3) or 0.3),
