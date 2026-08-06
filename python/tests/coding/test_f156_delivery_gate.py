@@ -22,6 +22,7 @@ from errorta_council.coding.autonomy import (
     CodingAutonomyPolicy,
     policy_from_dict,
     policy_to_dict,
+    save_policy,
 )
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
@@ -230,14 +231,20 @@ def test_not_applicable_over_limit_escalates(tmp_errorta_home: Path) -> None:
 
     The merge gate is running on review alone for these slices; past the limit the
     operator is told so, instead of it passing silently forever.
+
+    NOTE the knob must be PERSISTED, not passed to ``run()``: turn-side code reads
+    ``load_policy(store)`` (autonomy.json), which is how ``control_actions`` /
+    ``pm_changes`` configure it in production. A policy handed to ``run()`` is never
+    written to disk, so setting it there would leave the default in force and make
+    this test pass for the wrong reason.
     """
     store = _make("f156-g5-over", _PASS_CMD)
+    save_policy(store, CodingAutonomyPolicy(not_applicable_soft_limit=2))
     runner = CodingRunner("f156-g5-over", MEMBERS,
-                          _Fake(tester_not_applicable=True, n_tasks=5),
+                          _Fake(tester_not_applicable=True, n_tasks=4),
                           guardrail_enabled=True)
     runner.run(CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF,
-                                    max_iterations=60,
-                                    not_applicable_soft_limit=2))
+                                    max_iterations=60))
     assert store.get_run_state().get("tests_not_applicable_count", 0) >= 3
     choices = [d.get("choice") for d in store.list_decisions()]
     assert "tests_not_applicable_over_limit" in choices, choices
@@ -247,11 +254,13 @@ def test_not_applicable_limit_zero_disables_escalation(
         tmp_errorta_home: Path) -> None:
     """The escape hatch: 0 restores today's always-non-blocking alert."""
     store = _make("f156-g5-off", _PASS_CMD)
+    save_policy(store, CodingAutonomyPolicy(not_applicable_soft_limit=0))
     runner = CodingRunner("f156-g5-off", MEMBERS,
                           _Fake(tester_not_applicable=True, n_tasks=5),
                           guardrail_enabled=True)
     runner.run(CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF,
-                                    max_iterations=60,
-                                    not_applicable_soft_limit=0))
+                                    max_iterations=60))
+    # The escape itself still works — only the escalation is suppressed.
+    assert store.get_run_state().get("tests_not_applicable_count", 0) >= 1
     choices = [d.get("choice") for d in store.list_decisions()]
     assert "tests_not_applicable_over_limit" not in choices

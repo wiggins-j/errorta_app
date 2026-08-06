@@ -632,6 +632,15 @@ and FastAPI routers. Update the prose and this contract together.
 > `governance_proximity`, `{}` for `capability_overrides` — is required to
 > reproduce today's behaviour exactly, and stays required after its spec lands.
 
+> **F156 (G5) — `not_applicable_soft_limit` (3).** How many PRs in ONE run may merge
+> on a tester `not_applicable` declaration before the run records an
+> operator-visible `tests_not_applicable_over_limit` decision instead of only the
+> deduped non-blocking alert. It is **not** a hard cap: a partial slice legitimately
+> has no test that exercises it, and refusing the declaration would wedge the run.
+> What it bounds is *invisibility* — a run leaning on the escape slice after slice is
+> merging on review alone. The delivered head is still gated deterministically by the
+> delivery review's full-registry run and F154's default build. Disable value: `0`.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -673,6 +682,7 @@ and FastAPI routers. Update the prose and this contract together.
     "model_escalation_limit": 2,
     "narrow_drain_iters": 5,
     "narrow_limit": 3,
+    "not_applicable_soft_limit": 3,
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,

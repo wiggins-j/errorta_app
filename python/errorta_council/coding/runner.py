@@ -6914,17 +6914,58 @@ def build_run_turn(
                     store.update_pr(pr["pr_id"], tests_passed=True,
                                     tested_head=pr["head"])
                     store.update_task(task.task_id, state="done")
+                    # F156 (G5): count the escape per run. The declaration itself is
+                    # legitimate for a partial slice, so it is never refused — but a
+                    # run that leans on it slice after slice is merging on review
+                    # alone, and that must not stay invisible. Past
+                    # `not_applicable_soft_limit` the deduped non-blocking alert is
+                    # escalated to a recorded, operator-visible signal. Fully guarded:
+                    # a counter write failure degrades to today's behaviour and never
+                    # fails the turn.
+                    na_count = 0
+                    na_limit = 0
+                    try:
+                        na_count = int(store.get_run_state().get(
+                            "tests_not_applicable_count", 0) or 0) + 1
+                        store.set_run_state(tests_not_applicable_count=na_count)
+                        from .autonomy import load_policy
+                        na_limit = int(getattr(
+                            load_policy(store),
+                            "not_applicable_soft_limit", 0) or 0)
+                    except Exception:  # noqa: BLE001 — accounting is best-effort
+                        na_count, na_limit = 0, 0
+                    over_limit = bool(na_limit) and na_count > na_limit
+                    if over_limit:
+                        try:
+                            store.record_decision(
+                                title="tests not applicable over soft limit",
+                                context=f"pr {pr['pr_id']}",
+                                choice="tests_not_applicable_over_limit",
+                                rationale=(
+                                    f"{na_count} slices in this run have declared "
+                                    f"tests not-applicable (soft limit {na_limit}). "
+                                    "The per-PR merge gate is running on review "
+                                    "alone for those slices. The delivered head is "
+                                    "still gated deterministically at delivery, but "
+                                    "consider registering test commands."),
+                                related_task_ids=[task.task_id, pr["task_id"]])
+                        except Exception:  # noqa: BLE001
+                            pass
                     # F142 WS-C observability: surface a non-blocking Alert (deduped
                     # to one per run) so a human sees that a slice merged without any
                     # test running — otherwise a run could merge to done with tests
                     # never executed and nothing telling the operator.
                     try:
                         from . import attention
+                        _extra = (
+                            f" This is slice {na_count} in this run to skip tests "
+                            f"(soft limit {na_limit}) — the merge gate is running on "
+                            "review alone." if over_limit else "")
                         attention.raise_tests_skipped_alert(
                             store.project_id, stage="build",
                             summary=(f"PR on branch {pr['branch']} merged without "
                                      "running tests (tester declared the slice "
-                                     "not-applicable). Verify test coverage."),
+                                     f"not-applicable). Verify test coverage.{_extra}"),
                             store=store)
                     except Exception:  # noqa: BLE001 — observability is best-effort
                         pass

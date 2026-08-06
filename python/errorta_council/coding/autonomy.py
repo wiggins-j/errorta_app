@@ -373,6 +373,17 @@ class CodingAutonomyPolicy:
     # frozen but the dict is not — treat it as read-only; `policy_from_dict` always
     # builds a fresh copy so a persisted policy can never alias a caller's dict.
     capability_overrides: dict[str, Any] = field(default_factory=dict)
+    # F156 (G5): how many PRs in ONE run may merge on a tester `not_applicable`
+    # declaration before the run surfaces an operator-visible escalation instead of a
+    # deduped non-blocking alert. Deliberately NOT a hard cap: a partial slice
+    # legitimately has no test that exercises it, and refusing the declaration would
+    # wedge the run. What this bounds is INVISIBILITY — a run leaning on the escape
+    # for slice after slice is merging on review alone, and the operator should be
+    # told rather than have it pass silently forever. The FINAL head is still gated
+    # deterministically by delivery_review's full-registry run and F154's default
+    # build, so this is about visibility, not the last line of defence. 0 disables the
+    # escalation entirely, restoring today's always-non-blocking alert.
+    not_applicable_soft_limit: int = 3
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -429,6 +440,8 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         # Copy: the returned dict is persisted/serialized by callers, and handing
         # out the policy's own dict would let a caller mutate a frozen policy.
         "capability_overrides": dict(p.capability_overrides),
+        # F156 (G5) — bound the tester's not_applicable escape.
+        "not_applicable_soft_limit": p.not_applicable_soft_limit,
     }
 
 
@@ -571,6 +584,11 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # degrade to "no overrides" rather than crash policy load for the whole run.
         capability_overrides=_coerce_overrides(
             d.get("capability_overrides"), base.capability_overrides),
+        # F156 (G5): `max(0, …)` — NOT max(1) — so 0 disables the escalation
+        # entirely, matching the gate_stall_limit / plan_streak_limit convention.
+        not_applicable_soft_limit=max(
+            0, int(d.get("not_applicable_soft_limit",
+                         base.not_applicable_soft_limit))),
     )
 
 
