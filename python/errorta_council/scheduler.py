@@ -2788,7 +2788,12 @@ class TurnScheduler:
                 timeout=self._per_turn_timeout_for(judge_turn),
             )
             text = str(getattr(result, "content", "") or "").strip()
-            if text and not getattr(result, "is_thinking_burn", False):
+            # SPEC-41 Move 1: a TRUNCATED result is not an answer either. Before the
+            # marker suppression a clipped turn arrived prefixed and was rejected by
+            # the is_thinking_burn test; now it arrives as bare partial text, so the
+            # truncation flag has to carry that rejection.
+            if (text and not getattr(result, "is_thinking_burn", False)
+                    and not getattr(result, "truncated", False)):
                 self._credibility_judge_answer = text
         except Exception:
             self._credibility_judge_answer = ""
@@ -2982,7 +2987,11 @@ class TurnScheduler:
                 self._gateway.call(request),
                 timeout=self._per_turn_timeout_for(synth_member),
             )
-            if getattr(result, "is_thinking_burn", False) or not str(result.content).strip():
+            # SPEC-41 Move 1: `truncated` joins the existing burn/blank rejection —
+            # a clipped finalizer output is not a finalizer answer.
+            if (getattr(result, "is_thinking_burn", False)
+                    or getattr(result, "truncated", False)
+                    or not str(result.content).strip()):
                 return None
             return {
                 "content": result.content,
@@ -3962,7 +3971,15 @@ class TurnScheduler:
             # Record the answer-of-record for the terminal FINAL_ANSWER event.
             # Thinking-burn outputs (no visible answer) never become the
             # final answer. A finalizer's message takes precedence.
-            if not result.is_thinking_burn:
+            #
+            # SPEC-41 Move 1: this gate checked ONLY is_thinking_burn, so it was the
+            # one that regressed two ways once the marker stopped being substituted
+            # on a truncation — a clipped answer would be recorded as complete, and
+            # an EMPTY one would be recorded at all (the other two gates already test
+            # blankness independently; this one never did).
+            if (not result.is_thinking_burn
+                    and not getattr(result, "truncated", False)
+                    and str(result.content).strip()):
                 answer = {
                     "content": result.content,
                     "member_id": member["id"],

@@ -387,6 +387,18 @@ class CodingAutonomyPolicy:
     # teams persist 8192/6144 with no timeout_seconds, so stamping 2048 over those
     # would be a 4x demotion of a deliberate operator budget.
     reasoning_output_budget: bool = True
+    # SPEC-41 Move 2: send `think: false` on structured LOCAL turns. Measured on the
+    # reference box: reviewer-verdict schema compliance 4/6 -> 6/6, and mean generated
+    # tokens 2197 -> 33 (~66x), i.e. a ~100s turn becoming near-instant. Verified
+    # harmless on models with no thinking channel. False leaves thinking on.
+    local_think_false: bool = True
+    # SPEC-41 Move 3: send `format: "json"` on structured LOCAL turns. Models emit
+    # valid JSON but fence-wrapped 0/6 of the time without it, so every structured
+    # turn currently rides on extraction heuristics. GATED on local_think_false —
+    # issue #84's warning is that constraining the output channel while the thinking
+    # channel is live is what empties `content`, so the harmful pairing is unreachable
+    # rather than merely discouraged. False sends no `format`.
+    local_structured_format: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -445,6 +457,9 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "capability_overrides": dict(p.capability_overrides),
         # SPEC-42 — the model-derived per-turn output budget.
         "reasoning_output_budget": p.reasoning_output_budget,
+        # SPEC-41 — structured-turn decoding.
+        "local_think_false": p.local_think_false,
+        "local_structured_format": p.local_structured_format,
     }
 
 
@@ -590,6 +605,10 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # SPEC-42: a plain bool; absent key -> the dataclass default (ON).
         reasoning_output_budget=bool(
             d.get("reasoning_output_budget", base.reasoning_output_budget)),
+        local_think_false=bool(
+            d.get("local_think_false", base.local_think_false)),
+        local_structured_format=bool(
+            d.get("local_structured_format", base.local_structured_format)),
     )
 
 

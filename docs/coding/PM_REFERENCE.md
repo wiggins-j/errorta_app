@@ -645,6 +645,17 @@ and FastAPI routers. Update the prose and this contract together.
 > literals, because real teams persist 8192/6144 and stamping 2048 over those would be
 > a 4× demotion.
 
+> **SPEC-41 — `local_think_false` (true) and `local_structured_format` (true).**
+> Structured LOCAL turns send `think: false`, and `format: "json"` with it.
+> Measured on the reference box: reviewer-verdict schema compliance 4/6 -> 6/6 with
+> thinking off, and mean generated tokens 2197 -> 33 (~66x — a ~100 s turn becoming
+> near-instant on one GPU). Without `format`, models emit valid JSON but fence-wrapped
+> 0/6 of the time, so every structured turn otherwise rides on extraction heuristics.
+> **The two are coupled, not independent:** `format` is sent only when thinking is
+> also suppressed, because constraining the output channel while the thinking channel
+> is live is the combination that empties `content` (issue #84). Disabling
+> `local_think_false` therefore also suppresses `format`.
+
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
 {
@@ -679,6 +690,8 @@ and FastAPI routers. Update the prose and this contract together.
     "hot_file_freeze_stall_limit": 15,
     "hot_file_threshold": 2,
     "last_word_limit": 2,
+    "local_structured_format": true,
+    "local_think_false": true,
     "max_iterations": 200,
     "max_model_calls": null,
     "max_parallel_workers": null,
