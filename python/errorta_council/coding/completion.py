@@ -167,6 +167,123 @@ def acceptance_gate_status(ledger: Any, current_head: str) -> AcceptanceGateStat
     return "green" if res.get("passed") else "red"
 
 
+# SPEC-40 (item E) — the declared-mechanic gate's verdict for the `done` chokepoint.
+MechanicGateStatus = Literal["ok", "red", "advisory"]
+
+_EVIDENCE_KEY = "probe_mechanic_evidence"
+
+
+def _mechanic_evidence(ledger: Any, current_head: str) -> dict[str, Any] | None:
+    """The newest MASTER-arm probe evidence, but only if it describes THIS tree.
+
+    Evidence bound to a different head is evidence about a different artifact, so it
+    is discarded rather than reused — the same head-binding discipline
+    ``acceptance_gate_status`` applies. READ-ONLY; ``None`` on any read failure."""
+    head = str(current_head or "")
+    if not head:
+        return None
+    try:
+        raw = ledger.get_run_state().get(_EVIDENCE_KEY)
+    except Exception:  # noqa: BLE001 — never invent a block
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if str(raw.get("head") or "") != head:
+        return None
+    return raw
+
+
+def mechanic_gate_status(ledger: Any, current_head: str) -> MechanicGateStatus:
+    """SPEC-40 item E: the four-path hierarchy for a declared-mechanic project.
+
+    1. white-box contract present and GREEN -> ``ok``. This OVERRIDES a red advisory
+       differential: a white-box, council-authored, game-native assertion is strictly
+       stronger evidence than a black-box endpoint heuristic.
+    2. contract present and RED -> ``red`` (recoverable; the caller routes it through
+       the bounded ``completion_refused`` ladder).
+    3. no contract + a CONFIDENT calibrated-inert differential -> ``red``. This is the
+       golf-2 protection for a game that HAS a hook: a genuinely inert
+       declared-mechanic game must not ship.
+    3b. no usable ``__probe`` hook AT ALL -> ``red``. Distinct from path 3 and NOT
+       subject to the confidence rule, because this is not a measurement that could be
+       marginal — it is the total absence of behavioral evidence about a project that
+       declared the claim. SPEC-37 blocked this, and the real gravity-golf-2 tree is
+       exactly this shape (it predates the hook contract, so the differential never
+       runs and there is no ``mechanic_matters`` reading to be confident about).
+       Folding it into path 4 would let golf-2 ship on ``advisory`` — the precise
+       failure regression lock 1 exists to prevent.
+    4. everything else -> ``advisory``. Never a hard block, never an anchor
+       regression. This is the golf-4 lesson — the oracle itself may be the thing
+       that is wrong, so an uncertain verdict must not terminate a healthy run.
+
+    READ-ONLY and FAIL-OPEN: missing evidence, a head mismatch, or any read error
+    returns ``advisory``. The module's fail-closed rule governs open *work*; a
+    ``done``-block must fail OPEN, because a spurious block with no recovery is
+    precisely the wedge SPEC-34's review forbids.
+    """
+    ev = _mechanic_evidence(ledger, current_head)
+    if ev is None:
+        return "advisory"
+    # The project must have MADE the claim before it can be judged against it. An
+    # earlier revision omitted this and `record_mechanic_evidence` hardcoded
+    # "declares", so every ordinary web project — a CRUD app, a dashboard, anything
+    # with no `window.__probe` — fell into path 3b and was refused `done` with a
+    # message about exposing a golf hook. A fail-CLOSED wedge in the one place this
+    # spec insists must fail open. Evidence written before this field existed has no
+    # `declares` key and is treated as not-declaring, which is the safe reading.
+    if not ev.get("declares"):
+        return "advisory"
+    wb = str(ev.get("whitebox") or "absent")
+    if wb == "green":
+        return "ok"
+    if wb == "red":
+        return "red"
+    # Path 3 — a MEASURED inert verdict. Marginal readings stay advisory.
+    if ev.get("mechanic_matters") is False and bool(ev.get("confident")):
+        return "red"
+    # Path 3b — no measurement was possible at all. `mechanic_ok` is SPEC-37's verdict,
+    # which is False for a missing or structurally unusable hook (and True for every
+    # cannot-verify: a timeout, a thrown evaluation, an exhausted budget). Guarded on
+    # `mechanic_matters is None` so a game that DID produce a reading is judged by
+    # path 3's confidence rule and never sneaks a block in through here.
+    if (ev.get("mechanic_matters") is None
+            and ev.get("mechanic_ok") is False):
+        # `has_hook` is deliberately NOT required. Requiring it left a five-line
+        # bypass: a STUB hook (present, but a no-op `shoot()` or a non-restoring
+        # `reset()`) yields has_hook=True, ran=False, mechanic_matters=None — so it
+        # matched neither path 3 nor 3b and shipped on `advisory`. That is a strictly
+        # easier escape than golf-2's no-hook shape which 3b exists to catch, and it
+        # contradicts `_mechanic_verdict`'s own "a stub hook must not buy a pass".
+        # The `mechanic_matters is None` guard still keeps this from becoming a back
+        # door around path 3's confidence rule: a game that produced a READING is
+        # judged there, not here.
+        return "red"
+    return "advisory"
+
+
+def mechanic_gate_reason(ledger: Any, current_head: str) -> str:
+    """The actionable half of a ``red`` from :func:`mechanic_gate_status`.
+
+    Returns the specific white-box arm's reason when there is one (naming
+    ``setMechanic`` for the vacuity case — the message golf-4 needed and never got),
+    or the path-3 steer otherwise. Empty string when there is nothing to say."""
+    ev = _mechanic_evidence(ledger, current_head)
+    if ev is None:
+        return ""
+    reason = str(ev.get("whitebox_reason") or "").strip()
+    if str(ev.get("whitebox") or "") == "red" and reason:
+        return reason
+    if ev.get("mechanic_matters") is False and bool(ev.get("confident")):
+        return ("the calibrated differential found no effect at any power in the "
+                "game's own usable range — a straight shot behaves identically with "
+                "the mechanic on vs off")
+    # Path 3b — SPEC-37's reason already names the hook contract to build.
+    if (ev.get("mechanic_matters") is None
+            and ev.get("mechanic_ok") is False):
+        return str(ev.get("mechanic_reason") or "").strip()
+    return ""
+
+
 __all__ = [
     "OpenItem",
     "pending_completion_work",
@@ -174,4 +291,7 @@ __all__ = [
     "count_human_required",
     "acceptance_gate_status",
     "AcceptanceGateStatus",
+    "mechanic_gate_status",
+    "mechanic_gate_reason",
+    "MechanicGateStatus",
 ]

@@ -655,6 +655,39 @@ and FastAPI routers. Update the prose and this contract together.
 > also suppressed, because constraining the output channel while the thinking channel
 > is live is the combination that empties `content` (issue #84). Disabling
 > `local_think_false` therefore also suppresses `format`.
+> **F156 (G5) — `not_applicable_soft_limit` (3).** How many PRs in ONE run may merge
+> on a tester `not_applicable` declaration before the run records an
+> operator-visible `tests_not_applicable_over_limit` decision instead of only the
+> deduped non-blocking alert. It is **not** a hard cap: a partial slice legitimately
+> has no test that exercises it, and refusing the declaration would wedge the run.
+> What it bounds is *invisibility* — a run leaning on the escape slice after slice is
+> merging on review alone. The delivered head is still gated deterministically by the
+> delivery review's full-registry run and F154's default build. Disable value: `0`.
+
+> **F154 — `default_build_gate` (true).** When a project has **no registered test
+> commands**, the delivery review derives a build/typecheck from the detected stack
+> (`npm run build` → `tsc --noEmit` → `cargo build` → `go build` → `compileall`) and
+> treats its failure like a failed test. Without it a greenfield project's empty
+> registry reads as success at both gates and it can reach `done` with nothing ever
+> compiled. Never fires when the registry is non-empty, and derives `None` (skipping
+> silently) for any stack with no safe rule. Disable value: `false`.
+
+> **SPEC-40 — the testability-contract oracle.** Four `autonomy_defaults` keys,
+> all **live** and all defaulting to `true`. Unlike the batches above, each one's
+> disable value is `false`:
+> * `probe_adaptive_sweep` — calibrate the mechanic differential's power sweep to
+>   the game's own usable range (bisect for the minimum power at which a
+>   mechanic-OFF straight shot sinks) instead of anchoring it to hole geometry.
+>   `false` restores the `[0.8,1.3,2.0] × dist(tee,hole)` sweep, which was 32–80×
+>   miscalibrated against a game whose `shoot()` takes a speed.
+> * `probe_mechanic_advisory` — keep the mechanic verdict OUT of the anchored
+>   `web:probe` pass/fail, so a marginal verdict cannot drive `anchor_regressed`
+>   and through it `revise_livelock`. `false` restores the old fold.
+> * `probe_whitebox` — run the white-box `__probe.solution()` / `__probe.won()`
+>   acceptance phase. `false` skips it entirely.
+> * `probe_pr_gating` — stamp the same verdict components on the per-PR arm that
+>   gate delivery, so the reviewer reviews against the real bar. `false` restores
+>   the weaker per-PR verdict.
 
 <!-- PM_REFERENCE_CONTRACT_START -->
 ```json
@@ -677,6 +710,7 @@ and FastAPI routers. Update the prose and this contract together.
     "convergence_release_ratio": 0.35,
     "convergence_stall_limit": 20,
     "convergence_window": 20,
+    "default_build_gate": true,
     "delivery_review_round_limit": 3,
     "dev_repo_read": false,
     "diff_deadlock": true,
@@ -699,10 +733,15 @@ and FastAPI routers. Update the prose and this contract together.
     "model_escalation_limit": 2,
     "narrow_drain_iters": 5,
     "narrow_limit": 3,
+    "not_applicable_soft_limit": 3,
     "plan_streak_limit": 6,
     "pm_assist_limit": 1,
     "pm_idle_limit": 2,
     "reasoning_output_budget": true,
+    "probe_adaptive_sweep": true,
+    "probe_mechanic_advisory": true,
+    "probe_pr_gating": true,
+    "probe_whitebox": true,
     "review_min_latency_ms": 0,
     "review_screenshot": false,
     "revert_overlap": 0.7,

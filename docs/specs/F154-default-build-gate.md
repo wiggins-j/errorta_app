@@ -146,11 +146,33 @@ If setup cannot run (no deps installable, sandbox refused), the build is
 
 ## Status / sequencing
 
-**Fast-follow** relative to F152/F153/F155. Reason: the dependency-install ordering
-(§3) is the one genuinely non-trivial piece, and rushing it risks *false* build
-findings (a build that fails only because deps weren't installed). It is specced in
-full here and implemented immediately after the low-risk launch-probe + round-cap
-changes land and are verified, in the **same PR** if time allows or the very next.
+**Status: implemented** (2026-08-06), on the `feat/f154-f156-delivery-gate` branch
+alongside F156. Originally a **fast-follow** relative to F152/F153/F155, because the
+dependency-install ordering (§3) is the one genuinely non-trivial piece and rushing it
+risks *false* build findings (a build that fails only because deps weren't installed).
+
+**As implemented:**
+
+* §3 **option (A)** was taken — `_ensure_delivery_setup(store, workspace)` shares
+  `launch_probe`'s own `_setup_pending_venv_missing` gate, so it is idempotent and the
+  later launch probe's setup becomes a no-op. A setup failure is `cannot_verify`, never
+  a build failure.
+* `_run_default_build` returns the same `(clean, cannot_verify, detail)` tri-state
+  `_delivery_launch_evidence` uses, so the caller's fail-closed handling is symmetric.
+  `cannot_verify` blocks `done`, is **not** cached (the next completion claim retries),
+  and files no dev task; a build that ran and failed files "fix delivery build".
+* **The `ran` discriminator is not what the spec assumed.** The executor reports
+  `status="failed"` **with a real exit code** for a command that RAN and exited
+  non-zero — `blocked` / `timed_out` are the environmental shapes. Keying
+  `cannot_verify` on `status != "completed"` (the obvious reading, and what the first
+  draft did) misclassifies a genuine compile error as unverifiable and files no
+  finding. It is keyed on `blocked`/`timed_out` plus **exit 127** (toolchain absent).
+* Escape hatch: `default_build_gate` (policy, default `true`); `false` restores the
+  vacuous-clean behaviour exactly.
+* The resolver's per-candidate `except Exception: continue` means a *programming* error
+  inside it degrades silently to "no gate" rather than raising into delivery. That is
+  the correct posture for this gate, but it does mean only the unit tests catch a typo
+  there — one did, during implementation (a missing `sys` import returned `None`).
 
 ## Out of scope
 

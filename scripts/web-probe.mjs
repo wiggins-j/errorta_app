@@ -17,12 +17,18 @@
 // Usage: node web-probe.mjs <url> [frames] [--screenshot <path>] [--timeout-ms N]
 
 function parseArgs(argv) {
-  const out = { url: "", frames: 30, screenshot: "", timeoutMs: 15000 };
+  const out = { url: "", frames: 30, screenshot: "", timeoutMs: 15000,
+                legacySweep: false, whitebox: true };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--screenshot") out.screenshot = argv[++i] || "";
     else if (a === "--timeout-ms") out.timeoutMs = parseInt(argv[++i] || "15000", 10);
+    // SPEC-40 escape hatches, passed through by web_probe.py from the policy knobs.
+    // `--legacy-sweep` restores the geometry-anchored [0.8,1.3,2.0]xD powers exactly;
+    // `--no-whitebox` skips the white-box phase entirely (today's emitted JSON).
+    else if (a === "--legacy-sweep") out.legacySweep = true;
+    else if (a === "--no-whitebox") out.whitebox = false;
     else rest.push(a);
   }
   if (rest[0]) out.url = rest[0];
@@ -249,7 +255,13 @@ async function main() {
     // only for the MASTER arm of a project that DECLARES straight-shots-must-fail.
     let mechanicProbe = {
       has_hook: false, ran: false, wells: 0, mechanic_matters: null,
-      powers: [], reason: "" };
+      powers: [], reason: "",
+      // SPEC-40 (item A/B): the calibration + confidence metadata. `p_sink` is the
+      // bisected minimum power at which a mechanic-OFF straight shot reaches the hole
+      // (null when the bracket never converged); `confident` is the four-part rule
+      // that decides whether an INERT verdict may hard-block (item E path 3) or is
+      // advisory only (path 4); `straight_sank` is the SEPARATE straight-line claim.
+      p_sink: null, confident: false, max_gap: 0, straight_sank: null };
     try {
       const hasHook = await page.evaluate(() => {
         const p = window.__probe;
@@ -268,7 +280,7 @@ async function main() {
         // the whole on/off/off2 sweep and tick() is the sole driver. If this is ever
         // split or made to `await` mid-sweep, a per-shot pause/determinism guarantee
         // must be restored (the pause clause SPEC-39 removed relied on this).
-        const r = await withTimeout(page.evaluate(() => {
+        const r = await withTimeout(page.evaluate((legacySweep) => {
           const P = window.__probe;
           const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
           // Take control + go to a canonical start; the SPEC-30 interaction phase
@@ -302,7 +314,8 @@ async function main() {
             let sank = false, minD = D, maxMove = 0;
             let prev = { x: start.x, y: start.y }, still = 0;
             let end = { x: start.x, y: start.y };
-            for (let i = 0; i < 6000; i++) {
+            let i = 0;
+            for (; i < 6000; i++) {
               P.tick(1);
               const b = P.state().ball;
               const cur = { x: b.x, y: b.y };
@@ -315,35 +328,236 @@ async function main() {
               prev = cur;
               if (still >= 20) break;
             }
-            return { sank, end, maxMove };
+            return { sank, end, maxMove, ticks: i };
           };
-          const powers = [0.8, 1.3, 2.0].map((k) => k * D);
-          let matters = false, anyMoved = false, resetOk = true, nondet = false;
-          for (const pow of powers) {
-            const on = runShot(pow, true);
-            const off = runShot(pow, false);
-            const off2 = runShot(pow, false);   // determinism/causation guard
-            if (on === null || off === null || off2 === null) { resetOk = false; break; }
-            if (on.maxMove > 2 || off.maxMove > 2) anyMoved = true;
-            // If two IDENTICAL (off) shots diverge, the game is nondeterministic —
-            // the on/off difference cannot be attributed to the mechanic. Bail.
-            if (off.sank !== off2.sank || dist(off.end, off2.end) > holeR / 2) {
-              nondet = true; break;
+
+          // SPEC-40 (item A) — CALIBRATE the sweep to the GAME's usable power range.
+          //
+          // The old sweep anchored to hole GEOMETRY (`[0.8,1.3,2.0] x D`) and fed the
+          // result to a `shoot()` that means a SPEED. On gravity-golf-4 that launched
+          // the ball at 28,800 px/tick: it crossed the whole 600px course in ~one tick,
+          // before gravity could integrate, so ON was identical to OFF and a live
+          // mechanic was reported inert. The mechanic demonstrably mattered — but only
+          // in a power band the sweep never sampled.
+          //
+          // So: BISECT for `P_sink`, the minimum power at which a mechanic-OFF straight
+          // shot first reaches the hole. This is sound precisely because the OFF arm is
+          // MONOTONIC in power — with the mechanic disabled the ball travels a straight
+          // line at the hole and its reach grows with launch speed, so "does it sink"
+          // flips exactly once. The ON arm is NOT monotonic (that is the mechanic's
+          // whole point), which is why the bracket must be built on OFF.
+          let ticks = 0;
+          const TICK_BUDGET = 400000;
+          const sinksOff = (p) => {
+            const r = runShot(p, false);
+            if (r === null) return null;
+            ticks += r.ticks;
+            return r.sank;
+          };
+          let lo = 0, hi = 0, bracketed = false, resetOk = true;
+          if (!legacySweep) {
+            for (let p = 1, i = 0; i < 14 && ticks < TICK_BUDGET; i++, p *= 2) {
+              const s = sinksOff(p);
+              if (s === null) { resetOk = false; break; }
+              if (s) { hi = p; bracketed = true; break; }
+              lo = p;
             }
-            if (on.sank !== off.sank || dist(on.end, off.end) > holeR) {
-              matters = true; break;
+          }
+          let pSink = null;
+          if (bracketed) {
+            for (let i = 0; i < 12 && ticks < TICK_BUDGET; i++) {
+              const mid = (lo + hi) / 2;
+              const s = sinksOff(mid);
+              if (s === null) { resetOk = false; break; }
+              if (s) hi = mid; else lo = mid;
+              if ((hi - lo) / hi < 0.01) break;
+            }
+            pSink = hi;
+          }
+          // Sweep the band AT and BELOW P_sink: that is where the ball is slow enough
+          // for the mechanic to have integration time to bend it. Log-spaced over
+          // [0.15, 1.5] x P_sink. With no bracket we fall back to the old geometry
+          // sweep AND report `confident:false`, so the verdict can only be advisory.
+          const powers = (pSink && !legacySweep)
+            ? Array.from({ length: 7 },
+                (_, i) => pSink * 0.15 * Math.pow(10, i / 6))
+            : [0.8, 1.3, 2.0].map((k) => k * D);
+
+          let matters = false, anyMoved = false, nondet = false;
+          let completed = 0, maxGap = 0, greyBand = false, straightSank = false;
+          if (resetOk) {
+            for (const pow of powers) {
+              if (ticks > TICK_BUDGET) break;
+              const on = runShot(pow, true);
+              const off = runShot(pow, false);
+              const off2 = runShot(pow, false);   // determinism/causation guard
+              if (on === null || off === null || off2 === null) { resetOk = false; break; }
+              ticks += on.ticks + off.ticks + off2.ticks;
+              if (on.maxMove > 2 || off.maxMove > 2) anyMoved = true;
+              // If two IDENTICAL (off) shots diverge, the game is nondeterministic —
+              // the on/off difference cannot be attributed to the mechanic. Bail.
+              if (off.sank !== off2.sank || dist(off.end, off2.end) > holeR / 2) {
+                nondet = true; break;
+              }
+              completed++;
+              // A straight-at-hole shot that sinks WITH the mechanic on is a
+              // straight-line solution — a DISTINCT claim from "the mechanic matters"
+              // (both can be true at once), so it is tracked separately and never
+              // derived from `matters`.
+              if (on.sank) straightSank = true;
+              const gap = dist(on.end, off.end);
+              maxGap = Math.max(maxGap, gap);
+              if (on.sank !== off.sank || gap > holeR) matters = true;
+              else if (gap > holeR / 2) greyBand = true;  // near-threshold -> uncertain
             }
           }
           P.setMechanic(true);   // restore
           if (!resetOk) return { wells, ran: false, reason: "reset() did not return the ball" };
           if (nondet) return { wells, ran: false, reason: "non-deterministic (two identical shots diverged) — tick()/shoot() must be deterministic for headless verification" };
+          // Budget exhaustion is a CANNOT-VERIFY, not a broken shoot(). Reported before
+          // the `anyMoved` check because an exhausted budget breaks out of the sweep
+          // before any power completes, which would otherwise be misreported as "shoot()
+          // did not move the ball" — a wrong and unactionable steer.
+          if (completed === 0 && ticks > TICK_BUDGET) {
+            return { wells, ran: false, p_sink: pSink, confident: false,
+                     reason: "mechanic phase exhausted its simulation budget before "
+                             + "sampling any power — cannot verify" };
+          }
           if (!anyMoved) return { wells, ran: false, reason: "shoot() did not move the ball" };
+          // SPEC-40 (item B) — the CONFIDENCE rule. An INERT verdict may hard-block
+          // delivery (item E path 3) only when all four hold; anything else is
+          // advisory (path 4). The failure mode is therefore a MISSED block, never a
+          // false red — which is the property golf-4 needed and did not have.
+          // In LEGACY mode the confidence concept does not apply — today's trace
+          // hard-gates the differential unconditionally, and the 3-power sweep could
+          // never satisfy `completed >= 5`. So legacy reports confident, preserving
+          // the escape hatch's "reproduces today exactly" contract.
+          const confident = legacySweep
+            || (bracketed && completed >= 5 && !greyBand && !nondet
+                && ticks <= TICK_BUDGET);
           return { wells, ran: true, mechanic_matters: matters,
-                   powers: powers.map((p) => Math.round(p)) };
-        }).catch(() => ({ ran: false, reason: "mechanic phase threw" })), 20000);
+                   powers: powers.map((p) => Math.round(p * 100) / 100),
+                   p_sink: pSink === null ? null : Math.round(pSink * 100) / 100,
+                   confident, max_gap: Math.round(maxGap),
+                   // `bracketed` tells a CALIBRATED sweep from the legacy fallback.
+                   // Arm 3 must not hard-red on the fallback band — that is the very
+                   // miscalibrated regime this spec exists to eliminate.
+                   bracketed, straight_sank: straightSank };
+        }, args.legacySweep).catch(() => ({ ran: false, reason: "mechanic phase threw" })), 20000);
         Object.assign(mechanicProbe, r);
       }
     } catch { /* best-effort; web_probe.py treats an absent hook as no_hook */ }
+
+    // SPEC-40 (item D) — the WHITE-BOX phase, and the PRIMARY delivery verdict.
+    //
+    // Two additive hook fields the game already knows: won() is the predicate it uses
+    // to draw its own win banner, and solution() is a shot that clears the level in
+    // the SAME units shoot() already takes. The ENGINE drives both arms, so no
+    // council-authored code is evaluated here — we call two functions and read a
+    // boolean and three numbers. That is strictly less privilege than the differential
+    // above already exercises.
+    //
+    // Why this beats the black-box differential: the differential infers "does the
+    // mechanic matter" from endpoint geometry, which couples it to an unspecified
+    // game convention (control scheme, power scale, render timing) and therefore has a
+    // regime where it is simply wrong — golf-2 found its false-PASS regime, golf-3 and
+    // golf-4 two different false-RED ones. Here the council states its own claim in
+    // its own units and the engine checks it.
+    //
+    // Anti-vacuity is STRUCTURAL, not enforced: arm 2 fires the IDENTICAL shot with
+    // the mechanic off, so a solution that does not depend on the mechanic fails it by
+    // construction. There is nothing to author around.
+    let whitebox = { has_contract: false, ran: false, solved_on: null,
+                     solved_off: null, straight_wins: null, verdict: null,
+                     reason: "" };
+    if (args.whitebox) {
+      try {
+        // Bounded like the differential above. Without a race, a hanging `won()` or
+        // `tick()` runs until the 45s subprocess kill, at which point the engine gets
+        // NO probe evidence at all — losing the liveness verdict too, not just the
+        // mechanic one.
+        const wbTimeout = (pr, ms) => Promise.race([
+          pr, new Promise((res) => setTimeout(() => res({
+            has_contract: false, ran: false,
+            reason: "white-box phase timed out" }), ms))]);
+        const r = await wbTimeout(page.evaluate(() => {
+          const P = window.__probe;
+          const ok = (f) => P && typeof P[f] === "function";
+          if (!(ok("won") && ok("solution") && ok("shoot") && ok("tick")
+                && ok("reset") && ok("setMechanic"))) {
+            return { has_contract: false, ran: false,
+                     reason: "no solution()/won() contract" };
+          }
+          // Snapshot the solution ONCE, BEFORE either arm, as primitive numbers — so
+          // it cannot observe which arm is running, return a different shot per arm,
+          // or hand back a live reference into game state.
+          P.reset();
+          let s = null;
+          try { s = P.solution(); } catch { s = null; }
+          if (!s || typeof s.dx !== "number" || typeof s.dy !== "number"
+              || typeof s.power !== "number"
+              || !isFinite(s.dx) || !isFinite(s.dy) || !isFinite(s.power)) {
+            return { has_contract: true, ran: false,
+                     reason: "solution() did not return finite {dx,dy,power} numbers" };
+          }
+          const shot = { dx: s.dx, dy: s.dy, power: s.power };
+          const runArm = (on) => {
+            P.reset();
+            P.setMechanic(on);
+            P.shoot(shot.dx, shot.dy, shot.power);
+            for (let i = 0; i < 6000; i++) {
+              P.tick(1);
+              let w = false;
+              try { w = !!P.won(); } catch { return null; }
+              if (w) return true;
+            }
+            return false;
+          };
+          const solvedOn = runArm(true);
+          const solvedOff = runArm(false);
+          P.setMechanic(true);   // restore
+          if (solvedOn === null || solvedOff === null) {
+            return { has_contract: true, ran: false, reason: "won() threw" };
+          }
+          return { has_contract: true, ran: true, solved_on: solvedOn,
+                   solved_off: solvedOff };
+        }).catch(() => ({ has_contract: false, ran: false,
+                          reason: "white-box phase threw" })), 20000);
+        Object.assign(whitebox, r);
+      } catch { /* best-effort; an absent phase falls through to path 3/4 */ }
+    }
+    // Arm 3 is a DISTINCT claim from "the mechanic matters" — both can hold at once —
+    // so it is read from the differential's separately-tracked straight_sank, never
+    // derived from mechanic_matters.
+    if (whitebox.ran) {
+      // Arm 3 is only trustworthy when the sweep was CALIBRATED. When the bisect
+      // failed to bracket, `powers` falls back to the geometry-anchored
+      // [0.8,1.3,2.0]xD band — the 32-80x miscalibration this spec was written to
+      // remove — and a sink observed there would produce a hard white-box RED
+      // measured in precisely the regime we do not trust. Uncalibrated -> unknown.
+      whitebox.straight_wins = (mechanicProbe.ran
+                                && mechanicProbe.bracketed === true
+                                && mechanicProbe.straight_sank !== null)
+        ? !!mechanicProbe.straight_sank : null;
+      if (!whitebox.solved_on) {
+        whitebox.verdict = "red";
+        whitebox.reason = "your own solution() does not win with the mechanic on — "
+          + "either solution() returns the wrong shot, or the mechanic does not do "
+          + "what this level needs";
+      } else if (whitebox.solved_off) {
+        whitebox.verdict = "red";
+        whitebox.reason = "vacuous — the solution wins with the mechanic DISABLED; "
+          + "either this level is solvable without the mechanic, or setMechanic(false) "
+          + "does not actually disable it";
+      } else if (whitebox.straight_wins === true) {
+        whitebox.verdict = "red";
+        whitebox.reason = "a straight shot at the hole sinks — the DoD forbids "
+          + "straight-line solutions";
+      } else {
+        whitebox.verdict = "green";
+        whitebox.reason = "solution() wins with the mechanic on and fails with it off";
+      }
+    }
 
     // Screenshot for the record (best-effort) + compute the verdict.
     let st = { mean: 0, variance: 0, samples: 0 };
@@ -397,7 +611,7 @@ async function main() {
       ok, non_black: nonBlack, console_errors: consoleErrors, reason: reason2,
       screenshot: args.screenshot || "",
       interaction_changed: interactionChanged, interaction_error: interactionError,
-      mechanic_probe: mechanicProbe,
+      mechanic_probe: mechanicProbe, whitebox,
     });
   } catch (e) {
     emit({ ok: false, non_black: false, console_errors: consoleErrors, reason: `probe error: ${String(e && e.message || e).slice(0, 300)}`, screenshot: args.screenshot || "" });

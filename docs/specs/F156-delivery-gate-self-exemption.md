@@ -103,10 +103,32 @@ launch to be clean. The `no_reviewer` early-return is deleted. (The `no_workspac
 
 ## Status / sequencing
 
-**Fast-follow** (lower priority than F152/F153/F155). G7 is degenerate (real runs
-have a PM); G5 is backstopped by F154's deterministic final build. Specced now for
-completeness; implemented after the high-value gaps land. Included in the tightening
-PR as a reviewed spec.
+**Status: implemented** (2026-08-06), on the `feat/f154-f156-delivery-gate` branch
+alongside F154. Originally a fast-follow (lower priority than F152/F153/F155): G7 is
+degenerate (real runs have a PM) and G5 is backstopped by F154's deterministic final
+build.
+
+**As implemented:**
+
+* **G7** — the `no_reviewer` early return is deleted; `approved` defaults `True` and
+  only the reviewer turn is conditional. A passing reviewer-less delivery reports
+  `reason="reviewed_no_reviewer"` so the path stays visible in the record. The
+  `workspace.preview()` fetch and its `_cannot_verify` guard were moved **inside** the
+  reviewer branch: with no reviewer there is no diff to review, and failing delivery on
+  an unreadable preview nobody would have read would be a new false block.
+* **G5** — `not_applicable_soft_limit` (default 3) bounds *invisibility*, not the
+  escape. Past the limit the run records a `tests_not_applicable_over_limit` decision
+  and the alert names the count. `0` disables the escalation.
+* **Deviation, deliberate:** the spec says the limit is "configurable via run-setup
+  confirm". It is **policy-only**. `run_setup_fields` is a curated 17-entry
+  operator-facing subset of a ~50-field policy, and every comparable governance
+  threshold (`revise_chain_limit`, `gate_stall_limit`, `plan_streak_limit`) is
+  policy-only; this one guards a degenerate case and has a sane default.
+* **Note for future turn-side knobs:** the counter reads `load_policy(store)` —
+  i.e. persisted `autonomy.json`, how `control_actions` / `pm_changes` configure it —
+  matching `_web_probe_arm`. A policy passed to `run()` is never written to disk, which
+  initially made the over-limit test pass for the wrong reason (the default 3 firing
+  rather than the configured 2).
 
 ## Out of scope
 

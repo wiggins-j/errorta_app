@@ -399,6 +399,53 @@ class CodingAutonomyPolicy:
     # channel is live is what empties `content`, so the harmful pairing is unreachable
     # rather than merely discouraged. False sends no `format`.
     local_structured_format: bool = True
+    # F156 (G5): how many PRs in ONE run may merge on a tester `not_applicable`
+    # declaration before the run surfaces an operator-visible escalation instead of a
+    # deduped non-blocking alert. Deliberately NOT a hard cap: a partial slice
+    # legitimately has no test that exercises it, and refusing the declaration would
+    # wedge the run. What this bounds is INVISIBILITY — a run leaning on the escape
+    # for slice after slice is merging on review alone, and the operator should be
+    # told rather than have it pass silently forever. The FINAL head is still gated
+    # deterministically by delivery_review's full-registry run and F154's default
+    # build, so this is about visibility, not the last line of defence. 0 disables the
+    # escalation entirely, restoring today's always-non-blocking alert.
+    not_applicable_soft_limit: int = 3
+    # F154: when a project has NO registered test commands, run an auto-derived
+    # build/typecheck at the delivered head and treat its failure like a failed test.
+    # A greenfield project's empty registry currently reads as success at BOTH gates
+    # (per-PR `tests_ok` is vacuously satisfied; delivery sets tests_passed=True), so
+    # a project can reach `done` with nothing ever compiled. False restores that
+    # vacuous-clean behaviour exactly. Note this never fires when the registry is
+    # non-empty — the strict reviewer-AND-tests gate is untouched.
+    default_build_gate: bool = True
+    # --- SPEC-40 — the testability-contract oracle rework ---------------------- #
+    # Same escape-hatch convention as the Spec 22-28 batch above: each knob's DISABLE
+    # value must reproduce today's trace exactly.
+    #
+    # Item A: calibrate the mechanic differential's power sweep to the GAME's usable
+    # range — bisect for the minimum power at which a mechanic-OFF straight shot
+    # sinks, then sweep the band at and below it. The old sweep anchored to the HOLE
+    # GEOMETRY (`[0.8,1.3,2.0] x dist(tee,hole)`), which is 32-80x miscalibrated
+    # against a game whose `shoot()` takes a speed: gravity-golf-4 launched at 28,800
+    # px/tick, crossed a 600px course in ~one tick before gravity could integrate, and
+    # reported a live mechanic as inert. False restores the geometry-anchored sweep.
+    probe_adaptive_sweep: bool = True
+    # Item B: keep the mechanic differential OUT of the anchored `web:probe` passed,
+    # so a marginal verdict flipping green<->red can no longer drive `anchor_regressed`
+    # (and through it `revise_livelock`). The verdict still travels on the recorded
+    # run's stderr_preview and the PR record; the done-gate composes it. False restores
+    # folding `mechanic_ok` into `passed`.
+    probe_mechanic_advisory: bool = True
+    # Item D: run the white-box `solution()`/`won()` acceptance phase — the council's
+    # own win predicate plus a winning shot in the game's own units, with the engine
+    # driving both arms so anti-vacuity is structural. False skips the phase entirely.
+    probe_whitebox: bool = True
+    # Item C: stamp the same verdict components on the PER-PR arm that gate delivery.
+    # The feedback-locality bug this closes: the per-PR probe the reviewer saw was
+    # green while the master differential that gates delivery stayed red, so the
+    # council optimized the visible-but-wrong signal and merged 22 green PRs that never
+    # shipped. False restores today's weaker per-PR verdict.
+    probe_pr_gating: bool = True
 
 
 def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
@@ -460,6 +507,15 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         # SPEC-41 — structured-turn decoding.
         "local_think_false": p.local_think_false,
         "local_structured_format": p.local_structured_format,
+        # F156 (G5) — bound the tester's not_applicable escape.
+        "not_applicable_soft_limit": p.not_applicable_soft_limit,
+        # F154 — the zero-config compile floor for test-less projects.
+        "default_build_gate": p.default_build_gate,
+        # SPEC-40 — the oracle rework's four escape hatches.
+        "probe_adaptive_sweep": p.probe_adaptive_sweep,
+        "probe_mechanic_advisory": p.probe_mechanic_advisory,
+        "probe_whitebox": p.probe_whitebox,
+        "probe_pr_gating": p.probe_pr_gating,
     }
 
 
@@ -609,6 +665,21 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             d.get("local_think_false", base.local_think_false)),
         local_structured_format=bool(
             d.get("local_structured_format", base.local_structured_format)),
+        # F156 (G5): `max(0, …)` — NOT max(1) — so 0 disables the escalation
+        # entirely, matching the gate_stall_limit / plan_streak_limit convention.
+        not_applicable_soft_limit=max(
+            0, int(d.get("not_applicable_soft_limit",
+                         base.not_applicable_soft_limit))),
+        # F154: a plain bool gate; False restores today's vacuous-clean behaviour.
+        default_build_gate=bool(
+            d.get("default_build_gate", base.default_build_gate)),
+        # --- SPEC-40 — plain bool gates; absent key -> the dataclass default (ON).
+        probe_adaptive_sweep=bool(
+            d.get("probe_adaptive_sweep", base.probe_adaptive_sweep)),
+        probe_mechanic_advisory=bool(
+            d.get("probe_mechanic_advisory", base.probe_mechanic_advisory)),
+        probe_whitebox=bool(d.get("probe_whitebox", base.probe_whitebox)),
+        probe_pr_gating=bool(d.get("probe_pr_gating", base.probe_pr_gating)),
     )
 
 
