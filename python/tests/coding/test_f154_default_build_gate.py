@@ -47,6 +47,40 @@ def test_package_json_without_build_or_tsconfig_is_none(tmp_path: Path) -> None:
     assert _default_verify_command(tmp_path) is None
 
 
+def test_workspaces_root_does_not_abandon_the_scan(tmp_path: Path) -> None:
+    """A bare workspaces root must not disable the gate for the whole monorepo.
+
+    The root manifest has no `build` and no `tsconfig.json` — the exact shape npm
+    workspaces produce. That candidate yields nothing, but the sweep has to keep
+    going: `app/` carries the real build, and abandoning at the root left F154's
+    zero-config floor switched off for precisely the project layout it exists to
+    protect.
+    """
+    (tmp_path / "package.json").write_text(
+        '{"private": true, "workspaces": ["app"]}')
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "package.json").write_text('{"scripts": {"build": "vite build"}}')
+
+    argv, cwd = _default_verify_command(tmp_path)
+    assert argv == ["npm", "run", "build"]
+    assert cwd == app
+
+
+def test_unreadable_root_manifest_does_not_abandon_the_scan(tmp_path: Path) -> None:
+    # Same rule for the unreadable case: a corrupt root manifest is a reason to
+    # skip THAT candidate, not to stop looking. The loop's own `except` already
+    # used `continue`; these early returns were the inconsistency.
+    (tmp_path / "package.json").write_text("{not json")
+    app = tmp_path / "svc"
+    app.mkdir()
+    (app / "Cargo.toml").write_text("[package]\nname='x'\n")
+
+    argv, cwd = _default_verify_command(tmp_path)
+    assert argv == ["cargo", "build", "--quiet"]
+    assert cwd == app
+
+
 def test_derives_compileall_for_python(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("x = 1\n")
     argv, cwd = _default_verify_command(tmp_path)

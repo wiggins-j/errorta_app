@@ -250,6 +250,40 @@ def test_not_applicable_over_limit_escalates(tmp_errorta_home: Path) -> None:
     assert "tests_not_applicable_over_limit" in choices, choices
 
 
+def test_not_applicable_count_does_not_leak_across_runs(
+        tmp_errorta_home: Path) -> None:
+    """A FRESH run must not inherit the previous run's not-applicable total.
+
+    The counter is documented "per run" and the escalation it drives is worded
+    "N slices in THIS run", but nothing cleared it, so run 2 started already at
+    run 1's total and escalated on its first legitimate declaration — an
+    operator-visible signal about slices that were not in the run being
+    described.
+
+    A prior run's total is seeded directly rather than driven through a second
+    full run: once the first run finishes every task, a second runner on the
+    same store has nothing left to process and never declares not-applicable at
+    all — so the "two real runs" version of this test passes on the BROKEN code
+    and proves nothing. Seeding is what actually reaches the branch.
+
+    One fresh slice against a soft limit of 2: correct behaviour ends at 1 with
+    no escalation. Without the reset it resumes from 5, reaches 6, and escalates.
+    """
+    store = _make("f156-g5-leak", _PASS_CMD)
+    save_policy(store, CodingAutonomyPolicy(not_applicable_soft_limit=2))
+    store.set_run_state(tests_not_applicable_count=5)  # a previous run's total
+
+    CodingRunner("f156-g5-leak", MEMBERS,
+                 _Fake(tester_not_applicable=True, n_tasks=1),
+                 guardrail_enabled=True).run(
+        CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF,
+                             max_iterations=40))
+
+    assert store.get_run_state().get("tests_not_applicable_count", 0) == 1
+    choices = [d.get("choice") for d in store.list_decisions()]
+    assert "tests_not_applicable_over_limit" not in choices, choices
+
+
 def test_not_applicable_limit_zero_disables_escalation(
         tmp_errorta_home: Path) -> None:
     """The escape hatch: 0 restores today's always-non-blocking alert."""

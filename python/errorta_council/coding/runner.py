@@ -4181,13 +4181,20 @@ def _default_verify_command(root: Any) -> Optional[tuple[list[str], Any]]:
                     scripts = (_json.loads(pkg.read_text("utf-8")) or {}).get(
                         "scripts") or {}
                 except Exception:  # noqa: BLE001 — unreadable manifest -> no guess
-                    return None
+                    continue
                 if isinstance(scripts, dict) and scripts.get("build"):
                     return ["npm", "run", "build"], d
                 if (d / "tsconfig.json").is_file():
                     # No build script but TypeScript is configured -> typecheck only.
                     return ["npx", "--no-install", "tsc", "--noEmit"], d
-                return None  # a Node project with neither: nothing safe to run
+                # Nothing safe to run FOR THIS CANDIDATE — keep scanning rather
+                # than abandoning the sweep. A workspaces root carries a
+                # `package.json` with no `build` and no `tsconfig.json`, so
+                # returning here disabled the gate for the whole monorepo even
+                # though `<root>/app` had a real build. `continue` can only ever
+                # find more than the old code did: the loop still falls through
+                # to `return None` when no candidate matches.
+                continue
             if (d / "Cargo.toml").is_file():
                 return ["cargo", "build", "--quiet"], d
             if (d / "go.mod").is_file():
@@ -8237,9 +8244,16 @@ class CodingRunner:
                 # mid-ladder rung map or a still-engaged clamp from the last run;
                 # a resume/continue keeps both, because `counters_from_run_state`
                 # carried the budget that bounds them.
+                # F156 (G5) rides the same rule again: the not-applicable counter
+                # is documented as "per run" and the escalation it drives is
+                # phrased "N slices in THIS run". It was never cleared, so a
+                # second run inherited run 1's total and escalated on its FIRST
+                # legitimate declaration. A resume keeps it, because a resume IS
+                # the same run.
                 self.store.set_run_state(
                     last_words=None, narrow_ladder=None,
-                    integration_only=False, planning_clamped=False)
+                    integration_only=False, planning_clamped=False,
+                    tests_not_applicable_count=0)
             except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
                 pass
         # SPEC-24 (Item 1 / Edge cases): clear the published detector snapshot
