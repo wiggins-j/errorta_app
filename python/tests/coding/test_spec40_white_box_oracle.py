@@ -153,6 +153,43 @@ def test_live_weak_but_real_gravity_is_uncertain_not_inert() -> None:
     assert mp["confident"] is False, mp
 
 
+# --------------------------------------------------------------------------- #
+# Task 3 (item D) — the white-box phase, live
+# --------------------------------------------------------------------------- #
+@pytest.mark.live
+@pytest.mark.parametrize("fixture,verdict,needle", [
+    ("whitebox-green", "green", "wins with the mechanic on"),
+    ("whitebox-vacuous", "red", "setMechanic"),
+    ("whitebox-red", "red", "does not win"),
+])
+def test_live_whitebox_arms(fixture: str, verdict: str, needle: str) -> None:
+    """Item D's three arms, one fixture per outcome.
+
+    ``whitebox-vacuous`` is golf-4's literal defect — ``setMechanic`` is a no-op, so
+    the engine's negative control cannot disable the mechanic and the solution wins in
+    BOTH arms. The reason must name ``setMechanic``: that is the actionable message the
+    opaque "the mechanic has NO effect" never gave the council.
+    """
+    wb = _probe_fixture("spec40", fixture)["whitebox"]
+    assert wb["has_contract"] is True, wb
+    assert wb["ran"] is True, wb
+    assert wb["verdict"] == verdict, wb
+    assert needle in wb["reason"], wb
+
+
+@pytest.mark.live
+def test_live_no_contract_is_not_a_red() -> None:
+    """A contract-less game falls through to path 3/4 — never a white-box red.
+
+    The new verbs are deliberately NOT mandatory (that would re-create the very
+    instrumentation burden this spec exists to retire), so their absence must be
+    reported as "no contract", not as a failure.
+    """
+    wb = _probe_fixture("spec37", "live")["whitebox"]
+    assert wb["has_contract"] is False, wb
+    assert wb["verdict"] is None, wb
+
+
 @pytest.mark.live
 def test_live_nondeterministic_game_is_not_confident() -> None:
     """Regression lock 4 — a nondeterministic game routes to UNCERTAIN, not red.

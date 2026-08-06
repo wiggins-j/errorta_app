@@ -1,0 +1,50 @@
+<!doctype html><html><head><meta charset="utf-8"><title>whitebox-green</title>
+<style>html,body{margin:0;background:#0b1020}</style></head>
+<body><canvas id="c" width="800" height="600"></canvas>
+<script type="module">
+// SPEC-40 fixture — the item E path 1 control: a level that is genuinely UNSOLVABLE
+// without the mechanic. A wall spans x=400, y>=WALL_TOP, so any shot that stays low
+// is stopped; the only way through is over the wall, and the gravity well above the
+// gap is what bends the ball back DOWN onto the hole. With the mechanic off the same
+// shot sails straight past. That makes all three white-box arms meaningful:
+//   arm 1  solution() with the mechanic ON  -> wins
+//   arm 2  the SAME shot with it OFF        -> does not win  (anti-vacuity)
+//   arm 3  straight-at-hole, mechanic ON    -> never wins    (hits the wall)
+const cv=document.getElementById("c"), g=cv.getContext("2d");
+const DT=1/60, FRICTION=0.999, MIN=20, STOP=0.5, GSCALE=70000, BR=8;
+const WALL_X=400, WALL_TOP=260;
+const tee={x:80,y:420}, hole={x:700,y:420,r:22};
+const wells=[{x:400,y:140,strength:800,r:34}];
+let ball={x:tee.x,y:tee.y,vx:0,vy:0,r:BR}, sank=false, mechanicOn=true, stopped=false;
+function reset(){ball={x:tee.x,y:tee.y,vx:0,vy:0,r:BR}; sank=false; stopped=false;}
+function step(){
+  if(sank||stopped) return;
+  if(mechanicOn){for(const w of wells){const dx=w.x-ball.x,dy=w.y-ball.y,d=Math.hypot(dx,dy),ed=Math.max(d,MIN);
+    const a=GSCALE*w.strength/(ed*ed); if(d>0){ball.vx+=dx/d*a*DT; ball.vy+=dy/d*a*DT;}}}
+  ball.vx*=FRICTION; ball.vy*=FRICTION;
+  const px=ball.x; ball.x+=ball.vx*DT; ball.y+=ball.vy*DT;
+  // the wall: crossing x=WALL_X at or below WALL_TOP stops the ball dead.
+  if((px-WALL_X)*(ball.x-WALL_X)<=0 && px!==ball.x && ball.y>=WALL_TOP){
+    ball.x=WALL_X; ball.vx=0; ball.vy=0; stopped=true;
+  }
+  if(ball.x<-200||ball.x>1400||ball.y<-800||ball.y>1400) stopped=true;
+  if(Math.hypot(ball.x-hole.x,ball.y-hole.y)<=hole.r) sank=true;
+}
+cv.addEventListener("mousedown",()=>{ball.vx=560;ball.vy=-560;});
+function draw(){g.fillStyle="#0b1020";g.fillRect(0,0,800,600);
+  g.fillStyle="#4af";for(const w of wells){g.beginPath();g.arc(w.x,w.y,w.r,0,7);g.fill();}
+  g.strokeStyle="#888";g.lineWidth=6;g.beginPath();g.moveTo(WALL_X,WALL_TOP);g.lineTo(WALL_X,600);g.stroke();
+  g.strokeStyle="#5f5";g.lineWidth=3;g.beginPath();g.arc(hole.x,hole.y,hole.r,0,7);g.stroke();
+  g.fillStyle="#fff";g.beginPath();g.arc(ball.x,ball.y,ball.r,0,7);g.fill();}
+function loop(){step();draw();requestAnimationFrame(loop);} loop();
+window.__probe={
+  state:()=>({ball:{x:ball.x,y:ball.y},hole:{...hole},wells:wells.map(w=>({x:w.x,y:w.y})),moving:Math.hypot(ball.vx,ball.vy)>STOP}),
+  shoot:(dx,dy,power)=>{const d=Math.hypot(dx,dy)||1;ball.vx=dx/d*power;ball.vy=dy/d*power;},
+  tick:(n)=>{for(let i=0;i<n;i++)step();}, reset, setMechanic:(on)=>{mechanicOn=!!on;},
+  // SPEC-40 (item D): the white-box contract.
+  won:()=>sank,
+  // THE DEFECT: a solution() that simply does not clear the level — a dribble straight
+  // into the wall. Arm 1 fails, so the council's own assertion is red.
+  solution:()=>({dx:1,dy:0,power:120}),
+};
+</script></body></html>

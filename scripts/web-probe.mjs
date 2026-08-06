@@ -436,6 +436,102 @@ async function main() {
       }
     } catch { /* best-effort; web_probe.py treats an absent hook as no_hook */ }
 
+    // SPEC-40 (item D) — the WHITE-BOX phase, and the PRIMARY delivery verdict.
+    //
+    // Two additive hook fields the game already knows: won() is the predicate it uses
+    // to draw its own win banner, and solution() is a shot that clears the level in
+    // the SAME units shoot() already takes. The ENGINE drives both arms, so no
+    // council-authored code is evaluated here — we call two functions and read a
+    // boolean and three numbers. That is strictly less privilege than the differential
+    // above already exercises.
+    //
+    // Why this beats the black-box differential: the differential infers "does the
+    // mechanic matter" from endpoint geometry, which couples it to an unspecified
+    // game convention (control scheme, power scale, render timing) and therefore has a
+    // regime where it is simply wrong — golf-2 found its false-PASS regime, golf-3 and
+    // golf-4 two different false-RED ones. Here the council states its own claim in
+    // its own units and the engine checks it.
+    //
+    // Anti-vacuity is STRUCTURAL, not enforced: arm 2 fires the IDENTICAL shot with
+    // the mechanic off, so a solution that does not depend on the mechanic fails it by
+    // construction. There is nothing to author around.
+    let whitebox = { has_contract: false, ran: false, solved_on: null,
+                     solved_off: null, straight_wins: null, verdict: null,
+                     reason: "" };
+    if (args.whitebox) {
+      try {
+        const r = await page.evaluate(() => {
+          const P = window.__probe;
+          const ok = (f) => P && typeof P[f] === "function";
+          if (!(ok("won") && ok("solution") && ok("shoot") && ok("tick")
+                && ok("reset") && ok("setMechanic"))) {
+            return { has_contract: false, ran: false,
+                     reason: "no solution()/won() contract" };
+          }
+          // Snapshot the solution ONCE, BEFORE either arm, as primitive numbers — so
+          // it cannot observe which arm is running, return a different shot per arm,
+          // or hand back a live reference into game state.
+          P.reset();
+          let s = null;
+          try { s = P.solution(); } catch { s = null; }
+          if (!s || typeof s.dx !== "number" || typeof s.dy !== "number"
+              || typeof s.power !== "number"
+              || !isFinite(s.dx) || !isFinite(s.dy) || !isFinite(s.power)) {
+            return { has_contract: true, ran: false,
+                     reason: "solution() did not return finite {dx,dy,power} numbers" };
+          }
+          const shot = { dx: s.dx, dy: s.dy, power: s.power };
+          const runArm = (on) => {
+            P.reset();
+            P.setMechanic(on);
+            P.shoot(shot.dx, shot.dy, shot.power);
+            for (let i = 0; i < 6000; i++) {
+              P.tick(1);
+              let w = false;
+              try { w = !!P.won(); } catch { return null; }
+              if (w) return true;
+            }
+            return false;
+          };
+          const solvedOn = runArm(true);
+          const solvedOff = runArm(false);
+          P.setMechanic(true);   // restore
+          if (solvedOn === null || solvedOff === null) {
+            return { has_contract: true, ran: false, reason: "won() threw" };
+          }
+          return { has_contract: true, ran: true, solved_on: solvedOn,
+                   solved_off: solvedOff };
+        }).catch(() => ({ has_contract: false, ran: false,
+                          reason: "white-box phase threw" }));
+        Object.assign(whitebox, r);
+      } catch { /* best-effort; an absent phase falls through to path 3/4 */ }
+    }
+    // Arm 3 is a DISTINCT claim from "the mechanic matters" — both can hold at once —
+    // so it is read from the differential's separately-tracked straight_sank, never
+    // derived from mechanic_matters.
+    if (whitebox.ran) {
+      whitebox.straight_wins = (mechanicProbe.ran && mechanicProbe.straight_sank !== null)
+        ? !!mechanicProbe.straight_sank : null;
+      if (!whitebox.solved_on) {
+        whitebox.verdict = "red";
+        whitebox.reason = "your own solution() does not win with the mechanic on — "
+          + "either solution() returns the wrong shot, or the mechanic does not do "
+          + "what this level needs";
+      } else if (whitebox.solved_off) {
+        whitebox.verdict = "red";
+        whitebox.reason = "vacuous — the solution wins with the mechanic DISABLED; "
+          + "either this level is solvable without the mechanic, or setMechanic(false) "
+          + "does not actually disable it";
+      } else if (whitebox.straight_wins === true) {
+        whitebox.verdict = "red";
+        whitebox.reason = "a straight shot at the hole sinks — the DoD forbids "
+          + "straight-line solutions";
+      } else {
+        whitebox.verdict = "green";
+        whitebox.reason = "solution() wins with the mechanic on and fails with it off";
+      }
+    }
+
     // Screenshot for the record (best-effort) + compute the verdict.
     let st = { mean: 0, variance: 0, samples: 0 };
     const hasCanvas = await page.evaluate(() => !!document.querySelector("canvas")).catch(() => false);
@@ -488,7 +584,7 @@ async function main() {
       ok, non_black: nonBlack, console_errors: consoleErrors, reason: reason2,
       screenshot: args.screenshot || "",
       interaction_changed: interactionChanged, interaction_error: interactionError,
-      mechanic_probe: mechanicProbe,
+      mechanic_probe: mechanicProbe, whitebox,
     });
   } catch (e) {
     emit({ ok: false, non_black: false, console_errors: consoleErrors, reason: `probe error: ${String(e && e.message || e).slice(0, 300)}`, screenshot: args.screenshot || "" });
