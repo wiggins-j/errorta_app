@@ -306,11 +306,35 @@ malformed model. **The eval harnesses used `num_predict: 800`**
 and `1600` ([`correctness.py:543`](model-eval/correctness.py)) — roughly a tenth of
 what the council sends.
 
-**The council was never affected on this path.** `scheduler._is_reasoning_model`
-matches `"qwen3"`, so a real turn already gets
-`REASONING_MAX_OUTPUT_TOKENS = 8192` plus a 300 s timeout floor. The comment at
-`scheduler.py:1727` names this exact failure mode: a low budget "makes them emit a
-thinking-burn with no answer."
+**CORRECTION (adversarial spec review, same day): the CODING council *is* affected,
+and is truncating today.** An earlier revision of this section claimed "the council
+was never affected on this path" because `scheduler._is_reasoning_model` matches
+`"qwen3"` and yields `REASONING_MAX_OUTPUT_TOKENS = 8192` plus a 300 s timeout floor
+(`scheduler.py:1733/1738`). That is true **only of the deliberation/research
+scheduler path.** The coding council does not dispatch through it.
+
+Coding turns go through `coding/runner.py:7583` `gateway_member_caller`, which builds
+its own request at `runner.py:7622`:
+
+```python
+max_output_tokens=int(tl.get("max_output_tokens", 2048) or 2048),
+```
+
+It never calls `_is_reasoning_model` and never sees `REASONING_MAX_OUTPUT_TOKENS` —
+both constants are referenced nowhere outside `scheduler.py`. The only writer of a
+coding member's `turn_limits` is `coding/wizard.py:222`, which seeds
+`{"timeout_seconds": 120, "max_output_tokens": 2048}`.
+
+**So the coding council sends `num_predict=2048` to a model whose measured mean
+`eval_count` with thinking on is 2197.** Reviewer verdicts on the reference
+deployment are being truncated *now*, on the exact path this benchmark cares about —
+and the 120 s timeout is a second cliff against ~100 s thinking turns.
+
+This strengthens rather than weakens the case for `think:false`: at 33 mean tokens it
+fits inside 2048 with enormous headroom, whereas the thinking-on arm does not fit at
+all. The comment at `scheduler.py:1727` names the failure mode exactly — a low budget
+"makes them emit a thinking-burn with no answer" — but that mitigation was never
+wired to the coding path.
 
 **The 6-trial comparison — budget and `think:false` are NOT interchangeable.**
 
