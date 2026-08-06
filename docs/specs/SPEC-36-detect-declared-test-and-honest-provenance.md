@@ -11,7 +11,9 @@ authored". This spec closes the two small, sound gaps that made the miss silent.
 **Relates to:** [SPEC-34](SPEC-34-behavioral-acceptance-run-the-teams-oracle.md) (S1
 detection / S4 provenance — this fixes both) · [SPEC-35](SPEC-35-recoverable-acceptance-done-gate.md)
 (the done-gate that saw `no_gate` because of the detection miss)
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** _choose_js_argv gate_bootstrap.py:197 with npm-placeholder skip :239; _tree_has_authored_test runner.py:3460 consumed :3514
+**Tests:** tests/coding/test_spec36_detect_and_provenance.py
 
 ---
 

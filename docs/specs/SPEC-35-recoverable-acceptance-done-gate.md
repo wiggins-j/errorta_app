@@ -12,7 +12,9 @@ record is written by a one-shot bootstrap and never cleared). This spec is the
 landed; this is its deferred hard gate) · [SPEC-31](SPEC-31-in-loop-unit-test-execution.md)
 · [SPEC-28](SPEC-28-autonomy-acceptance.md) (the inert-mechanic fixture)
 · Spec 12 (the in-loop gate that provides the recovery)
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** latest_acceptance_result gate_state.py:131; acceptance_gate_status completion.py:120; _acceptance_gate_blocks_done runner.py:3534 at both chokepoints (:6391, :6518)
+**Tests:** tests/coding/test_spec35_acceptance_gate.py (G1-G4)
 
 ---
 

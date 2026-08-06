@@ -3,7 +3,9 @@
 **Source:** the `0.1.0-alpha.11` CLI recut (2026-07-25) — the released binary
 self-reported `0.1.0-alpha.10`, and its `/healthz.build.commit` was `null`.
 **Target version:** v0.1 (CLI + sidecar + release tooling)
-**Status:** proposed
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** canonical pyproject.toml:3 + mirrors; preflight gate release-cli.sh:127; _build_info.json stamp release-cli.sh:345; bundled cli.spec:125
+**Tests:** python/tests/test_version_identity.py (12 tests) + tests/test_build_info.py
 **Owner:** wiggins-j
 
 ---

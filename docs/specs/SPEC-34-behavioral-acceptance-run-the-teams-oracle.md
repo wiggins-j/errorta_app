@@ -15,7 +15,9 @@ NAMES the un-run test but never invokes the declared runner)
 **Relates to:** [SPEC-30](SPEC-30-execution-gate-and-grounded-review.md) (the
 render+input probe this shows is insufficient) · [SPEC-32](SPEC-32-reviewers-read-the-tree.md)
 (grounded review, shown insufficient here) · failure-report Pathology 1
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** _detect_acceptance_command gate_bootstrap.py:162; _ran_zero_tests :119 wired :416; _record_completion_oracles runner.py:3488 on BOTH done paths (:6401, :6531)
+**Tests:** tests/coding/test_spec34_behavioral_acceptance.py (all four items)
 
 ---
 

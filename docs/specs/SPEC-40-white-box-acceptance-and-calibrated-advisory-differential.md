@@ -19,7 +19,9 @@ that preceded this) · [SPEC-34](SPEC-34-behavioral-acceptance-run-the-teams-ora
 "run the team's own browser test" via the trusted-chromium path, recoverably) ·
 [SPEC-30](SPEC-30-execution-gate-and-grounded-review.md) (the per-PR vs master arm split
 this repairs)
-**Status:** proposed — **design approved (rev. 2, 2026-08-06), implementation in progress**
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** adaptive sweep web-probe.mjs:259-441; advisory demotion web_probe.py:366; white-box arms web-probe.mjs:453 parsed :304; gate hierarchy completion.py:196 consumed runner.py:3576
+**Tests:** tests/coding/test_spec40_white_box_oracle.py + fixtures/spec40/* + scripts/validate-spec40-trio.sh
 · **Owner:** wiggins-j
 
 > **Scope note.** This document is the verified root-cause account plus the approved

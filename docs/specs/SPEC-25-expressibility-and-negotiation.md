@@ -4,7 +4,10 @@
 without negotiation"**; the 2026-07-26 #2 gravity-golf run (`no_progress` with a
 merged game loop and 2 PRs open); and the three point fixes shipped as Spec 21.
 **Target version:** v0.1 (engine)
-**Status:** proposed
+**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — Items 1,3,4,5 landed; the ANSWERABLE half of Item 2 is not
+**Landed evidence:** BlockedIntent schemas.py:~460 consumed runner.py:6220/6353/6465/6847; CapabilityAsk schemas.py:402 recorded _record_capability_ask runner.py:1364; schema_rejects autonomy.py:1219
+**NOT landed:** A capability ask is RECORDED but never reaches the PM in-loop. The spec requires `_capability_ask_note(store)` (sibling of `_capability_refusal_note` runner.py:2482 used at :3015); no such function exists. The only readers are the writer runner.py:1382, the UI renderer team_log.py:188, and one test — team_log is not part of any prompt, so the ask is never answered.
+**Tests:** tests/coding/test_spec25_expressibility.py (~40). Note test_capability_ask_is_optional_and_never_grants_anything:772 asserts NON-granting, not PM delivery.
 **Owner:** wiggins-j
 
 > Every layer of the Spec 12–21 batch **constrains** an agent. Not one of them

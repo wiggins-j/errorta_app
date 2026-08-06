@@ -9,7 +9,9 @@ plus a code audit of the coding turn seam on `fix/local-model-integration`.
 **Depends on:** nothing — this is the *prerequisite*.
 **Blocks:** [SPEC-41](SPEC-41-local-model-integration.md) (all four moves; see
 "Why this must land first")
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** reasoning_budget.py leaf; consumed runner.py:8155 with the local-vendor gate :8156; interactive floor wizard.py:238 + routes/coding.py:62
+**Tests:** tests/coding/test_spec42_turn_output_budget.py (14)
 
 > **Line numbers in this spec are as of `98a745b`** on `fix/local-model-integration`.
 > An earlier revision cited `coding/runner.py` at pre-`98a745b` offsets; every

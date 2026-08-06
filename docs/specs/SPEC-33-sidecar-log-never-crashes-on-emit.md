@@ -21,7 +21,9 @@ SPEC-22 added for diagnosability and drops the log lines it was trying to write 
 the diagnosability code defeating itself.
 **Target version:** v0.1 (CLI/sidecar — `errorta_app/sidecar_log.py`)
 **Depends on:** [SPEC-22](SPEC-22-diagnosable-failures.md) (the handler this hardens)
-**Status:** proposed · **Owner:** wiggins-j
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** _live_stream sidecar_log.py:79 lazy reopen, used by emit :105; handleError :123 inert
+**Tests:** tests/coding/test_spec33_sidecar_log.py (5)
 
 ---
 

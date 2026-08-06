@@ -2,7 +2,9 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S1 (P0)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** LANDED (verified 2026-08-06 against the code, not the commit log)
+**Landed evidence:** coding/gate_bootstrap.py + gate_state.py; bootstrap called at runner.py:8360 (run start) and runner.py:5485 (post-merge); _run_gate runner.py:5299; delivery shares it runner.py:7892
+**Tests:** tests/coding/test_spec12_in_loop_gate.py (33 tests, all 5 items)
 **Owner:** wiggins-j
 
 > Continues the `Spec NN` series the code comments cite (Spec 01–11). This is the
