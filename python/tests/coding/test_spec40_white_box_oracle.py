@@ -194,8 +194,7 @@ def test_no_hook_at_all_still_blocks() -> None:
     a marginal measurement, it is the total absence of behavioral evidence about a
     project that declared the claim.
     """
-    from errorta_council.coding.completion import (
-        mechanic_gate_reason, mechanic_gate_status)
+    from errorta_council.coding.completion import mechanic_gate_reason, mechanic_gate_status
     golf2 = _ev(has_hook=False, mechanic_ok=False, mechanic_matters=None,
                 confident=False,
                 mechanic_reason="declares a straight-shots-must-fail mechanic but "
