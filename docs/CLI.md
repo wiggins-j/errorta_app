@@ -670,6 +670,18 @@ languages (not only Python tracebacks). A build failure that only shows on a rou
 the probe doesn't request is caught by registering a build command — e.g.
 `errorta test-commands set --commands '["npm run build"]'`.
 
+**If you register nothing, you still get a compile floor.** A project with no test
+commands used to reach `done` with nothing ever compiled — the empty registry read
+as success. Delivery now derives a build from the detected stack (`npm run build`,
+or `tsc --noEmit` for a TypeScript project with no build script, or `cargo build`,
+`go build ./...`, `compileall` for Python) and treats its failure like a failed
+test, blocking `done` and filing a "fix delivery build" task. It runs once per
+delivered head, never per-PR, and never when you have registered commands of your
+own — those are the stronger signal. A stack with no safe rule is skipped silently.
+Note the Python floor is `compileall`, which catches *syntax* errors only; register
+real commands to get type and name checking. Turn the whole thing off with the
+`default_build_gate` policy knob.
+
 If the delivery review keeps rejecting the integrated result, the run stops with
 `delivery_review_stalled` after `--delivery-review-round-limit` rounds (default 3)
 instead of looping to `budget_exhausted`. From the CLI you can also drive the

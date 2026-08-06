@@ -373,6 +373,25 @@ class CodingAutonomyPolicy:
     # frozen but the dict is not — treat it as read-only; `policy_from_dict` always
     # builds a fresh copy so a persisted policy can never alias a caller's dict.
     capability_overrides: dict[str, Any] = field(default_factory=dict)
+    # F156 (G5): how many PRs in ONE run may merge on a tester `not_applicable`
+    # declaration before the run surfaces an operator-visible escalation instead of a
+    # deduped non-blocking alert. Deliberately NOT a hard cap: a partial slice
+    # legitimately has no test that exercises it, and refusing the declaration would
+    # wedge the run. What this bounds is INVISIBILITY — a run leaning on the escape
+    # for slice after slice is merging on review alone, and the operator should be
+    # told rather than have it pass silently forever. The FINAL head is still gated
+    # deterministically by delivery_review's full-registry run and F154's default
+    # build, so this is about visibility, not the last line of defence. 0 disables the
+    # escalation entirely, restoring today's always-non-blocking alert.
+    not_applicable_soft_limit: int = 3
+    # F154: when a project has NO registered test commands, run an auto-derived
+    # build/typecheck at the delivered head and treat its failure like a failed test.
+    # A greenfield project's empty registry currently reads as success at BOTH gates
+    # (per-PR `tests_ok` is vacuously satisfied; delivery sets tests_passed=True), so
+    # a project can reach `done` with nothing ever compiled. False restores that
+    # vacuous-clean behaviour exactly. Note this never fires when the registry is
+    # non-empty — the strict reviewer-AND-tests gate is untouched.
+    default_build_gate: bool = True
     # --- SPEC-40 — the testability-contract oracle rework ---------------------- #
     # Same escape-hatch convention as the Spec 22-28 batch above: each knob's DISABLE
     # value must reproduce today's trace exactly.
@@ -457,6 +476,10 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         # Copy: the returned dict is persisted/serialized by callers, and handing
         # out the policy's own dict would let a caller mutate a frozen policy.
         "capability_overrides": dict(p.capability_overrides),
+        # F156 (G5) — bound the tester's not_applicable escape.
+        "not_applicable_soft_limit": p.not_applicable_soft_limit,
+        # F154 — the zero-config compile floor for test-less projects.
+        "default_build_gate": p.default_build_gate,
         # SPEC-40 — the oracle rework's four escape hatches.
         "probe_adaptive_sweep": p.probe_adaptive_sweep,
         "probe_mechanic_advisory": p.probe_mechanic_advisory,
@@ -604,6 +627,14 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # degrade to "no overrides" rather than crash policy load for the whole run.
         capability_overrides=_coerce_overrides(
             d.get("capability_overrides"), base.capability_overrides),
+        # F156 (G5): `max(0, …)` — NOT max(1) — so 0 disables the escalation
+        # entirely, matching the gate_stall_limit / plan_streak_limit convention.
+        not_applicable_soft_limit=max(
+            0, int(d.get("not_applicable_soft_limit",
+                         base.not_applicable_soft_limit))),
+        # F154: a plain bool gate; False restores today's vacuous-clean behaviour.
+        default_build_gate=bool(
+            d.get("default_build_gate", base.default_build_gate)),
         # --- SPEC-40 — plain bool gates; absent key -> the dataclass default (ON).
         probe_adaptive_sweep=bool(
             d.get("probe_adaptive_sweep", base.probe_adaptive_sweep)),

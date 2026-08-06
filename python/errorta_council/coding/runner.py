@@ -3970,6 +3970,16 @@ def _review_pr_prompt_segments(
 # A stable synthetic task_id for delivery-review turns (the reviewer echoes it;
 # parse_coding_turn requires envelope.task_id == this for a non-PM role).
 _DELIVERY_TASK_ID = "delivery-review"
+# F154: the synthetic command id for the auto-derived build. Distinct from any
+# registry id (which the council chooses) so the two can never collide, and so the
+# build's recorded run is identifiable on the ledger.
+_DEFAULT_BUILD_COMMAND_ID = "build:default"
+# ...and its own task_id, NOT _DELIVERY_TASK_ID. The delivery task_id identifies runs
+# of the council's REGISTERED suite; filing the engine-derived build under it makes
+# "did the delivery suite pass?" unanswerable by task_id alone (a green build would
+# read as a green suite). Keeping them separate also means the build cannot perturb
+# any detector that partitions runs by task.
+_DEFAULT_BUILD_TASK_ID = "delivery-build"
 
 
 class DeliveryReviewResult(NamedTuple):
@@ -4088,6 +4098,246 @@ def _delivery_review_prompt(store: LedgerStore, head: str, diff: str,
 
 
 # --- F146 Slice C: runtime launch evidence for the delivered head ------------
+
+def _default_verify_command(root: Any) -> Optional[tuple[list[str], Any]]:
+    """F154: derive a build/typecheck command for a project with NO registered test
+    commands. Returns ``(argv, cwd)``, or ``None`` when nothing is safe to run.
+
+    Why this exists: a greenfield project starts with an EMPTY registry, and two
+    gates read that emptiness as success — ``_set_mergeable_if_ready``'s ``tests_ok``
+    is vacuously satisfied (so every PR merges on a reviewer model-approval with zero
+    compilation ever run) and ``delivery_review`` sets ``tests_passed=True``
+    unconditionally. F152/F153 catch an app that fails to *serve or start*; neither
+    can catch a compile or type error on a code path never requested at launch. This
+    is the zero-config floor that does.
+
+    The table is deliberately SMALL and conservative. ``None`` preserves today's
+    behaviour exactly, so an unknown stack costs nothing; a wrong rule, by contrast,
+    files a phantom code finding against work that is fine. Order matters — a real
+    build is strictly stronger than ``compileall``, which only catches syntax errors.
+
+    The manifest is searched at ``root`` and then one level down, because the CLI
+    delivers into a subdirectory; ``cwd`` follows the manifest it found. Fully
+    guarded: any read/parse failure yields ``None`` rather than raising into the
+    delivery gate."""
+    import json as _json
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    try:
+        base = _Path(str(root))
+        if not base.is_dir():
+            return None
+        # The root itself first, then immediate subdirectories (sorted, so the
+        # choice is deterministic across runs).
+        candidates = [base] + sorted(
+            (p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            key=lambda p: p.name)
+    except Exception:  # noqa: BLE001 — an unreadable tree derives nothing
+        return None
+
+    for d in candidates:
+        try:
+            pkg = d / "package.json"
+            if pkg.is_file():
+                try:
+                    scripts = (_json.loads(pkg.read_text("utf-8")) or {}).get(
+                        "scripts") or {}
+                except Exception:  # noqa: BLE001 — unreadable manifest -> no guess
+                    return None
+                if isinstance(scripts, dict) and scripts.get("build"):
+                    return ["npm", "run", "build"], d
+                if (d / "tsconfig.json").is_file():
+                    # No build script but TypeScript is configured -> typecheck only.
+                    return ["npx", "--no-install", "tsc", "--noEmit"], d
+                return None  # a Node project with neither: nothing safe to run
+            if (d / "Cargo.toml").is_file():
+                return ["cargo", "build", "--quiet"], d
+            if (d / "go.mod").is_file():
+                return ["go", "build", "./..."], d
+            if ((d / "pyproject.toml").is_file() or (d / "setup.py").is_file()
+                    or any(d.glob("*.py"))):
+                # Syntax-level only, and honestly so: it needs no dependencies and
+                # cannot fail for environmental reasons. A project wanting type/name
+                # checking registers real test commands.
+                return [_sys.executable, "-m", "compileall", "-q", str(d)], d
+        except Exception:  # noqa: BLE001 — a bad candidate is skipped, never fatal
+            continue
+    return None
+
+
+def _ensure_delivery_setup(store: LedgerStore, workspace: Any) -> tuple[bool, str]:
+    """F154 §3: install dependencies ONCE before the default build runs.
+
+    ``npm run build`` / ``cargo build`` need deps present. Without this, a build that
+    fails only because dependencies were never installed would be filed as a code
+    finding against work that is perfectly fine — the exact false-finding risk that
+    made F154 a fast-follow rather than part of the original F152 PR.
+
+    Idempotent by construction: ``_setup_pending_venv_missing`` is the same gate
+    ``launch_probe`` consults, so running setup here makes the later launch probe's
+    own setup a no-op, and a project already set up is untouched.
+
+    Returns ``(ok, detail)``. A project with **no runnable profile** is ``(True, "")``
+    — there is nothing to set up, and a static site's build needs no deps. A setup
+    FAILURE is ``(False, detail)``, which the caller turns into ``cannot_verify``:
+    it blocks ``done`` but files NO dev task, exactly as today's launch-setup failure
+    does."""
+    try:
+        from .runtime import RuntimeProfileStore
+        rstore = RuntimeProfileStore.for_ledger(store)
+        profiles = rstore.list_profiles()
+    except Exception:  # noqa: BLE001 — can't enumerate -> nothing to set up
+        return True, ""
+    runnable = [p for p in profiles
+                if getattr(p, "runtime_mode", "") == "managed_local"
+                and getattr(p, "start", None)]
+    if not runnable:
+        return True, ""
+    try:
+        from .runtime_process import RuntimeProcessManager
+        mgr = RuntimeProcessManager(
+            project_id=store.project_id, rstore=rstore,
+            workspace_root=workspace.root(), work_root=store.dir)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"setup could not start: {exc}"
+    for profile in runnable:
+        try:
+            if not mgr._setup_pending_venv_missing(profile, profile.profile_id):
+                continue
+            # `setup()` is the BACKGROUND variant — it returns a `starting` session
+            # for the caller to poll. Grading it with `_setup_succeeded` (which
+            # requires a TERMINAL `stopped` + exit 0) therefore always failed, AND
+            # left a `pip install` running that raced the launch probe: the probe
+            # re-checks the same gate, sees the venv interpreter the racing
+            # `python -m venv` just created, skips its own setup, and starts against
+            # a half-installed venv — filing a phantom "fix runtime launch crash"
+            # against correct code. `_setup_sync` runs it inline and returns the
+            # terminal session, which is what this gate needs.
+            from .runtime_process import _setup_succeeded
+            session = mgr._setup_sync(profile.profile_id)
+            if not _setup_succeeded(session):
+                return False, f"{profile.profile_id}: dependency setup failed"
+        except Exception as exc:  # noqa: BLE001 — cannot set up -> cannot verify
+            return False, f"{profile.profile_id}: setup error: {exc}"
+    return True, ""
+
+
+# Dependency markers per stack. `_ensure_delivery_setup` only stands up a PYTHON
+# venv — `_setup_pending_venv_missing` keys on `_is_pip_install_step`, which is
+# pip-only — and `run_test_commands` runs with `network_allowed=False` by contract.
+# So for a stack whose build must resolve dependencies, running the build without
+# them present would fail for an ENVIRONMENTAL reason and be filed as a code
+# finding. Absent the marker, the honest answer is "cannot verify".
+_BUILD_DEP_MARKERS: tuple[tuple[str, str], ...] = (
+    ("npm", "node_modules"),
+    ("npx", "node_modules"),
+    ("cargo", "target"),
+    ("go", "go.sum"),
+)
+
+
+def _run_default_build(
+    store: LedgerStore, workspace: Any, head: str,
+    *, should_cancel: Optional[Callable[[], bool]] = None,
+) -> tuple[bool, bool, str]:
+    """F154: run the auto-derived build/typecheck at the delivered head.
+
+    Returns ``(built_clean, cannot_verify, detail)`` — deliberately the same
+    tri-state shape ``_delivery_launch_evidence`` uses, so the caller's fail-closed
+    handling is symmetric:
+
+    * nothing derivable for this stack -> ``(True, False, "")`` (skipped, vacuously
+      clean — today's exact behaviour);
+    * deps could not be installed -> ``(False, True, detail)`` — a verify error, NOT
+      a build failure, so no phantom code finding is filed;
+    * the build ran and failed -> ``(False, False, detail)`` — a real code finding;
+    * the build ran clean -> ``(True, False, "")``.
+
+    Runs through the same sandboxed executor and ``require_sandbox`` posture as the
+    registry path, and records a synthetic test run bound to ``head`` so the evidence
+    is on the ledger like any other."""
+    try:
+        derived = _default_verify_command(workspace.root())
+    except Exception:  # noqa: BLE001 — a resolver failure derives nothing
+        derived = None
+    if derived is None:
+        return True, False, ""
+    argv, cwd = derived
+    setup_ok, setup_detail = _ensure_delivery_setup(store, workspace)
+    if not setup_ok:
+        return False, True, f"dependency setup failed: {setup_detail}"
+    # A build that must resolve dependencies cannot run here without them: the
+    # executor is network-off by contract (`testing._run_one`), and
+    # `_ensure_delivery_setup` only stands up a Python venv. Running anyway would
+    # fail environmentally (cargo 101, go module fetch, npm's missing script binary)
+    # and be filed as a code finding — the exact false-finding risk F154 was
+    # sequenced as a fast-follow to avoid. Report cannot-verify instead.
+    try:
+        from pathlib import Path as _P
+        tool = str(argv[0]).lower() if argv else ""
+        for prefix, marker in _BUILD_DEP_MARKERS:
+            if tool.endswith(prefix) and not (_P(str(cwd)) / marker).exists():
+                return False, True, (
+                    f"{prefix} build needs dependencies and {marker!r} is absent; "
+                    "the delivery executor is network-off and only provisions a "
+                    "Python venv, so this cannot be verified here")
+    except Exception:  # noqa: BLE001 — a marker probe failure must not block
+        pass
+    from pathlib import Path as _Path
+    try:
+        rel = str(_Path(str(cwd)).relative_to(_Path(str(workspace.root())))) or "."
+    except Exception:  # noqa: BLE001 — a non-relative cwd falls back to the root
+        rel = "."
+    registry = {_DEFAULT_BUILD_COMMAND_ID: {
+        "argv": [str(a) for a in argv], "cwd": rel, "timeout_seconds": 600}}
+    try:
+        session = run_test_commands(
+            workspace.root(), registry, [_DEFAULT_BUILD_COMMAND_ID],
+            should_cancel=should_cancel,
+            require_sandbox=store.get_require_sandbox())
+    except Exception as exc:  # noqa: BLE001 — could not execute -> cannot verify
+        return False, True, f"default build could not run: {exc}"
+    try:
+        store.record_test_run(session, task_id=_DEFAULT_BUILD_TASK_ID, head=head)
+    except Exception:  # noqa: BLE001 — recording is best-effort
+        pass
+    if session.passed:
+        return True, False, ""
+    # Distinguish "the build ran and reported errors" from "the command could not
+    # run at all". The latter is environmental — no code merge flips it green — so it
+    # must be cannot_verify, never a phantom code finding.
+    #
+    # The executor reports `blocked` (sandbox refused) and `timed_out` for the
+    # environmental cases; a command that RAN and exited non-zero is `failed` with a
+    # real exit code, which is exactly the compile error we want to catch. Exit 127
+    # is the other environmental shape — the toolchain is simply not installed (no
+    # npm, no cargo, no go), which is not the council's defect.
+    detail = "; ".join(f"{r.command_id}={r.status}/{r.exit_code}"
+                       for r in session.results)
+    appendix = _failed_stderr_appendix(session.results)
+    if appendix:
+        detail += f"\n\nBuild output:\n{appendix}"
+    # An earlier revision keyed only on `blocked`/`timed_out`/exit-127 and MISSED the
+    # actual missing-toolchain shape. Execution is argv-only with no shell
+    # (`testing._run_one`), so an absent `npm`/`cargo`/`go` never yields 127 — it
+    # raises FileNotFoundError in `create_subprocess_exec`, which the runner reports
+    # as `status="failed"` with **`exit_code=None`**. That was being read as a real
+    # build failure and filed as "fix delivery build" against code that is fine.
+    #
+    #   exit_code is None  -> spawn/exec failure (toolchain absent, spawn refused)
+    #   exit_code < 0      -> killed by signal (OOM)
+    #   126 / 127          -> not executable / command-not-found from inside a script
+    unusable = any(
+        r.status in ("blocked", "timed_out")
+        or r.exit_code is None
+        or (isinstance(r.exit_code, int) and r.exit_code < 0)
+        or r.exit_code in (126, 127)
+        for r in session.results)
+    if unusable:
+        return False, True, f"default build could not run: {detail}"
+    return False, False, detail
+
 
 def _delivery_launch_evidence(
     store: LedgerStore, workspace: Any, head: str,
@@ -6935,17 +7185,58 @@ def build_run_turn(
                     store.update_pr(pr["pr_id"], tests_passed=True,
                                     tested_head=pr["head"])
                     store.update_task(task.task_id, state="done")
+                    # F156 (G5): count the escape per run. The declaration itself is
+                    # legitimate for a partial slice, so it is never refused — but a
+                    # run that leans on it slice after slice is merging on review
+                    # alone, and that must not stay invisible. Past
+                    # `not_applicable_soft_limit` the deduped non-blocking alert is
+                    # escalated to a recorded, operator-visible signal. Fully guarded:
+                    # a counter write failure degrades to today's behaviour and never
+                    # fails the turn.
+                    na_count = 0
+                    na_limit = 0
+                    try:
+                        na_count = int(store.get_run_state().get(
+                            "tests_not_applicable_count", 0) or 0) + 1
+                        store.set_run_state(tests_not_applicable_count=na_count)
+                        from .autonomy import load_policy
+                        na_limit = int(getattr(
+                            load_policy(store),
+                            "not_applicable_soft_limit", 0) or 0)
+                    except Exception:  # noqa: BLE001 — accounting is best-effort
+                        na_count, na_limit = 0, 0
+                    over_limit = bool(na_limit) and na_count > na_limit
+                    if over_limit:
+                        try:
+                            store.record_decision(
+                                title="tests not applicable over soft limit",
+                                context=f"pr {pr['pr_id']}",
+                                choice="tests_not_applicable_over_limit",
+                                rationale=(
+                                    f"{na_count} slices in this run have declared "
+                                    f"tests not-applicable (soft limit {na_limit}). "
+                                    "The per-PR merge gate is running on review "
+                                    "alone for those slices. The delivered head is "
+                                    "still gated deterministically at delivery, but "
+                                    "consider registering test commands."),
+                                related_task_ids=[task.task_id, pr["task_id"]])
+                        except Exception:  # noqa: BLE001
+                            pass
                     # F142 WS-C observability: surface a non-blocking Alert (deduped
                     # to one per run) so a human sees that a slice merged without any
                     # test running — otherwise a run could merge to done with tests
                     # never executed and nothing telling the operator.
                     try:
                         from . import attention
+                        _extra = (
+                            f" This is slice {na_count} in this run to skip tests "
+                            f"(soft limit {na_limit}) — the merge gate is running on "
+                            "review alone." if over_limit else "")
                         attention.raise_tests_skipped_alert(
                             store.project_id, stage="build",
                             summary=(f"PR on branch {pr['branch']} merged without "
                                      "running tests (tester declared the slice "
-                                     "not-applicable). Verify test coverage."),
+                                     f"not-applicable). Verify test coverage.{_extra}"),
                             store=store)
                     except Exception:  # noqa: BLE001 — observability is best-effort
                         pass
@@ -7346,93 +7637,101 @@ def build_run_turn(
         if rs.get("delivery_reviewed_head") == head:
             return DeliveryReviewResult(
                 passed=bool(rs.get("delivery_review_passed")), reason="cached")
-        # A reviewer (falling back to the PM) is required for a real review. With
-        # neither configured we cannot verify — record NOTHING (the accept gate
-        # honestly stays unreviewed) and preserve prior done behavior for such
-        # minimal teams; this is not a rubber-stamp (no verdict is fabricated).
+        # A reviewer (falling back to the PM) gives a real REVIEW VERDICT. With
+        # neither configured no verdict is fabricated — but F156 (G7): that must skip
+        # ONLY the verdict. The old early return sat here, BEFORE steps 2 and 3, so
+        # "no reviewer" silently also meant "no tests, no launch probe, no web probe",
+        # and a team with neither REVIEWER nor PM reached `project_done` with ZERO
+        # delivery verification. `approved` therefore defaults True (a team that
+        # cannot produce a verdict must not be blocked by its absence) while every
+        # deterministic check below still runs for real, so `passed` continues to
+        # require a delivered head that builds, launches and renders.
         reviewer_members = members_by_role.get(REVIEWER) or members_by_role.get(PM)
-        if not reviewer_members:
-            return DeliveryReviewResult(passed=True, reason="no_reviewer")
-        reviewer_member = reviewer_members[0]
+        reviewer_member = reviewer_members[0] if reviewer_members else None
+        approved = True
+        findings: list[dict[str, Any]] = []
 
         # 1) Reviewer over the WHOLE delivered diff, bound to `head`. A preview
         #    failure means a corrupt/missing worktree (F087-15 M1) — do NOT review
         #    a blank diff and pass; block done as an unverifiable delivery.
-        try:
-            diff = str((workspace.preview() or {}).get("diff") or "")
-        except Exception:  # noqa: BLE001
-            return _cannot_verify("delivered diff unavailable (preview failed)")
-        approved = False
-        findings: list[dict[str, Any]] = []
-        # SPEC-30 fix: ground the delivery reviewer in the delivered tree so it
-        # cannot invent file paths (run 7's "Missing acceptance test file
-        # test/test.js" wedge). Mount the master working tree read-only when
-        # reviewer_repo_read honors this vendor; fall back to the plain member.
-        delivery_reviewer = reviewer_member
-        delivery_repo_read = False
-        if _member_honors_repo_read(reviewer_member, reviewer_repo_read):
+        #    The preview + its fail-closed guard live INSIDE this branch on purpose:
+        #    with no reviewer there is no diff to review, and failing delivery on an
+        #    unreadable preview nobody would have read would be a new false block.
+        if reviewer_member is not None:
+            approved = False
             try:
-                delivery_reviewer = {**reviewer_member,
-                                     "repo_read_root": str(workspace.root())}
-                delivery_repo_read = True
-            except Exception:  # noqa: BLE001 — grounding is best-effort
-                delivery_reviewer, delivery_repo_read = reviewer_member, False
-        try:
-            parsed = _parse_member_turn(
-                REVIEWER, _DELIVERY_TASK_ID, delivery_reviewer,
-                _delivery_review_prompt(store, head, diff,
-                                        repo_read=delivery_repo_read),
-                context="delivery_review", related_task_ids=[])
-        except _MemberCallFailed as exc:
-            # Could not run the reviewer -> do NOT mark done and record NO verdict
-            # (the gate stays unreviewed). A genuine inability to verify, not a
-            # rubber-stamp; the loop retries on the next completion claim.
-            store.record_decision(
-                title="delivery review could not run",
-                context="delivery_review", choice="delivery_review_error",
-                rationale=f"reviewer call failed: {exc.failure.status}")
-            return DeliveryReviewResult(passed=False, filed_findings=False,
-                                        reason="reviewer_call_failed")
-        if isinstance(parsed, TurnParseError):
-            store.record_decision(
-                title="delivery review rejected (unparseable)",
-                context="delivery_review", choice="review_rejected",
-                rationale=f"{parsed.code.value}: {parsed.detail}",
-                extra={"reviewed_head": head})
-            approved = False
-        elif isinstance(parsed.intent, BlockedIntent):
-            # Spec 25: the delivery reviewer said it could not review the delivered
-            # head. Recorded as a NON-verdict (the same fail-closed treatment as a
-            # stale head): `done` does not stick, and nothing is fabricated in
-            # either direction.
-            store.record_decision(
-                title="delivery review blocked",
-                context="delivery_review", choice="blocked",
-                rationale=_blocked_reason_text(parsed.intent),
-                extra={"reviewed_head": head})
-            approved = False
-        elif parsed.intent.reviewed_head != head:
-            # Reviewed a different head than delivered -> stale, does not count.
-            # Recorded as a NON-verdict so the gate stays unreviewed (fail-closed).
-            store.record_decision(
-                title="delivery review stale head",
-                context="delivery_review", choice="stale_review_head",
-                rationale=(f"reviewed_head {parsed.intent.reviewed_head!r} != "
-                           f"delivered head {head!r}"))
-            approved = False
-        else:
-            approved = bool(parsed.intent.approved)
-            findings = [
-                {"severity": f.severity, "title": f.title, "body": f.body,
-                 "path": f.path, "blocking": f.severity == "blocking"}
-                for f in parsed.intent.findings
-            ]
-            store.record_decision(
-                title="delivery review verdict",
-                context="delivery_review",
-                choice="review_approved" if approved else "review_rejected",
-                rationale=f"delivery reviewer verdict (approved={approved})",
-                extra={"reviewed_head": head})
+                diff = str((workspace.preview() or {}).get("diff") or "")
+            except Exception:  # noqa: BLE001
+                return _cannot_verify("delivered diff unavailable (preview failed)")
+            # SPEC-30 fix: ground the delivery reviewer in the delivered tree so it
+            # cannot invent file paths (run 7's "Missing acceptance test file
+            # test/test.js" wedge). Mount the master working tree read-only when
+            # reviewer_repo_read honors this vendor; fall back to the plain member.
+            delivery_reviewer = reviewer_member
+            delivery_repo_read = False
+            if _member_honors_repo_read(reviewer_member, reviewer_repo_read):
+                try:
+                    delivery_reviewer = {**reviewer_member,
+                                         "repo_read_root": str(workspace.root())}
+                    delivery_repo_read = True
+                except Exception:  # noqa: BLE001 — grounding is best-effort
+                    delivery_reviewer, delivery_repo_read = reviewer_member, False
+            try:
+                parsed = _parse_member_turn(
+                    REVIEWER, _DELIVERY_TASK_ID, delivery_reviewer,
+                    _delivery_review_prompt(store, head, diff,
+                                            repo_read=delivery_repo_read),
+                    context="delivery_review", related_task_ids=[])
+            except _MemberCallFailed as exc:
+                # Could not run the reviewer -> do NOT mark done and record NO verdict
+                # (the gate stays unreviewed). A genuine inability to verify, not a
+                # rubber-stamp; the loop retries on the next completion claim.
+                store.record_decision(
+                    title="delivery review could not run",
+                    context="delivery_review", choice="delivery_review_error",
+                    rationale=f"reviewer call failed: {exc.failure.status}")
+                return DeliveryReviewResult(passed=False, filed_findings=False,
+                                            reason="reviewer_call_failed")
+            if isinstance(parsed, TurnParseError):
+                store.record_decision(
+                    title="delivery review rejected (unparseable)",
+                    context="delivery_review", choice="review_rejected",
+                    rationale=f"{parsed.code.value}: {parsed.detail}",
+                    extra={"reviewed_head": head})
+                approved = False
+            elif isinstance(parsed.intent, BlockedIntent):
+                # Spec 25: the delivery reviewer said it could not review the delivered
+                # head. Recorded as a NON-verdict (the same fail-closed treatment as a
+                # stale head): `done` does not stick, and nothing is fabricated in
+                # either direction.
+                store.record_decision(
+                    title="delivery review blocked",
+                    context="delivery_review", choice="blocked",
+                    rationale=_blocked_reason_text(parsed.intent),
+                    extra={"reviewed_head": head})
+                approved = False
+            elif parsed.intent.reviewed_head != head:
+                # Reviewed a different head than delivered -> stale, does not count.
+                # Recorded as a NON-verdict so the gate stays unreviewed (fail-closed).
+                store.record_decision(
+                    title="delivery review stale head",
+                    context="delivery_review", choice="stale_review_head",
+                    rationale=(f"reviewed_head {parsed.intent.reviewed_head!r} != "
+                               f"delivered head {head!r}"))
+                approved = False
+            else:
+                approved = bool(parsed.intent.approved)
+                findings = [
+                    {"severity": f.severity, "title": f.title, "body": f.body,
+                     "path": f.path, "blocking": f.severity == "blocking"}
+                    for f in parsed.intent.findings
+                ]
+                store.record_decision(
+                    title="delivery review verdict",
+                    context="delivery_review",
+                    choice="review_approved" if approved else "review_rejected",
+                    rationale=f"delivery reviewer verdict (approved={approved})",
+                    extra={"reviewed_head": head})
 
         # 2) Tests: run ALL registered commands for real against the delivered
         #    master root, bound to `head`. Deterministic (no model command
@@ -7476,6 +7775,35 @@ def build_run_turn(
                     rationale=str(exc))
                 tests_passed = False
 
+        # 2') F154: the zero-config compile floor. A greenfield project's EMPTY
+        #     registry currently reads as success at both gates — `tests_ok` is
+        #     vacuously satisfied per-PR and `tests_passed` is unconditionally True
+        #     here — so a project can reach `done` with nothing ever compiled.
+        #     F152/F153 catch an app that fails to serve or start; neither catches a
+        #     compile error on a path never requested at launch. Only when the
+        #     registry is empty: when the council registered real commands they are
+        #     the stronger signal and no build is injected on top.
+        built_clean, build_cannot_verify, build_detail = True, False, ""
+        try:
+            from .autonomy import load_policy
+            default_build_gate = bool(getattr(
+                load_policy(store), "default_build_gate", True))
+        except Exception:  # noqa: BLE001 — unreadable policy -> the default (on)
+            default_build_gate = True
+        if not registry and default_build_gate:
+            built_clean, build_cannot_verify, build_detail = _run_default_build(
+                store, workspace, head, should_cancel=should_cancel)
+            if build_detail or not built_clean:
+                try:
+                    store.record_decision(
+                        title="delivery build", context="delivery_review",
+                        choice=("built_pass" if built_clean
+                                else "build_cannot_verify" if build_cannot_verify
+                                else "built_fail"),
+                        rationale=build_detail[:1000] or "default build clean")
+                except Exception:  # noqa: BLE001
+                    pass
+
         # 3) Runtime launch evidence (F146 Slice C): for a runnable managed_local
         #    profile, LAUNCH the delivered program headless + bounded and require
         #    it to get past startup without a traceback — catching runtime-only
@@ -7509,19 +7837,26 @@ def build_run_turn(
         # `passed` requires a clean launch AND a non-red web probe. A launch or
         # probe cannot_verify (None) leaves its flag True (fail-open); only a
         # definitive red fails `passed`.
-        passed = approved and tests_passed and launched_clean and probe_ok
+        passed = (approved and tests_passed and launched_clean and probe_ok
+                  and built_clean)
         # Cache once-per-head ONLY for a real verdict. A cannot_verify (inability
-        # to launch) is NOT cached, so the next completion claim retries the launch
-        # instead of resting on a false negative (matches _cannot_verify above; a
-        # persistent failure stops via no_progress, never a false `done`).
-        if not launch_cannot_verify:
+        # to launch, or to install deps for the F154 build) is NOT cached, so the
+        # next completion claim retries instead of resting on a false negative
+        # (matches _cannot_verify above; a persistent failure stops via no_progress,
+        # never a false `done`).
+        if not launch_cannot_verify and not build_cannot_verify:
             try:
                 store.set_run_state(delivery_reviewed_head=head,
                                     delivery_review_passed=passed)
             except Exception:  # noqa: BLE001
                 pass
         if passed:
-            return DeliveryReviewResult(passed=True, reason="reviewed")
+            # F156 (G7): a distinct reason keeps the reviewer-less path visible in
+            # the record — it passed on deterministic evidence alone, with no verdict.
+            return DeliveryReviewResult(
+                passed=True,
+                reason=("reviewed" if reviewer_member is not None
+                        else "reviewed_no_reviewer"))
 
         # Fail-closed: file the failure as dev work so Slice E's `_has_open_work`
         # re-opens the run. The team fixes it, the head changes, and the next
@@ -7548,6 +7883,26 @@ def build_run_turn(
                 reason_summary="Delivery tests failed",
                 detail=("The registered test suite failed against the delivered "
                         f"head. Make the tests pass: {tests_failed_detail}."))
+            filed = True
+        if build_cannot_verify:
+            # F154: deps could not be installed, or the toolchain is absent. This is
+            # environmental — no code merge flips it green — so it records a decision
+            # and files NO dev task, mirroring the launch-error branch below. It
+            # still blocks `done` and is not cached, so the next claim retries.
+            store.record_decision(
+                title="delivery build could not run",
+                context="delivery_review", choice="delivery_build_error",
+                rationale=build_detail[:1000])
+        elif not built_clean:
+            # A build that RAN and reported errors is a real delivered-code defect —
+            # exactly the compile/type error F152's launch probe cannot see because
+            # the faulting path is never requested at startup.
+            store.add_task(
+                title="fix delivery build", role=DEV,
+                reason_summary="The delivered code does not build",
+                detail=("The project has no registered test commands, so delivery "
+                        "ran an auto-derived build/typecheck at the delivered head "
+                        f"and it FAILED. Fix the build errors: {build_detail}"))
             filed = True
         if launch_cannot_verify:
             # An INABILITY to launch the runnable delivered program (setup/sandbox/
@@ -7590,7 +7945,9 @@ def build_run_turn(
                         "without console errors AND visibly responds to input: "
                         f"{probe_detail}"))
             filed = True
-        reason = "launch_cannot_verify" if launch_cannot_verify else "rejected"
+        reason = ("launch_cannot_verify" if launch_cannot_verify
+                  else "build_cannot_verify" if build_cannot_verify
+                  else "rejected")
         return DeliveryReviewResult(passed=False, filed_findings=filed,
                                     reason=reason)
 
