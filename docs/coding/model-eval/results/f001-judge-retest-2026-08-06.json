@@ -1,0 +1,52 @@
+{
+  "qwen3.5:9b": {
+    "A_f001": {
+      "schema_ok": "2/8",
+      "truncated": "6/8",
+      "direct_parse": "0/8",
+      "mean_eval_tokens": 1678,
+      "failures": {
+        "unparseable": 6
+      }
+    },
+    "B_budget": {
+      "schema_ok": "7/8",
+      "truncated": "0/8",
+      "direct_parse": "5/8",
+      "mean_eval_tokens": 1455,
+      "failures": {
+        "unparseable": 1
+      }
+    },
+    "C_shipped": {
+      "schema_ok": "8/8",
+      "truncated": "0/8",
+      "direct_parse": "8/8",
+      "mean_eval_tokens": 91,
+      "failures": {}
+    }
+  },
+  "mistral-small3.1:latest": {
+    "A_f001": {
+      "schema_ok": "8/8",
+      "truncated": "0/8",
+      "direct_parse": "0/8",
+      "mean_eval_tokens": 89,
+      "failures": {}
+    },
+    "B_budget": {
+      "schema_ok": "8/8",
+      "truncated": "0/8",
+      "direct_parse": "0/8",
+      "mean_eval_tokens": 74,
+      "failures": {}
+    },
+    "C_shipped": {
+      "schema_ok": "8/8",
+      "truncated": "0/8",
+      "direct_parse": "8/8",
+      "mean_eval_tokens": 172,
+      "failures": {}
+    }
+  }
+}

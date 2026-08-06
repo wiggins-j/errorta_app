@@ -493,13 +493,32 @@ model-quality questions can be answered:
 
 **Only after both:**
 
-* **Re-test F001's judge-schema failure.** F001 records `qwen3.5:9b` "emitting
-  wrong-schema JSON" and proposes a 15 GB `mistral-small3.1` judge. That observation may
-  be an artefact of defect 1, defect 2, or neither. Run a real coding turn on the
-  reference box with `qwen3.5:9b` in a judge seat and score whether it persists. If it
-  vanishes, the judge recommendation is unfounded on the coding path too; if it
-  persists, it stands on its own merits and the truncation must stop being cited as the
-  explanation.
+* ~~**Re-test F001's judge-schema failure.**~~ **DONE 2026-08-06 — it vanishes.**
+  The pre-stated reading was: "if it vanishes, the judge recommendation is unfounded
+  on the coding path too." It vanished. Harness:
+  `docs/coding/model-eval/f001_judge_retest.py`, 8 trials/arm on `/api/chat`.
+
+  | arm | qwen3.5:9b | mistral-small3.1 |
+  |---|---|---|
+  | A — 2048, thinking on (F001's conditions) | **2/8**, 6/8 truncated, 1678 tok | 8/8, 89 tok |
+  | B — 8192, thinking on (this spec alone) | 7/8, 0 truncated, 1455 tok | 8/8, 74 tok |
+  | C — 8192 + `think:false` + `format:"json"` | **8/8**, 8/8 direct-parse, 91 tok | 8/8, 172 tok |
+
+  Attribution: **defect 2**. Arm A reproduces F001's failure and catches the
+  mechanism in the act — 6 of 8 turns returned `done_reason: "length"`, i.e. the
+  budget was consumed by the hidden trace before the answer began. Arm B recovers
+  most of it on budget alone; arm C is clean. Defect 1 is not an arm here and could
+  not have been: an empty model id is an HTTP 400 before the model is reached, so it
+  cannot produce wrong-schema JSON.
+
+  The control matters as much as the subject: `mistral-small3.1` scored 8/8 in
+  *every* arm, because it has no thinking channel and never approached the cap. So
+  F001's comparison was real but misattributed — it measured "immune to truncation",
+  not "better at schemas". Post-fix the two tie, and the 9B model is cheaper.
+
+  Note arm C's `direct_parse` column: 8/8 versus 0/8 for mistral in arms A/B. That
+  is `format:"json"` removing the fence-wrapping every structured turn was
+  previously surviving on extraction heuristics.
 * **The benchmark's own highest-value follow-up** — a real council run scored on
   merge-gate pass rate rather than isolated function correctness — can share that
   harness. It is also the only thing that can answer whether `think:false` and
