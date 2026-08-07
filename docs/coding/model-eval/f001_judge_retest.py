@@ -34,10 +34,13 @@ import urllib.request
 
 OLLAMA = "http://127.0.0.1:11434"
 TRIALS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
-JUDGE = "qwen3.5:9b"
+# Models are overridable so the SAME verified arms can be pointed at a second
+# thinking-capable model — which is what SPEC-41's default gate requires. Defaults
+# reproduce the 2026-08-06 F001 run exactly.
+JUDGE = sys.argv[2] if len(sys.argv) > 2 else "qwen3.5:9b"
 # The F001 recommendation, measured under the same arms so the comparison the
 # spec actually cares about — "is the 15 GB swap worth it?" — has both sides.
-CONTROL = "mistral-small3.1:latest"
+CONTROL = sys.argv[3] if len(sys.argv) > 3 else "mistral-small3.1:latest"
 
 REVIEWER = (
     "Review this Python diff and reply with ONLY a JSON object, no prose:\n"
