@@ -1,7 +1,9 @@
 # SPEC-43 — Verdict usefulness under `think:false`
 
-**Status:** proposed (rev. 2 — revised after an adversarial review that found the rev. 1
-design could not detect the degradation it was written to find) · **Owner:** wiggins-j
+**Status:** FIRST RUN COMPLETE (2026-08-07) — the shipped-arms result is VALID and bad; the control was abandoned as unusable · **Owner:** wiggins-j
+**Result:** the shipped reviewer configuration detects **0 of 48** seeded defects — every one of 8 defect classes, both depths, 3 trials, full 32-item corpus. It approves 46/48 clean twins and parses 91/96. So it is near-perfect on SHAPE and non-functional as a GATE. `format:"json"` is exonerated: the no-format arm scores identically at 0/48. Raw: `results/spec43-shipped-arms-2026-08-07.json`.
+**Control ABANDONED, not completed:** arm T (thinking on, 8192) truncated **16/19 rows (84%)** under the production `coding_turn.v1` envelope at ~3.5 min/row and was stopped. A control that cannot produce a verdict is not a control. It establishes only that thinking-on is NOT VIABLE for production-shaped reviewer turns at the shipped budget — it does NOT establish whether thinking-on would catch defects if it could finish. Raw: `results/spec43-thinking-control-2026-08-07-PARTIAL.json`.
+**Therefore UNRESOLVED:** (a) whether `think:false` CAUSED the 0/48 or merely failed to prevent it; (b) whether the corpus is simply too hard for a 9B model — §4 pre-stated that a both-arms-at-floor result requires the `gemma3:27b` reference pass before any conclusion about seat fitness, and that pass was not run. **Do not cite this run as evidence that `qwen3.5:9b` is unfit, or that `think:false` is the cause.** What it does support is that the shipped configuration is not performing review.
 **Relates to:** [SPEC-41](SPEC-41-local-model-integration.md) (shipped `think:false` +
 `format:"json"`, and carries the default gate this spec must discharge) ·
 [SPEC-42](SPEC-42-coding-turn-output-budget.md) (named this follow-up and gated it on

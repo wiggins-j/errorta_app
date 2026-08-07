@@ -1,0 +1,56 @@
+{
+  "model": "qwen3.5:9b",
+  "trials": 3,
+  "arms": [
+    "U",
+    "S"
+  ],
+  "corpus_integrity": {
+    "path": "docs/coding/model-eval/verdict_corpus",
+    "tree_sha": "2acb4a9e413e514444a46aac6e4086d40dc45139",
+    "dirty_entries": [],
+    "clean": true
+  },
+  "results": {
+    "U": {
+      "seeded_rejected": "0/48",
+      "clean_approved": "47/48",
+      "unparseable": "4/96",
+      "mean_eval_tokens": 78,
+      "per_class": {
+        "missing-input-validation": "0/6",
+        "null-guard": "0/6",
+        "off-by-one": "0/6",
+        "race-ordering": "0/6",
+        "resource-leak": "0/6",
+        "swallowed-exception": "0/6",
+        "unhandled-error-path": "0/6",
+        "wrong-comparison-operator": "0/6"
+      },
+      "per_depth": {
+        "deep": "0/24",
+        "shallow": "0/24"
+      }
+    },
+    "S": {
+      "seeded_rejected": "0/48",
+      "clean_approved": "46/48",
+      "unparseable": "5/96",
+      "mean_eval_tokens": 152,
+      "per_class": {
+        "missing-input-validation": "0/6",
+        "null-guard": "0/6",
+        "off-by-one": "0/6",
+        "race-ordering": "0/6",
+        "resource-leak": "0/6",
+        "swallowed-exception": "0/6",
+        "unhandled-error-path": "0/6",
+        "wrong-comparison-operator": "0/6"
+      },
+      "per_depth": {
+        "deep": "0/24",
+        "shallow": "0/24"
+      }
+    }
+  }
+}
