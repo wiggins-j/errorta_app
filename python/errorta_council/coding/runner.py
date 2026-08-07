@@ -32,6 +32,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
 from . import detector_state as _detector_state
+from . import drop_ledger as _drop_ledger
 from . import drop_reasons as _drop_reasons
 from . import gate_state as _gate_state
 from . import paths as _paths
@@ -3788,12 +3789,24 @@ def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
         if tid in live_pr_task_ids:
             continue  # real work is in an open PR — not obsolete scope
         try:
-            store.update_task(tid, state="dropped")
+            paths = _declared_target_paths(getattr(task, "title", ""),
+                                           getattr(task, "detail", ""))
+            identity = task_dedupe.identity_key(
+                title=getattr(task, "title", ""), paths=paths)
+            n = _drop_ledger.record_drop(store, identity)
+            store.update_task(tid, state="dropped",
+                              reason_summary="PM pruned this over-scoped task")
             store.record_decision(
                 title=f"PM dropped task: {getattr(task, 'title', tid)}",
                 context="pm_cancel", choice="pm_task_cancelled",
                 rationale="the PM pruned this obsolete / over-scoped task to converge",
-                related_task_ids=[tid])
+                related_task_ids=[tid],
+                extra={
+                    "drop_count": n,
+                    **_drop_reasons.reason_blob(
+                        _drop_reasons.PM_PRUNED,
+                        detail=f"dropped {n}× this run"),
+                })
             dropped.append(tid)
         except Exception:  # noqa: BLE001 — best-effort prune
             pass
