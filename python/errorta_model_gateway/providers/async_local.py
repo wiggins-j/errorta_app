@@ -33,6 +33,41 @@ _DEFAULT_ROUTES = [
 ]
 
 
+def _discover_ollama_routes(*, timeout_s: float = 2.0) -> list[RouteDescriptor]:
+    """`local.ollama.<model>` for every model the configured host reports.
+
+    Honors the same host resolution as LocalGateway (ERRORTA_OLLAMA_HOST >
+    settings > 127.0.0.1:11434), so what you can SEAT matches what the council
+    will actually CALL. Every failure path returns [] — this is a convenience,
+    never a gate.
+    """
+    try:
+        import httpx as _httpx
+
+        from errorta_council.gateway_local import _resolve_ollama_host
+
+        host = _resolve_ollama_host().rstrip("/")
+        with _httpx.Client(timeout=timeout_s) as client:
+            resp = client.get(f"{host}/api/tags")
+        if resp.status_code != 200:
+            return []
+        models = (resp.json() or {}).get("models") or []
+    except Exception:  # noqa: BLE001 — discovery must never break route listing
+        return []
+
+    out: list[RouteDescriptor] = []
+    for m in models:
+        name = str((m or {}).get("name") or "").strip()
+        if not name:
+            continue
+        out.append(RouteDescriptor(
+            route_id=f"local.ollama.{name}",
+            label=f"Ollama {name}",
+            family="ollama",
+        ))
+    return out
+
+
 class LocalHandler:
     """AsyncProviderHandler that delegates to the existing LocalGateway."""
 
@@ -77,7 +112,29 @@ class LocalHandler:
         )
 
     def list_routes(self, *, configured: bool) -> list[RouteDescriptor]:
-        return list(_DEFAULT_ROUTES)
+        """Curated defaults UNIONED with whatever the Ollama host actually serves.
+
+        The defaults alone were an ALLOWLIST in practice: `_resolve_value` in the
+        CLI team builder validates a route against `/gateway/routes`, so a model an
+        operator had actually pulled — `qwen3.5:9b`, say — was rejected with
+        "unknown route or provider" and could not be seated. That is backwards:
+        this handler's own `validate_route` accepts ANY `local.*` id, so the list
+        was only ever meant to be discovery, not permission.
+
+        Fails OPEN. A host that is down, slow, or serving junk yields the curated
+        defaults exactly as before — `errorta models` and the team builder must not
+        break because Ollama is not running.
+        """
+        discovered = _discover_ollama_routes()
+        if not discovered:
+            return list(_DEFAULT_ROUTES)
+        seen = {r.route_id for r in _DEFAULT_ROUTES}
+        out = list(_DEFAULT_ROUTES)
+        for rd in discovered:
+            if rd.route_id not in seen:
+                seen.add(rd.route_id)
+                out.append(rd)
+        return out
 
     def validate_route(self, route_id: str) -> ValidationResult:
         if not (route_id.startswith("local.") or route_id.startswith("fake.")):
