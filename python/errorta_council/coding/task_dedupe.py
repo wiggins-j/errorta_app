@@ -124,6 +124,16 @@ def normalized_target_paths(declared: Iterable[str] | None) -> frozenset[str]:
         _paths.normalize_path(p) for p in (declared or []) if str(p or "").strip())
 
 
+def identity_key(*, title: str, paths: Iterable[str]) -> str:
+    """A stable identity for the drop ledger (SPEC-46), keyed on the SAME
+    normalization dedupe uses so the two can never diverge. Filler verbs are
+    stripped; declared paths and digit-bearing tokens (a level/version/count)
+    stay significant, so `fix level 50` and `fix level 60` are distinct."""
+    tokens = "|".join(sorted(normalized_tokens(title)))
+    path_set = "|".join(sorted(normalized_target_paths(paths)))
+    return f"{tokens}##{path_set}"
+
+
 def _is_capability_waiting(task: Any) -> bool:
     """A `blocked` task waiting on a capability is still 'live' for dedupe: it will
     auto-unblock, so a re-proposal is a duplicate, not a regression re-open."""

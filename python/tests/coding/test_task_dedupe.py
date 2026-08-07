@@ -463,3 +463,18 @@ def test_plain_blocked_task_still_exempt():
     plain = Task(task_id="t-b", title="add pagination", role="dev", state="blocked")
     index = task_dedupe.build_open_index([plain])
     assert all(e.task_id != "t-b" for e in index)
+
+
+def test_identity_key_matches_across_filler_verb_swap():
+    a = task_dedupe.identity_key(title="Fix the parser harness", paths=[])
+    b = task_dedupe.identity_key(title="Implement the parser harness", paths=[])
+    assert a == b  # filler verbs (fix/implement) are stripped -> same identity
+
+
+def test_identity_key_distinguishes_paths_and_numbers():
+    base = task_dedupe.identity_key(title="add pagination", paths=["a.py"])
+    other_path = task_dedupe.identity_key(title="add pagination", paths=["b.py"])
+    numbered = task_dedupe.identity_key(title="fix level 50", paths=[])
+    numbered2 = task_dedupe.identity_key(title="fix level 60", paths=[])
+    assert base != other_path
+    assert numbered != numbered2
