@@ -16,7 +16,7 @@ this undercuts)
 **Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — Moves 1-3 landed on the CODING path; Move 4 not started; several DoD bullets open
 **Landed evidence:** Move 1 truncation honesty gateway_local.py:431 with marker suppression :432, `truncated` field :85; all three council-room burn gates wired (scheduler.py:2796, :2993, :3981). Moves 2/3 gateway_local.py:375-380 with `format` gated INSIDE the think_off branch (the issue #84 pairing is structurally unreachable); tag set runner.py:5758, forwarded :8132.
 **NOT landed:** (1) **Move 4 entirely** — no ERRORTA_LOCAL_SIZE_TIERS; model_tier.tier_for_route still returns MID unconditionally for `local.*` (model_tier.py:41); no `difficulty_downgraded` decision; no NoCapableModel fallback in initial assignment; **no mandatory single-model test**. (2) 4g discriminated escalation reasons — model_assignment still collapses to None. (3) **Moves 2/3 are CODING-PATH ONLY** — zero `structured_output` hits in scheduler.py, though the spec requires the tag on all eight LocalCouncilModelRequest sites. (4) `local_truncation_guard` knob does not exist; Move 1 is unconditional. (5) `truncated` is absent from _usage_sink (runner.py:8217), so the DoD bullet "readable from the persisted turn record" is unmet. (6) No test drives three consecutive truncations to the F127 unproductive ladder. (7) The gateway_local-in-coding import-lint case was never added to tests/council/test_import_lint.py.
-**⚠ DEFAULT SHIPPED PAST ITS OWN GATE:** the DoD (§Move 2) states `local_think_false` "defaults on **only after** the 6/6 schema result is reproduced on a second thinking-capable model (`deepseek-r1` or `qwq`)… Until then it defaults `False` and this bullet is the gate." It ships `True` (autonomy.py:394), and `local_structured_format` likewise. The gate was never satisfied and **cannot currently be run**: senditai carries no second thinking-capable model (qwen3.5:9b is the only one; there is no qwq or deepseek-r1). The 2026-08-06 F001 re-test does NOT close this — its second model, mistral-small3.1, has no thinking channel at all, which is precisely why it was immune. Resolve by either pulling a second thinking-capable model onto senditai and reproducing, or flipping the default to `False` until that happens. See SPEC-43.
+**✅ DEFAULT GATE RESOLVED 2026-08-06** (was: shipped past its own gate). The DoD required reproducing a schema IMPROVEMENT from `think:false` on a second thinking-capable model. `deepseek-r1:8b` was pulled onto the reference box and run through four budget arms plus a confound control. **The gate cannot be satisfied as written, because the effect does not exist:** `think:false` MATCHES each model's own budget-tuned ceiling (qwen 7/8, deepseek 8/8) and never exceeds it. Every apparent improvement in the original n=6 observation was truncation avoidance, which SPEC-42 fixed by other means. `local_think_false` stays `True`, re-justified on bounded/predictable generation (163-164 tokens, zero truncation on both models), no per-model budget tuning, and an 11-35x token reduction — see "Amendment (part 2)". **Contingent on [SPEC-43](SPEC-43-verdict-usefulness-under-think-false.md):** if suppressing reasoning costs verdict USEFULNESS, all three justifications are outweighed and the default should flip.
 **Tests:** tests/coding/test_spec41_structured_turns.py (9 — Move 1 gateway behaviour, Moves 2/3 request shape, unreachable think-on+format, knob round-trip)
 
 ---
@@ -516,6 +516,7 @@ Each disable value reproduces today's trace exactly, and that is asserted per kn
 - The operator docs name `model-catalog-overrides.json` as required configuration for a
   local-only team.
 
+<<<<<<< Updated upstream
 ## Amendment 2026-08-06 — discharging the `local_think_false` default gate
 
 **The gate, restated.** This spec's DoD says `local_think_false` "defaults on **only
@@ -564,6 +565,84 @@ through the identical three arms as the F001 re-test, on the reviewer-verdict sh
 Note this measures SHAPE only, exactly like the F001 re-test. Whether suppressing
 reasoning costs verdict USEFULNESS is [SPEC-43](SPEC-43-verdict-usefulness-under-think-false.md),
 and no result here can settle that question.
+=======
+## Amendment 2026-08-06 (part 2) — the gate is RESOLVED, and its premise was wrong
+
+The pre-registration above named two readings. The measured answer is the second
+one, and the reasoning behind it turned out to be more interesting than either
+branch anticipated.
+
+### What was run
+
+`deepseek-r1:8b` was pulled onto the reference box specifically to discharge this
+gate (it is named in the DoD; `qwq:32b` does not fit — ~20 GB against 13 GB free).
+Four arms per model, plus a control arm added after a self-review caught a
+confound. Raw JSON: `docs/coding/model-eval/results/spec41-gate-budget-arms-2026-08-06.json`
+and `f001-judge-retest-2026-08-06.json`.
+
+| model | 2048 ctx8192 | 8192 ctx8192 | 8192 ctx32768 | 16384 ctx32768 | `think:false` |
+|---|---|---|---|---|---|
+| `qwen3.5:9b` | 3/8 (5 trunc) | 7/8 (0 trunc, 2430 tok) | 7/8 (1 trunc, 1817 tok) | **4/8 (4 trunc, 9299 tok)** | 7/8 (163 tok) |
+| `deepseek-r1:8b` | 0/8 (8 trunc) | 6/8 (2 trunc, 5682 tok) | 6/8 (2 trunc, 5727 tok) | **8/8 (0 trunc, 3495 tok)** | 8/8 (164 tok) |
+
+**A confound was suspected and ruled out.** The 16384 arm was first run at
+`num_ctx=32768` while the earlier arms used 8192, so two variables moved at once.
+The `8192 ctx32768` column is the control added to isolate it: both models score
+identically to their `ctx8192` runs, so context size explains nothing here and the
+budget comparison is clean.
+
+### The finding
+
+**More budget is not monotonically better, and the right budget is model-specific.**
+`deepseek-r1` converges when given room: 6/8 → 8/8 from 8192 to 16384, truncation
+gone. `qwen3.5:9b` does the opposite — it EXPANDS its reasoning to fill the budget
+(1817 → 9299 mean generated tokens) and then overruns, scoring *worse* at 16384
+(4/8) than at 8192 (7/8).
+
+So "just give a reasoning model an adequate budget" is not a reachable policy for
+`qwen3.5:9b` at all. There is no single constant that is right for both models, and
+`reasoning_budget.py` currently ships exactly one
+(`REASONING_MAX_OUTPUT_TOKENS = 8192`) — correct for qwen, too small for deepseek.
+
+### The gate, resolved
+
+**The DoD's gate cannot be satisfied as written, because the effect it was created
+to confirm does not exist.** It required reproducing a schema IMPROVEMENT from
+`think:false` on a second thinking-capable model. What `think:false` actually does
+is MATCH the best budget-tuned thinking arm — 7/8 on qwen, 8/8 on deepseek, the
+same as each model's own ceiling — never exceed it. Every apparent improvement in
+the original n=6 observation was truncation avoidance, which SPEC-42 already fixed
+by other means.
+
+**`local_think_false` stays `True`, re-justified on grounds that the data supports:**
+
+1. **Bounded, predictable generation.** 163–164 tokens on both models, zero
+   truncation in every arm. No budget setting achieves this for `qwen3.5:9b`, whose
+   generation length is both variable and budget-sensitive.
+2. **No per-model budget tuning.** It reaches each model's own ceiling without
+   anyone discovering that deepseek needs 16384 and qwen must not get it.
+3. **11–35x fewer generated tokens** (qwen 1817 → 163; deepseek 5727 → 164). On a
+   single local GPU that is a ~100 s verdict turn becoming near-instant.
+
+The DoD bullet is superseded by this amendment. It is left in place above rather
+than deleted, because a gate that was shipped past should stay legible.
+
+### What this does NOT establish
+
+Everything here scores SHAPE. Whether suppressing reasoning costs verdict
+USEFULNESS is [SPEC-43](SPEC-43-verdict-usefulness-under-think-false.md), whose
+corpus and harness both landed the same day and which has not been run. **If SPEC-43
+shows a deep-subset detection regression, all three justifications above are
+outweighed** — a 35x token saving bought with worse code review is a bad trade, and
+`local_think_false` should default `False`. That decision is explicitly deferred to
+that measurement, not settled here.
+
+### Process note
+
+This default shipped `True` before the gate was ever run, and the gap was found by
+a code-grounded audit rather than by the people who shipped it. The DoD bullet
+existed, was specific, and was not checked.
+>>>>>>> Stashed changes
 
 ## Out of scope
 
