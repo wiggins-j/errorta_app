@@ -404,6 +404,12 @@ block still counts toward `pm_idle` (a PM with nothing to add *is* the idle stat
 — it is now merely legible). New decision choices to look for:
 `blocked` and `capability_ask`.
 
+An open capability ask is **delivered to you in the prompt**, not just filed: a
+note beside the duplicate-rejection and capability-refusal notes names the asking
+role, the capability, and the asker's own words. It lists one line per
+`(role, capability)` however many tasks asked, and it clears itself once the
+asking task is done, dropped, cancelled, or superseded.
+
 **You answer a capability ask by re-planning, never by granting a tool.** Nothing
 in the engine lets a plan turn widen a role's tool surface (`_ROLE_TOOLS` is
 static). The real answers are: re-scope the task to what the role can do, register

@@ -778,3 +778,156 @@ def test_capability_ask_is_optional_and_never_grants_anything() -> None:
     assert allowed_tools_for_role(DEV) == ("code_write",)
     for role in (PM, REVIEWER, TESTER):
         assert allowed_tools_for_role(role) == ()
+
+
+# --------------------------------------------------------------------------- #
+# 9. Item 2's ANSWERABLE half — the recorded ask REACHES the PM.
+# --------------------------------------------------------------------------- #
+#
+# `_record_capability_ask` shipped without a reader. The only consumers of a
+# `capability_ask` decision were the writer itself, the team-log UI renderer
+# (`team_log.py:188` — not part of any prompt), and the test above. So a worker
+# asked for a capability and the PM never saw the ask: unanswerable by
+# construction, which is exactly the class this spec exists to close. These lock
+# the DELIVERY, not the serialization.
+
+def _blocked_with_needs(capability: str, what: str, why: str = "") -> BlockedIntent:
+    return BlockedIntent(
+        kind="blocked", reason="missing_capability", detail="cannot proceed",
+        needs=CapabilityAsk(capability=capability, what=what, why=why))
+
+
+def test_capability_ask_note_is_empty_with_no_asks(tmp_errorta_home) -> None:
+    from errorta_council.coding import runner
+    assert runner._capability_ask_note(_store("s25-ask0")) == ""
+
+
+def test_a_dev_ask_reaches_the_pm_prompt(tmp_errorta_home) -> None:
+    """THE gap. A DEV records a capability ask; the PM's very next composed prompt
+    carries the NOTE — naming the role, the capability, and the worker's own words.
+
+    The prompt assertion is deliberately keyed on the note's own instruction text,
+    NOT on "execution" or "run pytest". Those two strings are already in the prompt
+    without this change: ``ensure_pm_working_memory`` dumps a ``recent_decisions``
+    JSON blob that includes the raw ``capability_ask`` record. A recency-bounded
+    raw dump with no instruction attached is not delivery — a test that asserted on
+    those substrings would have gone green against the unwired build."""
+    from errorta_council.coding import runner
+    s = _store("s25-ask1")
+    task = s.add_task(role="dev", title="Add a gravity solver")
+    runner._record_capability_ask(
+        s, _blocked_with_needs("execution", "a way to run pytest and see output"),
+        role=DEV, task=task, context=f"task {task.task_id}")
+    assert [d for d in s.list_decisions() if d["choice"] == "capability_ask"]
+
+    note = runner._capability_ask_note(s)
+    assert "dev" in note and "execution" in note
+    assert "run pytest" in note
+
+    prompt = runner._pm_prompt(s)
+    assert note in prompt
+    assert "open and unanswered" in prompt and "CANNOT grant a tool" in prompt
+
+
+def test_the_note_tells_the_pm_it_cannot_grant_and_what_it_can_do(
+        tmp_errorta_home) -> None:
+    """An ask the PM cannot answer is no better than an ask it never sees. The
+    note carries the answer shapes (re-scope / register a test command / split /
+    cancel) and states that the PM CANNOT grant a tool — the spec's non-goal, in
+    the prompt rather than only in a comment."""
+    from errorta_council.coding import runner
+    s = _store("s25-ask2")
+    task = s.add_task(role="dev", title="Run the acceptance gate")
+    runner._record_capability_ask(
+        s, _blocked_with_needs("execution", "run the tests"),
+        role=DEV, task=task, context=f"task {task.task_id}")
+    note = runner._capability_ask_note(s).lower()
+    assert "cannot grant" in note
+    assert "test command" in note and "cancel_task_ids" in note
+
+
+def test_one_role_capability_pair_is_one_line_however_many_asks(
+        tmp_errorta_home) -> None:
+    """Dedupe discipline, same as ``_capability_gap_note``: a dev that asks the
+    same thing on five tasks must not write five lines into the PM prompt."""
+    from errorta_council.coding import runner
+    s = _store("s25-ask3")
+    for i in range(5):
+        task = s.add_task(role="dev", title=f"task {i}")
+        runner._record_capability_ask(
+            s, _blocked_with_needs("execution", "run the tests"),
+            role=DEV, task=task, context=f"task {task.task_id}")
+    note = runner._capability_ask_note(s)
+    assert note.count("asked for") == 1
+    assert note.startswith("1 capability ask")
+
+
+def test_the_note_clears_itself_when_the_asking_task_settles(
+        tmp_errorta_home) -> None:
+    """Sibling behaviour of ``_duplicate_rejection_note``: the note is about LIVE
+    work. Once the asking task is dropped there is nothing for the PM to answer,
+    and a stale ask nagging forever is how a prompt fills with settled history."""
+    from errorta_council.coding import runner
+    s = _store("s25-ask4")
+    task = s.add_task(role="dev", title="Add a gravity solver")
+    runner._record_capability_ask(
+        s, _blocked_with_needs("repo_read", "read the existing engine"),
+        role=DEV, task=task, context=f"task {task.task_id}")
+    assert runner._capability_ask_note(s) != ""
+    s.update_task(task.task_id, state="dropped")
+    assert runner._capability_ask_note(s) == ""
+
+
+def test_a_blocked_tasks_ask_still_stands(tmp_errorta_home) -> None:
+    """The regression the OPEN_STATES shortcut would have shipped: a DEV's blocked
+    turn moves its task to ``blocked``, which is NOT in ``task_dedupe.OPEN_STATES``.
+    Filtering on that set would hide every ask the moment it was made."""
+    from errorta_council.coding import runner
+    s = _store("s25-ask4b")
+    task = s.add_task(role="dev", title="Add a gravity solver")
+    runner._record_capability_ask(
+        s, _blocked_with_needs("execution", "run the tests"),
+        role=DEV, task=task, context=f"task {task.task_id}")
+    s.update_task(task.task_id, state="blocked")
+    assert "execution" in runner._capability_ask_note(s)
+
+
+def test_a_run_level_ask_with_no_task_still_stands(tmp_errorta_home) -> None:
+    """The PM's own ask carries no ``related_task_ids``; nothing can settle it, so
+    it must not be filtered out by the still-live rule."""
+    from errorta_council.coding import runner
+    s = _store("s25-ask5")
+    runner._record_capability_ask(
+        s, _blocked_with_needs("other", "a human decision on scope"),
+        role=PM, task=None, context="plan")
+    assert "other" in runner._capability_ask_note(s)
+
+
+def test_the_note_is_failure_tolerant() -> None:
+    """Same discipline as every sibling note: prompt assembly must never raise."""
+    from errorta_council.coding import runner
+
+    class _Broken:
+        def list_decisions(self):
+            raise RuntimeError("ledger hiccup")
+
+        def list_tasks(self):
+            return []
+
+    assert runner._capability_ask_note(_Broken()) == ""
+
+
+def test_surfacing_an_ask_to_the_pm_grants_nothing(tmp_errorta_home) -> None:
+    """The delivery half must not weaken the non-goal above: the role→tool table
+    is identical before and after the ask is recorded AND surfaced."""
+    from errorta_council.coding import runner
+    from errorta_council.coding.turn_controller import allowed_tools_for_role
+    s = _store("s25-ask6")
+    task = s.add_task(role="dev", title="Run the acceptance gate")
+    runner._record_capability_ask(
+        s, _blocked_with_needs("execution", "run the tests"),
+        role=DEV, task=task, context=f"task {task.task_id}")
+    assert runner._capability_ask_note(s) != ""
+    assert allowed_tools_for_role(DEV) == ("code_write",)
+    for role in (PM, REVIEWER, TESTER):
+        assert allowed_tools_for_role(role) == ()

@@ -321,7 +321,9 @@ sidecar. See [One sidecar, one owner](#one-sidecar-one-owner).
 | `models` | What the PM learned (cross-project) + this project's assignments. | |
 
 The `team` sub-verbs edit a **local draft** (no store write). Only `team apply` (‡)
-writes the draft to the run config; `team preflight` probes member health.
+writes the draft to the run config; `team preflight` probes member health **and
+reports the SPEC-26 role-capability closure verdict** (any seated role that cannot
+discharge its duty, with the one action that closes it).
 
 **Build a coding team (F150).** The canonical coding roles are `pm`, `dev`,
 `reviewer`, `tester`, and the engine supports **multiple members per role**:
@@ -487,12 +489,20 @@ errorta team apply --yes
 ```
 
 `apply` writes the resolved members into the project's run config (the same shape
-the desktop app writes). You can probe provider health before committing to a
-run:
+the desktop app writes). You can probe provider health — and role capability —
+before committing to a run:
 
 ```bash
-errorta team preflight
+errorta team preflight     # same probe as `errorta setup --preflight`
 ```
+
+The probe answers two readiness questions. `preflight:` lists any provider that
+isn't ready with its remediation. `capability:` lists any seated role whose
+SPEC-26 closure verdict is not `capable` — `deferred` (it can still close mid-run,
+e.g. a TESTER with no unit-scoped test command yet) or `unclosable` (only an
+operator edit closes it, e.g. an ungrounded REVIEWER) — each with the remedy that
+closes it. Both sections empty means every route is ready and every seated role
+can discharge its duty.
 
 Then confirm the readiness gate and start. `setup` shows and edits governance,
 guardrails, and caps; `setup --confirm` marks the project run-ready:

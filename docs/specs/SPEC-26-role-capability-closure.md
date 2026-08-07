@@ -7,10 +7,11 @@ an invariant and
 [GL05](../../.superpowers/specs/GL05-single-vs-multi-and-parallelism.md) Item 1
 implements as an **advisory**.
 **Target version:** v0.1 (engine — `errorta_council/coding/`; one route pair)
-**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — Items 1,2,3,5 landed; Item 4's OPERATOR surface is not
-**Landed evidence:** ClosureVerdict capabilities.py:449, role_closure:502; _apply_role_closure runner.py:2799 called on the live path :8377; _reevaluate_role_closure :2851 called :5491
-**NOT landed:** POST /coding/projects/{id}/run-setup/preflight (routes/coding.py:3020) still returns only {'unhealthy': ...} with no 'capability' key, and GET /run-setup likewise. errorta_cli/render/runctl.py has ZERO `capability` references, so `errorta setup --preflight` / `errorta team preflight` never show the verdict or remedy before the operator commits to a run.
-**Tests:** tests/coding/test_spec26_role_closure.py (~29) — none cover the HTTP/CLI surface.
+**Status:** LANDED (Item 4's operator surface closed 2026-08-06) — Items 1,2,3,5 were already in the tree; the preflight verdict + remedy now reach the operator
+**Landed evidence:** ClosureVerdict capabilities.py:449, role_closure:502; _apply_role_closure runner.py:2799 called on the live path :8377; _reevaluate_role_closure :2851 called :5491; **POST /run-setup/preflight now returns `{"unhealthy": [...], "capability": [...]}` (routes/coding.py `_closure_preview`), rendered by `errorta_cli/render/runctl.py:_capability_lines` for both `errorta setup --preflight` and `errorta team preflight`**
+**Operator surface (2026-08-06):** `_closure_preview` calls the SAME `runner._closure_verdicts` the live path uses (a preview that could disagree with the run is worse than none), lists only the non-`capable` verdicts, and carries `role / outcome / capability / reason / remedy / overridden` per entry. The CLI renders reason and remedy indented under each verdict, shaped exactly like the existing `unhealthy` block. Read-only and fail-open — a probe route must never 500, and the empty list is "nothing to report", never "nothing was checked".
+**Scope note:** only `POST /run-setup/preflight` carries the verdict. `GET /run-setup` takes no team in its request and would have to guess a roster, so it was left alone; both CLI preflight entry points go through the POST.
+**Tests:** tests/coding/test_spec26_role_closure.py §S5 (4 new: the default-council verdict + remedy over HTTP, the verdict tracking a `set_test_commands` change, preview↔live-path agreement, and the fail-open probe) + tests/cli/test_connect_team_wizard.py (2 new: the rendered verdict and remedy via `team preflight` and `setup --preflight`). All 6 red before the source edits — the route tests with `KeyError: 'capability'` / `ImportError: _closure_preview`, the CLI tests on the missing remedy text.
 **Owner:** wiggins-j
 
 ---

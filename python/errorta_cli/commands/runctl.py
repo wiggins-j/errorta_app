@@ -151,8 +151,11 @@ def _setup_render(payload: Any, verbosity: Any, json_mode: bool) -> str:
     if payload.get("_aborted"):
         return render(muted("aborted — run setup not confirmed."))
     if "_preflight" in payload:
-        unhealthy = (payload["_preflight"] or {}).get("unhealthy") or []
-        return _rr.render_preflight(unhealthy)
+        result = payload["_preflight"] or {}
+        # SPEC-26 Item 4: the closure verdict rides the same probe, so the operator
+        # sees BOTH readiness answers before committing to a run.
+        return _rr.render_preflight(result.get("unhealthy") or [],
+                                    result.get("capability") or [])
     if "_confirmed" in payload:
         return render("run setup confirmed. Start with: errorta run --yes")
     return _rr.render_setup(payload.get("_setup"))
