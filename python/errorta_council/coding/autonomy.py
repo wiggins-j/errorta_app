@@ -435,6 +435,16 @@ class CodingAutonomyPolicy:
     # channel is live is what empties `content`, so the harmful pairing is unreachable
     # rather than merely discouraged. False sends no `format`.
     local_structured_format: bool = True
+    # SPEC-44 Move 2: how many capability ranks the INITIAL assignment may drop when
+    # the pool contains nothing at the requested tier. 0 disables —
+    # `resolve_task_assignment` returns `(None, "no_capable_model")` and the task
+    # hard-blocks, exactly as today. 1 (the default) permits strong->mid and
+    # mid->light; it deliberately does NOT permit strong->light, because a two-rank
+    # drop is a different claim about what the run actually ran at. Only ever applied
+    # on `no_capable_model` (never `unavailable`/`empty_pool`), never to the
+    # escalation path (`next_escalation_assignment`), and never without the persisted
+    # `ModelAssignment.difficulty_downgraded_from` record.
+    difficulty_downgrade_limit: int = 1
     # F156 (G5): how many PRs in ONE run may merge on a tester `not_applicable`
     # declaration before the run surfaces an operator-visible escalation instead of a
     # deduped non-blocking alert. Deliberately NOT a hard cap: a partial slice
@@ -492,6 +502,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "member_failure_limit": p.member_failure_limit,
         "worker_unproductive_limit": p.worker_unproductive_limit,
         "model_escalation_limit": p.model_escalation_limit,
+        "difficulty_downgrade_limit": p.difficulty_downgrade_limit,
         "task_reassignment_limit": p.task_reassignment_limit,
         "pm_assist_limit": p.pm_assist_limit,
         "completion_refused_limit": p.completion_refused_limit,
@@ -599,6 +610,10 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             0, int(d.get("worker_unproductive_limit", base.worker_unproductive_limit))),
         model_escalation_limit=max(
             0, int(d.get("model_escalation_limit", base.model_escalation_limit))),
+        # SPEC-44: `max(0, …)`-means-disabled, with an upper clamp of 2 because
+        # there are only three tiers.
+        difficulty_downgrade_limit=min(2, max(0, int(d.get(
+            "difficulty_downgrade_limit", base.difficulty_downgrade_limit)))),
         task_reassignment_limit=max(
             0, int(d.get("task_reassignment_limit", base.task_reassignment_limit))),
         pm_assist_limit=max(1, int(d.get("pm_assist_limit", base.pm_assist_limit))),
@@ -3377,11 +3392,14 @@ def _handle_unproductive(
 
         current_assignment = getattr(task, "model_assignment", None) or {}
         current_escalations = int(current_assignment.get("escalation_count") or 0)
-        next_assignment = (
-            next_escalation_assignment(task)
-            if current_escalations < policy.model_escalation_limit
-            else None
-        )
+        # SPEC-44 Move 3: the rung now names WHICH of five ways it was unavailable.
+        # `escalation_budget_exhausted` is a WALKED rung, not one of the five — it is
+        # already accounted at `c.model_escalations` — and the record below keeps it
+        # distinguishable rather than conflating it with an absent route.
+        if current_escalations < policy.model_escalation_limit:
+            next_assignment, rung_reason = next_escalation_assignment(task)
+        else:
+            next_assignment, rung_reason = None, "escalation_budget_exhausted"
         if next_assignment is not None:
             attempts = c.unproductive_counts[key]
             c.unproductive_counts[key] = 0
@@ -3425,6 +3443,20 @@ def _handle_unproductive(
                 },
             )
             return None
+        # SPEC-44 Move 3: purely additive. No control flow and no selection outcome
+        # changes here — the fall-through to member exclusion below is unchanged;
+        # the only new artifact is this record.
+        ledger.record_decision(
+            title=f"model escalation unavailable: {task.title or task_id}",
+            context=f"task {task_id}", choice="model_escalation_unavailable",
+            rationale=(f"No stronger route for {task_id}: {rung_reason}. "
+                       "Falling through to member exclusion."),
+            related_task_ids=[task_id],
+            extra={"member_id": member_id, "from_route_id": outcome.member_route,
+                   "reason": rung_reason,
+                   "escalation_count": current_escalations,
+                   "escalation_limit": policy.model_escalation_limit},
+        )
         prior = extras.get("excluded_member_ids") or []
         excluded = set(prior) | {member_id}
         failed_routes = dict(extras.get("excluded_member_routes") or {})

@@ -23,6 +23,15 @@ class ModelAssignment:
     catalog_revision: str = ""
     escalation_count: int = 0
     attempted_route_ids: list[str] = field(default_factory=list)
+    # SPEC-44: the tier that was REQUESTED when this assignment is a bounded
+    # downgrade; "" otherwise. `difficulty_tier` above always carries the tier the
+    # selector actually ran at — the tier the corpus buckets under and the reuse
+    # guard compares against — so an assignment never claims a capability its route
+    # does not have. Visibility rides on THIS persisted field rather than on the
+    # `difficulty_downgraded` decision, because every `record_decision` in this repo
+    # is best-effort. `from_dict` filters to `__dataclass_fields__`, so rows
+    # persisted before this field load unchanged.
+    difficulty_downgraded_from: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -39,12 +48,14 @@ class ModelAssignment:
 
 def make_assignment(*, task_id: str, member_id: str, route_id: str,
                     task_type: str, difficulty_tier: str, rationale: str,
-                    source: str, catalog_revision: str = "") -> ModelAssignment:
+                    source: str, catalog_revision: str = "",
+                    difficulty_downgraded_from: str = "") -> ModelAssignment:
     return ModelAssignment(
         assignment_id=f"ma-{uuid.uuid4().hex[:12]}", task_id=task_id,
         member_id=member_id, route_id=route_id, task_type=task_type,
         difficulty_tier=difficulty_tier, rationale=rationale, source=source,
         assigned_at=_now(), catalog_revision=catalog_revision,
+        difficulty_downgraded_from=difficulty_downgraded_from,
     )
 
 
@@ -69,11 +80,44 @@ def bind_member_route(member: dict[str, Any], assignment: ModelAssignment) -> di
     return bound
 
 
+def _select_downgraded(pool, available, catalog, difficulty, *, task_type,
+                       corpus_digest, limit):
+    """SPEC-44: the highest tier strictly BELOW ``difficulty`` that the pool can
+    satisfy, within ``limit`` ranks and never below ``light``.
+
+    Returns ``(Selection | None, satisfied_tier)``. With the default limit of 1 this
+    reaches ``strong -> mid`` and ``mid -> light`` but refuses ``strong -> light``:
+    a two-rank drop is a different claim about what the run ran at.
+    """
+    from .model_selector import NoCapableModel, select
+    from .model_tier import LIGHT, MID, STRONG, tier_rank
+
+    by_rank = (LIGHT, MID, STRONG)
+    start = tier_rank(difficulty)
+    floor = max(0, start - limit)
+    for rank in range(start - 1, floor - 1, -1):
+        got = select(pool, available, catalog, by_rank[rank],
+                     task_type=task_type, corpus_digest=corpus_digest)
+        if not isinstance(got, NoCapableModel):
+            return got, by_rank[rank]
+    return None, ""
+
+
 def resolve_task_assignment(
     task: Any,
     member: dict[str, Any],
+    *,
+    difficulty_downgrade_limit: int = 0,
 ) -> tuple[ModelAssignment | None, str]:
-    """Resolve/revalidate a task assignment. Returns (assignment, override reason)."""
+    """Resolve/revalidate a task assignment. Returns (assignment, override reason).
+
+    SPEC-44: ``difficulty_downgrade_limit`` is how many capability ranks the INITIAL
+    assignment may drop when the pool contains nothing at the requested tier. It
+    defaults to 0 — the legacy value — so the existing two-argument callers (and the
+    ~50 direct `build_run_turn` test callers upstream) keep today's behaviour exactly:
+    ``(None, "no_capable_model")`` and a hard block. `CodingRunner.run` passes the
+    policy field, whose default is 1.
+    """
     from .model_availability import available_route_ids, resolve_route_availability
     from .model_catalog import catalog_revision, load_catalog
     from .model_selector import NoCapableModel, select
@@ -108,11 +152,24 @@ def resolve_task_assignment(
     available = available_route_ids(projection)
     catalog = load_catalog(pool)
     revision = catalog_revision(catalog)
-    if (
-        existing and existing.member_id == member_id and existing.route_id in available
-        and tier_rank(catalog[existing.route_id].capability_tier) >= tier_rank(difficulty)
-    ):
-        return existing, ""
+    if existing and existing.member_id == member_id and existing.route_id in available:
+        have = tier_rank(catalog[existing.route_id].capability_tier)
+        if have >= tier_rank(difficulty):
+            return existing, ""
+        # SPEC-44 constraint 5. `difficulty` is re-derived from the task every turn,
+        # so a downgraded assignment fails the clause above FOREVER — minting a fresh
+        # assignment_id and writing a duplicate `difficulty_downgraded` decision on
+        # every single turn. An already-recorded downgrade for THIS request is
+        # honoured instead of re-derived, provided the route still satisfies the tier
+        # the downgrade settled on.
+        #
+        # The guard stays tight in the direction that matters: if the operator later
+        # adds a capable route, the weak route still fails `have >= requested`, and
+        # this branch keeps it. That is accepted and named — the remedy is the same
+        # as for any stale assignment, the F127 escalate rung.
+        if (existing.difficulty_downgraded_from == difficulty
+                and have >= tier_rank(existing.difficulty_tier)):
+            return existing, ""
 
     preferred = str(getattr(task, "preferred_route_id", "") or "")
     override_reason = ""
@@ -128,26 +185,63 @@ def resolve_task_assignment(
             override_reason = "route_below_difficulty"
         else:
             chosen, source = preferred, "pm"
+    satisfied = difficulty
+    downgraded_from = ""
     if not chosen:
+        corpus = digest()
         selected = select(
             pool, available, catalog, difficulty,
-            task_type=task_type, corpus_digest=digest(),
+            task_type=task_type, corpus_digest=corpus,
         )
         if isinstance(selected, NoCapableModel):
-            return None, override_reason or selected.reason
+            # SPEC-44 constraint 4: ONLY `no_capable_model` is a tier problem.
+            # `unavailable` and `empty_pool` are connectivity/config faults, and a
+            # lower requested tier cannot make an unreachable route reachable —
+            # downgrading there would fabricate a capability claim out of a
+            # connectivity fault.
+            if selected.reason != "no_capable_model" or difficulty_downgrade_limit <= 0:
+                return None, override_reason or selected.reason
+            selected, satisfied = _select_downgraded(
+                pool, available, catalog, difficulty, task_type=task_type,
+                corpus_digest=corpus, limit=difficulty_downgrade_limit,
+            )
+            if selected is None:
+                return None, override_reason or "no_capable_model"
+            downgraded_from = difficulty
         chosen = selected.route_id
         rationale = rationale or selected.rationale
         source = "override" if override_reason else "selector"
     return make_assignment(
         task_id=task_id, member_id=member_id, route_id=chosen,
-        task_type=task_type, difficulty_tier=difficulty,
+        task_type=task_type, difficulty_tier=satisfied,
         rationale=rationale or "PM-selected model", source=source,
-        catalog_revision=revision,
+        catalog_revision=revision, difficulty_downgraded_from=downgraded_from,
     ), override_reason
 
 
-def next_escalation_assignment(task: Any) -> ModelAssignment | None:
-    """Strictly increase capability within the persisted member pool."""
+def next_escalation_assignment(task: Any) -> tuple[ModelAssignment | None, str]:
+    """Strictly increase capability within the persisted member pool.
+
+    SPEC-44 Move 3: returns ``(assignment, reason)``. ``reason`` is ``""`` on
+    success; otherwise it names WHICH of the five ways the rung was unavailable, so
+    a ladder that silently loses a rung can no longer report itself as fully bounded:
+
+    * ``no_current_assignment`` — the task never had an assignment to escalate from
+    * ``empty_pool_snapshot`` — no ``model_pool_snapshot`` on the task
+    * ``all_routes_attempted`` — every route in the snapshot is already attempted.
+      This is the reason a SINGLE-model box hits: with a one-route pool the candidate
+      list is empty and `select` returns ``empty_pool`` before the candidate loop, so
+      it never reaches ``no_capable_model``. The selector's ``empty_pool`` is remapped
+      here because at THIS layer the pool is not empty — the candidate set is, and
+      that difference is the whole point of the discrimination.
+    * ``unavailable`` — candidates remain but none is currently reachable
+    * ``no_capable_model`` — candidates are reachable but none outranks the current
+      route (issue #82); reaching it needs >=2 routes.
+
+    There is NO downgrade here, deliberately: escalation is supposed to be able to
+    find nothing, and the downgrade is an ENTRY condition for work, not a recovery
+    rung.
+    """
     from .model_availability import available_route_ids, resolve_route_availability
     from .model_catalog import catalog_revision, load_catalog
     from .model_selector import NoCapableModel, select
@@ -156,11 +250,11 @@ def next_escalation_assignment(task: Any) -> ModelAssignment | None:
 
     current = ModelAssignment.from_dict(getattr(task, "model_assignment", None))
     if current is None:
-        return None
+        return None, "no_current_assignment"
     extras = getattr(task, "_extras", {}) or {}
     pool = [str(route) for route in extras.get("model_pool_snapshot", []) if str(route)]
     if not pool:
-        return None
+        return None, "empty_pool_snapshot"
     attempted = set(current.attempted_route_ids) | {current.route_id}
     candidates = [route for route in pool if route not in attempted]
     projection = resolve_route_availability(candidates)
@@ -173,7 +267,9 @@ def next_escalation_assignment(task: Any) -> ModelAssignment | None:
         minimum_rank_exclusive=current_rank,
     )
     if isinstance(selected, NoCapableModel):
-        return None
+        reason = ("all_routes_attempted" if selected.reason == "empty_pool"
+                  else selected.reason)
+        return None, reason
     return replace(
         current,
         assignment_id=f"ma-{uuid.uuid4().hex[:12]}",
@@ -184,7 +280,7 @@ def next_escalation_assignment(task: Any) -> ModelAssignment | None:
         catalog_revision=catalog_revision(catalog),
         escalation_count=current.escalation_count + 1,
         attempted_route_ids=sorted(attempted),
-    )
+    ), ""
 
 
 __all__ = [

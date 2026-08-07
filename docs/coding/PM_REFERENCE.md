@@ -226,7 +226,11 @@ entirely; it does NOT mean "stop immediately"), `member_failure_limit` (3, F120)
 `worker_unproductive_limit` (2 — `0` **disables** the F127 ladder: no escalation,
 no reassignment, no PM assist, matching its two siblings)
 / `model_escalation_limit` (2) / `task_reassignment_limit` (2) / `pm_assist_limit`
-(1) — the F127 escalate-up ladder, `completion_refused_limit` (2, F128 — false
+(1) — the F127 escalate-up ladder, `difficulty_downgrade_limit` (1, SPEC-44 — how
+many capability ranks the INITIAL model assignment may drop when no route in the
+pool sits at the requested difficulty tier; the downgrade is recorded on the task
+and in the decisions log, `strong`->`mid` and `mid`->`light` are reachable but
+`strong`->`light` is not, and `0` restores the old hard block), `completion_refused_limit` (2, F128 — false
 "done" guard), `foundation_stall_limit` (12) / `convergence_stall_limit` (20, F139
 — stop when nothing is converging), `delivery_review_round_limit` (3, F155 — stop
 `delivery_review_stalled` when the delivery review keeps rejecting the integrated
@@ -744,6 +748,7 @@ and FastAPI routers. Update the prose and this contract together.
     "default_build_gate": true,
     "delivery_review_round_limit": 3,
     "dev_repo_read": false,
+    "difficulty_downgrade_limit": 1,
     "diff_deadlock": true,
     "diff_stasis_epsilon": 0.12,
     "foundation_stall_limit": 12,
