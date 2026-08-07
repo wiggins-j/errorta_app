@@ -4,13 +4,28 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .model_tier import LIGHT, MID, STRONG, tier_for_route
+from .model_tier import (  # noqa: F401 — re-exported, see below
+    _LARGE_MIN_B,
+    _PARAM_BILLIONS_RE,
+    _SMALL_MAX_B,
+    LIGHT,
+    MID,
+    STRONG,
+    param_billions,
+    tier_for_route,
+)
+
+# SPEC-44 moved the issue-#83 parameter parser DOWN into `model_tier` (this module
+# imports that one, and `tier_for_route` is what needed the parser). The four names
+# are re-exported here unchanged so that
+# `tests/coding/test_issue83_model_size_hints.py` — the regression suite for the
+# substring collision that selected the one model which does not fit in 16 GB —
+# keeps passing with zero edits.
 
 CAPABILITY_TIERS = (LIGHT, MID, STRONG)
 
@@ -82,40 +97,6 @@ def default_cost_tier(route_id: str) -> int:
     if provider in {"anthropic", "openai", "google", "custom"}:
         return 3
     return 3
-
-
-# Parameter count in a model id, ANCHORED. The previous implementation tested bare
-# substrings ("3b", "7b", "70b"), which is wrong for every two-digit size that ends
-# in one of them: "27b" contains "7b" and "13b" contains "3b", so `gemma3:27b` and
-# `deepseek-r1:13b` were both tagged smallest-and-fastest. Since every local route
-# ties on cost_tier=0 and capability_tier=mid, selection falls through to size_rank —
-# so the mis-hint actively chose the LARGEST model as the cheapest, i.e. the one that
-# does not fit in 16 GB VRAM. Requiring a separator before the digits and a word
-# boundary after the "b" makes the match positional rather than incidental.
-_PARAM_BILLIONS_RE = re.compile(r"[:\-_/](\d+(?:\.\d+)?)b\b")
-
-# Bucket edges in billions of parameters. These decide relative ORDERING only —
-# they are NOT a VRAM fit check (nothing here knows the card). 24B is the large
-# edge rather than 32B so that a 27B sorts ABOVE a 14B: on the 16 GB reference card
-# a 27B (~17 GB) is the model that does not fit, and ranking it as merely "medium"
-# is what let the selector reach for it.
-_SMALL_MAX_B = 8.0
-_LARGE_MIN_B = 24.0
-
-
-def param_billions(route_id: str) -> float | None:
-    """Parameter count parsed from a model id, or ``None`` when it declares none.
-
-    ``local.qwen2.5-coder:7b`` -> 7.0; ``local.gemma3:27b`` -> 27.0;
-    ``local.mistral-small3.1:latest`` -> None (the "3.1" is a version, not a size).
-    """
-    m = _PARAM_BILLIONS_RE.search(str(route_id or "").lower())
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except ValueError:  # pragma: no cover — the regex only matches numerics
-        return None
 
 
 def _default_hints(route_id: str, capability: str) -> tuple[int, int]:
@@ -245,5 +226,5 @@ def catalog_revision(catalog: dict[str, ModelCatalogEntry]) -> str:
 __all__ = [
     "ModelCatalogEntry", "CAPABILITY_TIERS", "catalog_revision", "default_cost_tier",
     "default_entry", "load_catalog", "load_overrides", "normalize_override",
-    "overrides_path", "provider_class", "save_overrides",
+    "overrides_path", "param_billions", "provider_class", "save_overrides",
 ]

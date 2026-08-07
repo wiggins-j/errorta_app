@@ -5701,6 +5701,12 @@ def build_run_turn(
     local_structured_format: bool = True,
     reviewer_repo_read: bool = False,
     review_min_latency_ms: int = 0,
+    # SPEC-44 Move 2: how many capability ranks the INITIAL assignment may drop when
+    # nothing in the pool sits at the requested tier. `model_assignment` has no policy
+    # in scope, so the value reaches it the way `dev_repo_read` does. Default 0 —
+    # the legacy value — for this factory, so the ~50 direct test callers keep today's
+    # hard-block behaviour; `CodingRunner.run` passes the policy field (default 1).
+    difficulty_downgrade_limit: int = 0,
     role_closure_state: Optional["RoleClosure"] = None,
 ) -> Callable[[Any, Any], TurnOutcome]:
     """Construct the ``run_turn`` the autonomy loop drives.
@@ -6720,7 +6726,10 @@ def build_run_turn(
             # room/run snapshot is immutable; execution receives a bound copy.
             from .model_assignment import bind_member_route, resolve_task_assignment
 
-            assignment, override_reason = resolve_task_assignment(task, member)
+            assignment, override_reason = resolve_task_assignment(
+                task, member,
+                difficulty_downgrade_limit=difficulty_downgrade_limit,
+            )
             if assignment is None:
                 store.update_task(
                     task.task_id, state="blocked",
@@ -6749,7 +6758,33 @@ def build_run_turn(
                     model_assignment=assignment.to_dict(),
                     model_pool_snapshot=pool_snapshot,
                     model_assignment_failure=None,
+                    # SPEC-44: the persisted, non-best-effort surface for a
+                    # downgrade. Inside the `!= prior_assignment` branch, so it is
+                    # written exactly when the assignment is newly minted — never
+                    # per turn.
+                    model_difficulty_downgraded_from=(
+                        assignment.difficulty_downgraded_from or None),
                 )
+                if assignment.difficulty_downgraded_from:
+                    store.record_decision(
+                        title=f"difficulty downgraded: {task.title}",
+                        context=f"task {task.task_id}",
+                        choice="difficulty_downgraded",
+                        rationale=(
+                            "No route in the pool satisfies "
+                            f"{assignment.difficulty_downgraded_from}; running at "
+                            f"{assignment.difficulty_tier} on {assignment.route_id}."
+                        ),
+                        related_task_ids=[task.task_id],
+                        extra={
+                            "requested_difficulty_tier":
+                                assignment.difficulty_downgraded_from,
+                            "satisfied_difficulty_tier": assignment.difficulty_tier,
+                            "route_id": assignment.route_id,
+                            "assignment_id": assignment.assignment_id,
+                            "pool": pool_snapshot,
+                        },
+                    )
                 store.record_decision(
                     title=f"model assigned: {task.title}",
                     context=f"task {task.task_id}",
@@ -8397,6 +8432,8 @@ class CodingRunner:
                 getattr(policy, "local_structured_format", True)),
             reviewer_repo_read=bool(getattr(policy, "reviewer_repo_read", False)),
             review_min_latency_ms=int(getattr(policy, "review_min_latency_ms", 0)),
+            difficulty_downgrade_limit=int(
+                getattr(policy, "difficulty_downgrade_limit", 1)),
             role_closure_state=role_closure_state)
         try:
             res = run_coding_loop(self.store, member_pairs, policy,

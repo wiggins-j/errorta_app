@@ -438,9 +438,32 @@ Two consequences, both confirmed by running the selector:
   (`minimum_rank_exclusive`), so with every local route tied at `mid` the
   **escalation ladder can never fire**.
 
-**Recommended:** derive the tier from the model name for local routes as well, or
-document `metadata.model_tier` / `model-catalog-overrides.json` as required
-configuration for local-only teams.
+**Addressed by [SPEC-44](../specs/SPEC-44-local-tier-derivation.md)**, which is
+where the design and its reasoning now live. In short: `ERRORTA_LOCAL_SIZE_TIERS`
+derives a `local.*` route's tier from its declared parameter count (`<=8B` ->
+`light`, `>8B` -> `mid`, no declared count -> `mid`), and the bounded
+`difficulty_downgrade_limit` keeps a request the pool cannot satisfy from bricking
+the run. Note what the spec deliberately does **not** do: `strong` is never derived
+from a parameter count, because on this card the only models a `>=24B -> strong`
+rule would promote are the ones that do not fit, and the escalate rung admits only
+strictly-stronger routes — so a derived `strong` would aim the ladder at an OOM.
+
+**`model-catalog-overrides.json` is required configuration for a local-only team**,
+not a debugging tool. It is:
+
+- the ONLY route to a `strong` local model (per-route `capability_tier`), since no
+  parameter count derives one;
+- the ONLY remedy for the parse limits in §4.3 and SPEC-44's "out of scope" list —
+  `mixtral:8x7b`, `llama4:16x17b` and `mistral-small3.1` all parse to no declared
+  count and land on `mid`, and a model id is not a spec sheet;
+- the ONLY reset for a route the performance corpus has demoted (`_effective_rank`
+  demotes and nothing ever promotes);
+- the remedy for the tie-break that prefers `qwen2.5-coder:14b` (74.9%) over
+  `qwen3.5:9b` (92.3%) when both sit at `mid` — a name-derived tier cannot encode a
+  benchmark result.
+
+`metadata.model_tier` is **not** a substitute: it governs the F127 role-tier
+comparisons, not model selection, which reads `ModelCatalogEntry.capability_tier`.
 
 ### 4.3 Substring collision in size hints selects an unloadable model
 
