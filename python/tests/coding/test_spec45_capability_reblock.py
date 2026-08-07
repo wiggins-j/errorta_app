@@ -58,3 +58,19 @@ def test_capability_refusal_decision_carries_reason(tmp_path):
     assert dec is not None
     assert dec["reason_code"] == drop_reasons.MISSING_CAPABILITY
     assert dec["capability"] == "execution_gate"
+
+
+def _tasks_by_state(store, state):
+    return [t for t in store.list_tasks() if t.state == state]
+
+
+def test_refused_task_is_persisted_blocked(tmp_path):
+    store = _store(tmp_path)
+    _materialize_pm_tasks(store, _Intent([
+        _Planned("run the integration suite and report the failing cases")]))
+    blocked = _tasks_by_state(store, "blocked")
+    assert len(blocked) == 1
+    assert blocked[0]._extras.get("blocked_reason") == "missing_capability:execution_gate"
+    assert "execution" in blocked[0].reason_summary.lower() or blocked[0].reason_summary
+    # It must NOT have been dropped or silently discarded.
+    assert not _tasks_by_state(store, "dropped")

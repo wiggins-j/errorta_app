@@ -3415,15 +3415,48 @@ def _materialize_pm_tasks(
                                "rewritten to consume the acceptance-gate output"),
                     extra={"planned_title": planned.title})
             else:
-                # Refused: the dependents' title resolves to "" (dropped below).
-                title_to_id[planned.title] = ""
+                # SPEC-45: a capability gap is a PAUSE, not a deletion. Persist the
+                # task as `blocked (missing_capability:…)` so it (a) survives to be
+                # re-dispatched when the gate opens (the auto-unblock pass) and (b)
+                # is visible in board/status. Still record the reason-bearing
+                # decision so the PM's `_capability_refusal_note` prompt keeps firing.
+                blocked_task = store.add_task(
+                    title=planned.title,
+                    role="dev",
+                    detail=planned.detail,
+                    parent_task_id=parent_task.task_id if parent_task is not None else None,
+                    source_spec_artifact_id=(
+                        parent_task.source_spec_artifact_id if parent_task is not None else None
+                    ),
+                    source_plan_artifact_id=(
+                        parent_task.source_plan_artifact_id if parent_task is not None else None
+                    ),
+                    source_slice_id=(
+                        parent_task.source_slice_id if parent_task is not None else None
+                    ),
+                    governance_required=(
+                        parent_task.governance_required if parent_task is not None else False
+                    ),
+                    task_type=planned.task_type,
+                    difficulty_tier=planned.difficulty_tier,
+                    preferred_member_id=planned.preferred_member_id,
+                    preferred_route_id=planned.preferred_route_id,
+                    assignment_rationale=planned.assignment_rationale,
+                )
+                store.update_task(
+                    blocked_task.task_id, state="blocked",
+                    blocked_reason="missing_capability:execution_gate",
+                    reason_summary=("needs execution evidence but no gate exists yet; "
+                                    "waiting on the execution capability"))
+                title_to_id[planned.title] = blocked_task.task_id
                 store.record_decision(
-                    title=f"task refused (no executor): {planned.title}",
+                    title=f"task blocked (no executor): {planned.title}",
                     context="capability_lint",
                     choice="task_requires_absent_capability",
                     rationale=(f"{planned.title!r} demands execution evidence, but "
                                "no role can run a command and no acceptance gate "
-                               "exists to produce it; refused at planning time"),
+                               "exists to produce it; blocked at planning time"),
+                    related_task_ids=[blocked_task.task_id],
                     extra={
                         "planned_title": planned.title,
                         **_drop_reasons.reason_blob(

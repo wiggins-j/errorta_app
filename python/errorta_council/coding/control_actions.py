@@ -379,13 +379,34 @@ def create_task(
             if gate_state.gate_available(store):
                 title, detail = capabilities.routed_execution_task(title)
             else:
-                raise ControlActionError(
-                    "task_requires_absent_capability",
-                    f"{title!r} demands execution evidence, but no role can run a "
-                    "command and no acceptance gate exists to produce it — write it "
-                    "as work the gate can verify (e.g. 'add a test that fails on "
-                    "trivial levels'), or register a test command first",
-                )
+                from . import drop_reasons
+                task = store.add_task(title=title, role=role, detail=detail,
+                                      target_files=target_files)
+                task = store.update_task(
+                    task.task_id, state="blocked",
+                    blocked_reason="missing_capability:execution_gate",
+                    reason_summary=("needs execution evidence but no gate exists yet; "
+                                    "waiting on the execution capability"))
+                store.record_decision(
+                    title=f"task blocked (no executor): {title}",
+                    context="capability_lint",
+                    choice="task_requires_absent_capability",
+                    rationale=(f"{title!r} demands execution evidence, but "
+                               "no role can run a command and no acceptance gate "
+                               "exists to produce it; blocked at planning time"),
+                    related_task_ids=[task.task_id],
+                    extra={
+                        "planned_title": title,
+                        **drop_reasons.reason_blob(
+                            drop_reasons.MISSING_CAPABILITY,
+                            detail="no executor and no acceptance gate",
+                            capability="execution_gate"),
+                    })
+                return pm_changes.record_change(
+                    store, summary=f"Created task: {title}",
+                    details=[{"field": "task", "before": None, "after": task.task_id}],
+                    restore_target="task", restore_value={"task_id": task.task_id},
+                    surface=surface)
     task = store.add_task(title=title, role=role, detail=detail,
                           target_files=target_files)
     return pm_changes.record_change(
