@@ -1,0 +1,14 @@
+{
+  "status": "ABANDONED \u2014 partial, not a result",
+  "arm": "T (think on, no format)",
+  "trials": 1,
+  "rows_completed": 19,
+  "rows_planned": 32,
+  "seeded_rejected": "0 of the seeded rows completed",
+  "truncated": "16/19 (84%)",
+  "why_abandoned": "~3.5 min/row and 84% of verdicts never finished under the production envelope at 8192. A control that cannot produce a verdict is not a control; more rows would not have made it one.",
+  "what_it_does_and_does_not_show": {
+    "does": "thinking-on is NOT VIABLE for production-shaped reviewer turns on qwen3.5:9b at the shipped 8192 budget \u2014 84% truncation",
+    "does_not": "whether thinking-on would CATCH defects if it could finish; the 3 parsed rows are far too few"
+  }
+}
