@@ -390,6 +390,34 @@ def raise_monitor_problem(
     )
 
 
+def raise_task_pathology_problem(
+    project_id: str, *, identity: str, title: str, drops: int, reason_code: str,
+    stage: str = "development", store: LedgerStore | None = None,
+) -> AttentionSignal | None:
+    """SPEC-46: a task repeatedly created-and-dropped has been quarantined. Raise a
+    blocking Problem so the operator can see it needs input, deduped by the task's
+    normalized identity so a loop re-encountering it does not stack alarms. It flags
+    for the operator; it does not stop dispatch of other backlog."""
+    store = store or _store(project_id)
+    for s in list_open(project_id, store=store):
+        if (s.kind == "problem" and s.source == "task_pathology"
+                and str((s.context or {}).get("identity") or "") == str(identity)):
+            return None
+    pm_eval = (
+        f"'{title}' was created and dropped {drops}× this run (reason: {reason_code}) "
+        "and has been quarantined so the run can continue. It needs operator input — "
+        "re-scope it, supply the missing prerequisite, or drop it for good.")
+    return raise_signal(
+        project_id, kind="problem", source="task_pathology", stage=stage,
+        title=f"quarantined: {title}"[:80],
+        summary=f"dropped {drops}× — reason: {reason_code}; needs operator input",
+        pm_evaluation=pm_eval, suggestions=list(_MONITOR_SUGGESTIONS),
+        context={"identity": str(identity), "drops": int(drops),
+                 "reason_code": reason_code},
+        store=store,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Member-health producer (F120)
 # --------------------------------------------------------------------------- #

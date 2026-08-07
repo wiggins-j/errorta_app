@@ -3363,6 +3363,12 @@ def _materialize_pm_tasks(
             if owner != parent_task.task_id
         }
     inherited_deps = list(parent_task.depends_on) if parent_task is not None else []
+    try:
+        from .autonomy import load_policy
+        quarantine_limit = int(getattr(
+            load_policy(store), "task_drop_quarantine_limit", 3) or 0)
+    except Exception:  # noqa: BLE001
+        quarantine_limit = 3
     for planned in intent.tasks:
         paths = _declared_target_paths(planned.title, planned.detail)
         path_deps = [
@@ -3370,6 +3376,32 @@ def _materialize_pm_tasks(
                 (path, path_owners[path]) for path in paths if path in path_owners
             )
         ]
+        # SPEC-46: if this identity has already been dropped to the quarantine
+        # threshold, suppress creation and escalate — don't feed planning_churn.
+        identity = task_dedupe.identity_key(title=planned.title, paths=paths)
+        if quarantine_limit and _drop_ledger.drop_count(store, identity) >= quarantine_limit:
+            title_to_id[planned.title] = ""
+            drops = _drop_ledger.drop_count(store, identity)
+            store.record_decision(
+                title=f"task quarantined (dropped repeatedly): {planned.title}",
+                context="drop_quarantine", choice="task_quarantined",
+                rationale=(f"{planned.title!r} has been created and dropped "
+                           f"{drops}× this run; "
+                           "quarantined so the run continues on the rest of the backlog"),
+                extra={
+                    "drop_count": drops,
+                    **_drop_reasons.reason_blob(
+                        _drop_reasons.OVER_SCOPED,
+                        detail=f"quarantined after {quarantine_limit} drops"),
+                })
+            try:
+                from . import attention
+                attention.raise_task_pathology_problem(
+                    store.project_id, identity=identity, title=planned.title,
+                    drops=drops, reason_code=_drop_reasons.OVER_SCOPED, store=store)
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         # Spec 08: reject a planned task that is materially the same job as an
         # already-open one. The rejection is recorded as a decision (auditable +
         # renderable), the title still resolves — onto the MATCHED id — so a
