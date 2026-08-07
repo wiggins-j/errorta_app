@@ -441,3 +441,25 @@ def test_build_open_index_keeps_only_open_tasks(tmp_path: Path) -> None:
 
     index = task_dedupe.build_open_index(s.list_tasks())
     assert {e.task_id for e in index} == {todo.task_id, doing.task_id}
+
+
+from errorta_council.coding.ledger import Task
+
+
+def test_capability_blocked_task_suppresses_recreate():
+    waiting = Task(
+        task_id="t-cap", title="run the integration suite and report",
+        role="dev", state="blocked",
+        _extras={"blocked_reason": "missing_capability:execution_gate"})
+    index = task_dedupe.build_open_index([waiting])
+    assert any(e.task_id == "t-cap" for e in index)
+    match = task_dedupe.find_duplicate(
+        index, title="run the integration suite and report", role="dev", paths=[])
+    assert match is not None and match.task_id == "t-cap"
+
+
+def test_plain_blocked_task_still_exempt():
+    # A normal blocked task (regression candidate) stays OUT of the index.
+    plain = Task(task_id="t-b", title="add pagination", role="dev", state="blocked")
+    index = task_dedupe.build_open_index([plain])
+    assert all(e.task_id != "t-b" for e in index)

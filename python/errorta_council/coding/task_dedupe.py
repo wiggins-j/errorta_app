@@ -124,12 +124,26 @@ def normalized_target_paths(declared: Iterable[str] | None) -> frozenset[str]:
         _paths.normalize_path(p) for p in (declared or []) if str(p or "").strip())
 
 
+def _is_capability_waiting(task: Any) -> bool:
+    """A `blocked` task waiting on a capability is still 'live' for dedupe: it will
+    auto-unblock, so a re-proposal is a duplicate, not a regression re-open."""
+    if str(getattr(task, "state", "") or "") != "blocked":
+        return False
+    extras = getattr(task, "_extras", {}) or {}
+    return str(extras.get("blocked_reason", "") or "").startswith("missing_capability:")
+
+
 def build_open_index(tasks: Iterable[Any]) -> list[OpenTask]:
     """Project the OPEN tasks of a backlog into comparison form. Closed tasks are
-    dropped here, which is what makes "duplicate of a done task" legal."""
+    dropped here, which is what makes "duplicate of a done task" legal.
+
+    SPEC-45: a capability-waiting `blocked` task is also projected — it is not a
+    finished-work regression candidate but pending work that will auto-unblock, so
+    a re-proposal must be suppressed, not treated as a new job."""
     index: list[OpenTask] = []
     for task in tasks:
-        if str(getattr(task, "state", "") or "") not in OPEN_STATES:
+        state = str(getattr(task, "state", "") or "")
+        if state not in OPEN_STATES and not _is_capability_waiting(task):
             continue
         index.append(OpenTask(
             task_id=str(getattr(task, "task_id", "") or ""),
