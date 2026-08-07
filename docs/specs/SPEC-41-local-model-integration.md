@@ -516,6 +516,55 @@ Each disable value reproduces today's trace exactly, and that is asserted per kn
 - The operator docs name `model-catalog-overrides.json` as required configuration for a
   local-only team.
 
+## Amendment 2026-08-06 — discharging the `local_think_false` default gate
+
+**The gate, restated.** This spec's DoD says `local_think_false` "defaults on **only
+after** the 6/6 schema result is reproduced on a second thinking-capable model
+(`deepseek-r1` or `qwq`) on the reviewer-verdict shape. Until then it defaults `False`
+and this bullet is the gate."
+
+**It shipped `True` and the gate was never run.** That is a process failure, recorded
+here rather than quietly fixed. It was found by a code-grounded audit, not by the
+people who shipped it.
+
+**Why it could not be run until now.** The reference box carried exactly one
+thinking-capable model (`qwen3.5:9b`). `qwq:32b` does not fit — ~20 GB against 13 GB
+free. The F001 re-test of the same day does NOT discharge the gate either, and it is
+worth being precise about why: its second model, `mistral-small3.1`, scored 8/8 in
+*every* arm **because it has no thinking channel at all**. A model that cannot think
+cannot demonstrate that suppressing thinking helps. It was a control, not a replication.
+
+**What is being run.** `deepseek-r1:8b` (5.2 GB, fits) — named in the gate itself —
+through the identical three arms as the F001 re-test, on the reviewer-verdict shape:
+
+| arm | budget | thinking | format |
+|---|---|---|---|
+| A | 2048 | on | — |
+| B | 8192 | on | — |
+| C | 8192 | `think:false` | `"json"` |
+
+**Pre-stated readings, written before the numbers exist.**
+
+* **C materially above B on schema compliance** → the gate is discharged on its own
+  terms. `local_think_false=True` is justified and this amendment records it.
+* **C ≈ B** → the shape benefit does NOT reproduce on a second thinking model. This is
+  the outcome the F001 re-test already made likely: on `qwen3.5:9b`, once SPEC-42 fixed
+  the budget, B scored 7/8 and C 8/8 — one sample apart at n=8, i.e. nothing. If that
+  repeats here, the honest conclusion is that **`think:false` never bought shape; it
+  bought speed** (~16x fewer generated tokens), and the DoD's stated gate is simply not
+  satisfiable because the effect it was written to confirm does not exist at an adequate
+  budget. The correct response is then NOT to keep shipping `True` on a false rationale:
+  either re-justify the default explicitly on COST and amend the DoD to say so, or
+  default it `False` and let operators opt in. That decision is recorded here either way.
+* **C below B** → `think:false` actively harms this model's schema compliance. Default
+  to `False` immediately; the qwen3.5:9b result was model-specific.
+* **A far below both** → confirms SPEC-42's truncation finding generalises to a second
+  reasoning model, independent of what C shows.
+
+Note this measures SHAPE only, exactly like the F001 re-test. Whether suppressing
+reasoning costs verdict USEFULNESS is [SPEC-43](SPEC-43-verdict-usefulness-under-think-false.md),
+and no result here can settle that question.
+
 ## Out of scope
 
 - **A VRAM-fit check.** `param_billions` gives an ordering, not a fit decision; nothing
