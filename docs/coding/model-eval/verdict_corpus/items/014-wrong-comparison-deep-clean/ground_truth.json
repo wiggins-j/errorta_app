@@ -1,0 +1,10 @@
+{
+  "id": "014-wrong-comparison-deep-clean",
+  "kind": "clean",
+  "pair_id": "014",
+  "defect_class": "wrong-comparison-operator",
+  "depth": "deep",
+  "file": "cache/bounded.py",
+  "expected_verdict": "approve",
+  "note": "_evict_one keeps the entry with the smallest use stamp, which is the least recently used key under the increasing counter maintained by _touch."
+}

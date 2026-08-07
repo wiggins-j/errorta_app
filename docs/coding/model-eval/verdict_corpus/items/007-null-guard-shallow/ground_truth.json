@@ -1,0 +1,18 @@
+{
+  "id": "007-null-guard-shallow",
+  "kind": "seeded",
+  "pair_id": "007",
+  "defect_class": "null-guard",
+  "depth": "shallow",
+  "file": "ratelimit/config.py",
+  "location": "ratelimit/config.py, _configured() fallback test",
+  "mechanism": "_configured falls back on any falsy value rather than on a missing one, contradicting its own docstring. A tenant configured with burst: 0 or requests_per_second: 0 silently receives the permissive defaults, so the hard-stop support uses to shut off an abusive tenant does nothing.",
+  "accepted_finding_forms": [
+    "_configured uses `or`, so an explicit 0 is treated as unset and silently replaced by the default",
+    "the None check is really a falsiness check; burst=0 and rps=0 are meaningful values that get overwritten",
+    "wrong null guard: `value or default` cannot distinguish a configured zero from a missing key",
+    "the helper's behaviour contradicts its docstring -- it selects the default on falsiness rather than on absence",
+    "a tenant hard-stopped with requests_per_second: 0 will be given the default 50/s instead"
+  ],
+  "expected_verdict": "reject"
+}

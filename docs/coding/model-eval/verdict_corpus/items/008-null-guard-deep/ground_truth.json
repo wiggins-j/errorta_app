@@ -1,0 +1,19 @@
+{
+  "id": "008-null-guard-deep",
+  "kind": "seeded",
+  "pair_id": "008",
+  "defect_class": "null-guard",
+  "depth": "deep",
+  "file": "ingest/normalize.py",
+  "location": "ingest/normalize.py -- validate_row()'s presence test, wrong only in light of the None guard this diff deletes from normalize_row() and the str() coercion inside the pre-existing _norm_text()",
+  "mechanism": "normalize_row's `email is None` guard is removed on the stated grounds that validate_row now rejects bad rows, but validate_row only tests key presence. A row from a Postgres dump with a NULL email arrives as {'email': None}, passes validation, and reaches _identity_hash, where _norm_text stringifies None to 'none' instead of raising. Every null-email row across every partner therefore hashes to the same identity and is silently merged into one profile.",
+  "accepted_finding_forms": [
+    "validate_row checks that the key exists but not that it is non-null, while the None guard it replaced in normalize_row is gone",
+    "a row with email=None passes validation and is normalised as the literal string 'none', so all null-email rows collapse to one identity",
+    "the deleted None check is not actually covered by the new validator -- `name not in row` does not catch a NULL value",
+    "presence-vs-null mismatch between the new validator and the guard it was supposed to replace; None flows through _norm_text and is stringified",
+    "removing the null guard is unsafe here: nothing on the new path rejects None, and the hash helper silently accepts it",
+    "distinct people with missing emails will be merged, because the validation added does not enforce what the removed check enforced"
+  ],
+  "expected_verdict": "reject"
+}

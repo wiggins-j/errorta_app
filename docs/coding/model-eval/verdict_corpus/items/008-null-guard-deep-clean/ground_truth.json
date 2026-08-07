@@ -1,0 +1,10 @@
+{
+  "id": "008-null-guard-deep-clean",
+  "kind": "clean",
+  "pair_id": "008",
+  "defect_class": "null-guard",
+  "depth": "deep",
+  "file": "ingest/normalize.py",
+  "expected_verdict": "approve",
+  "note": "validate_row tests `row.get(name) is None`, which is what the deleted guard in normalize_row enforced, so a NULL email is rejected before it can be stringified into a shared identity hash."
+}

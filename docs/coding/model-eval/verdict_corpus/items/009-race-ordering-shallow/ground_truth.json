@@ -1,0 +1,18 @@
+{
+  "id": "009-race-ordering-shallow",
+  "kind": "seeded",
+  "pair_id": "009",
+  "defect_class": "race-ordering",
+  "depth": "shallow",
+  "file": "ratelimit/counters.py",
+  "location": "ratelimit/counters.py, WindowCounters.incr() -- the store happens after the lock is released",
+  "mechanism": "incr reads the current window under the lock but builds and stores the updated window after releasing it, so the read-modify-write is not atomic. Concurrent threads read the same count and each writes count + amount, discarding the other's increment; the counter under-reports and the limiter lets bursts through unthrottled.",
+  "accepted_finding_forms": [
+    "incr releases the lock between the read and the write, so concurrent increments are lost",
+    "the read-modify-write in incr is not atomic -- the store sits outside the `with self._lock` block",
+    "lost-update race: two threads read the same window and each overwrites the other's count",
+    "the dict assignment happens without the lock held, which also races with sweep()'s deletion loop",
+    "the counter will under-count under concurrency, so the rate limiter admits more requests than its limit"
+  ],
+  "expected_verdict": "reject"
+}

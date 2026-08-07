@@ -1,0 +1,75 @@
+diff --git a/cache/bounded.py b/cache/bounded.py
+--- a/cache/bounded.py
++++ b/cache/bounded.py
+@@ -2,37 +2,59 @@
+ 
+ from __future__ import annotations
+ 
+ 
+ class BoundedCache:
+-    """Fixed-capacity cache with first-in-first-out eviction.
++    """Fixed-capacity cache with least-recently-used eviction.
+ 
+-    FIFO is cheap but ignores how often an entry is actually read, so a hot
+-    fragment is thrown out simply for being old.
++    Reads as well as writes count as uses, so a fragment that keeps being
++    read survives regardless of how long ago it was first stored.
+     """
+ 
+     def __init__(self, capacity: int = 512):
+         self._capacity = capacity
+         self._values: dict = {}
+-        self._insert_order: list = []
++        self._used_at: dict = {}
++        self._ticks = 0
+ 
++    def _touch(self, key) -> None:
++        """Stamp ``key`` as used right now.
++
++        The tick counter only ever increases, so a larger stamp means a more
++        recent use, and the smallest stamp in the table belongs to the least
++        recently used key.
++        """
++        self._ticks += 1
++        self._used_at[key] = self._ticks
++
+     def get(self, key, default=None):
+-        return self._values.get(key, default)
++        if key not in self._values:
++            return default
++        self._touch(key)
++        return self._values[key]
+ 
+     def _evict_one(self) -> None:
+-        oldest = self._insert_order.pop(0)
+-        del self._values[oldest]
++        # Hand-rolled rather than min(..., key=...): this runs on the render
++        # hot path and the explicit loop avoids the bound-method call per
++        # entry that the key= form costs.
++        victim = None
++        victim_stamp = None
++        for key, stamp in self._used_at.items():
++            if victim_stamp is None or stamp < victim_stamp:
++                victim, victim_stamp = key, stamp
++        if victim is not None:
++            del self._values[victim]
++            del self._used_at[victim]
+ 
+     def put(self, key, value) -> None:
+-        if key not in self._values:
+-            if len(self._values) >= self._capacity:
+-                self._evict_one()
+-            self._insert_order.append(key)
++        if key not in self._values and len(self._values) >= self._capacity:
++            self._evict_one()
+         self._values[key] = value
++        self._touch(key)
+ 
+     def discard(self, key) -> None:
+         if key in self._values:
+             del self._values[key]
+-            self._insert_order.remove(key)
++            del self._used_at[key]
+ 
+     def __len__(self) -> int:
+         return len(self._values)

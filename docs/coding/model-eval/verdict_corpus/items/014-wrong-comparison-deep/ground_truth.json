@@ -1,0 +1,19 @@
+{
+  "id": "014-wrong-comparison-deep",
+  "kind": "seeded",
+  "pair_id": "014",
+  "defect_class": "wrong-comparison-operator",
+  "depth": "deep",
+  "file": "cache/bounded.py",
+  "location": "cache/bounded.py -- the victim-selection comparison in _evict_one(), wrong only relative to the direction of the tick counter established in _touch()",
+  "mechanism": "_touch stamps a key with an ever-increasing counter, so the smallest stamp is the least recently used entry; _evict_one selects the largest instead. Eviction is exactly inverted. Because put() touches the key it just stored, the newest entry carries the highest stamp and is the victim of the very next insertion, so beyond capacity the cache pins cold entries forever and discards every new one -- the hit rate collapses rather than improving as the change intended.",
+  "accepted_finding_forms": [
+    "_evict_one picks the largest use stamp, but _touch makes larger mean more recent -- it evicts the most recently used entry",
+    "the eviction comparison is inverted with respect to the tick counter, giving MRU eviction instead of LRU",
+    "the victim search should keep the smallest stamp; as written the cache throws away the hottest entry",
+    "the entry just inserted has the highest stamp and so becomes the next victim -- the cache degenerates and the hit rate drops",
+    "the comparison direction in the victim loop does not match the ordering the recency counter defines",
+    "this is an anti-LRU: the replacement policy selects exactly the wrong entry"
+  ],
+  "expected_verdict": "reject"
+}

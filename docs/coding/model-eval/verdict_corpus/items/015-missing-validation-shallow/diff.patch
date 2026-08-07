@@ -1,0 +1,48 @@
+diff --git a/catalog/query.py b/catalog/query.py
+--- a/catalog/query.py
++++ b/catalog/query.py
+@@ -14,11 +14,15 @@
+ 
+ DEFAULT_ORDER_BY = "ORDER BY created_at DESC"
+ 
+ MAX_PAGE_SIZE = 200
+ 
++SORT_DIRECTIONS = {"asc": "ASC", "desc": "DESC"}
+ 
++SORTABLE_COLUMNS = ("id", "name", "score", "created_at", "updated_at")
++
++
+ def page_size(raw) -> int:
+     if raw is None:
+         return 50
+     try:
+         value = int(raw)
+@@ -27,9 +31,26 @@
+     if value < 1 or value > MAX_PAGE_SIZE:
+         raise BadRequest(f"page_size must be between 1 and {MAX_PAGE_SIZE}")
+     return value
+ 
+ 
++def build_order_by(spec) -> str:
++    """Turn a ``field:direction`` sort spec into an ORDER BY clause.
++
++    The direction is checked against a fixed set; a bad one is a client
++    error rather than something to fall back from.
++    """
++    if spec is None:
++        return DEFAULT_ORDER_BY
++    field, _, raw_direction = str(spec).partition(":")
++    field = field.strip()
++    direction = SORT_DIRECTIONS.get(raw_direction.strip().lower() or "asc")
++    if direction is None:
++        raise BadRequest(f"unknown sort direction: {raw_direction!r}")
++    return f"ORDER BY {field} {direction}"
++
++
+ def build_query(tenant_id: str, params: dict) -> tuple[str, list]:
+-    """Build the list query.  Ordering is fixed; callers cannot choose it."""
+-    sql = f"{BASE_SELECT} {DEFAULT_ORDER_BY} LIMIT ?"
++    """Build the list query, honouring the caller's requested ordering."""
++    order_by = build_order_by(params.get("sort"))
++    sql = f"{BASE_SELECT} {order_by} LIMIT ?"
+     return sql, [tenant_id, page_size(params.get("page_size"))]

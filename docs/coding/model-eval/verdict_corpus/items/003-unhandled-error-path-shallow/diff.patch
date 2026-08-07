@@ -1,0 +1,90 @@
+diff --git a/configsvc/remote_config.py b/configsvc/remote_config.py
+--- a/configsvc/remote_config.py
++++ b/configsvc/remote_config.py
+@@ -1,39 +1,84 @@
+ """Runtime configuration for the edge fleet.
+ 
+ Configuration is baked into the image at build time and read once at
+-process start.  Rolling a config change therefore requires a redeploy.
++process start; a background thread then polls the control plane so a config
++change can roll without a redeploy.
+ """
+ 
+ from __future__ import annotations
+ 
+ import json
+ import logging
++import threading
+ import time
+ from dataclasses import dataclass
+ 
++import requests
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+ @dataclass(frozen=True)
+ class Snapshot:
+     values: dict
+     fetched_at: float
+ 
+ 
+ class ConfigStore:
+-    def __init__(self, path: str, defaults: dict = {}):
++    def __init__(
++        self,
++        path: str,
++        url: str,
++        session=None,
++        interval: float = 30.0,
++        timeout: float = 5.0,
++        defaults: dict = {},
++    ):
+         # ``defaults`` is read-only: every merge below builds a new dict, so
+         # sharing one instance across ConfigStores is safe and intentional.
+         self._path = path
++        self._url = url
++        self._session = session or requests.Session()
++        self._interval = interval
++        self._timeout = timeout
+         self._defaults = defaults
+         self._snapshot = Snapshot(dict(defaults), 0.0)
++        self._stop = threading.Event()
+ 
+     def load_from_disk(self) -> Snapshot:
+         with open(self._path, "r", encoding="utf-8") as fh:
+             values = json.load(fh)
+         merged = {**self._defaults, **values}
+         self._snapshot = Snapshot(merged, time.time())
+         return self._snapshot
+ 
++    def _fetch(self) -> dict:
++        response = self._session.get(self._url, timeout=self._timeout)
++        return response.json()
++
++    def refresh(self) -> bool:
++        """Pull one snapshot from the control plane.
++
++        Returns True when the snapshot was replaced.  A failed refresh keeps
++        the previous snapshot: stale config beats no config.
++        """
++        try:
++            values = self._fetch()
++        except requests.RequestException:
++            logger.warning("config refresh failed; keeping previous snapshot")
++            return False
++        merged = {**self._defaults, **values}
++        self._snapshot = Snapshot(merged, time.time())
++        return True
++
++    def _loop(self) -> None:
++        while not self._stop.is_set():
++            self.refresh()
++            self._stop.wait(self._interval)
++
++    def start(self) -> None:
++        thread = threading.Thread(target=self._loop, name="config-refresh", daemon=True)
++        thread.start()
++
+     def get(self, key: str, fallback=None):
+         return self._snapshot.values.get(key, fallback)

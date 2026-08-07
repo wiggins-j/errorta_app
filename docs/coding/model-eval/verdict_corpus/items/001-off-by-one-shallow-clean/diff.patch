@@ -1,0 +1,61 @@
+diff --git a/warehouse/bulk_writer.py b/warehouse/bulk_writer.py
+--- a/warehouse/bulk_writer.py
++++ b/warehouse/bulk_writer.py
+@@ -7,11 +7,11 @@
+ 
+ from __future__ import annotations
+ 
+ import logging
+ import sqlite3
+-from typing import Sequence
++from typing import Iterator, Sequence
+ 
+ logger = logging.getLogger(__name__)
+ 
+ # SQLite refuses any statement carrying more than 999 bound parameters unless
+ # it was compiled with a raised SQLITE_MAX_VARIABLE_NUMBER.  We target the
+@@ -32,19 +32,35 @@
+         return (
+             f"INSERT INTO {self._table} ({','.join(self._columns)}) VALUES "
+             + ",".join([placeholder] * row_count)
+         )
+ 
+-    def write(self, rows: Sequence[Sequence[object]]) -> int:
+-        """Insert every row in a single statement.
++    def _batches(
++        self, rows: Sequence[Sequence[object]]
++    ) -> Iterator[Sequence[Sequence[object]]]:
++        """Split ``rows`` so that no single statement exceeds the bind limit.
+ 
+-        Callers are currently expected to keep batches small by hand.
++        Each row contributes ``len(self._columns)`` bound parameters, so the
++        largest safe batch is the number of whole rows that fit inside
++        MAX_BIND_PARAMS.
+         """
++        per_batch = MAX_BIND_PARAMS // len(self._columns)
++        for start in range(0, len(rows), per_batch):
++            yield rows[start : start + per_batch]
++
++    def write(self, rows: Sequence[Sequence[object]]) -> int:
++        """Insert every row, splitting into as few statements as the bind
++        limit allows.  The commit is deferred to the end so that a large
++        write costs one fsync rather than one per batch.
++        """
+         if not rows:
+             return 0
+-        flat: list[object] = []
+-        for row in rows:
+-            flat.extend(row)
+-        self._conn.execute(self._statement(len(rows)), flat)
++        written = 0
++        for batch in self._batches(rows):
++            flat: list[object] = []
++            for row in batch:
++                flat.extend(row)
++            self._conn.execute(self._statement(len(batch)), flat)
++            written += len(batch)
+         self._conn.commit()
+-        logger.debug("bulk wrote %d rows to %s", len(rows), self._table)
+-        return len(rows)
++        logger.debug("bulk wrote %d rows to %s", written, self._table)
++        return written

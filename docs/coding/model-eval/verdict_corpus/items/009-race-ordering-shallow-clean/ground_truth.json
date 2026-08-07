@@ -1,0 +1,10 @@
+{
+  "id": "009-race-ordering-shallow-clean",
+  "kind": "clean",
+  "pair_id": "009",
+  "defect_class": "race-ordering",
+  "depth": "shallow",
+  "file": "ratelimit/counters.py",
+  "expected_verdict": "approve",
+  "note": "The whole read-modify-write in incr, including the store into _windows, happens with the lock held, so increments cannot be lost and the store cannot race sweep()."
+}

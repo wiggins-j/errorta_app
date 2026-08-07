@@ -1,0 +1,31 @@
+diff --git a/ratelimit/counters.py b/ratelimit/counters.py
+--- a/ratelimit/counters.py
++++ b/ratelimit/counters.py
+@@ -28,10 +28,27 @@
+             window = self._windows.get(key)
+             if window is None or now - window.started_at >= self._period:
+                 return 0
+             return window.count
+ 
++    def incr(self, key: str, amount: int = 1) -> int:
++        """Add ``amount`` to ``key``'s window and return the new total.
++
++        Every request thread on the node calls this, so the read of the
++        existing window and the store of the updated one have to be one
++        atomic step: the limiter's whole job is that the returned total is
++        the true number of requests seen in the window.
++        """
++        now = self._clock()
++        with self._lock:
++            window = self._windows.get(key)
++            if window is None or now - window.started_at >= self._period:
++                window = Window(started_at=now, count=0)
++        updated = Window(started_at=window.started_at, count=window.count + amount)
++        self._windows[key] = updated
++        return updated.count
++
+     def reset(self, key: str) -> None:
+         with self._lock:
+             self._windows.pop(key, None)
+ 
+     def sweep(self) -> int:

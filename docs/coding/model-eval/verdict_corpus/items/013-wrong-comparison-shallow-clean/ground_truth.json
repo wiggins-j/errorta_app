@@ -1,0 +1,10 @@
+{
+  "id": "013-wrong-comparison-shallow-clean",
+  "kind": "clean",
+  "pair_id": "013",
+  "defect_class": "wrong-comparison-operator",
+  "depth": "shallow",
+  "file": "sync/incremental.py",
+  "expected_verdict": "approve",
+  "note": "The skip test is `st_mtime <= last_sync`, so files untouched since the previous run are skipped and every file with a later mtime is copied."
+}

@@ -1,0 +1,10 @@
+{
+  "id": "010-race-ordering-deep-clean",
+  "kind": "clean",
+  "pair_id": "010",
+  "defect_class": "race-ordering",
+  "depth": "deep",
+  "file": "catalog/row_cache.py",
+  "expected_verdict": "approve",
+  "note": "_load stamps the cache version before the database read and only publishes when the version is unchanged, so an invalidation that lands during the read causes the in-flight load to discard its snapshot instead of resurrecting it."
+}

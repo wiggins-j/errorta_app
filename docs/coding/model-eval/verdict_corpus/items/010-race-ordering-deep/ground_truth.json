@@ -1,0 +1,19 @@
+{
+  "id": "010-race-ordering-deep",
+  "kind": "seeded",
+  "pair_id": "010",
+  "defect_class": "race-ordering",
+  "depth": "deep",
+  "file": "catalog/row_cache.py",
+  "location": "catalog/row_cache.py -- _load()'s unconditional publish, wrong only in light of the invalidate()/update() ordering added in the same diff",
+  "mechanism": "_load reads the row outside the lock and then publishes it unconditionally. A reader that read the pre-write row can be preempted, let update() write the database and invalidate the key, and then store its stale snapshot back into the cache. The invalidation is silently undone, so update() does not deliver the read-your-writes guarantee its docstring states and every reader is served the old row until the TTL expires.",
+  "accepted_finding_forms": [
+    "a concurrent _load can repopulate the cache with a pre-write row after invalidate() has cleared it",
+    "the invalidation added here can be undone by an in-flight load, so update() does not guarantee read-your-writes",
+    "_load publishes a snapshot read outside the lock with no check that the cache has not changed underneath it -- stale value wins the race",
+    "there is a read/invalidate race between the new write path and the existing load path; the cache can be left stale until the TTL",
+    "the ordering of the database read and the cache store is not protected against a concurrent invalidation",
+    "cache invalidation is not atomic with respect to loads, so a writer's invalidate can be lost"
+  ],
+  "expected_verdict": "reject"
+}

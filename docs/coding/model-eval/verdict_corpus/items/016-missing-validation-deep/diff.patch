@@ -1,0 +1,97 @@
+diff --git a/webhooks/partner.py b/webhooks/partner.py
+--- a/webhooks/partner.py
++++ b/webhooks/partner.py
+@@ -1,35 +1,87 @@
+ """Inbound partner webhook endpoint.
+ 
+-Authentication is a shared bearer token compared against the configured
+-secret.  Partners have asked for signed payloads instead, which is the
+-next change here.
++Requests carry an HMAC signature over the raw body rather than a bearer
++token, and repeated deliveries of the same event are absorbed by a
++short-lived dedup table.
+ """
+ 
+ from __future__ import annotations
+ 
++import hashlib
+ import hmac
+ import json
+ import logging
+ import time
+ 
+ logger = logging.getLogger(__name__)
+ 
++# The dedup table has to outlive the signature tolerance window: a delivery
++# that ages out of the table while its signature is still acceptable would be
++# processed a second time.
++SIGNATURE_TOLERANCE_SECONDS = 300
++SEEN_TTL_SECONDS = 2 * SIGNATURE_TOLERANCE_SECONDS
+ 
++
+ class BadSignature(Exception):
+     pass
+ 
+ 
++def _parse_signature_header(header: str) -> tuple[int, str]:
++    """Parse a ``t=<unix seconds>,v1=<hex digest>`` header."""
++    parts = dict(p.split("=", 1) for p in header.split(",") if "=" in p)
++    if "t" not in parts or "v1" not in parts:
++        raise BadSignature("malformed signature header")
++    try:
++        timestamp = int(parts["t"])
++    except ValueError:
++        raise BadSignature("malformed signature timestamp")
++    return timestamp, parts["v1"]
++
++
++def verify_signature(raw_body: bytes, header: str, secret: bytes, now: float) -> int:
++    """Check the HMAC over ``<timestamp>.<body>``.
++
++    The timestamp is folded into the signed string so that a partner cannot
++    edit it without invalidating the digest.
++    """
++    timestamp, provided = _parse_signature_header(header)
++    signed = f"{timestamp}.".encode("utf-8") + raw_body
++    expected = hmac.new(secret, signed, hashlib.sha256).hexdigest()
++    if not hmac.compare_digest(expected, provided):
++        raise BadSignature("signature mismatch")
++    logger.debug("webhook signature ok, age=%.1fs", now - timestamp)
++    return timestamp
++
++
+ class WebhookHandler:
+     def __init__(self, secret: bytes, dispatch, clock=time.time):
+         self._secret = secret
+         self._dispatch = dispatch
+         self._clock = clock
++        self._seen: dict = {}
+ 
++    def _prune(self, now: float) -> None:
++        for event_id, seen_at in list(self._seen.items()):
++            if now - seen_at > SEEN_TTL_SECONDS:
++                del self._seen[event_id]
++
+     def handle(self, raw_body: bytes, headers: dict) -> tuple[int, dict]:
+-        token = headers.get("X-Partner-Token", "")
+-        if not hmac.compare_digest(token.encode("utf-8"), self._secret):
+-            logger.warning("rejected webhook: bad token")
++        now = self._clock()
++        try:
++            verify_signature(
++                raw_body, headers.get("X-Signature", ""), self._secret, now
++            )
++        except BadSignature as exc:
++            logger.warning("rejected webhook: %s", exc)
+             return 401, {"error": "unauthorized"}
+         event = json.loads(raw_body)
++        self._prune(now)
++        event_id = event.get("id")
++        if event_id is None:
++            logger.warning("rejected webhook: event carries no id")
++            return 400, {"error": "missing event id"}
++        if event_id in self._seen:
++            return 200, {"status": "duplicate"}
++        self._seen[event_id] = now
+         self._dispatch(event)
+         return 200, {"status": "accepted"}

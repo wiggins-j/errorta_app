@@ -1,0 +1,59 @@
+diff --git a/db/pool.py b/db/pool.py
+--- a/db/pool.py
++++ b/db/pool.py
+@@ -24,32 +24,55 @@
+         self._max_size = max_size
+         self._idle: list = []
+         self._leased = 0
+         self._recycled = 0
+         self._lock = threading.Lock()
++        self._cursors: dict = {}
+ 
+     def acquire(self):
+         with self._lock:
+             if self._idle:
+                 return self._idle.pop()
+             if self._leased >= self._max_size:
+                 raise PoolExhausted("no connection available")
+             self._leased += 1
+         return self._factory()
+ 
++    def prepared(self, conn, sql: str):
++        """Return a cursor with ``sql`` already planned on ``conn``.
++
++        The driver re-plans a statement for every fresh cursor, and that plan
++        step dominates the cost of the small hot queries the router issues,
++        so we keep one prepared cursor per connection and statement.  The
++        outer dict is keyed by the connection object itself.
++
++        No lock is taken: a connection is only ever held by one thread at a
++        time, so the inner dict is thread-confined, and ``setdefault`` on the
++        outer dict is atomic.
++        """
++        per_conn = self._cursors.setdefault(conn, {})
++        cursor = per_conn.get(sql)
++        if cursor is None:
++            cursor = conn.cursor()
++            cursor.prepare(sql)
++            per_conn[sql] = cursor
++        return cursor
++
+     def release(self, conn) -> None:
+         with self._lock:
+             self._idle.append(conn)
+ 
+     def discard(self, conn) -> None:
+         """Retire a connection the driver told us is no longer usable."""
+         with self._lock:
+             self._leased -= 1
++            self._recycled += 1
+         conn.close()
+ 
+     def stats(self) -> dict:
+         with self._lock:
+             return {
+                 "idle": len(self._idle),
+                 "leased": self._leased,
+                 "recycled": self._recycled,
++                "prepared_connections": len(self._cursors),
+             }

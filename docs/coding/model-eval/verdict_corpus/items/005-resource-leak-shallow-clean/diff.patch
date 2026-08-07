@@ -1,0 +1,37 @@
+diff --git a/eventstore/segment.py b/eventstore/segment.py
+--- a/eventstore/segment.py
++++ b/eventstore/segment.py
+@@ -22,10 +22,33 @@
+         "last_seq": last_seq,
+         "record_count": record_count,
+     }
+ 
+ 
++def probe(path: str) -> dict | None:
++    """Peek at a segment header without reading its records.
++
++    The compactor calls this once per candidate file -- thousands per run --
++    to decide which segments a generation actually needs to touch.  Returns
++    None for anything that is not a readable EVS2 segment: foreign files and
++    half-written segments from a crashed writer are both expected here.
++    """
++    fh = open(path, "rb")
++    try:
++        if fh.read(4) != MAGIC:
++            return None
++        raw = fh.read(HEADER_LEN)
++        if len(raw) < HEADER_LEN:
++            return None
++        return _decode_header(raw)
++    finally:
++        # Explicit close rather than a `with` block: the compactor's C shim
++        # calls probe() through a wrapper that hands back the file object on
++        # success, so the close has to stay in one place we control.
++        fh.close()
++
++
+ def read_all(path: str) -> list[bytes]:
+     """Read every record body out of a segment."""
+     records: list[bytes] = []
+     with open(path, "rb") as fh:
+         if fh.read(4) != MAGIC:

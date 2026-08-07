@@ -1,0 +1,55 @@
+diff --git a/auth/token_cache.py b/auth/token_cache.py
+--- a/auth/token_cache.py
++++ b/auth/token_cache.py
+@@ -1,9 +1,10 @@
+ """Service-account token cache.
+ 
+ Every outbound call to an internal API carries a token minted by the IdP.
+-Refreshes are on-demand: the first request after expiry pays for the mint.
++A warmer thread refreshes the token at the halfway point of its lifetime so
++that request paths normally never wait on the IdP.
+ """
+ 
+ from __future__ import annotations
+ 
+ import logging
+@@ -27,16 +28,38 @@
+     def _expired(self, at: float) -> bool:
+         """True once the token is within ``skew`` seconds of its expiry."""
+         return at >= self._expires_at - self._skew
+ 
+     def _refresh(self) -> str:
++        """Mint a new token, tolerating a brief IdP outage.
++
++        A refresh that fails while the token we already hold is still good is
++        not an incident -- the warmer will try again shortly -- so we hand the
++        existing token back.  A refresh that fails when the token is *not*
++        still good is a real outage and has to propagate: returning an
++        expired token would convert an IdP problem into a wave of 401s from
++        every downstream service, with nothing in our own logs to explain it.
++        """
+         now = self._clock()
+-        token, ttl = self._client.mint()
++        try:
++            token, ttl = self._client.mint()
++        except AuthError as exc:
++            if self._token is not None and not self._expired(now):
++                logger.warning("token refresh failed, reusing cached token: %s", exc)
++                return self._token
++            raise
+         self._token = token
+         self._expires_at = now + ttl
+         return token
+ 
++    def refresh_ahead(self) -> None:
++        """Called by the warmer at the halfway point of the token lifetime."""
++        try:
++            self._refresh()
++        except AuthError:
++            logger.warning("proactive token refresh failed; will retry")
++
+     def get_token(self) -> str:
+         now = self._clock()
+         if self._token is not None and not self._expired(now):
+             return self._token
+         return self._refresh()

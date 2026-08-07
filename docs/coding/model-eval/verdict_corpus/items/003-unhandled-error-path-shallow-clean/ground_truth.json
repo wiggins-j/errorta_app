@@ -1,0 +1,10 @@
+{
+  "id": "003-unhandled-error-path-shallow-clean",
+  "kind": "clean",
+  "pair_id": "003",
+  "defect_class": "unhandled-error-path",
+  "depth": "shallow",
+  "file": "configsvc/remote_config.py",
+  "expected_verdict": "approve",
+  "note": "_fetch calls raise_for_status() and refresh() catches ValueError alongside RequestException, so a bad status or an unparseable body leaves the previous snapshot in place and the poll loop alive."
+}

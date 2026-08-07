@@ -1,0 +1,30 @@
+diff --git a/ratelimit/config.py b/ratelimit/config.py
+--- a/ratelimit/config.py
++++ b/ratelimit/config.py
+@@ -27,5 +27,26 @@
+     return Limits(
+         requests_per_second=DEFAULT_RPS,
+         burst=DEFAULT_BURST,
+         max_body_bytes=DEFAULT_MAX_BODY_BYTES,
+     )
++
++
++def _configured(value, default):
++    """Fall back to ``default`` only when the tenant left the key out.
++
++    Zero is a meaningful setting for every numeric limit here: burst=0
++    disables bursting outright, and requests_per_second=0 is how support
++    hard-stops a tenant that is abusing the API.  So absence, not
++    falsiness, is what selects the default.
++    """
++    return value or default
++
++
++def from_mapping(raw: dict) -> Limits:
++    """Build Limits from one tenant's stanza of the limits YAML."""
++    return Limits(
++        requests_per_second=_configured(raw.get("requests_per_second"), DEFAULT_RPS),
++        burst=_configured(raw.get("burst"), DEFAULT_BURST),
++        max_body_bytes=_configured(raw.get("max_body_bytes"), DEFAULT_MAX_BODY_BYTES),
++        exempt_paths=tuple(raw.get("exempt_paths") or ()),
++    )

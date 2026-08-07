@@ -1,0 +1,51 @@
+diff --git a/sync/incremental.py b/sync/incremental.py
+--- a/sync/incremental.py
++++ b/sync/incremental.py
+@@ -1,10 +1,9 @@
+ """Directory mirror for the rendered-asset pipeline.
+ 
+-Every run copies the whole tree.  On the large brand libraries this is
+-tens of gigabytes of unchanged files, which is why the nightly job now
+-takes longer than the window it is allowed.
++Runs are incremental: the manifest records when the previous successful run
++started, and only files touched since then are copied.
+ """
+ 
+ from __future__ import annotations
+ 
+ import logging
+@@ -25,12 +24,31 @@
+     target = os.path.join(dest, relative)
+     os.makedirs(os.path.dirname(target), exist_ok=True)
+     shutil.copy2(src, target)
+ 
+ 
+-def sync(root: str, dest: str) -> int:
+-    copied = 0
++def changed_since(root: str, last_sync: float):
++    """Yield the files that need copying on this run.
++
++    ``last_sync`` is the wall-clock start of the previous successful run, so
++    a file whose mtime is at or before it was already mirrored and can be
++    skipped; anything with a later mtime has been touched since and must be
++    copied again.
++    """
+     for path in walk_files(root):
++        try:
++            stat = os.stat(path)
++        except FileNotFoundError:
++            # A render job deleted the file between the walk and the stat.
++            continue
++        if stat.st_mtime >= last_sync:
++            continue
++        yield path
++
++
++def sync(root: str, dest: str, last_sync: float = 0.0) -> int:
++    copied = 0
++    for path in changed_since(root, last_sync):
+         _copy(path, root, dest)
+         copied += 1
+-    logger.info("mirrored %d files from %s", copied, root)
++    logger.info("mirrored %d changed files from %s", copied, root)
+     return copied

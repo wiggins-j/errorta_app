@@ -1,0 +1,19 @@
+{
+  "id": "002-off-by-one-deep",
+  "kind": "seeded",
+  "pair_id": "002",
+  "defect_class": "off-by-one",
+  "depth": "deep",
+  "file": "mediasvc/http_range.py",
+  "location": "mediasvc/http_range.py -- _read_span() read length, wrong only relative to the inclusive range contract of _parse_range() and the Content-Length computed in handle_get()",
+  "mechanism": "_parse_range returns an inclusive last byte, but _read_span reads last - first bytes, one short of the span. handle_get still advertises Content-Length = last - first + 1, so every 206 response is one byte shorter than its declared length: the client's last byte of each range is missing and conformant clients stall waiting for a byte that never arrives.",
+  "accepted_finding_forms": [
+    "_read_span reads one byte too few: HTTP ranges are inclusive, so the length is last - first + 1",
+    "the body length and the Content-Length disagree by one byte on every partial response",
+    "the range end is inclusive per _parse_range but the read treats it as exclusive, truncating each range by a byte",
+    "206 responses are short by one byte relative to the advertised Content-Length, so clients hang or lose the final byte",
+    "off-by-one between the inclusive range returned by the parser and the byte count read from the file",
+    "the two new helpers disagree about whether the end offset is inclusive; the read is one byte short"
+  ],
+  "expected_verdict": "reject"
+}

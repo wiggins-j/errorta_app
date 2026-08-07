@@ -1,0 +1,19 @@
+{
+  "id": "013-wrong-comparison-shallow",
+  "kind": "seeded",
+  "pair_id": "013",
+  "defect_class": "wrong-comparison-operator",
+  "depth": "shallow",
+  "file": "sync/incremental.py",
+  "location": "sync/incremental.py, changed_since() mtime comparison",
+  "mechanism": "The skip test is inverted: files with an mtime at or after the previous run are skipped and only untouched files are yielded. The incremental mirror therefore copies exactly the complement of the changed set and never copies an edited file -- and on a first run, where last_sync defaults to 0.0, it copies nothing at all. Edited assets silently stop reaching the mirror while the job still logs a file count and succeeds.",
+  "accepted_finding_forms": [
+    "the comparison is backwards -- `>=` skips the files modified since the last sync, which are the ones that need copying",
+    "changed_since yields unchanged files and filters out changed ones; the operator should be <=",
+    "inverted mtime test means the incremental sync mirrors the complement of the changed set",
+    "modified files are never copied, so the mirror silently goes stale while the run still looks successful",
+    "wrong comparison direction against last_sync in the skip condition",
+    "with the default last_sync of 0.0 the condition skips every file, so the first run copies nothing"
+  ],
+  "expected_verdict": "reject"
+}

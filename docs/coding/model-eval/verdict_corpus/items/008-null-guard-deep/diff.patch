@@ -1,0 +1,70 @@
+diff --git a/ingest/normalize.py b/ingest/normalize.py
+--- a/ingest/normalize.py
++++ b/ingest/normalize.py
+@@ -12,36 +12,56 @@
+ logger = logging.getLogger(__name__)
+ 
+ REQUIRED_FIELDS = ("email", "given_name", "family_name")
+ 
+ 
++class RowRejected(Exception):
++    def __init__(self, reason: str, source_id):
++        super().__init__(f"{source_id}: {reason}")
++        self.reason = reason
++        self.source_id = source_id
++
++
+ def _norm_text(value) -> str:
+     """Collapse runs of whitespace and case-fold for comparison keys."""
+     return " ".join(str(value).split()).lower()
+ 
+ 
+ def _identity_hash(email: str) -> str:
+     """Stable pseudonymous id -- two rows with the same hash are one person."""
+     return hashlib.sha256(_norm_text(email).encode("utf-8")).hexdigest()
+ 
+ 
+-def normalize_row(row: dict) -> dict | None:
+-    email = row.get("email")
+-    if email is None:
+-        logger.debug("dropping row with no email: %r", row.get("source_id"))
+-        return None
++def validate_row(row: dict) -> None:
++    """Reject a row that cannot produce a usable profile.
++
++    Partner dumps are inconsistent about which columns they ship, so every
++    required field has to be there before we try to normalise the row.
++    """
++    for name in REQUIRED_FIELDS:
++        if name not in row:
++            raise RowRejected(f"missing {name}", row.get("source_id"))
++
++
++def normalize_row(row: dict) -> dict:
++    # validate_row has already guaranteed every required field is present
++    # and non-null, so no defensive checks are needed here.
++    email = row["email"]
+     return {
+         "identity": _identity_hash(email),
+         "email": _norm_text(email),
+-        "given_name": _norm_text(row.get("given_name", "")),
+-        "family_name": _norm_text(row.get("family_name", "")),
++        "given_name": _norm_text(row["given_name"]),
++        "family_name": _norm_text(row["family_name"]),
+         "source_id": row.get("source_id"),
+     }
+ 
+ 
+ def normalize_batch(rows: list[dict]) -> list[dict]:
+     out = []
+     for row in rows:
+-        record = normalize_row(row)
+-        if record is not None:
+-            out.append(record)
++        try:
++            validate_row(row)
++        except RowRejected as exc:
++            logger.info("dropping row: %s", exc)
++            continue
++        out.append(normalize_row(row))
+     return out

@@ -1,0 +1,18 @@
+{
+  "id": "003-unhandled-error-path-shallow",
+  "kind": "seeded",
+  "pair_id": "003",
+  "defect_class": "unhandled-error-path",
+  "depth": "shallow",
+  "file": "configsvc/remote_config.py",
+  "location": "configsvc/remote_config.py, ConfigStore._fetch()/refresh() error handling",
+  "mechanism": "_fetch never checks the HTTP status, and refresh only catches RequestException. A non-2xx response carrying an HTML error body makes response.json() raise ValueError, which escapes refresh(), unwinds _loop() and kills the refresh thread; config then silently freezes for the life of the process.",
+  "accepted_finding_forms": [
+    "the HTTP error path is unhandled: no raise_for_status, and the JSON decode error escapes refresh()",
+    "a non-2xx response with a non-JSON body raises ValueError out of refresh and terminates the refresh thread",
+    "_fetch parses the body without checking the status code, so error pages are treated as config or blow up the poller",
+    "refresh only catches RequestException; a JSON decoding failure is unhandled and kills _loop permanently",
+    "the refresh thread has no top-level guard, so any error other than RequestException stops all future refreshes silently"
+  ],
+  "expected_verdict": "reject"
+}

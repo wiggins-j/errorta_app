@@ -1,0 +1,10 @@
+{
+  "id": "001-off-by-one-shallow-clean",
+  "kind": "clean",
+  "pair_id": "001",
+  "defect_class": "off-by-one",
+  "depth": "shallow",
+  "file": "warehouse/bulk_writer.py",
+  "expected_verdict": "approve",
+  "note": "per_batch is floor(MAX_BIND_PARAMS / len(columns)) with no +1, so every statement binds at most MAX_BIND_PARAMS parameters."
+}
