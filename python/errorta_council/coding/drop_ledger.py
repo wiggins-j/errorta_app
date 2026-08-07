@@ -26,10 +26,11 @@ def drop_count(store: Any, identity: str) -> int:
 
 def record_drop(store: Any, identity: str) -> int:
     """Increment and persist the count for `identity`; return the new value."""
-    led = _ledger(store)
-    led[str(identity)] = led.get(str(identity), 0) + 1
-    try:
-        store.set_run_state(**{_KEY: led})
-    except Exception:  # noqa: BLE001 — best-effort; a lost increment only delays quarantine
-        pass
-    return led[str(identity)]
+    with store.lock:  # RMW guarded — nested set_run_state re-acquires the RLock
+        led = _ledger(store)
+        led[str(identity)] = led.get(str(identity), 0) + 1
+        try:
+            store.set_run_state(**{_KEY: led})
+        except Exception:  # noqa: BLE001 — best-effort; a lost increment only delays quarantine
+            pass
+        return led[str(identity)]
