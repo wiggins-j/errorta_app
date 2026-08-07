@@ -146,6 +146,25 @@ enabling `format` on a thinking route makes the empty-`response` failure worse.
 |---|---|---|
 | **SPEC-28** | End-to-end autonomy acceptance | A repeatable gravity-golf-shaped fixture driven to `definition_of_done`, asserting a *playable artifact*, runnable in CI. Without this, every fix above is unverified in aggregate — which is exactly the state we are in today. |
 
+## Open work — tracked on GitHub (as of 2026-08-07)
+
+The 2026-08-06/07 campaign landed SPEC-29, SPEC-40/41/42/44, F154, F156, the
+knob disable-value fixes and local route discovery, and replaced every spec's
+Status line with a code-verified verdict. What remains is tracked as issues so
+the roadmap does not silently become the backlog:
+
+| Issue | What | Why it is not just a chore |
+|---|---|---|
+| [#86](https://github.com/wiggins-j/errorta_app/issues/86) | Local reviewer detects **0/48** seeded defects; cause not isolated | The reviewer seat is measured non-functional as a gate while scoring near-perfect on shape. Note it achieves a **100% merge-gate pass rate** — the degenerate oracle this roadmap's Phase 4 would have been scored against. Three candidate causes with completely different fixes; the `gemma3:27b` reference pass is the cheapest discriminator. |
+| [#87](https://github.com/wiggins-j/errorta_app/issues/87) | No end-to-end run has exercised the 2026-08 gates | SPEC-29's DoD clauses 2-3 are asserted at `plan_next_batch` level, not end-to-end. This is the same gap SPEC-28 exists to close, restated for the gates that landed after it was written. |
+| [#88](https://github.com/wiggins-j/errorta_app/issues/88) | Deferred spec items, release coverage, known-red tests | SPEC-31 §1, SPEC-32 Item 3, F149's cd-emit; arm64-only release; the two long-red egress-lint tests that train people to ignore the failure count. |
+
+**Phase 4 is still the binding constraint, and #86 sharpens why.** SPEC-28 would
+drive a fixture to `definition_of_done` — but a reviewer that approves every
+seeded defect passes that bar trivially. Any end-to-end acceptance built now must
+score what the gate CAUGHT, not merely that the run completed. #86 and #87 are
+the two halves of making Phase 4 mean something.
+
 ## Sequencing and dependencies
 
 - **22 → 23** — the last-word turn needs its decisions traceable, or we are
