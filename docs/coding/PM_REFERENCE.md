@@ -216,21 +216,26 @@ usually tune:
 |---|---|---|
 | `checkpoint_cadence` | `per_milestone` | when the loop pauses for the user: `off` / `every_n_tasks` / `per_milestone` / `on_merge_ready` |
 | `checkpoint_n` | 5 | N for `every_n_tasks` |
-| `max_iterations` | 200 | hard cap on loop turns |
+| `max_iterations` | 200 | hard cap on loop turns. **No disable value** — it is the run's terminal spend backstop, so a value `<= 0` clamps up to `1` (one iteration) instead of stopping `budget_exhausted` before the first turn |
 | `max_model_calls` | `null` (unlimited) | **total** AI-call cap across the whole run — the single spend valve for autonomous runs |
 | `max_parallel_workers` | `null` (AUTO = #workers) | how many members work at once; `1` = sequential |
 
 **Reliability guards** (usually leave at default; they keep a run from looping or
-burning budget): `pm_idle_limit` (2), `member_failure_limit` (3, F120),
-`worker_unproductive_limit` (2)
+burning budget): `pm_idle_limit` (2 — `0` **disables** the no-progress detector
+entirely; it does NOT mean "stop immediately"), `member_failure_limit` (3, F120),
+`worker_unproductive_limit` (2 — `0` **disables** the F127 ladder: no escalation,
+no reassignment, no PM assist, matching its two siblings)
 / `model_escalation_limit` (2) / `task_reassignment_limit` (2) / `pm_assist_limit`
 (1) — the F127 escalate-up ladder, `completion_refused_limit` (2, F128 — false
 "done" guard), `foundation_stall_limit` (12) / `convergence_stall_limit` (20, F139
 — stop when nothing is converging), `delivery_review_round_limit` (3, F155 — stop
 `delivery_review_stalled` when the delivery review keeps rejecting the integrated
-result instead of looping to budget), `hot_file_threshold` (2) /
-`hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) — the
-F159 hot-file serializer, `revise_chain_limit` (3) / `revise_livelock_limit` (5,
+result instead of looping to budget), `hot_file_serialization` (`true` — F159's
+on/off switch; `false` restores pre-F159 dispatch exactly) / `hot_file_threshold`
+(2) / `hot_file_escalation_threshold` (4) / `hot_file_freeze_stall_limit` (15) —
+the F159 hot-file serializer (the three integer knobs are **sensitivity dials**
+and clamp to `>= 1`; `1` is more aggressive than the default, so use
+`hot_file_serialization: false` to turn the mechanism off), `revise_chain_limit` (3) / `revise_livelock_limit` (5,
 Spec 16 — see below), `dev_repo_read` (`false`, Spec 11 — see below),
 `last_word_limit` (2, Spec 23 — see below), `governance_proximity` (0.6, Spec 24
 — see below), `narrow_limit` (3) / `narrow_drain_iters` (5, Spec 27 — see
@@ -361,7 +366,10 @@ a claim with no file behind it), and an **empty approval produced without readin
 the code** (the CLI's `num_turns` shows it ran no Read/Grep) is retried once and,
 if still ungrounded, accepted but surfaced as a `review_ungrounded` alert — never
 blocked. `review_min_latency_ms` (default `0`, off) is the latency fallback for
-vendors that don't report a turn count.
+vendors that don't report a turn count. If you **omit** `reviewer_repo_read` it
+follows `dev_repo_read` — the two are one capability decision, so turning dev
+retrieval on carries the reviewer with it. Set the key explicitly (`false`) to
+opt the reviewer out on its own.
 
 > **Withdrawn: `review_screenshot`.** A `review_screenshot` knob shipped in the
 > Spec 12-18 prep PR and has been **removed** — setting it never did anything, and
@@ -422,6 +430,12 @@ centralizes it (the same `contract_owner_task_id` task as WS-D2) and freezes
 direct parallel edits until that owner merges (surfaced as a `hot_file_escalated`
 decision); the freeze force-lifts (`hot_file_freeze_stalled`) after
 `hot_file_freeze_stall_limit` iterations if the owner never lands.
+
+**Off switch.** Set `hot_file_serialization: false` to disable the whole
+mechanism — no hot set is computed, no path is serialized, and a conflict never
+escalates to a centralize owner + freeze, which is pre-F159 dispatch exactly.
+`hot_file_threshold: 0` is **not** an off switch: it clamps to `1`, which makes
+every conflicted path hot (the opposite of disabling).
 
 **Presets:** **CAREFUL** (checkpoints per-milestone, `max_parallel_workers=1`,
 tight caps, block-on-problems on) vs **AUTONOMOUS** (checkpoints `off`,
@@ -733,6 +747,7 @@ and FastAPI routers. Update the prose and this contract together.
     "governance_proximity": 0.6,
     "hot_file_escalation_threshold": 4,
     "hot_file_freeze_stall_limit": 15,
+    "hot_file_serialization": true,
     "hot_file_threshold": 2,
     "last_word_limit": 2,
     "local_structured_format": true,

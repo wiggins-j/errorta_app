@@ -5642,7 +5642,13 @@ def _maybe_escalate_hot_files(store: LedgerStore, conflict_paths: list[str],
     try:
         try:
             from .autonomy import load_policy
-            esc = max(1, int(load_policy(store).hot_file_escalation_threshold))
+            _policy = load_policy(store)
+            # F159's off switch: no escalation, no centralize owner, no freeze —
+            # pre-F159 conflict handling exactly. Checked BEFORE `force`, which is
+            # an F159 escalation too (a resolve-retry exhaustion).
+            if not _policy.hot_file_serialization:
+                return
+            esc = max(1, int(_policy.hot_file_escalation_threshold))
         except Exception:  # noqa: BLE001
             esc = 4
         counts: dict[str, int] = {}
