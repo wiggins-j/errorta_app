@@ -74,3 +74,13 @@ def test_refused_task_is_persisted_blocked(tmp_path):
     assert "execution" in blocked[0].reason_summary.lower() or blocked[0].reason_summary
     # It must NOT have been dropped or silently discarded.
     assert not _tasks_by_state(store, "dropped")
+
+
+def test_same_batch_duplicate_execution_blocked_once(tmp_path):
+    title = "run the integration suite and report the failing cases"
+    store = _store(tmp_path)
+    _materialize_pm_tasks(store, _Intent([_Planned(title), _Planned(title)]))
+    blocked = _tasks_by_state(store, "blocked")
+    assert len(blocked) == 1
+    assert blocked[0]._extras.get("blocked_reason") == "missing_capability:execution_gate"
+    assert any(d.get("choice") == "duplicate_task_rejected" for d in store.list_decisions())

@@ -3464,6 +3464,9 @@ def _materialize_pm_tasks(
                             detail="no executor and no acceptance gate",
                             capability="execution_gate"),
                     })
+                open_index.append(task_dedupe.index_entry(
+                    task_id=blocked_task.task_id, title=planned.title, role=DEV,
+                    paths=paths))
                 continue
         task = store.add_task(
             title=use_title,
