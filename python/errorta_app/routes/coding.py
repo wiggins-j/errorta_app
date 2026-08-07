@@ -2910,7 +2910,12 @@ def _run_backlog_shape(store: Any) -> dict[str, int] | None:
         for role in _WORKER_PRIORITY:
             for task in store.next_tasks(role, todo_n or 1, exclude=seen):
                 seen.add(task.task_id)
-        return {"todo": todo_n, "dispatchable": len(seen)}
+        blocked_cap = sum(
+            1 for t in store.list_tasks(state="blocked")
+            if str((getattr(t, "_extras", {}) or {}).get("blocked_reason", "") or "")
+            .startswith("missing_capability:"))
+        return {"todo": todo_n, "dispatchable": len(seen),
+                "blocked_on_capability": blocked_cap}
     except Exception:  # noqa: BLE001 - a status read must never 500 the endpoint
         return None
 

@@ -178,6 +178,11 @@ def render_status(payload: Any, verbosity: Any) -> str:
             style = "cli.bad" if wedged else "cli.muted"
             lines.append(Text(
                 f"todo:    {todo_n} (dispatchable: {dispatchable})", style=style))
+        blocked_cap = backlog.get("blocked_on_capability")
+        if blocked_cap:
+            lines.append(Text(
+                f"blocked: {blocked_cap} on a missing capability (auto-retry when enabled)",
+                style="cli.warn"))
 
     counters = state.get("counters") or {}
     if counters:
