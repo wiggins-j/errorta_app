@@ -5709,17 +5709,25 @@ def _maybe_escalate_hot_files(store: LedgerStore, conflict_paths: list[str],
     file we failed to auto-rebase that many times IS hot, so hand it to the
     centralize owner + freeze it instead of leaving the PR silently blocked."""
     try:
+        # F159's off switch: no escalation, no centralize owner, no freeze —
+        # pre-F159 conflict handling exactly. Checked BEFORE `force`, which is an
+        # F159 escalation too (a resolve-retry exhaustion).
+        #
+        # An OFF SWITCH MUST FAIL CLOSED. This resolution deliberately sits OUTSIDE
+        # the threshold's try/except: when that except also covered the flag, an
+        # unreadable `autonomy.json` fell through to `esc = 4` and escalated — i.e.
+        # a corrupt policy file re-enabled the exact mechanism the operator had
+        # turned off. A policy we cannot read is not permission to act.
         try:
             from .autonomy import load_policy
             _policy = load_policy(store)
-            # F159's off switch: no escalation, no centralize owner, no freeze —
-            # pre-F159 conflict handling exactly. Checked BEFORE `force`, which is
-            # an F159 escalation too (a resolve-retry exhaustion).
-            if not _policy.hot_file_serialization:
-                return
+            serialization_on = bool(_policy.hot_file_serialization)
             esc = max(1, int(_policy.hot_file_escalation_threshold))
         except Exception:  # noqa: BLE001
+            serialization_on = False
             esc = 4
+        if not serialization_on:
+            return
         counts: dict[str, int] = {}
         for pr in store.list_prs():
             for raw in (pr.get("conflicts") or []):

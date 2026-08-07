@@ -1703,7 +1703,7 @@ def reserve_model_calls(counters: LoopCounters, policy: CodingAutonomyPolicy,
 
 
 def _checkpoint_due(policy: CodingAutonomyPolicy, counters: LoopCounters,
-                    milestone: bool, ledger: Any = None) -> bool:
+                    milestone: bool, ledger: Any) -> bool:
     cad = policy.checkpoint_cadence
     if cad == CADENCE_OFF:
         return False
@@ -1726,7 +1726,12 @@ def _checkpoint_due(policy: CodingAutonomyPolicy, counters: LoopCounters,
         # Found by the knob audit that followed the `review_screenshot` dead-knob
         # withdrawal: same shape, one level down — a documented VALUE with no reader
         # rather than a documented FIELD with no reader.
-        return _mergeable_pr_count(ledger) > 0 if ledger is not None else False
+        # `ledger` is REQUIRED, not defaulted. A default of None with a
+        # `ledger is not None` guard would silently restore the very bug this
+        # branch fixed — a caller that forgot the argument would get `off` again,
+        # with no error. A missing argument must be a TypeError at import/call
+        # time, not a silent behaviour reversion at run time.
+        return _mergeable_pr_count(ledger) > 0
     return False
 
 
@@ -3375,10 +3380,20 @@ def _handle_unproductive(
         if not (member_id and task_id):
             return None
         key = (member_id, task_id)
-        c.unproductive_counts[key] = c.unproductive_counts.get(key, 0) + 1
         limit = max(0, int(policy.worker_unproductive_limit))
         if limit <= 0:
-            return None  # ladder disabled — the same member keeps the task
+            # Ladder disabled — the same member keeps the task. The increment is
+            # deliberately BELOW this check. `sum(unproductive_counts.values())`
+            # is a term in `_progress_fingerprint`'s ladder tuple, and the resets
+            # that used to make it oscillate live further down this function, so
+            # counting here made the fingerprint differ on EVERY unproductive turn.
+            # That re-anchors `last_progress_iter` each iteration and
+            # `not_converging` can never trip — i.e. disabling this ladder also
+            # silently disabled the backstop that `_progress_fingerprint`'s own
+            # docstring delegates this exact pathology to. The run would burn to
+            # `budget_exhausted` and report a budget problem instead of the real one.
+            return None
+        c.unproductive_counts[key] = c.unproductive_counts.get(key, 0) + 1
         if c.unproductive_counts[key] < limit:
             return None  # let the same member retry up to the limit
 

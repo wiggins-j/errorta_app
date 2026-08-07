@@ -407,9 +407,9 @@ def test_on_merge_ready_cadence_actually_checkpoints() -> None:
     assert not _checkpoint_due(policy, counters, True, _Ledger([]))
 
 
-def test_on_merge_ready_without_a_ledger_is_inert() -> None:
-    # Defensive: the ledger argument defaults to None so any caller that has not
-    # been updated keeps today's behaviour instead of raising mid-loop.
+def test_on_merge_ready_requires_a_ledger_argument() -> None:
+    # `ledger` is REQUIRED. A defaulted None would let a future call site forget
+    # it and silently get `off` back — the exact bug this cadence fix closed.
     from errorta_council.coding.autonomy import (
         CADENCE_ON_MERGE_READY,
         CodingAutonomyPolicy,
@@ -417,7 +417,12 @@ def test_on_merge_ready_without_a_ledger_is_inert() -> None:
         _checkpoint_due,
     )
     policy = CodingAutonomyPolicy(checkpoint_cadence=CADENCE_ON_MERGE_READY)
-    assert not _checkpoint_due(policy, LoopCounters(), True)
+
+    class _NoPRs:
+        def list_prs(self):
+            return []
+
+    assert not _checkpoint_due(policy, LoopCounters(), True, _NoPRs())
 
 
 def test_other_cadences_are_unchanged_by_the_ledger_argument() -> None:
