@@ -77,9 +77,18 @@ the desktop Settings). For an **existing repo this is the single most important
 switch**: with it off, dev turns cannot `Read`/`Grep`/`Glob` the worktree, so
 the PM plans as if the repo were empty and the team **reinvents and duplicates
 work that already exists**. The tell in the logs is
-`capability_ask (dev): repo_read` followed by the PM blocking the task. Set both
-to `true` *before* the first `run`, then start the run so the fresh worker loads
-the new policy. (See `docs/coding/PM_REFERENCE.md` "Spec 11 / Spec 14" and
+`capability_ask (dev): repo_read` followed by the PM blocking the task.
+
+**Ordering matters: set the flags before `setup` / `team apply`, not after.**
+`run-setup/confirm` (which `team apply` and `setup` perform) **snapshots** the
+autonomy policy for the run. If you flip `dev_repo_read` in `autonomy.json`
+*after* confirming setup, the running worker keeps the old snapshot and repo_read
+stays off — the tell is a `capability_ask: repo_read` that persists even though
+the file now says `true`. Correct order: import → **edit `autonomy.json`** →
+`north-star set` → `team add`/`team apply` → `setup` → `run`. If you already
+confirmed setup, re-run `errorta setup` after editing the file, then start a
+**fresh** `run` (a stopped run is not `resume`-able — "run is not recoverable").
+(See `docs/coding/PM_REFERENCE.md` "Spec 11 / Spec 14" and
 `docs/specs/SPEC-15-capability-aware-planning.md`.)
 
 **2. AIAR is optional; a stale remote pointer throws a scary error.** AIAR (the
