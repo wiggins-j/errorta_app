@@ -1642,7 +1642,7 @@ def reserve_model_calls(counters: LoopCounters, policy: CodingAutonomyPolicy,
 
 
 def _checkpoint_due(policy: CodingAutonomyPolicy, counters: LoopCounters,
-                    milestone: bool) -> bool:
+                    milestone: bool, ledger: Any = None) -> bool:
     cad = policy.checkpoint_cadence
     if cad == CADENCE_OFF:
         return False
@@ -1650,7 +1650,22 @@ def _checkpoint_due(policy: CodingAutonomyPolicy, counters: LoopCounters,
         return counters.since_checkpoint >= policy.checkpoint_n
     if cad == CADENCE_PER_MILESTONE:
         return milestone
-    # on_merge_ready is handled by definition-of-done completion.
+    if cad == CADENCE_ON_MERGE_READY:
+        # A PR at `mergeable` is reviewer-approved AND tests-green — the last
+        # moment a human can look before it lands on master. That is what this
+        # cadence NAMES and what PM_REFERENCE promises ("when the loop pauses for
+        # the user"), so it pauses there.
+        #
+        # This branch did not exist until 2026-08-06. The value was a constant, was
+        # offered in `errorta run --checkpoint-cadence` help, was accepted by
+        # `policy_from_dict` without validation, and was documented as one of four
+        # cadences — and fell through to `return False`, i.e. an operator who
+        # selected it silently got `off`. The comment that stood here asserted it
+        # was "handled by definition-of-done completion"; no such consumer existed.
+        # Found by the knob audit that followed the `review_screenshot` dead-knob
+        # withdrawal: same shape, one level down — a documented VALUE with no reader
+        # rather than a documented FIELD with no reader.
+        return _mergeable_pr_count(ledger) > 0 if ledger is not None else False
     return False
 
 
@@ -4099,7 +4114,7 @@ def _run_sequential_loop(
         publish_detector_state(ledger, c, policy)
 
         # Checkpoint AFTER making progress on a unit; resume continues cleanly.
-        if _checkpoint_due(policy, c, milestone):
+        if _checkpoint_due(policy, c, milestone, ledger):
             c.since_checkpoint = 0
             return LoopResult(CHECKPOINT, c)
 
@@ -4603,7 +4618,7 @@ def _run_concurrent_loop(
                 # Spec 13 lifts the foundation clamp, i.e. the runs whose PM most
                 # needs to see the countdown.
                 publish_detector_state(ledger, c, policy)
-                if _checkpoint_due(policy, c, milestone):
+                if _checkpoint_due(policy, c, milestone, ledger):
                     c.since_checkpoint = 0
                     return LoopResult(CHECKPOINT, c)
                 milestone = False
