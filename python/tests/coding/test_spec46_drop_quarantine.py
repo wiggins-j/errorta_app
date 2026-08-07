@@ -39,3 +39,11 @@ def test_drop_decision_carries_reason_and_count(tmp_path):
                if d.get("choice") == "pm_task_cancelled")
     assert dec["reason_code"] == "pm_pruned"
     assert dec["drop_count"] == 1
+
+
+def test_quarantine_limit_default_and_ordering():
+    from errorta_council.coding.autonomy import CodingAutonomyPolicy
+    p = CodingAutonomyPolicy()
+    assert p.task_drop_quarantine_limit == 3
+    # MUST fire before planning_churn, or the whole run halts first.
+    assert p.task_drop_quarantine_limit < p.plan_streak_limit

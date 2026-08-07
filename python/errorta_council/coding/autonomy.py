@@ -217,6 +217,13 @@ class CodingAutonomyPolicy:
     # review_done / task_blocked / a PR transition) resets the streak, so a
     # legitimate up-front decomposition burst is unaffected. 0 disables it.
     plan_streak_limit: int = 6
+    # SPEC-46: after a task's normalized identity has been created-and-dropped this
+    # many times in one run, quarantine it (stop re-creating it) and raise a deduped
+    # operator Problem, instead of letting the create↔drop loop climb the plan streak
+    # to `planning_churn` and halt the whole run. MUST stay < plan_streak_limit so
+    # quarantine fires first. 0 disables the damping (planning_churn is then the only
+    # backstop, i.e. today's behaviour).
+    task_drop_quarantine_limit: int = 3
     # Spec 10: wedged-graph probe. When at least `wedge_min_tasks` todo tasks exist
     # but NO worker role has a dispatchable (deps-satisfied) head — sustained for
     # `wedge_stall_limit` iterations — the run stops `dispatch_wedged` after naming
@@ -516,6 +523,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "hot_file_freeze_stall_limit": p.hot_file_freeze_stall_limit,
         "gate_stall_limit": p.gate_stall_limit,
         "plan_streak_limit": p.plan_streak_limit,
+        "task_drop_quarantine_limit": p.task_drop_quarantine_limit,
         "wedge_min_tasks": p.wedge_min_tasks,
         "wedge_stall_limit": p.wedge_stall_limit,
         "dev_repo_read": p.dev_repo_read,
@@ -645,6 +653,10 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # detector entirely. Absent key -> dataclass default (6).
         plan_streak_limit=max(
             0, int(d.get("plan_streak_limit", base.plan_streak_limit))),
+        # SPEC-46: `max(0, …)` — NOT max(1) — so 0 disables drop-quarantine
+        # damping entirely. Absent key -> dataclass default (3).
+        task_drop_quarantine_limit=max(
+            0, int(d.get("task_drop_quarantine_limit", base.task_drop_quarantine_limit))),
         # Spec 10: `max(0, …)` clamps — a small/negative min is meaningless, and
         # `wedge_stall_limit == 0` disables the wedged-graph probe entirely.
         wedge_min_tasks=max(
