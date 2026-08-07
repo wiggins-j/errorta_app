@@ -11,10 +11,12 @@ capable REVIEWER whose turns never dispatched) · [SPEC-27](SPEC-27-convergence-
 **Relates to:** [F159](F159-hot-file-serialization.md) (the sibling merge-scoped
 gate, same role-blindness) · known-open #3, the missing reviewer-less merge path
 ([ROADMAP-autonomy.md](ROADMAP-autonomy.md):193-194)
-**Status:** PARTIAL (verified 2026-08-06 against the code, not the commit log) — ONLY the GL05 skip predicate; the claim guard, the hot-file exemption, AND the entire test deliverable are absent
+**Status:** LANDED (2026-08-06) — all three path gates exempt non-writers; the Item 2 regression lock exists
+**Landed evidence:** the three `role == DEV` guards in `plan_next_batch` (topology.py): the freeze-intersect gate, F159's hot gate, and GL05's skip + claim. F159's teeth (`role == DEV and not tp`) are unchanged and still hold prose-silent writers.
+**Correction to this spec's Item 3:** its closing note said F159's FREEZE gate could be left role-blind because `hot_file_freeze_stall_limit` force-lifts it. That is wrong, and the first implementation attempt shipped the error. The lift exists and fires, but it RACES `planning_churn` (plan_streak_limit 6, streak reset each trip), and under the documented `narrow_limit=0` disable value `_ladder_rung` collapses the ladder so churn STOPs several iterations BEFORE the lift; in the concurrent chain the freeze counter is not even reached on the wedge iterations. Reproduced as `plan_next_batch(...) -> [Plan(PM)]` — run 4's exact stop signature. Goal 3 is met only now that the freeze gate carries the exemption too.
+**Correction to Item 1's claim half:** the claim guard is a CONSISTENCY fix, not a liveness one. The sole non-test caller consumes only the first action of each batch and recomputes ownership from the ledger, so the in-batch `claimed` set is never read in production, and `inflight_owned_paths_by_task` is already DEV-scoped. The deadlock came from the skip predicates.
+**Tests:** tests/coding/test_spec29_review_dispatch.py (14). Four are red against the pre-work tree, including two freeze locks against the first fix attempt. Remaining gap: DoD clauses 2-3 (driven-to-completion, PRs reach merged) are still asserted only at the `plan_next_batch` level, not end-to-end.
 **Landed evidence:** landed: topology.py:585 `if partition_on and role == DEV and tp and paths_intersect(tp, owned_unavailable): continue`
-**NOT landed:** (a) Item 1 CLAIM half — topology.py:611 is still `if partition_on and tp: claimed |= tp` with NO role guard, so a dispatched REVIEWER/TESTER claims paths it never writes and blocks a later DEV in the SAME batch. (b) Item 3 (F159 hot gate) — topology.py:563 is role-blind too, so a merge-scoped hot hold can deadlock a review one conflict later. (c) Item 2 IS THE STATED DELIVERABLE ("the test is the spec") and NO SPEC-29 test exists anywhere: grep over python/ returns only the source comment at topology.py:573. The one landed predicate is itself untested.
-**Tests:** NONE. No test_spec29_*.py; test_gl05_parallelism.py has no dispatch-level reviewer-exemption test.
 **Owner:** wiggins-j
 
 ---
