@@ -80,7 +80,7 @@ conflict. Add them all at once, defaults only:
 | `gate_min_merge_interval` | `3` | 12 | `max(1, …)` |
 | `reviewer_repo_read` | *see P0.3* | 14 | bool |
 | `review_min_latency_ms` | `0` (off) | 14 | `max(0, …)` |
-| `review_screenshot` | `False` | 14 | bool |
+| ~~`review_screenshot`~~ | *deleted 2026-08-06* | 14 | *Item 6 withdrawn — a knob with no reader* |
 | `revise_chain_limit` | `3` | 16 | `max(0, …)` = disable |
 | `revise_livelock_limit` | `5` | 16 | `max(0, …)` = disable |
 

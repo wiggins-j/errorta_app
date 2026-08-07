@@ -239,10 +239,23 @@ class CodingAutonomyPolicy:
     # doubling review cost and adding a retry loop to the very path this batch
     # exists to de-loop.
     review_min_latency_ms: int = 0
-    # Spec 14 (P2): attach a headless screenshot of the running merged head to
-    # review prompts for a visual Definition of Done. Off by default — it is the
-    # one part of the batch that introduces a browser dependency.
-    review_screenshot: bool = False
+    # SPEC-14 Item 6 (`review_screenshot`) is WITHDRAWN — there is deliberately no
+    # field here. It shipped in the prep PR as a knob with no reader, which is
+    # worse than a missing feature: a status audit and a green serialization test
+    # both said it worked. It cannot be wired: no image channel exists on the
+    # member seam (`MemberCaller = Callable[[dict, str], str]`, runner.py:86;
+    # `gateway_member_caller` sends `messages=[{"role": "user", "content":
+    # prompt}]`), and the one tool-capable reviewer path (claude_cli with
+    # `--tools "Read,Grep,Glob"`, cwd = the PR worktree, no `--add-dir` /
+    # permission bypass — async_claude_cli.py:298-310) cannot open the probe PNG,
+    # which lives outside that worktree under the ledger dir
+    # (`web_probe._screenshot_path`). Its SUBSTANCE already reaches the reviewer:
+    # the GL01 probe's verdict (non-black, console errors, interaction, reason) is
+    # folded verbatim into the `gate_output` prompt segment, and the screenshot
+    # itself stays a human debugging aid on the PR record (`probe_screenshot`).
+    # Unknown keys are ignored by `policy_from_dict`, so a persisted policy that
+    # still carries `review_screenshot` loads unchanged. See
+    # docs/specs/SPEC-14-grounded-reviewer.md Item 6.
     # Spec 12: auto-acquire a gate for a greenfield project (detect + persist
     # runtime profiles; register an acceptance-scoped test command that is proven
     # to execute on master). Without this the test-command registry is only ever
@@ -475,7 +488,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         # feature branch has to edit this function).
         "reviewer_repo_read": p.reviewer_repo_read,
         "review_min_latency_ms": p.review_min_latency_ms,
-        "review_screenshot": p.review_screenshot,
+        # (`review_screenshot` withdrawn — see the dataclass note.)
         "gate_bootstrap": p.gate_bootstrap,
         "gate_min_merge_interval": p.gate_min_merge_interval,
         "revise_chain_limit": p.revise_chain_limit,
@@ -590,7 +603,9 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
         # `max(0, …)` — 0 disables the latency fallback entirely (the default).
         review_min_latency_ms=max(
             0, int(d.get("review_min_latency_ms", base.review_min_latency_ms))),
-        review_screenshot=bool(d.get("review_screenshot", base.review_screenshot)),
+        # A persisted `review_screenshot` key (the withdrawn SPEC-14 Item 6 knob)
+        # is simply not read here — unknown keys are ignored, so an old ledger
+        # loads unchanged instead of raising.
         # Spec 12: gate bootstrap + in-loop cadence. `max(1, …)` on the interval —
         # 0 merges between runs is meaningless, so it clamps up rather than
         # disabling; `gate_bootstrap` is the on/off switch.

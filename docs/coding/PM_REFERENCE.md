@@ -361,9 +361,20 @@ a claim with no file behind it), and an **empty approval produced without readin
 the code** (the CLI's `num_turns` shows it ran no Read/Grep) is retried once and,
 if still ungrounded, accepted but surfaced as a `review_ungrounded` alert — never
 blocked. `review_min_latency_ms` (default `0`, off) is the latency fallback for
-vendors that don't report a turn count. `review_screenshot` (default off) is a P2
-follow-up (attach a headless screenshot of the running head to visual-DoD
-reviews) — **not yet implemented**.
+vendors that don't report a turn count.
+
+> **Withdrawn: `review_screenshot`.** A `review_screenshot` knob shipped in the
+> Spec 12-18 prep PR and has been **removed** — setting it never did anything, and
+> a knob that lies to an operator is worse than a missing feature. It cannot be
+> wired: no image can reach a member (the member seam is `(member, prompt) -> str`
+> and the gateway sends one text message), and the only reviewer that has read
+> tools runs with `Read,Grep,Glob` scoped to the PR worktree, so it cannot open a
+> PNG stored under the ledger directory. What the screenshot was *for* already
+> reaches the reviewer as text: the web probe's verdict — canvas non-black,
+> console errors, whether input changed anything — is folded verbatim into the
+> `gate_output` block of the review prompt, and the image itself remains on the PR
+> record as `probe_screenshot` for a human. A policy JSON that still contains the
+> key is ignored, not rejected.
 
 **Spec 25 — the `blocked` turn, and what it means for you.** Every role can now
 emit one always-legal intent:
@@ -610,11 +621,11 @@ green delivery gate at the delivered head.
 The canary test parses this block and compares it with the real Python schemas
 and FastAPI routers. Update the prose and this contract together.
 
-> **Spec 12-18 batch, prep PR.** Seven `autonomy_defaults` keys below are landed
+> **Spec 12-18 batch, prep PR.** Six `autonomy_defaults` keys below are landed
 > ahead of their features and have **no consumers yet** — setting them changes
 > nothing until the matching spec merges: `gate_bootstrap` /
 > `gate_min_merge_interval` (Spec 12), `reviewer_repo_read` /
-> `review_min_latency_ms` / `review_screenshot` (Spec 14), `revise_chain_limit` /
+> `review_min_latency_ms` (Spec 14), `revise_chain_limit` /
 > `revise_livelock_limit` (Spec 16). They ship early so two engineers can build
 > the batch in parallel without both editing `CodingAutonomyPolicy`. Each spec
 > documents its own knob when it lands.
@@ -743,7 +754,6 @@ and FastAPI routers. Update the prose and this contract together.
     "probe_pr_gating": true,
     "probe_whitebox": true,
     "review_min_latency_ms": 0,
-    "review_screenshot": false,
     "revert_overlap": 0.7,
     "reviewer_repo_read": false,
     "revise_chain_limit": 3,

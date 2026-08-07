@@ -51,7 +51,7 @@ On `CodingAutonomyPolicy` (`autonomy.py:63`), with round-trip entries in
 | `gate_min_merge_interval` | `3` | `max(1, int(...))` |
 | `reviewer_repo_read` | *P0.3* | `bool(...)` |
 | `review_min_latency_ms` | `0` | `max(0, int(...))` |
-| `review_screenshot` | `False` | `bool(...)` |
+| ~~`review_screenshot`~~ | *deleted 2026-08-06* | *SPEC-14 Item 6 withdrawn — a knob with no reader* |
 | `revise_chain_limit` | `3` | `max(0, int(...))` — 0 disables |
 | `revise_livelock_limit` | `5` | `max(0, int(...))` — 0 disables |
 
