@@ -541,7 +541,24 @@ def plan_next_batch(
             # instead. Prevents the parallel-writers-to-one-file conflict churn.
             tp = _paths.task_touched_paths(task)
             if frozen_set and task.task_id != frozen_owner_task_id:
-                if _paths.paths_intersect(tp, frozen_set):
+                # SPEC-29 (review follow-up): this gate needs the SAME non-writer
+                # exemption as its two siblings. An earlier draft left it role-blind
+                # on the theory that `hot_file_freeze_stall_limit` force-lifts the
+                # freeze, so it could not wedge. That reasoning does not hold:
+                #   * the lift RACES `planning_churn` — plan_streak_limit is 6 and
+                #     `_apply_detector_outcome` resets the streak each trip, so the
+                #     churn ladder reaches STOP at roughly the same iteration the
+                #     freeze lifts, and
+                #   * with `narrow_limit=0` — a DOCUMENTED disable value —
+                #     `_ladder_rung` collapses the ladder to its stop tail and churn
+                #     STOPs several iterations BEFORE the lift can fire.
+                # The wedge is then run 4's exact stop signature: a review of the
+                # frozen path is skipped every tick, the freeze lifts only when the
+                # centralize owner's PR merges, and that merge needs the
+                # reviewer_approved this review would produce. Reproduced as
+                # `plan_next_batch(...) -> [Plan(PM)]` with a reviewer seated; see
+                # test_review_of_a_frozen_path_dispatches.
+                if role == DEV and _paths.paths_intersect(tp, frozen_set):
                     continue
                 # F159 teeth: a freeze only bites tasks whose touched paths are
                 # KNOWN to hit a frozen file — but real dev tasks that thrash a hot
@@ -569,10 +586,8 @@ def plan_next_batch(
             # moment a file conflicts twice this gate blocks that file's review
             # exactly as GL05 blocked all six — the same deadlock, one conflict later.
             #
-            # F159's FREEZE-intersect gate at :543 is deliberately left role-blind:
-            # the freeze is bounded by `hot_file_freeze_stall_limit` and force-lifts,
-            # so it cannot wedge. Only the two merge-scoped, release-on-merge-only
-            # gates need the exemption.
+            # All three of F159/GL05's path gates now carry this exemption; see the freeze
+            # gate above for why the force-lift is not a sufficient substitute.
             if (role == DEV and hot_unavailable
                     and _paths.paths_intersect(tp, hot_unavailable)):
                 continue
@@ -617,7 +632,7 @@ def plan_next_batch(
             # batch touching them waits (cross-tick holds come in via hot_blocked).
             #
             # SPEC-29 leaves this claim role-BLIND on purpose, unlike the GL05 claim
-            # below. `hot_claimed` is per-batch (seeded empty at :482), so a reviewer
+            # below. `hot_claimed` is per-batch (seeded empty each call), so a reviewer
             # claiming a hot path costs a later DEV one tick and nothing more — it
             # cannot deadlock, because the claim does not survive the batch. The two
             # gates that needed the exemption are the merge-scoped ones whose
@@ -633,11 +648,17 @@ def plan_next_batch(
             # file; cross-tick holds arrive via `owned_paths`.
             #
             # SPEC-29 Item 1 (the claim half): gated on `role == DEV` for the same
-            # reason as the skip. A REVIEWER's touched paths are INFERRED from its
-            # title ("review PR: Create ball.js" -> {ball.js}); claiming them would
-            # block a later DEV in this same batch from a file the reviewer never
-            # writes. Exempting non-writers removes zero protection against the
-            # collision GL05 exists to prevent — that collision is two WRITERS.
+            # reason as the skip — a REVIEWER's paths are INFERRED from its title
+            # ("review PR: Create ball.js" -> {ball.js}) and it never writes them.
+            #
+            # Scope, honestly: this is a CONSISTENCY fix, not a liveness one. The
+            # only non-test caller consumes just the FIRST action of each batch and
+            # then recomputes ownership from the ledger, so the in-batch `claimed`
+            # set is never read in production; and the cross-call channel is already
+            # writer-scoped, because `inflight_owned_paths_by_task` iterates
+            # `list_tasks(role=DEV)`. The deadlock this spec fixes comes from the
+            # SKIP predicates, not from here. Gating the claim keeps the two halves
+            # from disagreeing if a future caller ever consumes a whole batch.
             if partition_on and role == DEV and tp:
                 claimed |= tp
             # SPEC-27 `integration_only`: serial drain. One assign this tick, so

@@ -20,13 +20,23 @@ PR on that file. Exempting non-writers removes exactly zero protection against t
 collision GL05 was built for — which is the same reasoning `topology.py` already
 recorded for F159's freeze teeth, applied to the gates that were missing it.
 
-**Which of these were red before the fix, stated plainly.** Only two:
-`test_a_dispatched_reviewer_does_not_claim_the_path` (the claim half of Item 1) and
-`test_review_of_a_hot_owned_path_dispatches` (Item 3). The other seven passed already,
-because the GL05 *skip* predicate had landed — untested — and the protections they pin
-were never broken. They are regression locks, not red-green tests, and are worth no
-less for it: an untested predicate is one refactor from silently reverting, and this
-file exists precisely because that predicate shipped without a lock.
+**Which of these were red, stated plainly.** Against the tree before ANY SPEC-29
+follow-up work, four: `test_a_dispatched_reviewer_does_not_claim_the_path` (claim
+half), `test_review_of_a_hot_owned_path_dispatches` (Item 3), and the two freeze-gate
+locks (`test_review_of_a_frozen_path_dispatches`,
+`test_frozen_wedge_pre_fix_shape_is_plan_pm`). The rest passed already, because the
+GL05 *skip* predicate had landed — untested — and the protections they pin were never
+broken. Those are regression locks, not red-green tests, and are worth no less for it:
+an untested predicate is one refactor from silently reverting, and this file exists
+precisely because that predicate shipped without a lock.
+
+**The freeze gate is here because a review of the first fix caught it.** That attempt
+guarded GL05's claim and F159's hot gate but left the freeze-intersect gate role-blind,
+on the argument that `hot_file_freeze_stall_limit` force-lifts the freeze so it cannot
+wedge. The lift is real and does fire — but it RACES `planning_churn`, and under the
+documented `narrow_limit=0` disable value the churn ladder STOPs first. A bounded
+escape that loses the race is not a defence, and the wedge it leaves is byte-for-byte
+run 4's `[Plan(PM)]`.
 """
 from __future__ import annotations
 
@@ -40,6 +50,7 @@ from errorta_council.coding.autonomy import (
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.topology import (
     DEV,
+    PM,
     REVIEWER,
     TESTER,
     Assign,
@@ -231,6 +242,114 @@ def test_two_devs_on_a_hot_file_still_serialize(tmp_path: Path) -> None:
         s, [("m-dev2", DEV)], hot_paths=hot, hot_blocked=hot,
         hot_blocked_by_task=hot_owned_paths_by_task(s, {"src/mockData.ts": 2})))}
     assert second.task_id not in ids, "hot-file writers must still serialize"
+
+
+# --------------------------------------------------------------------------- #
+# The freeze gate — the third sibling, found by review of the first attempt
+# --------------------------------------------------------------------------- #
+
+def test_review_of_a_frozen_path_dispatches(tmp_path: Path) -> None:
+    """The freeze gate wedges exactly like GL05 did, and the force-lift is no defence.
+
+    The first attempt at SPEC-29 left this gate role-blind, reasoning that
+    `hot_file_freeze_stall_limit` force-lifts the freeze so it cannot wedge. It does
+    exist and it does fire — but it RACES `planning_churn` (plan_streak_limit=6, and
+    the streak resets each trip), and with the documented `narrow_limit=0` disable
+    value the churn ladder collapses to its stop tail and STOPs several iterations
+    BEFORE the lift. A bounded escape that loses the race is not a defence.
+
+    The cycle is GL05's: the freeze lifts only when the centralize owner's PR merges,
+    and that merge needs the reviewer_approved this very review would produce.
+    """
+    s = _store(tmp_path)
+    path = "src/mockData.ts"
+    owner, _pr, review = _module_pr_awaiting_review(s, path, branch="br-central")
+
+    batch = plan_next_batch(
+        s, [("m-rev1", REVIEWER), ("pm-1", PM)],
+        frozen={path}, frozen_owner_task_id=owner.task_id)
+    ids = {a.task_id for a in _assigns(batch)}
+    assert review.task_id in ids, (
+        "a review of a FROZEN path must dispatch; pre-fix this returned [Plan(PM)] — "
+        "run 4's exact stop signature")
+
+
+def test_frozen_wedge_pre_fix_shape_is_plan_pm(tmp_path: Path) -> None:
+    """Pin the run-4 OBSERVABLE, not just the negative.
+
+    SPEC-29 Item 2 assertion 1 is stated in terms of what the batch IS — a lone
+    Plan(PM) — not merely that the review is absent. With the fix the PM must no
+    longer be the only thing the planner can find to do.
+    """
+    s = _store(tmp_path)
+    path = "src/mockData.ts"
+    owner, _pr, _review = _module_pr_awaiting_review(s, path, branch="br-c")
+
+    batch = plan_next_batch(
+        s, [("m-rev1", REVIEWER), ("pm-1", PM)],
+        frozen={path}, frozen_owner_task_id=owner.task_id)
+    assert _assigns(batch), (
+        f"batch must contain a worker Assign, not a lone planning turn: {batch}")
+
+
+def test_two_devs_on_a_frozen_file_still_serialize(tmp_path: Path) -> None:
+    # The freeze must keep its teeth against WRITERS — that is what it is for.
+    s = _store(tmp_path)
+    path = "src/mockData.ts"
+    owner = s.add_task(title=f"centralize {path}", role=DEV, target_files=[path])
+    s.update_task(owner.task_id, state="doing")
+    intruder = s.add_task(title=f"edit {path}", role=DEV, target_files=[path])
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev2", DEV)], frozen={path}, frozen_owner_task_id=owner.task_id))}
+    assert intruder.task_id not in ids, "a frozen path must still hold other writers"
+
+
+def test_prose_silent_dev_writers_are_still_held_under_a_freeze(
+        tmp_path: Path) -> None:
+    """The F159 teeth (`role == DEV and not tp`) must survive the exemption.
+
+    A dev task that declares nothing cannot be proven safe while a freeze is
+    active — that was the mockData.ts non-convergence — so it is still held.
+    """
+    s = _store(tmp_path)
+    path = "src/mockData.ts"
+    owner = s.add_task(title=f"centralize {path}", role=DEV, target_files=[path])
+    s.update_task(owner.task_id, state="doing")
+    silent = s.add_task(title="Add real-time activity feed", role=DEV)
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-dev2", DEV)], frozen={path}, frozen_owner_task_id=owner.task_id))}
+    assert silent.task_id not in ids
+
+
+# --------------------------------------------------------------------------- #
+# The title-union path the spec calls load-bearing
+# --------------------------------------------------------------------------- #
+
+def test_review_dispatches_when_the_pr_touched_a_sibling_path(
+        tmp_path: Path) -> None:
+    """SPEC-29 names this as the difference between four-of-six and six-of-six.
+
+    The review's title infers `hole.js`, but the PR's observed `changed_paths` is the
+    `hole.test.js` sibling, so ownership is the UNION of the two. A review must
+    dispatch against that union just as it does against the simple case.
+    """
+    s = _store(tmp_path)
+    dev = s.add_task(title="Create src/hole.js", role=DEV,
+                     target_files=["src/hole.js"])
+    s.update_task(dev.task_id, state="doing")
+    pr = s.record_pr(task_id=dev.task_id, branch="br-hole", head="h-hole",
+                     dev_member="m-dev1")
+    s.update_pr(pr["pr_id"], changed_paths=["src/hole.test.js"])
+    s.update_task(dev.task_id, state="done")
+    review = s.add_task(title="review PR: Create src/hole.js", role=REVIEWER,
+                        pr_id=pr["pr_id"])
+
+    ids = {a.task_id for a in _assigns(plan_next_batch(
+        s, [("m-rev1", REVIEWER)], owned_paths=inflight_owned_paths(s),
+        owned_by_task=inflight_owned_paths_by_task(s)))}
+    assert review.task_id in ids
 
 
 # --------------------------------------------------------------------------- #
