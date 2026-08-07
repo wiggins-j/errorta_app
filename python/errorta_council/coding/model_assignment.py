@@ -163,12 +163,22 @@ def resolve_task_assignment(
         # honoured instead of re-derived, provided the route still satisfies the tier
         # the downgrade settled on.
         #
-        # The guard stays tight in the direction that matters: if the operator later
-        # adds a capable route, the weak route still fails `have >= requested`, and
-        # this branch keeps it. That is accepted and named — the remedy is the same
-        # as for any stale assignment, the F127 escalate rung.
+        # It RELEASES as soon as the pool can satisfy the tier that was originally
+        # requested. The first version of this guard pinned the downgrade
+        # unconditionally and named the F127 escalate rung as the remedy for an
+        # operator who later adds a capable route — but an integration review found
+        # that rung is fully disableable (`worker_unproductive_limit=0`), so the
+        # named remedy could be switched off, leaving a task pinned to a weak model
+        # permanently with no decision, no monitor and no stop reason. Releasing on
+        # an available-and-capable route re-mints ONLY when the situation actually
+        # changed, so it does not reintroduce the per-turn churn this guard exists
+        # to prevent: once re-minted onto the capable route, `have >= requested`
+        # holds and the clause above returns it.
         if (existing.difficulty_downgraded_from == difficulty
-                and have >= tier_rank(existing.difficulty_tier)):
+                and have >= tier_rank(existing.difficulty_tier)
+                and not any(
+                    tier_rank(catalog[r].capability_tier) >= tier_rank(difficulty)
+                    for r in available if r in catalog)):
             return existing, ""
 
     preferred = str(getattr(task, "preferred_route_id", "") or "")
@@ -180,7 +190,8 @@ def resolve_task_assignment(
         if preferred not in pool:
             override_reason = "route_out_of_pool"
         elif preferred not in available:
-            override_reason = projection.get(preferred).reason if projection.get(preferred) else "unavailable"
+            _proj = projection.get(preferred)
+            override_reason = _proj.reason if _proj else "unavailable"
         elif tier_rank(catalog[preferred].capability_tier) < tier_rank(difficulty):
             override_reason = "route_below_difficulty"
         else:
