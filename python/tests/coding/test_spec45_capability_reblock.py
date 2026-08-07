@@ -84,3 +84,30 @@ def test_same_batch_duplicate_execution_blocked_once(tmp_path):
     assert len(blocked) == 1
     assert blocked[0]._extras.get("blocked_reason") == "missing_capability:execution_gate"
     assert any(d.get("choice") == "duplicate_task_rejected" for d in store.list_decisions())
+
+
+from errorta_council.coding.runner import _reeval_capability_blocked
+
+
+def test_auto_unblock_when_gate_appears(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    _materialize_pm_tasks(store, _Intent([
+        _Planned("run the integration suite and report the failing cases")]))
+    assert len(_tasks_by_state(store, "blocked")) == 1
+
+    # Gate still closed -> no unblock.
+    monkeypatch.setattr(
+        "errorta_council.coding.runner._gate_state.gate_available", lambda s: False)
+    assert _reeval_capability_blocked(store) == []
+    assert len(_tasks_by_state(store, "blocked")) == 1
+
+    # Gate now available -> the task returns to todo, a decision is recorded.
+    monkeypatch.setattr(
+        "errorta_council.coding.runner._gate_state.gate_available", lambda s: True)
+    unblocked = _reeval_capability_blocked(store)
+    assert len(unblocked) == 1
+    assert len(_tasks_by_state(store, "todo")) == 1
+    assert len(_tasks_by_state(store, "blocked")) == 0
+    assert any(d.get("choice") == "capability_unblocked" for d in store.list_decisions())
+    # Idempotent: nothing left to unblock.
+    assert _reeval_capability_blocked(store) == []

@@ -3528,6 +3528,47 @@ def _materialize_pm_tasks(
     return [task for task, _dependencies in created]
 
 
+def _reeval_capability_blocked(store: LedgerStore) -> list[str]:
+    """SPEC-45: re-dispatch tasks blocked for a now-satisfied capability.
+
+    The gate predicate (`gate_state.gate_available`) is re-read live; when it flips
+    true, every task blocked on `missing_capability:<cap>` returns to `todo` so the
+    scheduler picks it up — no operator interjection. Best-effort and idempotent."""
+    try:
+        if not _gate_state.gate_available(store):
+            return []
+        blocked = [t for t in store.list_tasks(state="blocked")
+                   if str((t._extras or {}).get("blocked_reason", "") or "")
+                   .startswith("missing_capability:")]
+    except Exception:  # noqa: BLE001 — a read failure means "unblock nothing"
+        return []
+    unblocked: list[str] = []
+    for task in blocked:
+        try:
+            store.update_task(task.task_id, state="todo", blocked_reason="",
+                              reason_summary="")
+            store.record_decision(
+                title=f"capability now available: {task.title}",
+                context="capability_lint", choice="capability_unblocked",
+                rationale=("the execution gate is now available; the task blocked "
+                           "for it is re-dispatched"),
+                related_task_ids=[task.task_id],
+                extra=_drop_reasons.reason_blob(
+                    _drop_reasons.MISSING_CAPABILITY, detail="gate now available",
+                    capability="execution_gate"))
+            unblocked.append(task.task_id)
+        except Exception:  # noqa: BLE001 — best-effort per task
+            pass
+    if unblocked:
+        try:
+            from . import attention
+            attention.resolve_closed_capability(
+                store.project_id, "dev", "execution_gate", store=store)
+        except Exception:  # noqa: BLE001 — resolution is advisory
+            pass
+    return unblocked
+
+
 def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
     """SPEC-31: if the run is reaching `done` while an authored acceptance test was
     never executed (its runtime is not provisioned — recorded by gate_bootstrap as
@@ -8461,6 +8502,9 @@ class CodingRunner:
         # every 'doing' task is a safe-to-requeue orphan.
         from .run_recovery import reclaim_stranded_inflight
         reclaim_stranded_inflight(self.store, reason="run_start")
+        # SPEC-45: a capability enabled between runs (or mid-run) re-dispatches the
+        # tasks that were blocked waiting for it — on start and every iteration.
+        _reeval_capability_blocked(self.store)
         # SPEC-23 (Item 6): the last-word SNAPSHOT (which detector was asked, what
         # it answered) describes one run and must not be read as this run's. A
         # FRESH start clears it; a resume/continue — the only caller that passes

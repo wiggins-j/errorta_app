@@ -4016,6 +4016,11 @@ def _run_sequential_loop(
                 should_cancel=should_cancel, c=c, policy_provider=policy_provider,
                 member_tiers=member_tiers, delivery_review=delivery_review,
                 pool_members=pool_members)
+        try:
+            from errorta_council.coding.runner import _reeval_capability_blocked
+            _reeval_capability_blocked(ledger)
+        except Exception:  # noqa: BLE001
+            pass
         if should_cancel is not None and should_cancel():
             return LoopResult(CANCELLED, c)
 
@@ -4380,6 +4385,12 @@ def _run_concurrent_loop(
                     should_cancel=should_cancel, c=c, policy_provider=policy_provider,
                     member_tiers=member_tiers, delivery_review=delivery_review,
                     pool_members=pool_members)
+
+            try:
+                from errorta_council.coding.runner import _reeval_capability_blocked
+                _reeval_capability_blocked(ledger)
+            except Exception:  # noqa: BLE001
+                pass
 
             if pending_stop is None and should_cancel is not None and should_cancel():
                 pending_stop = LoopResult(CANCELLED, c)
