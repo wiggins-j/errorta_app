@@ -183,6 +183,11 @@ def render_status(payload: Any, verbosity: Any) -> str:
             lines.append(Text(
                 f"blocked: {blocked_cap} on a missing capability (auto-retry when enabled)",
                 style="cli.warn"))
+        quarantined = backlog.get("quarantined")
+        if quarantined:
+            lines.append(Text(
+                f"quarantined: {quarantined} task(s) need operator input (see attention)",
+                style="cli.bad"))
 
     counters = state.get("counters") or {}
     if counters:

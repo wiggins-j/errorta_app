@@ -43,6 +43,7 @@ from errorta_council.coding.autonomy import (
     NO_PROGRESS,
     NOT_CONVERGING,
     PLANNING_CHURN,
+    QUARANTINED_TASK_NEEDS_INPUT,
     REVISE_LIVELOCK,
     TERMINAL_STOP_REASONS,
     WORKER_UNPRODUCTIVE,
@@ -141,7 +142,9 @@ def test_the_taxonomy_matches_the_spec_table() -> None:
         "no_progress", "not_converging", "gate_not_improving", "planning_churn",
         "dispatch_wedged", "revise_livelock", "delivery_review_stalled",
         "worker_unproductive", "completion_blocked"}
-    assert TERMINAL_STOP_REASONS == {DEFINITION_OF_DONE, NO_ACTIONABLE_WORK}
+    assert TERMINAL_STOP_REASONS == {
+        DEFINITION_OF_DONE, NO_ACTIONABLE_WORK, QUARANTINED_TASK_NEEDS_INPUT,
+    }
 
 
 def test_completion_blocked_is_heuristic_but_never_intervened() -> None:

@@ -2914,8 +2914,15 @@ def _run_backlog_shape(store: Any) -> dict[str, int] | None:
             1 for t in store.list_tasks(state="blocked")
             if str((getattr(t, "_extras", {}) or {}).get("blocked_reason", "") or "")
             .startswith("missing_capability:"))
+        try:
+            from errorta_council.coding import attention
+            quarantined = sum(
+                1 for s in attention.list_open(store.project_id, store=store)
+                if s.source == "task_pathology")
+        except Exception:  # noqa: BLE001
+            quarantined = 0
         return {"todo": todo_n, "dispatchable": len(seen),
-                "blocked_on_capability": blocked_cap}
+                "blocked_on_capability": blocked_cap, "quarantined": quarantined}
     except Exception:  # noqa: BLE001 - a status read must never 500 the endpoint
         return None
 

@@ -55,6 +55,7 @@ GATE_NOT_IMPROVING = "gate_not_improving"      # Spec 04: acceptance gate result
 PLANNING_CHURN = "planning_churn"              # Spec 07: PM-only plan turns, no worker
 DISPATCH_WEDGED = "dispatch_wedged"            # Spec 10: large todo backlog, nothing dispatchable
 REVISE_LIVELOCK = "revise_livelock"            # Spec 16: broken revise lineage, no recovery
+QUARANTINED_TASK_NEEDS_INPUT = "quarantined_task_needs_input"  # Spec 46: quarantined task only work left
 
 # --- SPEC-23 (Item 1): the stop-reason taxonomy, HARD vs HEURISTIC ----------- #
 #
@@ -100,7 +101,9 @@ HEURISTIC_STOP_REASONS = frozenset({
 # `no_actionable_work` comes from `decide_next` returning `Complete`, not from a
 # detector window, so there is no window to reset — and it is CLI SUCCESS-class,
 # so intervening there risks flipping an exit code. SPEC-27 owns it.
-TERMINAL_STOP_REASONS = frozenset({DEFINITION_OF_DONE, NO_ACTIONABLE_WORK})
+TERMINAL_STOP_REASONS = frozenset({
+    DEFINITION_OF_DONE, NO_ACTIONABLE_WORK, QUARANTINED_TASK_NEEDS_INPUT,
+})
 
 # Where `_intervene` actually fires: HEURISTIC minus `completion_blocked`.
 # F128's `_handle_completion_refused` ALREADY is a last-word loop — the PM is
@@ -2857,6 +2860,41 @@ def _open_backlog_shape(ledger: Any) -> tuple[int, int]:
     return (len(open_tasks), len(titles))
 
 
+def _quarantined_task_needs_input(ledger: Any) -> bool:
+    """SPEC-46: True iff an open task_pathology Problem exists AND there is no
+    remaining dispatchable/capability-waiting work. Narrow by design — a genuine
+    plan-only loop with no quarantine Problem must still trip planning_churn."""
+    try:
+        from . import attention
+        pid = getattr(ledger, "project_id", None)
+        if not pid:
+            return False
+        if not any(
+            getattr(s, "source", "") == "task_pathology"
+            and getattr(s, "kind", "") == "problem"
+            for s in attention.list_open(pid, store=ledger)
+        ):
+            return False
+        for t in ledger.list_tasks():
+            state = str(getattr(t, "state", "") or "")
+            if state in ("todo", "doing"):
+                return False
+            if state == "blocked":
+                extras = getattr(t, "_extras", {}) or {}
+                if str(extras.get("blocked_reason", "") or "").startswith(
+                        "missing_capability:"):
+                    return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _exit_reason(ledger: Any, reason: str) -> str:
+    if reason == NO_ACTIONABLE_WORK and _quarantined_task_needs_input(ledger):
+        return QUARANTINED_TASK_NEEDS_INPUT
+    return reason
+
+
 def _account_planning_churn(ledger: Any, c: LoopCounters,
                             policy: CodingAutonomyPolicy) -> DetectorOutcome:
     """Spec 07: detect a run that has degenerated into PM-ONLY planning — N
@@ -2885,6 +2923,13 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
               f"(backlog {depth} open task(s) across {distinct} distinct title(s))"),
         value=c.plan_streak, threshold=policy.plan_streak_limit)
     _maybe_raise_monitor(ledger, "planning_churn", evidence)
+    if _quarantined_task_needs_input(ledger):
+        return Stop(
+            reason=QUARANTINED_TASK_NEEDS_INPUT,
+            detector=QUARANTINED_TASK_NEEDS_INPUT,
+            evidence=("a quarantined task is the only remaining work — "
+                      "needs operator input (see attention)"),
+        )
     # SPEC-27 Item 3 — ladder `CLAMP_PLANNING -> ESCALATE -> STOP`. The detector's
     # own diagnosis is "PM plan turns with zero interleaved worker turns", so
     # making the next turn a worker turn IS the remedy, and it costs nothing.
@@ -3056,6 +3101,9 @@ _SNAPSHOT_NOT_RENDERED = {
     NO_ACTIONABLE_WORK: (
         "an event from `decide_next` returning `Complete`, not a detector window; "
         "SPEC-27 owns it"),
+    QUARANTINED_TASK_NEEDS_INPUT: (
+        "a quarantined task is the only work left — an operator-input pause, "
+        "not a detector window"),
     CANCELLED: "a human said stop — there is no countdown to observe",
     CHECKPOINT: "the operator's own cadence knob, resumable via `continue`",
     HARD_BLOCKER: "a member declared it in a turn — an event, not an approach",
@@ -4048,7 +4096,7 @@ def _run_sequential_loop(
                 if na_stop is not None:
                     return na_stop
                 continue
-            return LoopResult(action.reason, c)  # definition_of_done / no_actionable_work
+            return LoopResult(_exit_reason(ledger, action.reason), c)  # definition_of_done / no_actionable_work
 
         # Budget caps (always a stop).
         if c.iterations >= policy.max_iterations:
@@ -4554,7 +4602,7 @@ def _run_concurrent_loop(
                         if na_stop is not None:
                             return na_stop
                         continue
-                    return LoopResult(action.reason, c)
+                    return LoopResult(_exit_reason(ledger, action.reason), c)
                 if _over_budget():
                     return LoopResult(BUDGET_EXHAUSTED, c)
                 # SPEC-27 Item 3: nothing is running, `decide_next` DID name an
@@ -4567,7 +4615,7 @@ def _run_concurrent_loop(
                     if na_stop is not None:
                         return na_stop
                     continue
-                return LoopResult(NO_ACTIONABLE_WORK, c)
+                return LoopResult(_exit_reason(ledger, NO_ACTIONABLE_WORK), c)
 
             # --- wait for the next turn to finish, apply its outcome --------
             done, _pending = wait(set(in_flight), return_when=FIRST_COMPLETED)

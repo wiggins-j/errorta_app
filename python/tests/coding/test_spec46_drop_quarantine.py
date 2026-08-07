@@ -95,3 +95,12 @@ def test_task_is_quarantined_at_threshold(tmp_path):
     opens = [s for s in attention.list_open(store.project_id, store=store)
              if s.source == "task_pathology"]
     assert len(opens) == 1
+
+
+def test_quarantine_stop_reason_is_benign_exit():
+    from errorta_cli import runstream
+    payload = {"running": False,
+               "state": {"status": "stopped",
+                         "stop_reason": "quarantined_task_needs_input"}}
+    assert runstream.classify_exit(payload) == runstream.EXIT_OK
+    assert "quarantine" in runstream.gloss("quarantined_task_needs_input").lower()
