@@ -130,11 +130,19 @@ CADENCE_ON_MERGE_READY = "on_merge_ready"
 @dataclass(frozen=True)
 class CodingAutonomyPolicy:
     """Configurable stop knobs. Editable mid-run (the loop re-reads it)."""
+    # CANNOT be disabled: this is the run's terminal spend backstop, not a
+    # detector, and "unlimited iterations" is not a safe reading of 0. An operator
+    # value <= 0 clamps to 1 in `policy_from_dict` (a run always gets at least one
+    # iteration) rather than stopping `budget_exhausted` before the first turn.
     max_iterations: int = 200
     max_model_calls: Optional[int] = None      # None = unlimited
     checkpoint_cadence: str = CADENCE_PER_MILESTONE
     checkpoint_n: int = 5                       # for CADENCE_EVERY_N
-    pm_idle_limit: int = 2                      # consecutive no-progress PM turns
+    # Consecutive no-progress PM turns before the run stops `no_progress`.
+    # <= 0 DISABLES the detector (this module's "0 disables" convention) — it does
+    # NOT stop the run on the first detector pass, which is what an unclamped 0
+    # used to do (`c.pm_idle >= 0` is true before any turn has run).
+    pm_idle_limit: int = 2
     # F120: consecutive unrecoverable failures of ONE member before the loop
     # raises a blocking member-health Problem and stops. Terminal reasons
     # (auth_failed/binary_missing) cap at 1 regardless via classify_aware_cap.
@@ -142,6 +150,10 @@ class CodingAutonomyPolicy:
     # F127: how many UNPRODUCTIVE turns (unusable output, not a gateway failure)
     # one member may produce on one task before the task is reassigned to a
     # different (preferably stronger) member. The escalate-up ladder.
+    # 0 DISABLES the ladder's first rung (and therefore the whole ladder — no
+    # escalation, no reassignment, no PM assist), matching its two siblings below,
+    # which already clamp with `max(0, …)`. It used to clamp to >= 1, so the rung
+    # always fired and the ladder was only half-disableable.
     worker_unproductive_limit: int = 2
     model_escalation_limit: int = 2
     task_reassignment_limit: int = 2
@@ -180,6 +192,13 @@ class CodingAutonomyPolicy:
     # engine centralizes it (reuses the F139 WS-D2 contract-owner task) and freezes
     # direct parallel edits until that task merges; the freeze force-lifts (with an
     # alert) after the stall limit so a never-merging owner can't starve the file.
+    # The on/off switch for the whole F159 mechanism (mirrors GL05's
+    # `strict_file_partition`, which is a plain bool). `hot_file_threshold` is a
+    # SENSITIVITY dial and clamps to >= 1 — 1 is MORE aggressive than the default,
+    # so it can never express "off". `hot_file_serialization=False` restores
+    # pre-F159 dispatch exactly: no hot set is computed, no path is serialized, and
+    # a conflict never escalates to a centralize-owner + freeze.
+    hot_file_serialization: bool = True
     hot_file_threshold: int = 2
     hot_file_escalation_threshold: int = 4
     hot_file_freeze_stall_limit: int = 15
@@ -230,6 +249,10 @@ class CodingAutonomyPolicy:
     # PM PR-review) turns, so a verdict can be grounded in the tree it judges
     # instead of a diff excerpt. Defaults to `dev_repo_read` deliberately — the
     # two are one capability decision, and letting them drift lands it half-on.
+    # That inheritance lives in `policy_from_dict`: an ABSENT `reviewer_repo_read`
+    # key resolves to the run's `dev_repo_read` value, so turning dev retrieval on
+    # carries the reviewer with it. The literal below is the base default both
+    # share (OFF); `test_spec12_18_prep.py` locks the pair together.
     reviewer_repo_read: bool = False
     # Spec 14: wall-time floor (ms) under which an EMPTY reviewer approval is
     # treated as unparsed and retried once. The primary ungrounded-verdict signal
@@ -476,6 +499,7 @@ def policy_to_dict(p: CodingAutonomyPolicy) -> dict[str, Any]:
         "foundation_stall_limit": p.foundation_stall_limit,
         "convergence_stall_limit": p.convergence_stall_limit,
         "delivery_review_round_limit": p.delivery_review_round_limit,
+        "hot_file_serialization": p.hot_file_serialization,
         "hot_file_threshold": p.hot_file_threshold,
         "hot_file_escalation_threshold": p.hot_file_escalation_threshold,
         "hot_file_freeze_stall_limit": p.hot_file_freeze_stall_limit,
@@ -549,16 +573,30 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
     base = CodingAutonomyPolicy()
     raw_workers = d.get("max_parallel_workers", base.max_parallel_workers)
     workers = None if raw_workers is None else max(1, int(raw_workers))
+    # Spec 14: the reviewer flag INHERITS the dev flag when its key is absent (the
+    # field's stated intent: the two are one capability decision). Resolved here so
+    # the inheritance is a single source of truth for both.
+    dev_repo_read = bool(d.get("dev_repo_read", base.dev_repo_read))
     return CodingAutonomyPolicy(
-        max_iterations=int(d.get("max_iterations", base.max_iterations)),
+        # `max(1, …)` — NOT max(0): the iteration cap is the run's terminal spend
+        # backstop and must always be able to fire, so it is the one budget knob
+        # that cannot be disabled. Unclamped, `max_iterations=0` stopped the run
+        # `budget_exhausted` before the first turn.
+        max_iterations=max(1, int(d.get("max_iterations", base.max_iterations))),
         max_model_calls=d.get("max_model_calls", base.max_model_calls),
         checkpoint_cadence=str(d.get("checkpoint_cadence", base.checkpoint_cadence)),
         checkpoint_n=int(d.get("checkpoint_n", base.checkpoint_n)),
-        pm_idle_limit=int(d.get("pm_idle_limit", base.pm_idle_limit)),
+        # `max(0, …)` — NOT max(1) — so 0 disables the no-progress detector, this
+        # module's own convention. Unclamped, `pm_idle_limit=0` tripped
+        # `no_progress` on the FIRST detector pass (`c.pm_idle >= 0`).
+        pm_idle_limit=max(0, int(d.get("pm_idle_limit", base.pm_idle_limit))),
         member_failure_limit=max(
             1, int(d.get("member_failure_limit", base.member_failure_limit))),
+        # `max(0, …)` — matching its two siblings below — so 0 disables the F127
+        # ladder's first rung (and with it the whole ladder). It used to clamp to
+        # >= 1, which made the ladder only half-disableable.
         worker_unproductive_limit=max(
-            1, int(d.get("worker_unproductive_limit", base.worker_unproductive_limit))),
+            0, int(d.get("worker_unproductive_limit", base.worker_unproductive_limit))),
         model_escalation_limit=max(
             0, int(d.get("model_escalation_limit", base.model_escalation_limit))),
         task_reassignment_limit=max(
@@ -573,6 +611,11 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             1, int(d.get("convergence_stall_limit", base.convergence_stall_limit))),
         delivery_review_round_limit=max(
             1, int(d.get("delivery_review_round_limit", base.delivery_review_round_limit))),
+        # F159's on/off switch — a plain bool, like GL05's `strict_file_partition`.
+        # `hot_file_threshold` below is a sensitivity dial that clamps to >= 1 (1 is
+        # MORE aggressive than the default 2), so it can never express "off".
+        hot_file_serialization=bool(
+            d.get("hot_file_serialization", base.hot_file_serialization)),
         hot_file_threshold=max(
             1, int(d.get("hot_file_threshold", base.hot_file_threshold))),
         hot_file_escalation_threshold=max(
@@ -595,11 +638,14 @@ def policy_from_dict(d: dict[str, Any]) -> CodingAutonomyPolicy:
             0, int(d.get("wedge_stall_limit", base.wedge_stall_limit))),
         # Spec 11: a plain bool gate for in-turn read-only worktree retrieval on
         # dev turns. Absent key -> the dataclass default (see the field: OFF).
-        dev_repo_read=bool(d.get("dev_repo_read", base.dev_repo_read)),
+        dev_repo_read=dev_repo_read,
         # --- Spec 12-18 batch (prep PR P0.2) --------------------------------- #
-        # Spec 14: reviewer-side retrieval + ungrounded-verdict handling.
+        # Spec 14: reviewer-side retrieval + ungrounded-verdict handling. An ABSENT
+        # key inherits `dev_repo_read` (the field's stated intent — one capability
+        # decision, never half-on); an explicit key still wins, so a run can opt
+        # out of reviewer retrieval on its own.
         reviewer_repo_read=bool(
-            d.get("reviewer_repo_read", base.reviewer_repo_read)),
+            d.get("reviewer_repo_read", dev_repo_read)),
         # `max(0, …)` — 0 disables the latency fallback entirely (the default).
         review_min_latency_ms=max(
             0, int(d.get("review_min_latency_ms", base.review_min_latency_ms))),
@@ -3315,7 +3361,10 @@ def _handle_unproductive(
             return None
         key = (member_id, task_id)
         c.unproductive_counts[key] = c.unproductive_counts.get(key, 0) + 1
-        if c.unproductive_counts[key] < max(1, policy.worker_unproductive_limit):
+        limit = max(0, int(policy.worker_unproductive_limit))
+        if limit <= 0:
+            return None  # ladder disabled — the same member keeps the task
+        if c.unproductive_counts[key] < limit:
             return None  # let the same member retry up to the limit
 
         task = next((t for t in ledger.list_tasks() if t.task_id == task_id), None)
@@ -4030,7 +4079,10 @@ def _run_sequential_loop(
             return LoopResult(HARD_BLOCKER, c, detail={"reason": outcome.reason})
 
         # PM made no progress N times in a row -> nothing left to do.
-        if c.pm_idle >= policy.pm_idle_limit:
+        # `pm_idle_limit <= 0` DISABLES the detector (this module's "0 disables"
+        # convention). Without the guard, 0 stops the run on the FIRST pass, since
+        # `c.pm_idle >= 0` holds before any PM turn has run.
+        if policy.pm_idle_limit > 0 and c.pm_idle >= policy.pm_idle_limit:
             np_evidence = DetectorEvidence(
                 detector="no_progress", text="PM made no progress",
                 value=c.pm_idle, threshold=policy.pm_idle_limit)
@@ -4293,7 +4345,12 @@ def _run_concurrent_loop(
                 # F159: compute the hot-file picture ONCE per iteration (list_prs is
                 # a file read). `_hot` empty (the no-contention common case) makes
                 # every gate below a no-op → dispatch is identical to pre-F159.
-                _hot = hot_files(ledger, threshold=policy.hot_file_threshold)
+                # `hot_file_serialization=False` is F159's off switch: an empty hot
+                # set makes every gate below a no-op, so dispatch is byte-identical
+                # to pre-F159 (the runner's escalation arm is gated by the same
+                # flag, so no freeze can appear either).
+                _hot = (hot_files(ledger, threshold=policy.hot_file_threshold)
+                        if policy.hot_file_serialization else {})
                 _hot_paths = set(_hot)
                 _hot_blocked_by_task = hot_owned_paths_by_task(ledger, _hot)
                 # GL05 (Item 2): the strict a-priori file-ownership partition — the
@@ -4305,7 +4362,11 @@ def _run_concurrent_loop(
                     inflight_owned_paths_by_task(ledger)
                     if policy.strict_file_partition else None
                 )
-                _frozen = frozen_paths(ledger)
+                # Same switch: a freeze is an F159 artefact, so a run that turns the
+                # mechanism off mid-flight must not keep honouring one that was
+                # already recorded.
+                _frozen = (frozen_paths(ledger)
+                           if policy.hot_file_serialization else set())
                 # SPEC-27 Item 2: the narrowing flags the dispatch phase honours.
                 # Read ONCE per iteration beside the hot/frozen picture, at the
                 # same seam `hot_paths` / `frozen` / `owned_paths` already use.
@@ -4543,7 +4604,8 @@ def _run_concurrent_loop(
                                 text=str((pending_stop.detail or {})
                                          .get("reason", "") or "")))
                     return pending_stop
-                if c.pm_idle >= policy.pm_idle_limit:
+                # `pm_idle_limit <= 0` DISABLES the detector (module convention).
+                if policy.pm_idle_limit > 0 and c.pm_idle >= policy.pm_idle_limit:
                     np_evidence = DetectorEvidence(
                         detector="no_progress", text="PM made no progress",
                         value=c.pm_idle, threshold=policy.pm_idle_limit)
