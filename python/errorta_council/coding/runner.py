@@ -32,6 +32,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
 from . import detector_state as _detector_state
+from . import drop_reasons as _drop_reasons
 from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
@@ -3423,7 +3424,13 @@ def _materialize_pm_tasks(
                     rationale=(f"{planned.title!r} demands execution evidence, but "
                                "no role can run a command and no acceptance gate "
                                "exists to produce it; refused at planning time"),
-                    extra={"planned_title": planned.title})
+                    extra={
+                        "planned_title": planned.title,
+                        **_drop_reasons.reason_blob(
+                            _drop_reasons.MISSING_CAPABILITY,
+                            detail="no executor and no acceptance gate",
+                            capability="execution_gate"),
+                    })
                 continue
         task = store.add_task(
             title=use_title,
