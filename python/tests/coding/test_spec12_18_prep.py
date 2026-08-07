@@ -6,7 +6,9 @@ differently", and these tests are that bar:
 
 * P0.1 — ``_handle_review_rejection`` produces byte-identical revise tasks to the
   two inlined copies it replaced (reviewer arm and strict-mode PM-review arm).
-* P0.2 — the seven new policy knobs round-trip and default as documented.
+* P0.2 — the new policy knobs round-trip and default as documented. (Six, not the
+  original seven: ``review_screenshot`` is withdrawn — see
+  ``test_review_screenshot_knob_is_gone_everywhere``.)
 * P0.3 — ``dev_repo_read``'s default and every statement about it agree.
 * P0.4 — ``gate_state`` answers match the existing ``evidence`` predicate.
 """
@@ -172,7 +174,6 @@ _NEW_KNOBS = {
     "gate_min_merge_interval": 3,
     "reviewer_repo_read": False,
     "review_min_latency_ms": 0,
-    "review_screenshot": False,
     "revise_chain_limit": 3,
     "revise_livelock_limit": 5,
 }
@@ -192,11 +193,51 @@ def test_absent_keys_round_trip_to_the_dataclass_defaults() -> None:
 def test_new_policy_knobs_round_trip_explicit_values() -> None:
     raw = {"gate_bootstrap": False, "gate_min_merge_interval": 7,
            "reviewer_repo_read": True, "review_min_latency_ms": 2500,
-           "review_screenshot": True, "revise_chain_limit": 4,
+           "revise_chain_limit": 4,
            "revise_livelock_limit": 9}
     out = policy_to_dict(policy_from_dict(raw))
     for key, value in raw.items():
         assert out[key] == value, key
+
+
+def test_review_screenshot_knob_is_gone_everywhere() -> None:
+    """SPEC-14 Item 6 is WITHDRAWN. ``review_screenshot`` was a knob with no
+    reader: it round-tripped through ``policy_to_dict``/``policy_from_dict`` and
+    was asserted by this very file, so a status audit AND a green test both said
+    the feature shipped while nothing on the review path ever read it.
+
+    The serialization assertions could not catch that — they pass whether or not
+    a reader exists. So this test asserts the thing that actually matters: the
+    knob is not offered to an operator ANYWHERE. If someone re-adds the field
+    without also adding a reader, this fails; if someone genuinely implements
+    Item 6, they must delete this test and say so.
+    """
+    assert not hasattr(CodingAutonomyPolicy(), "review_screenshot")
+    assert "review_screenshot" not in policy_to_dict(CodingAutonomyPolicy())
+    src = Path(__file__).parents[2]
+    offenders = []
+    for pkg in ("errorta_council", "errorta_app"):
+        for p in (src / pkg).rglob("*.py"):
+            text = p.read_text(encoding="utf-8")
+            if "review_screenshot" in text and "WITHDRAWN" not in text:
+                offenders.append(str(p))
+    assert not offenders, offenders
+    # The operator reference may only mention the key to say it is withdrawn —
+    # never as a settable default in the machine-readable contract block.
+    doc = (Path(__file__).parents[3] / "docs" / "coding" / "PM_REFERENCE.md"
+           ).read_text(encoding="utf-8")
+    contract = doc.split("<!-- PM_REFERENCE_CONTRACT_START -->", 1)[1]
+    assert "review_screenshot" not in contract
+    assert "Withdrawn: `review_screenshot`" in doc
+
+
+def test_withdrawn_knob_in_a_persisted_policy_is_ignored_not_fatal() -> None:
+    """Forward-compat: a ledger written before the withdrawal still carries the
+    key. Loading it must be a no-op, never a raise and never a resurrection."""
+    out = policy_to_dict(policy_from_dict(
+        {"review_screenshot": True, "reviewer_repo_read": True}))
+    assert "review_screenshot" not in out
+    assert out["reviewer_repo_read"] is True
 
 
 def test_detector_knobs_accept_zero_to_disable() -> None:

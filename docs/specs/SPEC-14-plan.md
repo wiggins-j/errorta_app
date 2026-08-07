@@ -125,9 +125,16 @@ finding — and it comes with a path, so it satisfies Phase 3 naturally.
 
 **Tests.** Reviewer prompt golden with and without a gate run.
 
-## Phase 7 — screenshot evidence *(P2, knob default off)*
+## Phase 7 — screenshot evidence *(WITHDRAWN 2026-08-06 — do not build)*
 
-Behind `review_screenshot` (default `False`): with a runnable `static`/`web`
+The `review_screenshot` knob shipped in the prep PR with **no reader** and has
+been deleted. No image can reach a member (the seam is `(member, prompt) -> str`),
+and the only read-capable reviewer is scoped to the PR worktree and cannot open a
+PNG under the ledger dir; the probe's verdict on those pixels already reaches the
+reviewer through `gate_output`. Full reasoning:
+[SPEC-14 Item 6](SPEC-14-grounded-reviewer.md#item-6--screenshot-evidence-for-visual-dods-withdrawn-2026-08-06).
+
+**Original plan, superseded.** Behind `review_screenshot` (default `False`): with a runnable `static`/`web`
 profile and a visual DoD, capture one headless screenshot of the merged head and
 attach an artifact reference to the review prompt. Reuse F146 Slice C's launch
 machinery (`runner.py:1853-1900`, `RuntimeProcessManager`) — lifecycle, ports,

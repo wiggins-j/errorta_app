@@ -2,7 +2,8 @@
 
 **Source:** `docs/coding/RUN_ANALYSIS_GRAVITY_GOLF_2026-07-24.md` §6 **S3 (P0)**
 **Target version:** v0.1 (engine)
-**Status:** proposed (revised after a code-grounded review — see the **Δ review** notes)
+**Status:** implemented, except **Item 6 — WITHDRAWN 2026-08-06** (the
+`review_screenshot` knob and its serialization are deleted; see Item 6 for why)
 **Owner:** wiggins-j
 
 > Items 5 and 6 depend on [Spec 12](SPEC-12-in-loop-acceptance-gate.md); Items
@@ -84,8 +85,10 @@ Two more gaps make the empty verdicts unfalsifiable:
   unparsed and retried once, then recorded as ungrounded rather than silently
   trusted.
 - Once [Spec 12](SPEC-12-in-loop-acceptance-gate.md) lands, the reviewer sees the
-  **latest gate output**; for a visual DoD it also sees a **screenshot** of the
-  running artifact.
+  **latest gate output**. (This goal originally also promised a **screenshot** of
+  the running artifact for a visual DoD — that half is withdrawn; see Item 6. The
+  web probe's verdict on those pixels reaches the reviewer as text in the same
+  gate output.)
 
 ## Non-goals
 
@@ -268,7 +271,60 @@ path, so it satisfies Item 3 naturally.
 output; with no gate run, the segment is absent and the prompt is byte-identical
 to today (golden-locked).
 
-## Item 6 — Screenshot evidence for visual DoDs *(P2, depends on Spec 12)*
+## Item 6 — Screenshot evidence for visual DoDs *(WITHDRAWN 2026-08-06)*
+
+**Withdrawn. The `review_screenshot` knob is deleted, not deferred.**
+
+What actually shipped of this item was the knob alone: `review_screenshot` was
+added to `CodingAutonomyPolicy`, round-tripped through
+`policy_to_dict`/`policy_from_dict`, asserted by
+`tests/coding/test_spec12_18_prep.py`, and **read nowhere**. No capture step ever
+existed on the review path. That is worse than an unimplemented item — a status
+audit and a green test both reported it as shipped, because the test locked only
+the serialization and would have passed either way. A knob an operator can set
+that changes nothing is a lie told by the product, so it is removed rather than
+left switched off.
+
+**Why it cannot be wired as specified.**
+
+1. **No image can reach a member.** The member seam is
+   `MemberCaller = Callable[[dict, str], str]` (`runner.py:86`), and
+   `gateway_member_caller` builds `messages=[{"role": "user", "content": prompt}]`
+   (`runner.py:7616-7631`). `LocalCouncilModelRequest` /
+   `LocalCouncilModelResult` (`gateway_local.py:63-79`) carry no image field.
+   Attaching real pixels means changing the Council-invariant boundary type, the
+   gateway, the provider, and the seam — for a P2 knob.
+2. **The one tool-capable reviewer still cannot open the file.** The `claude_cli`
+   retrieval invocation is `--tools "Read,Grep,Glob"` with cwd = the PR worktree
+   and **no** `--add-dir` or permission bypass
+   (`async_claude_cli.py:296-311`). The probe screenshot is written under the
+   ledger directory (`web_probe._screenshot_path` → `<ledger>/web-probe/probe-
+   <head>.png`), outside that cwd, so a headless `Read` of it is not permitted.
+   Moving the PNG *into* the worktree is not an option either: the worktree is
+   staged with `git add -A` (`workspace.py:255`), so the artifact would be
+   committed into the delivered product.
+3. **A path string alone is not evidence.** Stripped of the pixels, the item
+   reduces to pasting an unopenable filename into the prompt.
+4. **The substance already reaches the reviewer.** GL01's web probe captures the
+   screenshot and folds its verdict — canvas non-black, console-error count,
+   whether input changed anything, the failure reason — VERBATIM into the
+   `web:probe` run's `stderr_preview` (`web_probe._verdict_to_result`), which
+   `gate_state.latest_gate_text` renders into the reviewer prompt's `gate_output`
+   segment (`runner.py:3928`). The black-screen case this item was written for
+   ("a pure black canvas is invisible to every other signal in this spec") is now
+   caught numerically by that probe and reported to the reviewer in words.
+   [Spec 28](SPEC-28-autonomy-acceptance.md) already reached the same conclusion
+   from the other side: the probe's numeric verdict is the oracle, and the
+   screenshot is "a human debugging aid".
+
+**What remains.** `probe_screenshot` stays on the PR record for a human. Real
+visual assertions (pixel/DOM diffing) stay where they already were — in Out of
+scope / follow-ups — and any future attempt needs a genuine multimodal member
+seam, which is a spec of its own, not a knob.
+
+---
+
+**Original design (for the record, superseded by the withdrawal above).**
 
 **Design.** When the project has a runnable `static`/`web` runtime profile (which
 [Spec 12](SPEC-12-in-loop-acceptance-gate.md) Item 1 now bootstraps) **and** the
@@ -305,9 +361,10 @@ to a failed review.
   `:2501-2502`); metadata forwarding (`:4118-4128`); `build_run_turn` signature
   (`:2419-2427`, `:4285-4288`). **No prompt-segment edits** — `gate_output` is
   Spec 12's, `tool_guidance` is Spec 17's.
-- **`autonomy.py`** — `reviewer_repo_read`, `review_min_latency_ms` (0),
-  `review_screenshot` (off) on `CodingAutonomyPolicy` (`:63`), round-tripped
-  (`:157/183`) — **landed in the shared prep PR**, consumed here.
+- **`autonomy.py`** — `reviewer_repo_read`, `review_min_latency_ms` (0) on
+  `CodingAutonomyPolicy` (`:63`), round-tripped (`:157/183`) — **landed in the
+  shared prep PR**, consumed here. (`review_screenshot` landed there too and has
+  since been deleted — Item 6 is withdrawn.)
 - **`ledger.py`** — additive PR fields for review grounding evidence
   (`record_pr` `:1017`, `update_pr` `:1047`); absent → falsy, no migration.
   Land in one commit with [Spec 13](SPEC-13-foundation-gate-buildless-web.md)'s
@@ -354,9 +411,11 @@ to a failed review.
   from the fake provider is **not** retried (the false-positive lock); with it
   set, it is.
 - **Item 5**: reviewer prompt golden with and without a gate run.
-- **Item 6**: with the knob off nothing changes; with it on and a stubbed
-  capture, the artifact reference appears; a capture exception degrades to no
-  screenshot.
+- **Item 6**: withdrawn. In place of the capture tests,
+  `test_spec12_18_prep.py::test_review_screenshot_knob_is_gone_everywhere` asserts
+  the knob is offered nowhere (dataclass, policy dict, `errorta_council` source,
+  `PM_REFERENCE.md`), and a companion test asserts a persisted
+  `review_screenshot` key still loads as a no-op.
 - **Integration**: replay a gravity-golf-shaped PR (a rendering module against a
   visual DoD) and assert the reviewer's turn had a mounted worktree and that a
   path-less "no evidence tests were run" finding no longer spawns a `revise:`

@@ -353,8 +353,10 @@ proof that the arm is reachable in practice.
   for real. Elsewhere it skips, exactly as GL01's probe smoke does today.
 * **Tier 2 (live, never gating).** Item 7.
 
-**Δ note — why not assert on a screenshot.** `review_screenshot` exists and is
-default-OFF (`autonomy.py:179`). Image comparison is a second oracle with its own
+**Δ note — why not assert on a screenshot.** (Update 2026-08-06: the
+`review_screenshot` knob referenced here no longer exists — SPEC-14 Item 6 is
+withdrawn and the knob is deleted, for reasons that include this note's own.)
+Image comparison is a second oracle with its own
 flakiness surface (font rendering, GPU, platform) and it answers a question the
 probe already answers numerically. The probe's mean/variance verdict is the
 oracle; the screenshot stays a human debugging aid (`probe_screenshot` on the PR

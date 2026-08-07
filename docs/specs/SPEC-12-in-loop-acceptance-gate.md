@@ -118,8 +118,8 @@ executes correctly, once, at the end, on a registry nothing ever fills.**
 - **Not making the acceptance gate a per-PR merge blocker.** A bootstrapped
   command is a project-level integration signal, not a branch-level one — see
   Item 1's scoping rule. The delivery gate remains the hard gate.
-- Not a browser-automation framework. Headless screenshots are
-  [Spec 14](SPEC-14-grounded-reviewer.md) Item 6.
+- Not a browser-automation framework. (Headless screenshots were Spec 14 Item 6,
+  now withdrawn; GL01's web probe is what drives a real browser.)
 
 ---
 
@@ -320,8 +320,8 @@ alongside the command results. The tester-spawn condition (`runner.py:3448`) is
 **left alone**.
 
 This is what catches the black screen: a runtime that starts, passes its health
-probe, and renders nothing is still one step from a screenshot
-([Spec 14](SPEC-14-grounded-reviewer.md) Item 6), but a runtime that *crashes on
+probe, and renders nothing is still one step from a rendering verdict (GL01's web
+probe — Spec 14 Item 6's screenshot is withdrawn), but a runtime that *crashes on
 start* is caught here, in-loop, instead of at delivery.
 
 **Acceptance.** A project with a runnable profile and no commands produces an
@@ -414,8 +414,9 @@ in-loop gate record from the runtime probe. The tester-spawn condition and the
 ## Out of scope / follow-ups
 
 - Per-branch acceptance runs. v1 is master-scoped by design — see Item 1.
-- Browser-level assertions. [Spec 14](SPEC-14-grounded-reviewer.md) Item 6
-  attaches a screenshot; real visual assertions are later.
+- Browser-level assertions. (Spec 14 Item 6 was to attach a screenshot; it is
+  **withdrawn** — GL01's web probe now supplies the browser-level verdict, and
+  real visual assertions are still later.)
 - A dependency-install step (`npm install`) before a bootstrapped command — the
   reason Item 1 smoke-checks instead. Worth doing, and it needs its own sandbox
   and network-policy decision.
