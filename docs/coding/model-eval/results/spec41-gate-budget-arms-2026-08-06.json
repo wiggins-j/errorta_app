@@ -1,0 +1,30 @@
+{
+  "D_bigbudget_16384_ctx32768": {
+    "deepseek-r1:8b": {
+      "schema_ok": "8/8",
+      "truncated": "0/8",
+      "direct_parse": "7/8",
+      "mean_eval_tokens": 3495
+    },
+    "qwen3.5:9b": {
+      "schema_ok": "4/8",
+      "truncated": "4/8",
+      "direct_parse": "4/8",
+      "mean_eval_tokens": 9299
+    }
+  },
+  "Bprime_8192_ctx32768": {
+    "deepseek-r1:8b": {
+      "schema_ok": "6/8",
+      "truncated": "2/8",
+      "direct_parse": "6/8",
+      "mean_eval_tokens": 5727
+    },
+    "qwen3.5:9b": {
+      "schema_ok": "7/8",
+      "truncated": "1/8",
+      "direct_parse": "5/8",
+      "mean_eval_tokens": 1817
+    }
+  }
+}

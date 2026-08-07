@@ -41,6 +41,18 @@ REASONING_MODEL_MARKERS: tuple[str, ...] = (
 
 # Per-turn output budget when a member sets no explicit limit.
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
+# MEASURED LIMITATION (2026-08-06, SPEC-41 amendment part 2). This is ONE constant
+# for all reasoning models, and the reference box shows the right value is
+# model-specific and NOT monotonic:
+#   * qwen3.5:9b   — 7/8 schema at 8192, 4/8 at 16384. It EXPANDS its reasoning to
+#     fill the budget (1817 -> 9299 mean generated tokens) and then overruns, so a
+#     bigger number makes it WORSE. 8192 is correct for it.
+#   * deepseek-r1:8b — 6/8 at 8192 with 2/8 truncated, 8/8 at 16384. 8192 is TOO
+#     SMALL for it.
+# In practice this is masked because `local_think_false` defaults True and
+# suppresses the reasoning channel entirely on structured turns. It bites anyone
+# who disables that knob. A per-model budget table is the real fix; it is not
+# attempted here because the sample is two models on one prompt shape.
 REASONING_MAX_OUTPUT_TOKENS = 8192
 # Reasoning models need more wall-clock than a normal turn, or the bigger budget just
 # trades a thinking-burn for a timeout.
