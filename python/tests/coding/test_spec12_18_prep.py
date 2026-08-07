@@ -364,3 +364,87 @@ def test_gate_state_never_raises_on_a_broken_store() -> None:
     assert gate_state.gate_available(broken) is False
     assert gate_state.latest_gate_run(broken) is None
     assert gate_state.latest_gate_text(broken) == ""
+
+
+# --------------------------------------------------------------------------- #
+# on_merge_ready — a documented VALUE that had no reader
+# --------------------------------------------------------------------------- #
+
+def test_on_merge_ready_cadence_actually_checkpoints() -> None:
+    """`on_merge_ready` was offered, accepted, documented — and did nothing.
+
+    It is a constant, it is listed in `errorta run --checkpoint-cadence` help, it
+    passes `policy_from_dict` unvalidated, and PM_REFERENCE documents it as one of
+    four cadences. `_checkpoint_due` handled the other three and fell through to
+    `return False`, so an operator who selected it silently got `off`.
+
+    This is the `review_screenshot` shape one level down: not a field with no
+    reader, but a VALUE with no reader — and the same weak signals (a constant, a
+    CLI option, a doc row) all read as "shipped".
+    """
+    from errorta_council.coding.autonomy import (
+        CADENCE_ON_MERGE_READY,
+        CodingAutonomyPolicy,
+        LoopCounters,
+        _checkpoint_due,
+    )
+
+    policy = CodingAutonomyPolicy(checkpoint_cadence=CADENCE_ON_MERGE_READY)
+    counters = LoopCounters()
+
+    class _Ledger:
+        def __init__(self, statuses):
+            self._statuses = statuses
+
+        def list_prs(self):
+            return [{"status": s} for s in self._statuses]
+
+    # No mergeable PR -> no checkpoint.
+    assert not _checkpoint_due(policy, counters, False, _Ledger(["open", "draft"]))
+    # A mergeable PR is the last moment a human can look before it lands.
+    assert _checkpoint_due(policy, counters, False, _Ledger(["open", "mergeable"]))
+    # `milestone` must not be what drives this cadence.
+    assert not _checkpoint_due(policy, counters, True, _Ledger([]))
+
+
+def test_on_merge_ready_without_a_ledger_is_inert() -> None:
+    # Defensive: the ledger argument defaults to None so any caller that has not
+    # been updated keeps today's behaviour instead of raising mid-loop.
+    from errorta_council.coding.autonomy import (
+        CADENCE_ON_MERGE_READY,
+        CodingAutonomyPolicy,
+        LoopCounters,
+        _checkpoint_due,
+    )
+    policy = CodingAutonomyPolicy(checkpoint_cadence=CADENCE_ON_MERGE_READY)
+    assert not _checkpoint_due(policy, LoopCounters(), True)
+
+
+def test_other_cadences_are_unchanged_by_the_ledger_argument() -> None:
+    # The escape-hatch convention: adding the argument must not alter any
+    # cadence that already worked.
+    from errorta_council.coding.autonomy import (
+        CADENCE_EVERY_N,
+        CADENCE_OFF,
+        CADENCE_PER_MILESTONE,
+        CodingAutonomyPolicy,
+        LoopCounters,
+        _checkpoint_due,
+    )
+
+    class _Ledger:
+        def list_prs(self):
+            return [{"status": "mergeable"}]
+
+    led = _Ledger()
+    assert not _checkpoint_due(
+        CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF),
+        LoopCounters(), True, led)
+    assert _checkpoint_due(
+        CodingAutonomyPolicy(checkpoint_cadence=CADENCE_PER_MILESTONE),
+        LoopCounters(), True, led)
+    c = LoopCounters()
+    c.since_checkpoint = 5
+    assert _checkpoint_due(
+        CodingAutonomyPolicy(checkpoint_cadence=CADENCE_EVERY_N, checkpoint_n=5),
+        c, False, led)
