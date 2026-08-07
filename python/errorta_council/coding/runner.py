@@ -2509,6 +2509,71 @@ def _capability_refusal_note(store: LedgerStore) -> str:
     )
 
 
+# How much of the worker's own words ride into the PM note. Bounded for the same
+# reason `_BLOCKED_DETAIL_CAP` is: the note is prepended to the PM prompt, and an
+# essay there crowds out the backlog it has to read.
+_CAPABILITY_ASK_NOTE_DETAIL_CAP = 160
+
+
+def _capability_ask_note(store: LedgerStore) -> str:
+    """Spec 25 (Item 2): DELIVER a recorded capability ask to the PM.
+
+    ``_record_capability_ask`` writes one ``capability_ask`` decision per ``needs``
+    block on a blocked turn, and until this note existed its only readers were that
+    writer, the team-log renderer, and a test — so a worker asked for a capability
+    and the PM never saw it. An ask nobody reads is unanswerable by construction.
+
+    Exact sibling of ``_capability_refusal_note`` and ``_duplicate_rejection_note``:
+    read the decisions, keep only asks whose task is still live (so the note clears
+    itself once the task lands or is dropped, instead of nagging about settled
+    history), dedupe per ``(role, capability)`` so one systematic gap is one line,
+    render a bounded note, and never fail the turn.
+
+    Surfacing an ask is NOT granting it — enforcement stays in
+    ``allowed_tools_for_role`` / ``execute_dev_turn``, exactly as the spec's
+    non-goal requires, and the note tells the PM so in as many words."""
+    from .completion import _TERMINAL_TASK_STATES
+    try:
+        decisions = store.list_decisions()
+        settled = {
+            task.task_id for task in store.list_tasks()
+            if str(getattr(task, "state", "") or "") in _TERMINAL_TASK_STATES
+        }
+    except Exception:  # noqa: BLE001 — prompt assembly must never fail the turn
+        return ""
+    asks: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in decisions:
+        if record.get("choice") != "capability_ask":
+            continue
+        related = [str(t) for t in (record.get("related_task_ids") or [])]
+        # A task-bound ask dies with its task; a run-level ask (the PM's own, which
+        # carries no task) has nothing to settle it, so it always stands.
+        if related and all(task_id in settled for task_id in related):
+            continue
+        role = str(record.get("role") or "")
+        capability = str(record.get("capability") or "other")
+        key = (role, capability)
+        if key in seen:
+            continue
+        seen.add(key)
+        what = " ".join(str(record.get("rationale") or "").split())
+        asks.append((role, capability, what[:_CAPABILITY_ASK_NOTE_DETAIL_CAP]))
+    if not asks:
+        return ""
+    items = "; ".join(
+        f"{role or 'a worker'} asked for {capability}"
+        + (f" ({what})" if what else "")
+        for role, capability, what in asks[-_DUPLICATE_NOTE_CAP:])
+    return (
+        f"{len(asks)} capability ask(s) from the team are open and unanswered "
+        f"({items}). You CANNOT grant a tool — answer by RE-PLANNING: re-scope the "
+        "task to work a granted role can already do, register a test command so an "
+        "execution gate exists, split the work, or drop the task via "
+        "`cancel_task_ids`. Ignoring the ask leaves the asker with no legal move.\n"
+    )
+
+
 def _count_confabulated_tool_failures(
         store: LedgerStore, task_id: str, tool_name: str) -> int:
     """GL03: how many times THIS ungranted tool has failed on THIS task — the tally
@@ -3016,6 +3081,10 @@ def _pm_prompt(store: LedgerStore) -> str:
     # GL03 (Item 1): and which roles kept confabulating a capability they lack, so
     # the next plan turn re-plans/routes instead of re-spawning the impossible task.
     done_gate = f"{done_gate}{_capability_gap_note(store)}"
+    # Spec 25 (Item 2): and which workers ASKED for a capability. The honest form
+    # of the same signal the line above infers from confabulation — it belongs in
+    # the same place, or the ask is recorded and never answered.
+    done_gate = f"{done_gate}{_capability_ask_note(store)}"
     return _register_pending_composition(
         _pm_prompt_segments(store, pin=pin, done_gate=done_gate))
 

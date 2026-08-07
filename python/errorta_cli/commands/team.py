@@ -265,7 +265,10 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
         result = client.post_json(
             f"/coding/projects/{ctx.project_id}/run-setup/preflight", json=body
         )
-        return {"_kind": "preflight", "unhealthy": (result or {}).get("unhealthy") or []}
+        return {"_kind": "preflight",
+                "unhealthy": (result or {}).get("unhealthy") or [],
+                # SPEC-26 Item 4: the role-capability closure verdict + remedy.
+                "capability": (result or {}).get("capability") or []}
 
     if sub == "apply":
         _mutate.guard_sole_owner(ctx)
@@ -310,7 +313,8 @@ def _render(payload: Any, verbosity: Any, json_mode: bool) -> str:
     if kind == "cleared":
         return render(muted("team draft cleared."))
     if kind == "preflight":
-        return render_preflight(payload.get("unhealthy") or [])
+        return render_preflight(payload.get("unhealthy") or [],
+                                payload.get("capability") or [])
     if kind == "applied":
         return render("team applied to run setup. Start with: errorta run --yes")
     if kind == "rooms":

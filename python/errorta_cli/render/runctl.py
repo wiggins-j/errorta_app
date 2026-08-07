@@ -112,25 +112,71 @@ def render_stream_event(event: Any) -> str | None:
 # Preflight (member-health) list.
 # --------------------------------------------------------------------------- #
 
-def render_preflight(unhealthy: list[Any]) -> str:
-    """Render the ``{unhealthy:[{provider,route,reason,remediation}]}`` list."""
+def render_preflight(unhealthy: list[Any],
+                     capability: list[Any] | None = None) -> str:
+    """Render the preflight payload: the
+    ``{unhealthy:[{provider,route,reason,remediation}]}`` provider list and the
+    SPEC-26 ``{capability:[{role,outcome,capability,reason,remedy,overridden}]}``
+    role-closure verdicts.
+
+    Both blocks read the same way — a headline, one bullet per finding, and the
+    action that closes it indented underneath. The remedy line is not decoration:
+    a verdict without it tells an operator they have a problem and not what to do
+    about it, which is the state this surface existed in before SPEC-26 Item 4."""
+    lines: list[Any] = []
     if not unhealthy:
-        return render(Text("preflight: every required provider is ready", style="cli.ok"))
-    lines: list[Any] = [Text("preflight: providers not ready", style="cli.bad")]
-    for entry in unhealthy:
-        if not isinstance(entry, dict):
-            continue
-        head = Text("  • ", style="cli.bad")
-        head.append(str(entry.get("provider") or "?"), style="cli.key")
-        route = str(entry.get("route") or "")
-        if route:
-            head.append(f" ({route})", style="cli.muted")
-        head.append(f"  {entry.get('reason') or ''}", style="cli.warn")
-        lines.append(head)
-        remediation = str(entry.get("remediation") or "")
-        if remediation:
-            lines.append(muted(f"      → {remediation}"))
+        lines.append(Text("preflight: every required provider is ready",
+                          style="cli.ok"))
+    else:
+        lines.append(Text("preflight: providers not ready", style="cli.bad"))
+        for entry in unhealthy:
+            if not isinstance(entry, dict):
+                continue
+            head = Text("  • ", style="cli.bad")
+            head.append(str(entry.get("provider") or "?"), style="cli.key")
+            route = str(entry.get("route") or "")
+            if route:
+                head.append(f" ({route})", style="cli.muted")
+            head.append(f"  {entry.get('reason') or ''}", style="cli.warn")
+            lines.append(head)
+            remediation = str(entry.get("remediation") or "")
+            if remediation:
+                lines.append(muted(f"      → {remediation}"))
+    lines.extend(_capability_lines(capability or []))
     return render(*lines)
+
+
+def _capability_lines(capability: list[Any]) -> list[Any]:
+    """The role-capability closure block of the preflight view (SPEC-26 Item 4).
+
+    An ``unclosable`` role cannot be fixed by running (a policy/registry change or
+    an override is required); a ``deferred`` one can still close mid-run. An
+    ``overridden`` verdict is still shown — the override suppresses the unseating,
+    never the finding."""
+    entries = [e for e in capability if isinstance(e, dict)]
+    if not entries:
+        return []
+    lines: list[Any] = [Text("capability: seated roles that cannot discharge "
+                             "their duty", style="cli.warn")]
+    for entry in entries:
+        outcome = str(entry.get("outcome") or "")
+        head = Text("  • ", style="cli.warn")
+        head.append(str(entry.get("role") or "?"), style="cli.key")
+        head.append(f" {outcome}", style="cli.bad" if outcome == "unclosable"
+                    else "cli.warn")
+        cap = str(entry.get("capability") or "")
+        if cap:
+            head.append(f" ({cap})", style="cli.muted")
+        if entry.get("overridden"):
+            head.append("  [overridden — seated anyway]", style="cli.muted")
+        lines.append(head)
+        reason = str(entry.get("reason") or "")
+        if reason:
+            lines.append(muted(f"      {reason}"))
+        remedy = str(entry.get("remedy") or "")
+        if remedy:
+            lines.append(muted(f"      → {remedy}"))
+    return lines
 
 
 # --------------------------------------------------------------------------- #

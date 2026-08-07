@@ -443,6 +443,57 @@ def test_team_preflight_probes_members(make_ctx, monkeypatch) -> None:
     assert guard == []  # a probe, not a mutation
 
 
+def test_team_preflight_renders_the_capability_verdict_and_its_remedy(
+        make_ctx, monkeypatch) -> None:
+    """SPEC-26 Item 4. The preflight probe answers two readiness questions —
+    providers AND seated-role capability — and `errorta team preflight` used to
+    render only the first, so the verdict reached the operator's terminal never.
+    The REMEDY is not optional decoration: a verdict without it says you have a
+    problem and not what to do about it."""
+    monkeypatch.setattr("errorta_cli.commands._mutate.require_sole_owner",
+                        lambda *a, **k: None)
+    ctx = make_ctx(project_id=PID)
+    registry.dispatch("team", RouteClient(), ctx, ["set", "dev", "anthropic.sonnet"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unhealthy": [], "capability": [
+            {"role": "reviewer", "outcome": "unclosable", "capability": "verification",
+             "reason": "reviewer has no repo read", "remedy": "set reviewer_repo_read",
+             "overridden": False},
+            {"role": "tester", "outcome": "deferred", "capability": "execution",
+             "reason": "no unit-scoped test command", "remedy": "errorta test-commands set",
+             "overridden": False}]})
+
+    with _mock_client(handler) as client:
+        _payload, text = registry.dispatch("team", client, ctx, ["preflight"])
+    # The provider half still reads the same when nothing is wrong with it.
+    assert "every required provider is ready" in text
+    for token in ("reviewer", "unclosable", "reviewer has no repo read",
+                  "set reviewer_repo_read", "tester", "deferred",
+                  "errorta test-commands set"):
+        assert token in text, token
+
+
+def test_setup_preflight_renders_the_capability_verdict_and_its_remedy(
+        make_ctx, monkeypatch) -> None:
+    """The same surface via the other entry point (`errorta setup --preflight`).
+    Two commands, one renderer — they must not drift."""
+    monkeypatch.setattr("errorta_cli.commands._mutate.require_sole_owner",
+                        lambda *a, **k: None)
+    ctx = make_ctx(project_id=PID)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unhealthy": [], "capability": [
+            {"role": "tester", "outcome": "deferred", "capability": "execution",
+             "reason": "no unit-scoped test command", "remedy": "errorta test-commands set",
+             "overridden": False}]})
+
+    with _mock_client(handler) as client:
+        _payload, text = registry.dispatch("setup", client, ctx, ["--preflight"])
+    assert "tester" in text and "deferred" in text
+    assert "errorta test-commands set" in text
+
+
 # --------------------------------------------------------------------------- #
 # 10. team room → lists Council rooms / selects one into the draft.
 # --------------------------------------------------------------------------- #

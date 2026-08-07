@@ -3023,18 +3023,49 @@ def run_setup_preflight(
 ) -> dict[str, Any]:
     """Probe the gate's selected team's distinct provider routes (F120 reuse).
 
-    Returns ``{unhealthy: [...]}`` — one entry per logged-out / unavailable
-    provider class with its remediation, exactly as the in-loop preflight. An
-    empty list means every required route is ready. Always 200 (the gate renders
-    the badges); the *blocking* decision is the frontend's (D4)."""
+    Returns ``{unhealthy: [...], capability: [...]}`` — one ``unhealthy`` entry per
+    logged-out / unavailable provider class with its remediation, exactly as the
+    in-loop preflight, and one ``capability`` entry per seated role whose SPEC-26
+    closure verdict is not ``capable``, each with the remedy that closes it. Both
+    empty means every required route is ready and every seated role can discharge
+    its duty. Always 200 (the gate renders the badges); the *blocking* decision is
+    the frontend's (D4)."""
     _require_tauri_origin(request)
-    _project_store_or_404(project_id)
+    store = _project_store_or_404(project_id)
     members = _resolve_members(body)
     if not members:
         raise HTTPException(status_code=400, detail="no members (pass members or room_id)")
     _validate_member_ids(members)
     from errorta_council.coding.member_health import preflight_members
-    return {"unhealthy": preflight_members(members)}
+    return {
+        "unhealthy": preflight_members(members),
+        "capability": _closure_preview(store, members),
+    }
+
+
+def _closure_preview(store: Any, members: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """SPEC-26 Item 4 — the closure verdict, BEFORE the operator commits to a run.
+
+    ``_apply_role_closure`` computes exactly this on the live path and publishes it
+    to ``run_state.role_closure``, which is only readable once the run is already
+    going. Preflight is the one moment the operator can still act on the remedy, so
+    it evaluates the same verdicts through the same ``_closure_verdicts`` — sharing
+    the function is what keeps the preview honest.
+
+    Read-only and fail-open, like the live path: a probe route must never 500, and
+    an empty list here means "nothing to report", never "nothing was checked"."""
+    from errorta_council.coding.runner import _closure_verdicts
+    from errorta_council.coding.topology import coding_role_of
+
+    try:
+        pairs = [(str(m.get("id") or ""), coding_role_of(m)) for m in members
+                 if m.get("enabled", True)]
+        verdicts = _closure_verdicts(store, pairs, load_policy(store))
+    except Exception:  # noqa: BLE001 — a preview must never fail the probe
+        return []
+    # Only the roles with something to say. A `capable` verdict carries no remedy
+    # and no action; listing it would bury the two that do.
+    return [v.to_dict() for v in verdicts if v.outcome != "capable"]
 
 
 @router.post("/projects/{project_id}/run-setup/confirm")

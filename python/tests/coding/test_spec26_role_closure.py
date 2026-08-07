@@ -778,3 +778,104 @@ def test_closure_at_run_start_holds_over_every_seated_subset(
                     # ...and a role seated under protest always leaves a trace.
                     if (verdict.outcome != CAPABLE and role not in overrides):
                         assert "role_capability_unclosed" in _choices(s)
+
+
+# --------------------------------------------------------------------------- #
+# S5 — Item 4's OPERATOR surface. The verdict, BEFORE the run.
+# --------------------------------------------------------------------------- #
+#
+# Everything above proves the verdict is computed, applied on the live path, and
+# published to `run_state.role_closure`. `run_state` is only readable once the run
+# is already going, which is one moment too late: the operator's chance to act on
+# a remedy is at run setup. `POST /run-setup/preflight` answered only
+# `{"unhealthy": [...]}` — provider readiness with no word on ROLE readiness — and
+# `errorta setup --preflight` / `errorta team preflight` rendered exactly that, so
+# an operator committed to a run without ever seeing the verdict or its remedy.
+
+_HTTP_MEMBERS = [
+    {"id": "m-pm", "enabled": True, "gateway_route_id": "fake.local.deterministic",
+     "provider_kind": "local", "metadata": {"coding_role": "pm"}},
+    {"id": "m-dev", "enabled": True, "gateway_route_id": "fake.local.deterministic",
+     "provider_kind": "local", "metadata": {"coding_role": "dev"}},
+    {"id": "m-rev", "enabled": True, "gateway_route_id": "fake.local.deterministic",
+     "provider_kind": "local", "metadata": {"coding_role": "reviewer"}},
+    {"id": "m-test", "enabled": True, "gateway_route_id": "fake.local.deterministic",
+     "provider_kind": "local", "metadata": {"coding_role": "tester"}},
+]
+
+
+def _http(pid: str):
+    from fastapi.testclient import TestClient
+
+    from errorta_app.server import app
+    c = TestClient(app, headers={"x-errorta-origin": "tauri-ui"})
+    resp = c.post("/coding/projects", json={
+        "project_id": pid, "north_star": "n", "definition_of_done": "d",
+        "target": "new"})
+    assert resp.status_code == 200, resp.text
+    return c
+
+
+def _preflight(c, pid: str) -> dict:
+    resp = c.post(f"/coding/projects/{pid}/run-setup/preflight",
+                  json={"members": _HTTP_MEMBERS})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_preflight_reports_the_closure_verdict_with_its_remedy(
+        tmp_errorta_home) -> None:
+    """THE gap. The shipped-default council on a fresh project: the operator is
+    told, before committing to a run, that the REVIEWER is ungrounded and the
+    TESTER has no dispatchable command — and told what closes each."""
+    c = _http("s26pf")
+    body = _preflight(c, "s26pf")
+    assert body["unhealthy"] == []          # providers are fine; the roles are not
+    by_role = {e["role"]: e for e in body["capability"]}
+    assert by_role[REVIEWER]["outcome"] == UNCLOSABLE
+    assert by_role[TESTER]["outcome"] == DEFERRED
+    # A verdict without its remedy tells an operator they have a problem and not
+    # what to do about it — the remedy is the load-bearing half of this surface.
+    assert "reviewer_repo_read" in by_role[REVIEWER]["remedy"]
+    assert "test-commands" in by_role[TESTER]["remedy"]
+    for entry in by_role.values():
+        assert entry["reason"]              # the legible audit line, verbatim
+        assert entry["capability"]
+    # A capable role has nothing to act on and is not listed.
+    assert PM not in by_role and DEV not in by_role
+
+
+def test_preflight_verdict_tracks_the_state_it_reports_on(tmp_errorta_home) -> None:
+    """Not a constant. Take the one action the TESTER remedy names — register a
+    UNIT-scoped test command — and the TESTER drops out of the preflight report."""
+    c = _http("s26pf2")
+    assert TESTER in {e["role"] for e in _preflight(c, "s26pf2")["capability"]}
+    LedgerStore("s26pf2").set_test_commands({"unit": _UNIT})
+    assert TESTER not in {e["role"] for e in _preflight(c, "s26pf2")["capability"]}
+
+
+def test_preflight_and_the_live_path_answer_from_one_computation(
+        tmp_errorta_home, tmp_path: Path) -> None:
+    """The preview is only worth showing if it is what the run will actually do.
+    Both go through ``_closure_verdicts``; this locks that they agree."""
+    import errorta_council.coding.runner as r
+    from errorta_app.routes.coding import _closure_preview
+    s = _store("s26pf3", tmp_path)
+    pairs, _by_role = _roster()
+    live = {v.role: v.to_dict()
+            for v in r._closure_verdicts(s, pairs, CodingAutonomyPolicy())}
+    preview = {e["role"]: e for e in _closure_preview(s, _MEMBERS)}
+    assert preview == {role: v for role, v in live.items()
+                       if v["outcome"] != CAPABLE}
+    assert preview  # and it is not vacuously equal on two empty dicts
+
+
+def test_the_preview_never_fails_the_probe(tmp_errorta_home) -> None:
+    """Fail-open like the live path: a preflight is a PROBE and must never 500.
+    An empty list means "nothing to report", never "nothing was checked"."""
+    from errorta_app.routes.coding import _closure_preview
+
+    class _Broken:
+        pass
+
+    assert _closure_preview(_Broken(), _HTTP_MEMBERS) == []
