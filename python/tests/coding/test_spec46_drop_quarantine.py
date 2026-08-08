@@ -104,3 +104,20 @@ def test_quarantine_stop_reason_is_benign_exit():
                          "stop_reason": "quarantined_task_needs_input"}}
     assert runstream.classify_exit(payload) == runstream.EXIT_OK
     assert "quarantine" in runstream.gloss("quarantined_task_needs_input").lower()
+
+
+def test_quarantine_isolates_one_task_backlog_continues(tmp_path):
+    """A task dropped to the threshold is suppressed on the next materialize while a
+    fresh, distinct task still gets created — the loop is not wedged on the bad one."""
+    from errorta_council.coding import drop_ledger, task_dedupe
+    from errorta_council.coding.runner import _materialize_pm_tasks
+    store = _store(tmp_path)
+    bad = "reconcile the cross-module event bus"
+    key = task_dedupe.identity_key(title=bad, paths=[])
+    for _ in range(3):
+        drop_ledger.record_drop(store, key)
+    created = _materialize_pm_tasks(store, _PlanIntent([
+        _Planned(bad), _Planned("add a --verbose flag to the CLI")]))
+    titles = [t.title for t in created]
+    assert bad not in titles                       # quarantined
+    assert "add a --verbose flag to the CLI" in titles  # unrelated work proceeds
