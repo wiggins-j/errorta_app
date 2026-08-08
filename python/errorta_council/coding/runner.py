@@ -32,6 +32,8 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from . import capabilities as _capabilities
 from . import detector_state as _detector_state
+from . import drop_ledger as _drop_ledger
+from . import drop_reasons as _drop_reasons
 from . import gate_state as _gate_state
 from . import paths as _paths
 from . import task_dedupe
@@ -3338,6 +3340,7 @@ def _materialize_pm_tasks(
     all_tasks = store.list_tasks()
     existing_title_to_id = {task.title: task.task_id for task in all_tasks}
     created: list[tuple[Task, list[str]]] = []
+    blocked_for_deps: list[tuple[Task, list[str]]] = []
     title_to_id = dict(existing_title_to_id)
     # Spec 08 — the dedupe gate. `existing_title_to_id` above maps EVERY task
     # (it must: `depends_on` may name a finished prerequisite by title), but the
@@ -3361,6 +3364,12 @@ def _materialize_pm_tasks(
             if owner != parent_task.task_id
         }
     inherited_deps = list(parent_task.depends_on) if parent_task is not None else []
+    try:
+        from .autonomy import load_policy
+        quarantine_limit = int(getattr(
+            load_policy(store), "task_drop_quarantine_limit", 3) or 0)
+    except Exception:  # noqa: BLE001
+        quarantine_limit = 3
     for planned in intent.tasks:
         paths = _declared_target_paths(planned.title, planned.detail)
         path_deps = [
@@ -3368,6 +3377,32 @@ def _materialize_pm_tasks(
                 (path, path_owners[path]) for path in paths if path in path_owners
             )
         ]
+        # SPEC-46: if this identity has already been dropped to the quarantine
+        # threshold, suppress creation and escalate — don't feed planning_churn.
+        identity = task_dedupe.identity_key(title=planned.title, paths=paths)
+        if quarantine_limit and _drop_ledger.drop_count(store, identity) >= quarantine_limit:
+            title_to_id[planned.title] = ""
+            drops = _drop_ledger.drop_count(store, identity)
+            store.record_decision(
+                title=f"task quarantined (dropped repeatedly): {planned.title}",
+                context="drop_quarantine", choice="task_quarantined",
+                rationale=(f"{planned.title!r} has been created and dropped "
+                           f"{drops}× this run; "
+                           "quarantined so the run continues on the rest of the backlog"),
+                extra={
+                    "drop_count": drops,
+                    **_drop_reasons.reason_blob(
+                        _drop_reasons.PM_PRUNED,
+                        detail=f"quarantined after {quarantine_limit} drops"),
+                })
+            try:
+                from . import attention
+                attention.raise_task_pathology_problem(
+                    store.project_id, identity=identity, title=planned.title,
+                    drops=drops, reason_code=_drop_reasons.PM_PRUNED, store=store)
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         # Spec 08: reject a planned task that is materially the same job as an
         # already-open one. The rejection is recorded as a decision (auditable +
         # renderable), the title still resolves — onto the MATCHED id — so a
@@ -3414,16 +3449,62 @@ def _materialize_pm_tasks(
                                "rewritten to consume the acceptance-gate output"),
                     extra={"planned_title": planned.title})
             else:
-                # Refused: the dependents' title resolves to "" (dropped below).
-                title_to_id[planned.title] = ""
+                # SPEC-45: a capability gap is a PAUSE, not a deletion. Persist the
+                # task as `blocked (missing_capability:…)` so it (a) survives to be
+                # re-dispatched when the gate opens (the auto-unblock pass) and (b)
+                # is visible in board/status. Still record the reason-bearing
+                # decision so the PM's `_capability_refusal_note` prompt keeps firing.
+                blocked_task = store.add_task(
+                    title=planned.title,
+                    role="dev",
+                    detail=planned.detail,
+                    parent_task_id=parent_task.task_id if parent_task is not None else None,
+                    source_spec_artifact_id=(
+                        parent_task.source_spec_artifact_id if parent_task is not None else None
+                    ),
+                    source_plan_artifact_id=(
+                        parent_task.source_plan_artifact_id if parent_task is not None else None
+                    ),
+                    source_slice_id=(
+                        parent_task.source_slice_id if parent_task is not None else None
+                    ),
+                    governance_required=(
+                        parent_task.governance_required if parent_task is not None else False
+                    ),
+                    task_type=planned.task_type,
+                    difficulty_tier=planned.difficulty_tier,
+                    preferred_member_id=planned.preferred_member_id,
+                    preferred_route_id=planned.preferred_route_id,
+                    assignment_rationale=planned.assignment_rationale,
+                )
+                store.update_task(
+                    blocked_task.task_id, state="blocked",
+                    blocked_reason="missing_capability:execution_gate",
+                    reason_summary=("needs execution evidence but no gate exists yet; "
+                                    "waiting on the execution capability"))
+                title_to_id[planned.title] = blocked_task.task_id
                 store.record_decision(
-                    title=f"task refused (no executor): {planned.title}",
+                    title=f"task blocked (no executor): {planned.title}",
                     context="capability_lint",
                     choice="task_requires_absent_capability",
                     rationale=(f"{planned.title!r} demands execution evidence, but "
                                "no role can run a command and no acceptance gate "
-                               "exists to produce it; refused at planning time"),
-                    extra={"planned_title": planned.title})
+                               "exists to produce it; blocked at planning time"),
+                    related_task_ids=[blocked_task.task_id],
+                    extra={
+                        "planned_title": planned.title,
+                        **_drop_reasons.reason_blob(
+                            _drop_reasons.MISSING_CAPABILITY,
+                            detail="no executor and no acceptance gate",
+                            capability="execution_gate"),
+                    })
+                open_index.append(task_dedupe.index_entry(
+                    task_id=blocked_task.task_id, title=planned.title, role=DEV,
+                    paths=paths))
+                for path in paths:
+                    path_owners.setdefault(path, blocked_task.task_id)
+                blocked_for_deps.append(
+                    (blocked_task, inherited_deps + list(planned.depends_on) + path_deps))
                 continue
         task = store.add_task(
             title=use_title,
@@ -3474,7 +3555,7 @@ def _materialize_pm_tasks(
         created.append(
             (task, inherited_deps + list(planned.depends_on) + path_deps)
         )
-    for task, dependencies in created:
+    for task, dependencies in created + blocked_for_deps:
         resolved: list[str] = []
         for dependency in dependencies:
             dependency_id = title_to_id.get(dependency, dependency)
@@ -3483,6 +3564,47 @@ def _materialize_pm_tasks(
         if resolved:
             store.update_task(task.task_id, depends_on=resolved)
     return [task for task, _dependencies in created]
+
+
+def _reeval_capability_blocked(store: LedgerStore) -> list[str]:
+    """SPEC-45: re-dispatch tasks blocked for a now-satisfied capability.
+
+    The gate predicate (`gate_state.gate_available`) is re-read live; when it flips
+    true, every task blocked on `missing_capability:<cap>` returns to `todo` so the
+    scheduler picks it up — no operator interjection. Best-effort and idempotent."""
+    try:
+        if not _gate_state.gate_available(store):
+            return []
+        blocked = [t for t in store.list_tasks(state="blocked")
+                   if str((t._extras or {}).get("blocked_reason", "") or "")
+                   .startswith("missing_capability:")]
+    except Exception:  # noqa: BLE001 — a read failure means "unblock nothing"
+        return []
+    unblocked: list[str] = []
+    for task in blocked:
+        try:
+            store.update_task(task.task_id, state="todo", blocked_reason="",
+                              reason_summary="")
+            store.record_decision(
+                title=f"capability now available: {task.title}",
+                context="capability_lint", choice="capability_unblocked",
+                rationale=("the execution gate is now available; the task blocked "
+                           "for it is re-dispatched"),
+                related_task_ids=[task.task_id],
+                extra=_drop_reasons.reason_blob(
+                    _drop_reasons.MISSING_CAPABILITY, detail="gate now available",
+                    capability="execution_gate"))
+            unblocked.append(task.task_id)
+        except Exception:  # noqa: BLE001 — best-effort per task
+            pass
+    if unblocked:
+        try:
+            from . import attention
+            attention.resolve_closed_capability(
+                store.project_id, "dev", "execution_gate", store=store)
+        except Exception:  # noqa: BLE001 — resolution is advisory
+            pass
+    return unblocked
 
 
 def _ack_unrun_acceptance_test(store: LedgerStore) -> None:
@@ -3704,12 +3826,24 @@ def _apply_pm_cancels(store: LedgerStore, intent: Any) -> list[str]:
         if tid in live_pr_task_ids:
             continue  # real work is in an open PR — not obsolete scope
         try:
-            store.update_task(tid, state="dropped")
+            paths = _declared_target_paths(getattr(task, "title", ""),
+                                           getattr(task, "detail", ""))
+            identity = task_dedupe.identity_key(
+                title=getattr(task, "title", ""), paths=paths)
+            n = _drop_ledger.record_drop(store, identity)
+            store.update_task(tid, state="dropped",
+                              reason_summary="PM pruned this over-scoped task")
             store.record_decision(
                 title=f"PM dropped task: {getattr(task, 'title', tid)}",
                 context="pm_cancel", choice="pm_task_cancelled",
                 rationale="the PM pruned this obsolete / over-scoped task to converge",
-                related_task_ids=[tid])
+                related_task_ids=[tid],
+                extra={
+                    "drop_count": n,
+                    **_drop_reasons.reason_blob(
+                        _drop_reasons.PM_PRUNED,
+                        detail=f"dropped {n}× this run"),
+                })
             dropped.append(tid)
         except Exception:  # noqa: BLE001 — best-effort prune
             pass
@@ -8418,6 +8552,9 @@ class CodingRunner:
         # every 'doing' task is a safe-to-requeue orphan.
         from .run_recovery import reclaim_stranded_inflight
         reclaim_stranded_inflight(self.store, reason="run_start")
+        # SPEC-45: a capability enabled between runs (or mid-run) re-dispatches the
+        # tasks that were blocked waiting for it — on start and every iteration.
+        _reeval_capability_blocked(self.store)
         # SPEC-23 (Item 6): the last-word SNAPSHOT (which detector was asked, what
         # it answered) describes one run and must not be read as this run's. A
         # FRESH start clears it; a resume/continue — the only caller that passes
@@ -8446,10 +8583,18 @@ class CodingRunner:
                 # or delivery decision reads this key — so it is not worth a
                 # run-identity token here; fixing the proxy is a change to all
                 # five keys and belongs with SPEC-23/27, not with F156.
+                #
+                # SPEC-46's drop ledger rides the same rule for the same reason: it
+                # is specified per-run ("a fresh run starts clean"). Left uncleared,
+                # a task the PM prunes ONCE in each of three separate runs is
+                # silently quarantined on run 4 and never re-created. The resume
+                # path keeps it, because the create->drop cycles it counts belong to
+                # the run whose budget is being carried.
                 self.store.set_run_state(
                     last_words=None, narrow_ladder=None,
                     integration_only=False, planning_clamped=False,
-                    tests_not_applicable_count=0)
+                    tests_not_applicable_count=0,
+                    **{_drop_ledger.RUN_STATE_KEY: {}})
             except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
                 pass
         # SPEC-24 (Item 1 / Edge cases): clear the published detector snapshot

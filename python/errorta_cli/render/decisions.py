@@ -2,7 +2,8 @@
 
 Item: ``{decision_id, title, context, choice, rationale, alternatives,
 related_task_ids, at, ...extra}`` (``ledger.record_decision``). We surface the
-enumerated fields only — never the free-form ``extra`` blob.
+enumerated fields only — SPEC-45 surfaces ``reason_code``, ``reason_detail``, and
+``capability`` for drop/refuse choices; never the free-form ``extra`` blob.
 """
 from __future__ import annotations
 
@@ -25,10 +26,17 @@ def render_decisions(payload: Any, verbosity: Any) -> str:
     table.add_column("time", style="cli.muted", no_wrap=True)
     table.add_column("choice", style="cli.key", no_wrap=True)
     table.add_column("title")
+    table.add_column("reason", style="cli.muted", no_wrap=True)
+    _REASON_CHOICES = {
+        "task_requires_absent_capability", "pm_task_cancelled", "task_quarantined",
+        "capability_unblocked",
+    }
     for d in decisions:
-        table.add_row(
-            ts(d.get("at")),
-            str(d.get("choice") or ""),
-            str(d.get("title") or ""),
-        )
+        choice = str(d.get("choice") or "")
+        reason = ""
+        if choice in _REASON_CHOICES:
+            code = str(d.get("reason_code") or "")
+            cap = str(d.get("capability") or "")
+            reason = f"{code}:{cap}" if cap else code
+        table.add_row(ts(d.get("at")), choice, str(d.get("title") or ""), reason)
     return render(table)

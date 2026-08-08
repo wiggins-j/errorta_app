@@ -125,7 +125,10 @@ def test_execution_task_refused_without_a_gate(tmp_errorta_home, tmp_path) -> No
     s = _real_store("cap1", tmp_path)
     tasks = runner._materialize_pm_tasks(
         s, _intent(_planned("Run acceptance gate and fix failures")))
-    assert tasks == []  # not created — no role can discharge it, no gate exists
+    assert tasks == []  # blocked path does not append to `created`
+    blocked = [t for t in s.list_tasks() if t.state == "blocked"]
+    assert len(blocked) == 1
+    assert blocked[0]._extras.get("blocked_reason") == "missing_capability:execution_gate"
     assert any(d["choice"] == "task_requires_absent_capability"
                for d in s.list_decisions())
     # And the refusal surfaces to the PM's next plan turn.
@@ -161,9 +164,12 @@ def test_control_action_refuses_execution_task_without_a_gate(
         tmp_errorta_home, tmp_path) -> None:
     from errorta_council.coding import control_actions
     s = _real_store("cap7", tmp_path)
-    with pytest.raises(control_actions.ControlActionError):
-        control_actions.create_task(
-            s, title="Run the acceptance gate and report the results", role="dev")
+    change = control_actions.create_task(
+        s, title="Run the acceptance gate and report the results", role="dev")
+    assert change is not None
+    blocked = [t for t in s.list_tasks() if t.state == "blocked"]
+    assert len(blocked) == 1
+    assert blocked[0]._extras.get("blocked_reason") == "missing_capability:execution_gate"
 
 
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,12 @@ command reference are in **[docs/CLI.md](docs/CLI.md)**; a quick tour is in
 [Headless CLI](#headless-cli-errorta) below. Prefer the desktop app? See the
 build-from-source **Quick start** next.
 
+> **Driving Errorta headlessly (or from an AI agent)? Read
+> [docs/CLI_FOR_AI.md](docs/CLI_FOR_AI.md) first.** It is the correct end-to-end
+> sequence for pointing the coding team at an **existing repo** — plus the
+> handful of switches that live in config and default off (notably
+> `dev_repo_read`, without which the team reinvents code you already have).
+
 ---
 
 ## Quick start — build & install on macOS
@@ -175,9 +181,17 @@ errorta setup --confirm --yes
 errorta run --autonomous --yes
 ```
 
+The tour above is the **greenfield** path. To point the team at an **existing
+repo** (import, give it read access to your code, and steer it to continue
+rather than reinvent), follow **[docs/CLI_FOR_AI.md](docs/CLI_FOR_AI.md)** — the
+headless runbook written for AI operators, with the exact sequence and the
+config switches that default off.
+
 **Full CLI documentation: [docs/CLI.md](docs/CLI.md)** — the complete command
 reference, the verbosity model, scripting with `--json` and exit codes, and the
-sole-owner sidecar model.
+sole-owner sidecar model. **Headless / AI-operator runbook:
+[docs/CLI_FOR_AI.md](docs/CLI_FOR_AI.md)** — existing-repo sequencing + the
+config gotchas.
 
 ---
 
@@ -294,6 +308,7 @@ Two foundational feature designs are included as reference:
 - [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) — product identity, who it's for, what makes it different, what we're explicitly NOT building.
 - [`docs/AIAR_SETUP.md`](docs/AIAR_SETUP.md) — what AIAR is, local vs. remote, and how to connect it. First run just connects your models; AIAR/knowledge is set up in Settings.
 - [`docs/CLI.md`](docs/CLI.md) — the headless `errorta` CLI: full command reference and guides.
+- [`docs/CLI_FOR_AI.md`](docs/CLI_FOR_AI.md) — **AI-operator runbook**: the correct end-to-end sequence for driving the CLI against an **existing repo**, and the config switches (like `dev_repo_read`) that default off and will otherwise make the team reinvent your code.
 - [`DEVELOPING.md`](DEVELOPING.md) — how to actually run the thing locally.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
 - [`docs/SIDECAR_LIFECYCLE.md`](docs/SIDECAR_LIFECYCLE.md) and [`docs/SYSTEM_TRAY.md`](docs/SYSTEM_TRAY.md) — architecture notes.

@@ -786,6 +786,7 @@ and FastAPI routers. Update the prose and this contract together.
     "revise_livelock_limit": 5,
     "schema_reject_limit": 3,
     "strict_file_partition": true,
+    "task_drop_quarantine_limit": 3,
     "task_reassignment_limit": 2,
     "web_probe": true,
     "web_probe_frames": 30,

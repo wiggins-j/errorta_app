@@ -68,6 +68,9 @@ def render_board(payload: Any, verbosity: Any) -> str:
                 body.append("\n")
             body.append("• ", style=_STATE_STYLE.get(col, "white"))
             body.append(truncate(t.get("title"), 28))
+            reason = str(t.get("blocked_reason") or t.get("reason_summary") or "")
+            if col == "blocked" and reason:
+                body.append(f"\n  ↳ {truncate(reason, 26)}", style="cli.muted")
         panels.append(
             Panel(
                 body,

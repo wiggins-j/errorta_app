@@ -21,9 +21,11 @@ from typing import Any
 from errorta_council.coding.autonomy import (
     NARROW_CLAMP_PLANNING,
     PLANNING_CHURN,
+    QUARANTINED_TASK_NEEDS_INPUT,
     CodingAutonomyPolicy,
     LoopCounters,
     Narrow,
+    Stop,
     TurnOutcome,
     _account_planning_churn,
     _apply_outcome,
@@ -250,6 +252,62 @@ def test_a_bare_ledger_never_breaks_the_detector() -> None:
     c = LoopCounters(plan_streak=5)
     stop = _account_planning_churn(Bare(), c, policy)
     assert isinstance(stop, Narrow) and stop.detector == PLANNING_CHURN
+
+
+def test_quarantined_task_yields_needs_input_not_planning_churn(
+        tmp_path: Path) -> None:
+    """When plan_streak would trip but a task_pathology Problem is the only
+    remaining work, emit quarantined_task_needs_input — not planning_churn."""
+    from errorta_council.coding import attention
+
+    store = LedgerStore("qtni", root=tmp_path)
+    store.create_project(north_star="n", definition_of_done="d", target="new",
+                         repo_path=None)
+    attention.raise_task_pathology_problem(
+        store.project_id, identity="k1", title="wire the integration layer",
+        drops=3, reason_code="pm_pruned", store=store)
+    t = store.add_task(title="already done", role="dev")
+    store.update_task(t.task_id, state="done")
+
+    limit = 3
+    policy = CodingAutonomyPolicy(plan_streak_limit=limit)
+    c = LoopCounters()
+    stop = None
+    for _ in range(limit):
+        _apply(_planned(), c, ledger=store)
+        stop = _account_planning_churn(store, c, policy)
+
+    assert isinstance(stop, Stop)
+    assert stop.reason == QUARANTINED_TASK_NEEDS_INPUT
+    assert stop.detector == QUARANTINED_TASK_NEEDS_INPUT
+
+
+def test_quarantine_guard_is_narrow_todo_work_still_trips_planning_churn(
+        tmp_path: Path) -> None:
+    """A task_pathology Problem alone must not suppress planning_churn while todo
+    work remains — the guard is narrow by design."""
+    from errorta_council.coding import attention
+
+    store = LedgerStore("qtni-todo", root=tmp_path)
+    store.create_project(north_star="n", definition_of_done="d", target="new",
+                         repo_path=None)
+    attention.raise_task_pathology_problem(
+        store.project_id, identity="k1", title="wire the integration layer",
+        drops=3, reason_code="pm_pruned", store=store)
+    store.add_task(title="still dispatchable", role="dev")
+
+    limit = 3
+    policy = CodingAutonomyPolicy(plan_streak_limit=limit)
+    c = LoopCounters()
+    stop = None
+    for _ in range(limit):
+        _apply(_planned(), c, ledger=store)
+        stop = _account_planning_churn(store, c, policy)
+
+    assert stop is not None
+    assert stop.detector == PLANNING_CHURN
+    if isinstance(stop, Stop):
+        assert stop.reason == PLANNING_CHURN
 
 
 # --------------------------------------------------------------------------- #

@@ -74,6 +74,7 @@ FAILURE_STOP_REASONS = frozenset({
 # stop_reasons that are a clean finish / benign stop (exit 0).
 SUCCESS_STOP_REASONS = frozenset({
     "definition_of_done", "checkpoint", "cancelled", "no_actionable_work",
+    "quarantined_task_needs_input",
 })
 
 # One-line human gloss per terminal reason (rendered at the end of a stream).
@@ -82,6 +83,9 @@ STOP_REASON_GLOSS: dict[str, str] = {
     "checkpoint": "stopped at a checkpoint — continue it with: errorta continue",
     "cancelled": "cancelled by request",
     "no_actionable_work": "no actionable work remained",
+    "quarantined_task_needs_input": (
+        "a task was quarantined after repeated drops and is the only work left — "
+        "resolve it in the attention list, then continue"),
     "budget_exhausted": "budget (iterations / model-calls) exhausted",
     "no_progress": "the PM made no progress (idle limit reached)",
     "hard_blocker": "a hard blocker stopped the run",
