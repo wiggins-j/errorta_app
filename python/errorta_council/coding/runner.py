@@ -8583,10 +8583,18 @@ class CodingRunner:
                 # or delivery decision reads this key — so it is not worth a
                 # run-identity token here; fixing the proxy is a change to all
                 # five keys and belongs with SPEC-23/27, not with F156.
+                #
+                # SPEC-46's drop ledger rides the same rule for the same reason: it
+                # is specified per-run ("a fresh run starts clean"). Left uncleared,
+                # a task the PM prunes ONCE in each of three separate runs is
+                # silently quarantined on run 4 and never re-created. The resume
+                # path keeps it, because the create->drop cycles it counts belong to
+                # the run whose budget is being carried.
                 self.store.set_run_state(
                     last_words=None, narrow_ladder=None,
                     integration_only=False, planning_clamped=False,
-                    tests_not_applicable_count=0)
+                    tests_not_applicable_count=0,
+                    **{_drop_ledger.RUN_STATE_KEY: {}})
             except Exception:  # noqa: BLE001 — never fail a start on a hygiene write
                 pass
         # SPEC-24 (Item 1 / Edge cases): clear the published detector snapshot

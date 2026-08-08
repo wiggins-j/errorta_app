@@ -92,7 +92,11 @@ it carries the foundation instead; the two must not double-implement it.
   (mirror the `raise_monitor_problem` dedupe pattern, `attention.py:~365-390`) — with a
   message naming the task and its drop reason: *"task ‹title› dropped N× — reason: ‹code›;
   needs operator input."* The Problem flags for the operator; it does **not** stop dispatch
-  of unrelated tasks. Because the pathological task is no longer re-created, worker /
+  of unrelated tasks — so it MUST be raised `blocking=False`, overriding `raise_signal`'s
+  `kind == "problem"` default. A blocking signal at `stage="development"` makes
+  `governance_scheduler`'s `blocks_stage` gate halt the whole run with `blocked_on_problem`
+  (`block_on_problems` defaults on), which is the wholesale stop this spec exists to
+  prevent. Because the pathological task is no longer re-created, worker /
   governance-progress turns on the rest of the backlog reset `plan_streak`, so
   `planning_churn` no longer trips on this loop.
 - **Clean terminal when quarantine is the last work.** If, after quarantine, the only
@@ -113,7 +117,11 @@ it carries the foundation instead; the two must not double-implement it.
 - Auto-repairing the pathological task (rewriting scope, splitting it). Quarantine +
   escalate hands it to the operator; automatic repair is out of scope.
 - Cross-run persistence of the drop ledger. The counter is per-run; a fresh run starts
-  clean. (Revisit only if churn is observed to survive restarts.)
+  clean. (Revisit only if churn is observed to survive restarts.) The ledger lives in
+  `run_state.json`, which SURVIVES a run, so this non-goal is only real if the key joins
+  the fresh-start hygiene clear in `CodingRunner.run` alongside `last_words` /
+  `narrow_ladder` / `tests_not_applicable_count`. Uncleared, a task pruned once in each of
+  three separate runs is silently quarantined on run 4.
 
 ## Regression locks
 
@@ -126,6 +134,11 @@ it carries the foundation instead; the two must not double-implement it.
   self-contained ones, the self-contained tasks complete while the pathological one is
   quarantined; the run does not halt on the pathological task while other work is
   dispatchable.
+- **Per-run ledger.** Test pair: a fresh run (`counters is None`) starts with an empty drop
+  ledger, and a carried-counters resume — the same run — keeps its counts.
+- **Escalation does not halt.** Test: after quarantine, `attention.blocks_stage(pid,
+  "development")` is False, so the governance gate cannot convert the escalation into a
+  whole-run `blocked_on_problem` stop.
 - **Deduped escalation.** Test: a quarantined identity raises exactly **one** open
   `task_pathology` Problem regardless of how many plan turns re-encounter it (dedupe by
   `identity_key`), and the Problem message contains the drop reason code.

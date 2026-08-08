@@ -121,3 +121,71 @@ def test_quarantine_isolates_one_task_backlog_continues(tmp_path):
     titles = [t.title for t in created]
     assert bad not in titles                       # quarantined
     assert "add a --verbose flag to the CLI" in titles  # unrelated work proceeds
+
+
+# --------------------------------------------------------------------------- #
+# The ledger is specified PER-RUN. Left uncleared in `run_state.json`, a task the
+# PM prunes once in each of three separate runs is silently quarantined on run 4.
+# --------------------------------------------------------------------------- #
+_PM_MEMBERS = [
+    {"id": "m-pm", "enabled": True, "metadata": {"coding_role": "pm"}},
+    {"id": "m-dev", "enabled": True, "metadata": {"coding_role": "dev"}},
+]
+
+
+def _done_pm(member, prompt):
+    import json
+    return json.dumps({"schema_version": "coding_turn.v1", "role": "pm",
+                       "intent": {"kind": "plan", "done": True,
+                                  "completion_summary": "done"}})
+
+
+def _run(pid: str, *, counters):
+    from errorta_council.coding.autonomy import CADENCE_OFF, CodingAutonomyPolicy
+    from errorta_council.coding.runner import CodingRunner
+    CodingRunner(pid, _PM_MEMBERS, _done_pm, guardrail_enabled=True).run(
+        CodingAutonomyPolicy(checkpoint_cadence=CADENCE_OFF, max_iterations=4),
+        counters=counters)
+
+
+def test_drop_ledger_is_cleared_on_a_fresh_run(tmp_errorta_home):
+    store = LedgerStore("p46-fresh")
+    store.create_project(north_star="n", definition_of_done="d", target="new",
+                         repo_path=None)
+    key = task_dedupe.identity_key(title="wire the integration layer", paths=[])
+    for _ in range(3):
+        drop_ledger.record_drop(store, key)
+
+    _run("p46-fresh", counters=None)
+
+    assert drop_ledger.drop_count(store, key) == 0
+
+
+def test_drop_ledger_survives_a_resume(tmp_errorta_home):
+    """The KEEP half: a carried-counters resume is the SAME run, so the
+    create->drop cycles it counted must not restart."""
+    from errorta_council.coding.autonomy import LoopCounters
+
+    store = LedgerStore("p46-resume")
+    store.create_project(north_star="n", definition_of_done="d", target="new",
+                         repo_path=None)
+    key = task_dedupe.identity_key(title="wire the integration layer", paths=[])
+    for _ in range(3):
+        drop_ledger.record_drop(store, key)
+
+    _run("p46-resume", counters=LoopCounters())
+
+    assert drop_ledger.drop_count(store, key) == 3
+
+
+def test_quarantine_problem_does_not_block_the_development_stage(tmp_path):
+    """The escalation flags for the operator; it must NOT trip the governance
+    blocking gate, which halts the whole run with `blocked_on_problem`."""
+    from errorta_council.coding import attention
+    store = _store(tmp_path, "p46-nonblocking")
+    sig = attention.raise_task_pathology_problem(
+        store.project_id, identity="k1", title="wire the integration layer",
+        drops=3, reason_code="pm_pruned", store=store)
+    assert sig is not None and sig.blocking is False
+    assert attention.blocks_stage(store.project_id, "development",
+                                  store=store) is False

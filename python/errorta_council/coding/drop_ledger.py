@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
-_KEY = "drop_ledger"
+# The `run_state.json` key. Public because the fresh-start hygiene write in
+# `CodingRunner.run` clears it — the ledger is specified per-run.
+RUN_STATE_KEY = "drop_ledger"
 
 
 def _ledger(store: Any) -> dict[str, int]:
     try:
-        raw = store.get_run_state().get(_KEY) or {}
+        raw = store.get_run_state().get(RUN_STATE_KEY) or {}
         return {str(k): int(v) for k, v in raw.items()}
     except Exception:  # noqa: BLE001 — a read failure means "no counts yet"
         return {}
@@ -30,7 +32,7 @@ def record_drop(store: Any, identity: str) -> int:
         led = _ledger(store)
         led[str(identity)] = led.get(str(identity), 0) + 1
         try:
-            store.set_run_state(**{_KEY: led})
+            store.set_run_state(**{RUN_STATE_KEY: led})
         except Exception:  # noqa: BLE001 — best-effort; a lost increment only delays quarantine
             pass
         return led[str(identity)]
