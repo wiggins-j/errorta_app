@@ -37,6 +37,7 @@ from .autonomy import (
     run_coding_loop,
 )
 from .completion import pending_completion_work, summarize_open_items
+from .gate_state import gate_available
 from .ledger import LedgerStore, Task, format_focus_lines
 from .orientation import build_orientation_packet
 from .schemas import TurnErrorCode, TurnParseError, parse_coding_turn
@@ -1603,17 +1604,26 @@ def _repoint_dropped_dependents(
     return touched
 
 
-def _dev_prompt(task: Task, store: LedgerStore, readback: str = "") -> str:
+def _member_repo_read(member: dict[str, Any] | None) -> bool:
+    """Spec 17: describe the capability on this invocation, not project policy."""
+    member = member or {}
+    return bool(member.get("repo_read_root") or member.get("dev_repo_read_root"))
+
+
+def _dev_prompt(task: Task, store: LedgerStore, readback: str = "",
+                *, member: dict[str, Any] | None = None) -> str:
     # F087-17: the dev works on its own branch off master. The current contents
     # of the worktree (everything merged so far) are inlined so the dev EXTENDS
     # the project instead of regenerating a file from scratch and clobbering
     # prior work. code_write replaces the WHOLE file, so it must include
     # everything that should remain.
-    return _register_pending_composition(_dev_prompt_segments(task, store, readback))
+    return _register_pending_composition(
+        _dev_prompt_segments(task, store, readback, member=member))
 
 
 def _dev_prompt_segments(task: Task, store: LedgerStore,
-                         readback: str = "") -> list[PromptSegment]:
+                         readback: str = "", *,
+                         member: dict[str, Any] | None = None) -> list[PromptSegment]:
     """F143-01 Slice F: the DEV prompt as ordered labeled segments. Joined verbatim
     this equals the pre-refactor ``_dev_prompt`` string byte-for-byte (golden-locked)."""
     existing = (f"Current files in the worktree (EXTEND these — do not drop "
@@ -1657,11 +1667,19 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
         # Prior PM/reviewer context response threaded to this task.
         PromptSegment("prior_outputs",
                       _latest_context_response_text(store, task.task_id)),
+        PromptSegment(
+            "prior_outputs",
+            (
+                "Previous tool failure (correct this on this turn): "
+                f"{task.last_tool_failure[:1000]}\n"
+            ) if task.last_tool_failure else "",
+        ),
         # The current worktree snapshot the dev extends.
         PromptSegment("repo_snapshot", existing),
         # Tool catalog / how-to-emit-tool-calls guidance.
         PromptSegment("tool_guidance",
-                      f"{tool_catalog_text(DEV)} Do not request merge-back.\n"),
+                      f"{tool_catalog_text(DEV, repo_read=_member_repo_read(member), gate=gate_available(store))} "
+                      "Do not request merge-back.\n"),
         # Standing implement instructions + envelope schema.
         PromptSegment("role_instructions", envelope),
     ]
@@ -1710,7 +1728,9 @@ def _task_is_governance_sourced(task: Task) -> bool:
 
 
 def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
-                      project_context: str, scope_task: Task | None = None) -> str:
+                      project_context: str, scope_task: Task | None = None, *,
+                      member: dict[str, Any] | None = None,
+                      gate: bool = False) -> str:
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
@@ -1761,13 +1781,16 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     })
     return _register_pending_composition(_review_pr_prompt_segments(
         task, pr, project_context, task_scope=task_scope, bar=bar, cap=cap,
-        trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example))
+        trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example,
+        member=member, gate=gate))
 
 
 def _review_pr_prompt_segments(
         task: Task, pr: dict[str, Any], project_context: str, *,
         task_scope: str, bar: str, cap: str, trunc: str, trunc_note: str,
-        verdict_example: str) -> list[PromptSegment]:
+        verdict_example: str,
+        member: dict[str, Any] | None = None,
+        gate: bool = False) -> list[PromptSegment]:
     """F143-01 Slice F: the reviewer prompt as ordered labeled segments. Joined
     verbatim this equals the pre-refactor ``_review_pr_prompt`` string byte-for-byte
     (golden-locked). The branchy truncation/scope logic stays in ``_review_pr_prompt``;
@@ -1816,6 +1839,11 @@ def _review_pr_prompt_segments(
         PromptSegment("pr_diff", f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"),
         # Truncation caveat (empty when the diff fit).
         PromptSegment("role_instructions", trunc_note),
+        PromptSegment(
+            "tool_guidance",
+            f"{tool_catalog_text(REVIEWER, repo_read=_member_repo_read(member), gate=gate)} "
+            "Every blocking finding must cite a file; file:line in the body is better.\n",
+        ),
         # reviewed_head echo instruction + verdict envelope schema.
         PromptSegment("role_instructions", envelope),
     ]
@@ -2116,7 +2144,8 @@ def _review_project_context(store: LedgerStore, workspace: Any,
     )
 
 
-def _test_prompt(task: Task, store: LedgerStore) -> str:
+def _test_prompt(task: Task, store: LedgerStore, *,
+                 member: dict[str, Any] | None = None) -> str:
     registry = store.get_test_commands()
     if registry:
         ids = ", ".join(sorted(registry.keys()))
@@ -2125,11 +2154,13 @@ def _test_prompt(task: Task, store: LedgerStore) -> str:
         avail = ("No test commands are configured for this project, so there is "
                  "nothing to run — reply with empty \"command_ids\": [] and "
                  "\"not_applicable\": true (the test gate is non-blocking).")
-    return _register_pending_composition(_test_prompt_segments(task, store, avail=avail))
+    return _register_pending_composition(
+        _test_prompt_segments(task, store, avail=avail, member=member))
 
 
 def _test_prompt_segments(task: Task, store: LedgerStore, *,
-                          avail: str) -> list[PromptSegment]:
+                          avail: str,
+                          member: dict[str, Any] | None = None) -> list[PromptSegment]:
     """F143-01 Slice F: the tester prompt as ordered labeled segments. Joined verbatim
     this equals the pre-refactor ``_test_prompt`` string byte-for-byte (golden-locked).
     ``avail`` (the registered-command availability line) is computed by ``_test_prompt``
@@ -2164,6 +2195,10 @@ def _test_prompt_segments(task: Task, store: LedgerStore, *,
         # Retrieved project grounding for the tester.
         PromptSegment("project_context",
                       _grounding_packet_text("tester", store, task=task)),
+        PromptSegment(
+            "tool_guidance",
+            f"{tool_catalog_text(TESTER, repo_read=_member_repo_read(member), gate=gate_available(store))}\n",
+        ),
         # Standing test instructions (available commands + envelope schema).
         PromptSegment("role_instructions", instructions),
     ]
@@ -3317,7 +3352,8 @@ def build_run_turn(
                     except Exception:  # noqa: BLE001 — retrieval is best-effort
                         dev_member = member
                 parsed = _parse_member_turn(
-                    DEV, task.task_id, dev_member, _dev_prompt(task, store, readback),
+                    DEV, task.task_id, dev_member,
+                    _dev_prompt(task, store, readback, member=dev_member),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 if isinstance(parsed, TurnParseError):
                     store.record_decision(
@@ -3345,17 +3381,25 @@ def build_run_turn(
                 data = {"task_type": intent.task_type,
                         "tool_calls": [{"tool": tc.tool, "args": tc.args}
                                        for tc in intent.tool_calls]}
-                writes = controller.execute_dev_turn(task=task, member=member, data=data)
+                writes = controller.execute_dev_turn(task=task, member=dev_member, data=data)
                 if writes.failures:
                     for path, reason in writes.failures:
-                        choice = "tool_failed" if reason == "tool_not_allowed" else "write_failed"
+                        choice = (
+                            "tool_failed"
+                            if reason.startswith(TurnErrorCode.tool_not_allowed.value)
+                            else "write_failed"
+                        )
                         title = "tool failed" if choice == "tool_failed" else "write failed"
                         store.record_decision(
                             title=f"{title}: {task.title}",
                             context=f"task {task.task_id}", choice=choice,
                             rationale=f"{path}: {reason}",
                             related_task_ids=[task.task_id])
-                    store.update_task(task.task_id, state="todo")
+                    failure_text = "; ".join(
+                        f"{path}: {reason}" for path, reason in writes.failures)
+                    store.update_task(
+                        task.task_id, state="todo",
+                        last_tool_failure=failure_text[:1000])
                     # F136: a turn that produced NO usable write (every tool
                     # failed / was disallowed) is unproductive — feed the F127
                     # escalate-up ladder so a dev that keeps emitting a
@@ -3384,6 +3428,10 @@ def build_run_turn(
                         member_id=str(member.get("id", "")), member_role=DEV,
                         member_route=str(member.get("gateway_route_id", "")),
                         reason="write_missing")
+                # Spec 17: a usable write proves the corrective hint was acted on;
+                # do not nag future turns with stale tool guidance.
+                if task.last_tool_failure:
+                    store.update_task(task.task_id, last_tool_failure="")
                 if workspace is None or branch is None:
                     # No worktree -> can't open a PR; mark done (degenerate path).
                     store.update_task(task.task_id, state="done")
@@ -3456,7 +3504,8 @@ def build_run_turn(
                     REVIEWER, task.task_id, member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or ""))),
+                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        member=member, gate=gate_available(store)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 # F126: persist the reviewer's findings on the PR so the task
                 # detail can show WHY a PR got "changes requested", not just that
@@ -3528,7 +3577,7 @@ def build_run_turn(
                     TESTER,
                     task.task_id,
                     member,
-                    _test_prompt(task, store),
+                    _test_prompt(task, store, member=member),
                     context=f"task {task.task_id}",
                     related_task_ids=[task.task_id],
                 )
@@ -3638,7 +3687,8 @@ def build_run_turn(
                     REVIEWER, task.task_id, member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or ""))),
+                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        member=member, gate=gate_available(store)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 pm_findings: list[dict[str, Any]] = []
                 if isinstance(parsed, TurnParseError):

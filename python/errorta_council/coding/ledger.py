@@ -401,6 +401,9 @@ class Task:
     # machine title (e.g. "revise: <branch>") stays load-bearing for
     # _supersede_ancestors, so the reason lives here instead of in the title.
     reason_summary: str = ""
+    # Spec 17: the most recent rejected dev tool call, carried into the next
+    # composed prompt and cleared after a successful write.
+    last_tool_failure: str = ""
     source_spec_artifact_id: str | None = None
     source_plan_artifact_id: str | None = None
     source_slice_id: str | None = None
@@ -443,6 +446,8 @@ class Task:
             d["assignment_rationale"] = self.assignment_rationale
         if self.reason_summary:
             d["reason_summary"] = self.reason_summary
+        if self.last_tool_failure:
+            d["last_tool_failure"] = self.last_tool_failure
         if self.model_assignment:
             d["model_assignment"] = dict(self.model_assignment)
         d.update(self._extras)
@@ -689,6 +694,7 @@ class LedgerStore:
                  depends_on: list[str] | None = None,
                  pr_id: str | None = None,
                  reason_summary: str = "",
+                 last_tool_failure: str = "",
                  source_spec_artifact_id: str | None = None,
                  source_plan_artifact_id: str | None = None,
                  source_slice_id: str | None = None,
@@ -713,6 +719,7 @@ class LedgerStore:
             detail=detail, state="todo", assignee_member_id=assignee_member_id,
             parent_task_id=parent_task_id, depends_on=list(depends_on or []),
             pr_id=pr_id, reason_summary=reason_summary,
+            last_tool_failure=last_tool_failure,
             source_spec_artifact_id=source_spec_artifact_id,
             source_plan_artifact_id=source_plan_artifact_id,
             source_slice_id=source_slice_id,

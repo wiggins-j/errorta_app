@@ -198,7 +198,8 @@ def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
         f"{_latest_context_response_text(store, task.task_id)}"
         f"{existing}"
         f"{latest_gate_text(store)}"          # Spec 12 inserts here
-        f"{tool_catalog_text(DEV)} Do not request merge-back.\n"
+        f"{tool_catalog_text(DEV, repo_read=False, gate=False)} "
+        "Do not request merge-back.\n"
         "Implement the task via tool-backed writes; preserve all prior functions. "
         "If you write a web server, read its listen port from the PORT environment "
         "variable (with a sensible default) instead of hardcoding one, so the "
@@ -243,6 +244,7 @@ def _old_test_prompt(task, store: LedgerStore) -> str:
         f"Context: {_orientation_text(store)}\n"
         f"{_grounding_packet_text('tester', store, task=task)}"
         f"{latest_gate_text(store)}"          # Spec 12 inserts here
+        f"{tool_catalog_text(TESTER, repo_read=False, gate=False)}\n"
         f"{avail} You CANNOT declare pass or fail — the verdict comes from the "
         "REAL exit code of the commands actually run.\n"
         "This PR implements ONE scoped task, not the whole product. If NO "
@@ -349,6 +351,8 @@ def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> s
         f"PR diff vs master{trunc}:\n```diff\n{cap}\n```\n"
         f"{_gate_text_for_review()}"          # Spec 12 inserts here
         f"{trunc_note}"
+        f"{tool_catalog_text(REVIEWER, repo_read=False, gate=False)} "
+        "Every blocking finding must cite a file; file:line in the body is better.\n"
         f"The PR head you are reviewing is {pr.get('head')!r}; echo it verbatim as "
         '"reviewed_head".\n'
         "Reply with ONLY a coding_turn.v1 envelope: "

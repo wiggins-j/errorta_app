@@ -66,9 +66,28 @@ def _resolve_write_content(args: dict[str, Any]) -> str | bytes:
     return str(args.get("content", ""))
 
 
-def tool_catalog_text(role: str) -> str:
+def tool_catalog_text(role: str, *, repo_read: bool, gate: bool) -> str:
     tools = ", ".join(allowed_tools_for_role(role)) or "none"
-    return f"Available Coding Mode tools for role {role}: {tools}."
+    read_guidance = (
+        "CLI-native read tools available directly in the current working "
+        "directory: Read, Grep, Glob. They are read-only and are used directly "
+        "mid-turn; do not emit them as errorta tool calls."
+        if repo_read
+        else (
+            "No direct repo-read tools are available. A dev may request a file "
+            "or contract with a typed context_request intent."
+        )
+    )
+    evidence = (
+        "Execution evidence comes from the acceptance gate output."
+        if gate
+        else "No acceptance-gate execution evidence is available."
+    )
+    return (
+        f"Available Coding Mode tools for role {role}: {tools}. "
+        f"{read_guidance} No execute, run, or shell tool exists for this role; "
+        f"do not plan one. {evidence}"
+    )
 
 
 @dataclass(frozen=True)
@@ -108,7 +127,15 @@ class CodingTurnController:
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
             intent = self._safe_intent(tool=tool, args=args, index=idx)
             if tool not in allowed_tools_for_role(DEV):
-                reason = TurnErrorCode.tool_not_allowed.value
+                allowed = ", ".join(allowed_tools_for_role(DEV)) or "none"
+                if member.get("repo_read_root") or member.get("dev_repo_read_root"):
+                    read_hint = "to read files use Read/Grep/Glob directly"
+                else:
+                    read_hint = "to read files use a context_request intent"
+                reason = (
+                    f"{TurnErrorCode.tool_not_allowed.value}: {tool or '<missing-tool>'!r} "
+                    f"— this role executes only: {allowed}; {read_hint}"
+                )
                 failures.append((tool or "<missing-tool>", reason))
                 self.store.record_tool_event(
                     turn_id=turn_id,
