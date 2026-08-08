@@ -3340,6 +3340,7 @@ def _materialize_pm_tasks(
     all_tasks = store.list_tasks()
     existing_title_to_id = {task.title: task.task_id for task in all_tasks}
     created: list[tuple[Task, list[str]]] = []
+    blocked_for_deps: list[tuple[Task, list[str]]] = []
     title_to_id = dict(existing_title_to_id)
     # Spec 08 — the dedupe gate. `existing_title_to_id` above maps EVERY task
     # (it must: `depends_on` may name a finished prerequisite by title), but the
@@ -3391,14 +3392,14 @@ def _materialize_pm_tasks(
                 extra={
                     "drop_count": drops,
                     **_drop_reasons.reason_blob(
-                        _drop_reasons.OVER_SCOPED,
+                        _drop_reasons.PM_PRUNED,
                         detail=f"quarantined after {quarantine_limit} drops"),
                 })
             try:
                 from . import attention
                 attention.raise_task_pathology_problem(
                     store.project_id, identity=identity, title=planned.title,
-                    drops=drops, reason_code=_drop_reasons.OVER_SCOPED, store=store)
+                    drops=drops, reason_code=_drop_reasons.PM_PRUNED, store=store)
             except Exception:  # noqa: BLE001
                 pass
             continue
@@ -3500,6 +3501,10 @@ def _materialize_pm_tasks(
                 open_index.append(task_dedupe.index_entry(
                     task_id=blocked_task.task_id, title=planned.title, role=DEV,
                     paths=paths))
+                for path in paths:
+                    path_owners.setdefault(path, blocked_task.task_id)
+                blocked_for_deps.append(
+                    (blocked_task, inherited_deps + list(planned.depends_on) + path_deps))
                 continue
         task = store.add_task(
             title=use_title,
@@ -3550,7 +3555,7 @@ def _materialize_pm_tasks(
         created.append(
             (task, inherited_deps + list(planned.depends_on) + path_deps)
         )
-    for task, dependencies in created:
+    for task, dependencies in created + blocked_for_deps:
         resolved: list[str] = []
         for dependency in dependencies:
             dependency_id = title_to_id.get(dependency, dependency)

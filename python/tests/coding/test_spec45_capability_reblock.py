@@ -76,6 +76,19 @@ def test_refused_task_is_persisted_blocked(tmp_path):
     assert not _tasks_by_state(store, "dropped")
 
 
+def test_blocked_task_preserves_depends_on(tmp_path):
+    store = _store(tmp_path)
+    prior = store.add_task(title="Set up the test harness", role="dev")
+    exec_title = "run the integration suite and report the failing cases"
+    planned = _Planned(exec_title)
+    planned.depends_on = ["Set up the test harness"]
+    created = _materialize_pm_tasks(store, _Intent([planned]))
+    assert created == []
+    blocked = _tasks_by_state(store, "blocked")
+    assert len(blocked) == 1
+    assert blocked[0].depends_on == [prior.task_id]
+
+
 def test_same_batch_duplicate_execution_blocked_once(tmp_path):
     title = "run the integration suite and report the failing cases"
     store = _store(tmp_path)
