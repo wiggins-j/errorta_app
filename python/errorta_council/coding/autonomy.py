@@ -2916,13 +2916,6 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
         return None
     if c.plan_streak < policy.plan_streak_limit:
         return None
-    depth, distinct = _open_backlog_shape(ledger)
-    evidence = DetectorEvidence(
-        detector="planning_churn",
-        text=(f"{c.plan_streak} consecutive planning turns with no worker turn "
-              f"(backlog {depth} open task(s) across {distinct} distinct title(s))"),
-        value=c.plan_streak, threshold=policy.plan_streak_limit)
-    _maybe_raise_monitor(ledger, "planning_churn", evidence)
     if _quarantined_task_needs_input(ledger):
         return Stop(
             reason=QUARANTINED_TASK_NEEDS_INPUT,
@@ -2930,6 +2923,13 @@ def _account_planning_churn(ledger: Any, c: LoopCounters,
             evidence=("a quarantined task is the only remaining work — "
                       "needs operator input (see attention)"),
         )
+    depth, distinct = _open_backlog_shape(ledger)
+    evidence = DetectorEvidence(
+        detector="planning_churn",
+        text=(f"{c.plan_streak} consecutive planning turns with no worker turn "
+              f"(backlog {depth} open task(s) across {distinct} distinct title(s))"),
+        value=c.plan_streak, threshold=policy.plan_streak_limit)
+    _maybe_raise_monitor(ledger, "planning_churn", evidence)
     # SPEC-27 Item 3 — ladder `CLAMP_PLANNING -> ESCALATE -> STOP`. The detector's
     # own diagnosis is "PM plan turns with zero interleaved worker turns", so
     # making the next turn a worker turn IS the remedy, and it costs nothing.

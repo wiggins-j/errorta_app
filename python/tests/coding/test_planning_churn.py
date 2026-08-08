@@ -282,6 +282,34 @@ def test_quarantined_task_yields_needs_input_not_planning_churn(
     assert stop.detector == QUARANTINED_TASK_NEEDS_INPUT
 
 
+def test_quarantine_guard_is_narrow_todo_work_still_trips_planning_churn(
+        tmp_path: Path) -> None:
+    """A task_pathology Problem alone must not suppress planning_churn while todo
+    work remains — the guard is narrow by design."""
+    from errorta_council.coding import attention
+
+    store = LedgerStore("qtni-todo", root=tmp_path)
+    store.create_project(north_star="n", definition_of_done="d", target="new",
+                         repo_path=None)
+    attention.raise_task_pathology_problem(
+        store.project_id, identity="k1", title="wire the integration layer",
+        drops=3, reason_code="pm_pruned", store=store)
+    store.add_task(title="still dispatchable", role="dev")
+
+    limit = 3
+    policy = CodingAutonomyPolicy(plan_streak_limit=limit)
+    c = LoopCounters()
+    stop = None
+    for _ in range(limit):
+        _apply(_planned(), c, ledger=store)
+        stop = _account_planning_churn(store, c, policy)
+
+    assert stop is not None
+    assert stop.detector == PLANNING_CHURN
+    if isinstance(stop, Stop):
+        assert stop.reason == PLANNING_CHURN
+
+
 # --------------------------------------------------------------------------- #
 # 3. The diagnosis pair: backlog depth + DISTINCT open titles.
 # --------------------------------------------------------------------------- #
