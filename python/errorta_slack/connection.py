@@ -53,9 +53,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any, Awaitable, Callable
 
 from errorta_slack import auth, concierge, render, tools
+
+_LOGGER = logging.getLogger(__name__)
+
+_TURN_ERROR_TEXT = "⚠️ couldn't process that — try again"
 
 try:  # pragma: no cover - exercised by test_connection_module_import_is_safe_without_slack_sdk
     from slack_sdk.socket_mode.request import SocketModeRequest  # noqa: F401
@@ -248,8 +253,19 @@ class SlackBridge:
                     wait_new.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await wait_new
-                with contextlib.suppress(BaseException):
-                    task.exception()
+                # `_process` catches and handles every exception it can
+                # anticipate (logs + posts a user-facing error) and never
+                # lets one propagate out under normal operation. This is a
+                # last-resort backstop: if something still escaped (a bug in
+                # the handling above, not cancellation), log it so it is
+                # never silently dropped.
+                if not task.cancelled():
+                    exc = task.exception()
+                    if exc is not None:
+                        _LOGGER.error(
+                            "slack bridge: unhandled worker exception on thread_ts=%s: %r",
+                            thread_ts, exc,
+                        )
                 return
 
             event.clear()
@@ -330,21 +346,58 @@ class SlackBridge:
             return
 
         history = self._thread_history.setdefault(thread_ts, [])
-        result = await asyncio.to_thread(
-            concierge.run_turn,
-            item.get("text", ""),
-            list(history),
-            project_id=project_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            deps=self._deps,
-            caller=self._caller,
-        )
+        try:
+            result = await asyncio.to_thread(
+                concierge.run_turn,
+                item.get("text", ""),
+                list(history),
+                project_id=project_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                deps=self._deps,
+                caller=self._caller,
+            )
+        except asyncio.CancelledError:
+            # A cancel look-ahead intentionally interrupted this turn -- not
+            # a failure. Never surface a user-facing error for it.
+            raise
+        except Exception:
+            # Never log the raw item/prompt here -- it may carry a user's
+            # Slack message text. Metadata only (thread/channel + the
+            # exception's own type/message) — no tokens, no secrets, no
+            # message content.
+            _LOGGER.exception(
+                "slack bridge: turn failed (thread_ts=%s, channel_id=%s)",
+                thread_ts, channel_id,
+            )
+            await self._post_turn_error(channel_id, thread_ts)
+            return
+
         history.append({"role": "user", "text": item.get("text", "")})
         reply = result.get("reply")
         if reply:
             history.append({"role": "assistant", "text": reply})
-        await self._post_result(channel_id, thread_ts, result)
+
+        try:
+            await self._post_result(channel_id, thread_ts, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception(
+                "slack bridge: posting the reply failed (thread_ts=%s, channel_id=%s)",
+                thread_ts, channel_id,
+            )
+            await self._post_turn_error(channel_id, thread_ts)
+
+    async def _post_turn_error(self, channel_id: Any, thread_ts: str) -> None:
+        if self._poster is None:
+            return
+        # Best-effort: if even posting the error fails, there's nothing
+        # further to do -- swallow rather than let it crash the worker.
+        # `Exception` (not `BaseException`) so a genuine CancelledError from
+        # an overlapping cancel still propagates.
+        with contextlib.suppress(Exception):
+            await self._poster.post_message(channel_id, thread_ts, _TURN_ERROR_TEXT, blocks=None)
 
     async def _post_result(self, channel_id: Any, thread_ts: str, result: dict[str, Any]) -> None:
         if self._poster is None:

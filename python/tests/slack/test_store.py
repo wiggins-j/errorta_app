@@ -201,7 +201,61 @@ def test_set_pref_is_per_channel() -> None:
     assert store.get_prefs("C456") == {"digest": "weekly"}
 
 
-def test_store_module_does_not_import_slack_sdk() -> None:
-    import sys
+def test_concurrent_stage_confirmation_loses_no_records() -> None:
+    """Task 8 review finding: store.py's read-modify-write was unguarded, so
+    two threads staging a confirmation at the same time could race -- both
+    load the same stale confirmations.json, and the second writer clobbers
+    the first's record entirely (not just a field -- the whole entry, and
+    its Approve button, vanish). Guards against a regression of the
+    threading.RLock fix in every mutating function."""
+    import concurrent.futures
 
-    assert "slack_sdk" not in sys.modules
+    n = 64
+
+    def stage(i: int) -> str:
+        return store.stage_confirmation("spend_cloud", {"amount": i}, f"thread-{i}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        cids = list(pool.map(stage, range(n)))
+
+    assert len(cids) == len(set(cids)) == n
+    for cid in cids:
+        record = store.get_confirmation(cid)
+        assert record is not None, f"confirmation {cid} was lost to a race"
+        assert record["state"] == "pending"
+
+
+def test_concurrent_resolve_confirmation_loses_no_updates() -> None:
+    """Same lost-update race, on the resolve path: many threads resolving
+    DIFFERENT confirmations concurrently must not clobber each other."""
+    import concurrent.futures
+
+    n = 64
+    cids = [store.stage_confirmation("spend_cloud", {"amount": i}, f"t-{i}") for i in range(n)]
+
+    def resolve(cid: str) -> None:
+        store.resolve_confirmation(cid, "approved")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(resolve, cids))
+
+    for cid in cids:
+        record = store.get_confirmation(cid)
+        assert record is not None
+        assert record["state"] == "approved", f"confirmation {cid} update was lost to a race"
+
+
+def test_store_module_does_not_import_slack_sdk() -> None:
+    """store.py must not pull in slack_sdk at module load.
+
+    Order-independent by construction: this checks store.py's OWN bound
+    names and source text, not process-global ``sys.modules`` — a sibling
+    test module (e.g. test_connection.py, whose connection.py guard-imports
+    slack_sdk when it's actually installed) importing slack_sdk earlier in
+    the same pytest session must not make this assertion false-fail.
+    """
+    import inspect
+
+    assert "slack_sdk" not in vars(store)
+    source = inspect.getsource(store)
+    assert "import slack_sdk" not in source

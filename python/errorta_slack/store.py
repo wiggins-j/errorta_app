@@ -12,14 +12,18 @@ at module load time — the Slack bridge is strictly optional and disabled by
 default, so the rest of the sidecar must keep working when ``slack-sdk``
 isn't installed.
 
-Concurrency: single-process file-based, like the mobile stores. No locking
-beyond atomic replace — that's sufficient for the sidecar's usage pattern.
+Concurrency: single-process file-based, like the mobile stores. Every
+mutating operation's full read-modify-write is additionally guarded by a
+module-level ``threading.RLock`` (see ``_LOCK`` below) so concurrent
+in-process threads (e.g. Task 8's per-``thread_ts`` Slack workers) can't
+lose an update to each other; this is not a cross-process lock.
 """
 from __future__ import annotations
 
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -29,6 +33,19 @@ from errorta_slack import config
 
 # Dedupe: keep only the most recent N seen event ids.
 _SEEN_EVENTS_MAX = 512
+
+# Guards every mutating operation's full read-modify-write (load -> mutate
+# -> write) so it is atomic within this process. Task 8's connection.py runs
+# one worker per Slack thread_ts, each as its own OS thread via
+# asyncio.to_thread — without this lock, two concurrent callers (e.g. two
+# threads both staging a confirmation) can race: both load the same stale
+# file, mutate their own in-memory copy, and the second write clobbers the
+# first's change (a lost update — a staged confirmation silently vanishes
+# and its Approve button no-ops forever). An RLock (not Lock) so a function
+# that legitimately calls another locked function internally doesn't
+# deadlock. This protects concurrent THREADS within one process; it is not
+# a cross-process lock (matches this module's existing documented scope).
+_LOCK = threading.RLock()
 
 
 # --- Generic atomic-write JSON helpers ------------------------------------
@@ -88,9 +105,10 @@ def _load_bindings() -> dict[str, dict[str, Any]]:
 
 def bind_channel(channel_id: str, project_id: str) -> None:
     """Bind ``channel_id`` to ``project_id``, overwriting any prior binding."""
-    bindings = _load_bindings()
-    bindings[channel_id] = {"channel_id": channel_id, "project_id": project_id}
-    _write_json(_bindings_path(), bindings)
+    with _LOCK:
+        bindings = _load_bindings()
+        bindings[channel_id] = {"channel_id": channel_id, "project_id": project_id}
+        _write_json(_bindings_path(), bindings)
 
 
 def binding_for(channel_id: str) -> dict[str, Any] | None:
@@ -105,11 +123,12 @@ def list_bindings() -> list[dict[str, Any]]:
 
 def unbind(channel_id: str) -> None:
     """Remove any binding for ``channel_id``. No-op if it wasn't bound."""
-    bindings = _load_bindings()
-    if channel_id not in bindings:
-        return
-    del bindings[channel_id]
-    _write_json(_bindings_path(), bindings)
+    with _LOCK:
+        bindings = _load_bindings()
+        if channel_id not in bindings:
+            return
+        del bindings[channel_id]
+        _write_json(_bindings_path(), bindings)
 
 
 # --- Outbound cursor ---------------------------------------------------
@@ -136,11 +155,12 @@ def advance_cursor(channel_id: str, marker: str) -> None:
 
     Idempotent: advancing to the same marker twice is a no-op (no write).
     """
-    cursors = _load_cursors()
-    if cursors.get(channel_id) == marker:
-        return
-    cursors[channel_id] = marker
-    _write_json(_cursors_path(), cursors)
+    with _LOCK:
+        cursors = _load_cursors()
+        if cursors.get(channel_id) == marker:
+            return
+        cursors[channel_id] = marker
+        _write_json(_cursors_path(), cursors)
 
 
 # --- Dedupe ----------------------------------------------------------------
@@ -164,14 +184,15 @@ def seen_event(event_id: str) -> bool:
     evicted first), so long-running channels don't grow this file
     unbounded.
     """
-    seen = _load_seen_events()
-    if event_id in seen:
-        return True
-    seen.append(event_id)
-    if len(seen) > _SEEN_EVENTS_MAX:
-        seen = seen[-_SEEN_EVENTS_MAX:]
-    _write_json(_seen_events_path(), seen)
-    return False
+    with _LOCK:
+        seen = _load_seen_events()
+        if event_id in seen:
+            return True
+        seen.append(event_id)
+        if len(seen) > _SEEN_EVENTS_MAX:
+            seen = seen[-_SEEN_EVENTS_MAX:]
+        _write_json(_seen_events_path(), seen)
+        return False
 
 
 # --- Confirmations -----------------------------------------------------
@@ -209,9 +230,10 @@ def stage_confirmation(
         "created_at": now if now is not None else time.time(),
         "state": "pending",
     }
-    confirmations = _load_confirmations()
-    confirmations[cid] = record
-    _write_json(_confirmations_path(), confirmations)
+    with _LOCK:
+        confirmations = _load_confirmations()
+        confirmations[cid] = record
+        _write_json(_confirmations_path(), confirmations)
     return cid
 
 
@@ -225,13 +247,14 @@ def resolve_confirmation(cid: str, decision: str) -> dict[str, Any]:
 
     Raises ``KeyError`` if ``cid`` is unknown.
     """
-    confirmations = _load_confirmations()
-    record = confirmations[cid]
-    record = dict(record)
-    record["state"] = decision
-    confirmations[cid] = record
-    _write_json(_confirmations_path(), confirmations)
-    return record
+    with _LOCK:
+        confirmations = _load_confirmations()
+        record = confirmations[cid]
+        record = dict(record)
+        record["state"] = decision
+        confirmations[cid] = record
+        _write_json(_confirmations_path(), confirmations)
+        return record
 
 
 def pop_pending_older_than(
@@ -244,25 +267,26 @@ def pop_pending_older_than(
     ``time.time()``.
     """
     effective_now = now if now is not None else time.time()
-    confirmations = _load_confirmations()
-    stale: list[dict[str, Any]] = []
-    changed = False
-    for cid, record in confirmations.items():
-        if record.get("state") != "pending":
-            continue
-        created_at = record.get("created_at")
-        if not isinstance(created_at, (int, float)):
-            continue
-        if effective_now - created_at <= max_age_seconds:
-            continue
-        updated = dict(record)
-        updated["state"] = "timed_out"
-        confirmations[cid] = updated
-        stale.append(updated)
-        changed = True
-    if changed:
-        _write_json(_confirmations_path(), confirmations)
-    return stale
+    with _LOCK:
+        confirmations = _load_confirmations()
+        stale: list[dict[str, Any]] = []
+        changed = False
+        for cid, record in confirmations.items():
+            if record.get("state") != "pending":
+                continue
+            created_at = record.get("created_at")
+            if not isinstance(created_at, (int, float)):
+                continue
+            if effective_now - created_at <= max_age_seconds:
+                continue
+            updated = dict(record)
+            updated["state"] = "timed_out"
+            confirmations[cid] = updated
+            stale.append(updated)
+            changed = True
+        if changed:
+            _write_json(_confirmations_path(), confirmations)
+        return stale
 
 
 # --- Prefs ----------------------------------------------------------------
@@ -281,11 +305,12 @@ def _load_all_prefs() -> dict[str, dict[str, Any]]:
 
 def set_pref(channel_id: str, key: str, value: Any) -> None:
     """Set a single preference ``key`` for ``channel_id``."""
-    all_prefs = _load_all_prefs()
-    channel_prefs = dict(all_prefs.get(channel_id, {}))
-    channel_prefs[key] = value
-    all_prefs[channel_id] = channel_prefs
-    _write_json(_prefs_path(), all_prefs)
+    with _LOCK:
+        all_prefs = _load_all_prefs()
+        channel_prefs = dict(all_prefs.get(channel_id, {}))
+        channel_prefs[key] = value
+        all_prefs[channel_id] = channel_prefs
+        _write_json(_prefs_path(), all_prefs)
 
 
 def get_prefs(channel_id: str) -> dict[str, Any]:
