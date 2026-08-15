@@ -352,13 +352,23 @@ async def lifespan(app: FastAPI):
     # module is built around (see tests/slack/test_optionality.py). Routes
     # added to `app.router` here, before the app starts serving, are live
     # for every request exactly like the ones registered at module level.
-    try:
-        from errorta_slack.routes import router as slack_routes_router
+    # Guard against re-mounting: `app` is a module-cached singleton, and
+    # lifespan re-enters on every `with TestClient(app) as c:` cycle (this
+    # repo has ~28 test files that do exactly that against the same `app`
+    # object). Without this guard, each re-entry would append another copy
+    # of the router to `app.router.routes` — unbounded growth plus a
+    # `Duplicate Operation ID` warning per repeat boot. Mirrors
+    # `slack_lifecycle.sync()`'s own self-guarding (stop-then-restart)
+    # shape, just for a router include instead of a live connection.
+    if not getattr(app.state, "_slack_routes_mounted", False):
+        try:
+            from errorta_slack import routes as slack_routes
 
-        app.include_router(slack_routes_router)
-    except ImportError as exc:  # pragma: no cover - exercised by optionality tests
-        logging.getLogger(__name__).info(
-            "slack routes not mounted (errorta_slack unavailable): %s", exc)
+            app.include_router(slack_routes.router)
+            app.state._slack_routes_mounted = True
+        except ImportError as exc:  # pragma: no cover - exercised by optionality tests
+            logging.getLogger(__name__).info(
+                "slack routes not mounted (errorta_slack unavailable): %s", exc)
 
     try:
         from errorta_app import slack_lifecycle

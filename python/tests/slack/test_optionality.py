@@ -121,3 +121,64 @@ def test_server_import_does_not_pull_in_slack_bridge(tmp_path: Path) -> None:
         f"subprocess failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
     )
     assert proc.stdout.strip() == "OK"
+
+
+# --- router mount is idempotent across repeated lifespan entries -----------
+
+
+def test_slack_router_mounts_exactly_once_across_repeated_lifespan_entries() -> None:
+    """``errorta_app.server.app`` is a module-cached singleton shared across
+    the whole pytest process, and ~28 test files elsewhere in this repo each
+    do ``with TestClient(app) as c:`` against that SAME object -- every one
+    of those re-enters lifespan startup. Review reproduced the bug this
+    guards: without a mount guard, each re-entry appended another copy of
+    the slack router to ``app.router.routes`` (26 -> 27 -> 28 -> 29 routes
+    over 4 boots) plus a ``Duplicate Operation ID`` warning per repeat. This
+    drives the real app through lifespan twice in a row and asserts the
+    route table -- and the OpenAPI schema build -- are unaffected by the
+    second entry."""
+    import warnings
+
+    from fastapi.testclient import TestClient
+
+    from errorta_app.server import app
+    from errorta_slack import routes as slack_routes
+
+    def _slack_mount_count() -> int:
+        # FastAPI >=0.139's `include_router` appends a lazy `_IncludedRouter`
+        # wrapper (identified by `.original_router`) rather than flattening
+        # each sub-route into `app.router.routes` directly -- so counting by
+        # `.path` (which only exists on already-flattened `APIRoute`s defined
+        # straight on `app`) silently finds zero regardless of how many times
+        # the router was mounted. Identity on `.original_router` is the
+        # version-independent way to count how many times THIS router object
+        # was included.
+        return sum(
+            1 for r in app.router.routes
+            if getattr(r, "original_router", None) is slack_routes.router
+        )
+
+    with TestClient(app):
+        pass
+    first_total = len(app.router.routes)
+    assert _slack_mount_count() == 1
+
+    with TestClient(app):
+        pass
+    second_total = len(app.router.routes)
+    assert _slack_mount_count() == 1
+    assert second_total == first_total, (
+        f"route table grew across a second lifespan entry: "
+        f"{first_total} -> {second_total}"
+    )
+
+    # The "Duplicate Operation ID" warning is emitted when the OpenAPI
+    # schema is (re)built from a route table with two routes sharing an
+    # auto-generated operation id -- force a fresh build and assert it's
+    # clean now that the mount is guarded.
+    app.openapi_schema = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        app.openapi()
+    dup_warnings = [w for w in caught if "Duplicate Operation ID" in str(w.message)]
+    assert not dup_warnings, [str(w.message) for w in dup_warnings]
