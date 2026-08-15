@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import stat
+from pathlib import Path
+
+import pytest
+
+from errorta_slack import store
+
+
+@pytest.fixture(autouse=True)
+def _isolated_errorta_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("ERRORTA_HOME", str(tmp_path))
+    return tmp_path
+
+
+# --- Bindings ---------------------------------------------------------
+
+
+def test_binding_for_unbound_channel_returns_none() -> None:
+    assert store.binding_for("C123") is None
+
+
+def test_bind_lookup_unbind_round_trip() -> None:
+    store.bind_channel("C123", "errorta")
+
+    binding = store.binding_for("C123")
+    assert binding is not None
+    assert binding["channel_id"] == "C123"
+    assert binding["project_id"] == "errorta"
+
+    store.unbind("C123")
+
+    assert store.binding_for("C123") is None
+
+
+def test_list_bindings_returns_all() -> None:
+    store.bind_channel("C123", "errorta")
+    store.bind_channel("C456", "aiar")
+
+    bindings = store.list_bindings()
+
+    channel_ids = {b["channel_id"] for b in bindings}
+    assert channel_ids == {"C123", "C456"}
+
+
+def test_bind_channel_overwrites_existing_binding() -> None:
+    store.bind_channel("C123", "errorta")
+    store.bind_channel("C123", "aiar")
+
+    binding = store.binding_for("C123")
+    assert binding is not None
+    assert binding["project_id"] == "aiar"
+    assert len(store.list_bindings()) == 1
+
+
+def test_unbind_unknown_channel_is_a_no_op() -> None:
+    store.unbind("C999")  # must not raise
+
+
+def test_bindings_file_written_with_owner_only_permissions() -> None:
+    store.bind_channel("C123", "errorta")
+
+    from errorta_slack import config
+
+    path = config.slack_dir() / "bindings.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+# --- Outbound cursor ----------------------------------------------------
+
+
+def test_get_cursor_for_unknown_channel_returns_none() -> None:
+    assert store.get_cursor("C123") is None
+
+
+def test_advance_cursor_sets_and_updates_marker() -> None:
+    store.advance_cursor("C123", "marker-1")
+    assert store.get_cursor("C123") == "marker-1"
+
+    store.advance_cursor("C123", "marker-2")
+    assert store.get_cursor("C123") == "marker-2"
+
+
+def test_advance_cursor_to_same_marker_is_idempotent() -> None:
+    store.advance_cursor("C123", "marker-1")
+    store.advance_cursor("C123", "marker-1")
+
+    assert store.get_cursor("C123") == "marker-1"
+
+
+def test_advance_cursor_is_per_channel() -> None:
+    store.advance_cursor("C123", "marker-1")
+    store.advance_cursor("C456", "marker-2")
+
+    assert store.get_cursor("C123") == "marker-1"
+    assert store.get_cursor("C456") == "marker-2"
+
+
+# --- Dedupe ---------------------------------------------------------------
+
+
+def test_seen_event_returns_false_then_true() -> None:
+    assert store.seen_event("evt-1") is False
+    assert store.seen_event("evt-1") is True
+
+
+def test_seen_event_distinct_ids_independent() -> None:
+    assert store.seen_event("evt-1") is False
+    assert store.seen_event("evt-2") is False
+    assert store.seen_event("evt-1") is True
+
+
+def test_seen_event_bounded_to_512_ids() -> None:
+    for i in range(600):
+        store.seen_event(f"evt-{i}")
+
+    # The oldest ids should have been evicted; the most recent 512 remain.
+    assert store.seen_event("evt-599") is True
+    assert store.seen_event("evt-0") is False
+
+
+# --- Confirmations ----------------------------------------------------
+
+
+def test_stage_confirmation_returns_pending_record() -> None:
+    cid = store.stage_confirmation("deploy", {"target": "prod"}, "1699999999.000100")
+
+    record = store.get_confirmation(cid)
+    assert record is not None
+    assert record["id"] == cid
+    assert record["verb"] == "deploy"
+    assert record["args"] == {"target": "prod"}
+    assert record["thread_ts"] == "1699999999.000100"
+    assert record["state"] == "pending"
+    assert "created_at" in record
+
+
+def test_get_confirmation_unknown_id_returns_none() -> None:
+    assert store.get_confirmation("nope") is None
+
+
+def test_resolve_confirmation_sets_state_and_returns_record() -> None:
+    cid = store.stage_confirmation("deploy", {"target": "prod"}, "ts-1")
+
+    resolved = store.resolve_confirmation(cid, "approved")
+
+    assert resolved["state"] == "approved"
+    assert store.get_confirmation(cid)["state"] == "approved"
+
+
+def test_stage_confirmation_ids_are_unique() -> None:
+    cid1 = store.stage_confirmation("deploy", {}, "ts-1")
+    cid2 = store.stage_confirmation("deploy", {}, "ts-2")
+
+    assert cid1 != cid2
+
+
+def test_pop_pending_older_than_returns_and_resolves_stale() -> None:
+    cid_old = store.stage_confirmation("deploy", {}, "ts-1", now=1000.0)
+    cid_new = store.stage_confirmation("deploy", {}, "ts-2", now=1900.0)
+
+    popped = store.pop_pending_older_than(500.0, now=2000.0)
+
+    popped_ids = {r["id"] for r in popped}
+    assert popped_ids == {cid_old}
+    assert store.get_confirmation(cid_old)["state"] == "timed_out"
+    assert store.get_confirmation(cid_new)["state"] == "pending"
+
+
+def test_pop_pending_older_than_ignores_already_resolved() -> None:
+    cid = store.stage_confirmation("deploy", {}, "ts-1", now=1000.0)
+    store.resolve_confirmation(cid, "approved")
+
+    popped = store.pop_pending_older_than(0.0, now=2000.0)
+
+    assert popped == []
+
+
+# --- Prefs --------------------------------------------------------------
+
+
+def test_get_prefs_for_unknown_channel_returns_empty_dict() -> None:
+    assert store.get_prefs("C123") == {}
+
+
+def test_set_pref_then_get_prefs_round_trips() -> None:
+    store.set_pref("C123", "quiet_hours", True)
+    store.set_pref("C123", "digest", "daily")
+
+    prefs = store.get_prefs("C123")
+
+    assert prefs == {"quiet_hours": True, "digest": "daily"}
+
+
+def test_set_pref_is_per_channel() -> None:
+    store.set_pref("C123", "digest", "daily")
+    store.set_pref("C456", "digest", "weekly")
+
+    assert store.get_prefs("C123") == {"digest": "daily"}
+    assert store.get_prefs("C456") == {"digest": "weekly"}
+
+
+def test_store_module_does_not_import_slack_sdk() -> None:
+    import sys
+
+    assert "slack_sdk" not in sys.modules
