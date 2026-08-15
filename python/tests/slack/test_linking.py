@@ -85,3 +85,51 @@ def test_approve_unknown_link_id_raises_key_error() -> None:
 def test_deny_unknown_link_id_raises_key_error() -> None:
     with pytest.raises(KeyError):
         linking.deny_link("nope")
+
+
+# --- Terminal-state guards (approve-after-deny / deny-after-approve) ------
+
+
+def test_approve_after_deny_is_rejected_and_leaves_no_binding() -> None:
+    link_id = linking.request_link(CHANNEL_ID, PROJECT_ID, REQUESTER_USER_ID)
+    linking.deny_link(link_id)
+
+    with pytest.raises(linking.LinkingError) as excinfo:
+        linking.approve_link(link_id)
+
+    assert excinfo.value.code == "link_not_pending"
+    assert store.binding_for(CHANNEL_ID) is None
+    assert linking.status(link_id)["state"] == "denied"
+
+
+def test_deny_after_approve_is_rejected_and_binding_is_unchanged() -> None:
+    link_id = linking.request_link(CHANNEL_ID, PROJECT_ID, REQUESTER_USER_ID)
+    linking.approve_link(link_id)
+
+    with pytest.raises(linking.LinkingError) as excinfo:
+        linking.deny_link(link_id)
+
+    assert excinfo.value.code == "link_not_pending"
+    assert store.binding_for(CHANNEL_ID) is not None
+    assert store.binding_for(CHANNEL_ID)["project_id"] == PROJECT_ID
+    assert linking.status(link_id)["state"] == "approved"
+
+
+def test_double_approve_is_rejected() -> None:
+    link_id = linking.request_link(CHANNEL_ID, PROJECT_ID, REQUESTER_USER_ID)
+    linking.approve_link(link_id)
+
+    with pytest.raises(linking.LinkingError):
+        linking.approve_link(link_id)
+
+    assert linking.status(link_id)["state"] == "approved"
+
+
+def test_double_deny_is_rejected() -> None:
+    link_id = linking.request_link(CHANNEL_ID, PROJECT_ID, REQUESTER_USER_ID)
+    linking.deny_link(link_id)
+
+    with pytest.raises(linking.LinkingError):
+        linking.deny_link(link_id)
+
+    assert linking.status(link_id)["state"] == "denied"

@@ -99,15 +99,31 @@ def request_link(
     return link_id
 
 
+class LinkingError(ValueError):
+    """Raised when a link transition is attempted from a non-pending state."""
+
+    def __init__(self, link_id: str, state: str) -> None:
+        self.code = "link_not_pending"
+        self.link_id = link_id
+        self.state = state
+        super().__init__(
+            f"link {link_id!r} is not awaiting_owner (current state: {state!r})"
+        )
+
+
 def approve_link(link_id: str) -> dict[str, Any]:
     """Owner action: approve a pending link request.
 
     Transitions the record to ``"approved"`` and binds the channel to the
     project via ``store.bind_channel``. Raises ``KeyError`` if ``link_id``
-    is unknown.
+    is unknown. Raises ``LinkingError`` (code ``"link_not_pending"``) if
+    the record is not currently ``"awaiting_owner"`` — a terminal
+    (approved/denied) link can never be re-transitioned or rebound.
     """
     links = _load_links()
     record = dict(links[link_id])
+    if record["state"] != "awaiting_owner":
+        raise LinkingError(link_id, record["state"])
     record["state"] = "approved"
     links[link_id] = record
     _write_json(_links_path(), links)
@@ -120,10 +136,16 @@ def approve_link(link_id: str) -> dict[str, Any]:
 def deny_link(link_id: str) -> dict[str, Any]:
     """Owner action: deny a pending link request. No binding is created.
 
-    Raises ``KeyError`` if ``link_id`` is unknown.
+    Raises ``KeyError`` if ``link_id`` is unknown. Raises ``LinkingError``
+    (code ``"link_not_pending"``) if the record is not currently
+    ``"awaiting_owner"`` — a terminal (approved/denied) link can never be
+    re-transitioned, and an already-approved link's binding is left
+    untouched (denying does not unbind).
     """
     links = _load_links()
     record = dict(links[link_id])
+    if record["state"] != "awaiting_owner":
+        raise LinkingError(link_id, record["state"])
     record["state"] = "denied"
     links[link_id] = record
     _write_json(_links_path(), links)
@@ -135,4 +157,4 @@ def status(link_id: str) -> dict[str, Any] | None:
     return _load_links().get(link_id)
 
 
-__all__ = ["request_link", "approve_link", "deny_link", "status"]
+__all__ = ["request_link", "approve_link", "deny_link", "status", "LinkingError"]
