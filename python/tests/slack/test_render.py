@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-
 from errorta_slack import render
 
 
@@ -10,10 +8,22 @@ from errorta_slack import render
 
 def test_render_module_does_not_import_slack_sdk() -> None:
     """render.py builds plain dicts — it must not pull in slack_sdk at
-    module load (that SDK isn't needed to construct Block Kit JSON)."""
-    assert "slack_sdk" not in sys.modules or "errorta_slack.render" in sys.modules
-    # Stronger check: the module's own globals never bind slack_sdk.
+    module load (that SDK isn't needed to construct Block Kit JSON).
+
+    Order-independent by construction: checks render.py's OWN bound names
+    and source text, not process-global ``sys.modules`` (a prior version of
+    this test's first assertion keyed on ``sys.modules`` and was
+    tautological — always true once this very test module had imported
+    ``render`` — and would have false-failed had it been the stricter form,
+    the moment a sibling test module like test_connection.py's guarded
+    slack_sdk import actually succeeds in a venv where slack-sdk is
+    installed).
+    """
+    import inspect
+
     assert "slack_sdk" not in vars(render)
+    source = inspect.getsource(render)
+    assert "import slack_sdk" not in source
 
 
 # --- decision_message --------------------------------------------------
