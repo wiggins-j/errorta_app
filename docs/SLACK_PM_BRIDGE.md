@@ -15,11 +15,13 @@ give the team any capability it didn't already have.
 
 ## v1 scope — read this first
 
-- **Local/LAN URLs only.** `launch_runtime` starts your project's preview and
-  replies with the **loopback** URL, or the **LAN** URL if the sidecar runs
-  on a machine reachable on your network. There is **no public, phone-openable
-  URL** in v1 — that needs a real authenticated public ingress and is
-  deferred to v2.
+- **Loopback URL only.** `launch_runtime` starts your project's preview and
+  replies with a **loopback** URL (`http://127.0.0.1:<port>`) — that's all
+  v1 ships; there is no LAN-address detection in the code. Reaching it from
+  another device is up to your own network setup (e.g. running the sidecar
+  on a host you can already reach, or your own SSH tunnel) — the bridge
+  itself does not expose a LAN or public URL. A **public, phone-openable
+  URL** needs a real authenticated public ingress and is deferred to v2.
 - **Bugs become lightweight queued tasks, not governed specs.** "Add this bug
   to the work" appends a plain `todo` task to the project ledger. Turning a
   bug into a fully governed spec artifact (with its own model call and
