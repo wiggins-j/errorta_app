@@ -36,6 +36,13 @@ fire a real effect for the same confirmation: whichever claims it first
 (pending -> timed_out, or pending -> approved/declined) wins, and the other
 sees a non-pending state and no-ops.
 
+For an ``attention_signal``-class confirmation specifically, both paths
+write the decision through to the REAL governance signal (not just an
+announcement) via the injected ``attention_resolve_fn`` — see
+``attention_decision_action`` for the decision -> ``attention.resolve``
+action mapping and its documented edge case (no safe auto-action exists for
+a "problem"-kind signal).
+
 This module MUST NOT import ``slack_sdk`` at module load — the real Slack
 API call lives entirely behind the injected ``poster``, matching every
 other module in this optional bridge.
@@ -57,14 +64,13 @@ from errorta_slack import store as _slack_store
 _LOGGER = logging.getLogger(__name__)
 
 # Confirmation "verb" staged by THIS module for a decision-needed attention
-# signal — distinct from tools.py's real dispatchable tool verbs. Approving
-# one of these via Slack has no engine effect to fire (there is no matching
-# entry in tools.TOOL_CATALOG); it exists purely so the timeout sweep can
-# decide + announce it like any other confirmation. Real resolution of the
-# underlying attention signal is a human using the CLI/UI (out of scope for
-# this bridge task) — this only pushes visibility + a timeout default into
-# Slack.
-_ATTENTION_VERB = "attention_signal"
+# signal — distinct from tools.py's real dispatchable tool verbs (there is
+# no matching entry in tools.TOOL_CATALOG, and none is needed: resolving one
+# of these routes through the injected `attention_resolve_fn`, in both
+# connection.handle_interaction and sweep_timeouts, never through
+# tools.dispatch). Public (not module-private) because connection.py
+# branches on it by name.
+ATTENTION_VERB = "attention_signal"
 
 # The two irreversible tool classes ALWAYS default to the conservative
 # ("don't act") choice on timeout, regardless of any declared on_timeout tag
@@ -75,6 +81,40 @@ _CONSERVATIVE_VERBS = frozenset({"spend_cloud", "publish_pr"})
 # "on_timeout" tag. Only consulted for verbs NOT in _CONSERVATIVE_VERBS
 # (those are always forced to "declined" — see _timeout_decision).
 _DEFAULT_ON_TIMEOUT = "declined"
+
+
+def attention_decision_action(kind: str, decision: str) -> str | None:
+    """The ``attention.resolve`` action a Slack decision maps to, for a
+    signal of this ``kind`` — the write-through half of an
+    ``attention_signal`` confirmation (used by both
+    ``connection.handle_interaction`` and ``sweep_timeouts`` so approve,
+    decline, and timeout all resolve through the identical mapping).
+
+    ``"approved"`` -> ``"accept"`` (valid for every kind ``attention.py``
+    currently defines — both ``"problem"`` and ``"alert"``).
+
+    ``"declined"`` (including the timeout sweep's conservative default) ->
+    the safest CLEARING action available for this kind: ``"dismiss"``
+    preferred, ``"defer"`` as a fallback (per
+    ``attention.VALID_ACTIONS["alert"]``).
+
+    Returns ``None`` if no safe action exists for this kind — notably
+    ``"problem"``, whose ``VALID_ACTIONS`` is only ``{"accept", "correct"}``.
+    There is no no-op/clear action there, and this function deliberately
+    does NOT fall back to ``"accept"`` on a decline/timeout: auto-accepting
+    (which can spawn a task) is an active decision, the opposite of the
+    conservative "don't act" default a decline is supposed to mean. Callers
+    must treat ``None`` as "leave the signal open for a human", not as
+    license to invent an action.
+    """
+    valid = attention.VALID_ACTIONS.get(kind, frozenset())
+    if decision == "approved":
+        return "accept" if "accept" in valid else None
+    if "dismiss" in valid:
+        return "dismiss"
+    if "defer" in valid:
+        return "defer"
+    return None
 
 
 def _default_publish_events_fn(project_id: str) -> list[Any]:
@@ -94,6 +134,7 @@ class OutboundDeps:
     team_log_fn: Callable[[Any], list[dict[str, Any]]] = team_log.build_team_log
     attention_list_open: Callable[..., list[Any]] = attention.list_open
     publish_events_fn: Callable[[str], list[Any]] = _default_publish_events_fn
+    attention_resolve_fn: Callable[..., Any] = attention.resolve
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -113,6 +154,7 @@ class _Item:
     title: str
     detail: str
     signal_id: str | None = None  # only set for kind == "decision"
+    signal_kind: str | None = None  # "problem" | "alert" -- only set alongside signal_id
 
 
 def _log_items(deps: "OutboundDeps", ledger_store: Any) -> list[_Item]:
@@ -134,6 +176,7 @@ def _attention_items(
     items: list[_Item] = []
     for sig in deps.attention_list_open(project_id, store=ledger_store):
         sig_id = str(_get(sig, "id", ""))
+        sig_kind = str(_get(sig, "kind", ""))
         created_at = str(_get(sig, "created_at", ""))
         title = str(_get(sig, "title", ""))
         summary = str(_get(sig, "summary", ""))
@@ -142,7 +185,8 @@ def _attention_items(
             _Item(
                 marker=f"attn:{sig_id}", sort_key=created_at,
                 kind="decision" if blocking else "fyi",
-                title=title, detail=summary or title, signal_id=sig_id,
+                title=title, detail=summary or title,
+                signal_id=sig_id, signal_kind=sig_kind,
             )
         )
     return items
@@ -215,10 +259,11 @@ def poll_once(
 
         if item.kind == "decision":
             cid = deps.store.stage_confirmation(
-                _ATTENTION_VERB,
+                ATTENTION_VERB,
                 {
                     "signal_id": item.signal_id,
                     "project_id": project_id,
+                    "signal_kind": item.signal_kind,
                     "class": "attention",
                     "on_timeout": _DEFAULT_ON_TIMEOUT,
                 },
@@ -266,13 +311,52 @@ def _timeout_decision(record: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _resolve_attention_on_timeout(
+    deps: "OutboundDeps", record: dict[str, Any], decision: str,
+) -> str | None:
+    """Write the sweep's timeout decision through to the REAL attention
+    signal (spec §5.9 rule 3: an auto-decision must be written through the
+    coding store, not just announced) — without this, the governance signal
+    stays open and the pipeline stays stuck even though Slack says
+    "declined". Returns an override note to use in place of the normal
+    timeout reason if the write-through couldn't happen (no safe action, or
+    the resolve call itself failed), else ``None`` (the normal reason text
+    stands unchanged)."""
+    args = record.get("args") or {}
+    project_id = str(args.get("project_id") or "")
+    signal_id = str(args.get("signal_id") or "")
+    signal_kind = str(args.get("signal_kind") or "")
+    action = attention_decision_action(signal_kind, decision)
+    if action is None:
+        _LOGGER.warning(
+            "outbound: no safe attention.resolve action for signal %s "
+            "(kind=%r, decision=%r) -- leaving it open for a human",
+            signal_id, signal_kind, decision,
+        )
+        return "no automatic action was safe for this signal — it's still open for you"
+    try:
+        deps.attention_resolve_fn(
+            project_id, signal_id, action, by="slack-timeout",
+            store=deps.ledger_factory(project_id),
+        )
+    except Exception:
+        _LOGGER.exception(
+            "outbound: attention_resolve_fn failed for signal %s (action=%r)",
+            signal_id, action,
+        )
+        return "resolving it automatically failed — please check the project"
+    return None
+
+
 def sweep_timeouts(
     *, deps: "OutboundDeps", poster: Any, timeout_minutes: float,
     now: float | None = None,
 ) -> list[str]:
     """Atomically claim every confirmation pending longer than
-    ``timeout_minutes`` and post the PM's auto-decided outcome to its
-    thread. Returns the claimed confirmation ids.
+    ``timeout_minutes``, write each one's auto-decision through to the real
+    store (for ``attention_signal`` confirmations — see
+    ``_resolve_attention_on_timeout``), and post the outcome to its thread.
+    Returns the claimed confirmation ids.
 
     ``store.pop_pending_older_than`` IS the atomic claim — it transitions
     matching records from ``pending`` to ``timed_out`` and returns only the
@@ -280,8 +364,13 @@ def sweep_timeouts(
     human's button click (``connection.handle_interaction``'s own atomic
     claim via ``store.resolve_confirmation`` loses cleanly if the sweep won
     first, and vice versa). This sweep never itself calls ``tools.dispatch``
-    — the conservative default for an irreversible verb IS "the effect never
-    runs"; only a human Approve ever fires one.
+    — the conservative default for an irreversible tool verb IS "the effect
+    never runs"; only a human Approve ever fires one. ``attention_signal``
+    confirmations are the one exception: there IS a real write-through for
+    them (``attention_resolve_fn``), because the whole point of a Problem/
+    Alert signal is that the pipeline stays blocked until it's resolved one
+    way or another — announcing a decision without writing it through would
+    leave spec §5.9's block in place forever.
     """
     claimed = deps.store.pop_pending_older_than(timeout_minutes * 60, now=now)
     handled: list[str] = []
@@ -290,6 +379,12 @@ def sweep_timeouts(
         verb = str(record.get("verb", ""))
         channel_id = str(record.get("channel_id") or "")
         thread_ts = str(record.get("thread_ts") or "")
+
+        if verb == ATTENTION_VERB:
+            override = _resolve_attention_on_timeout(deps, record, decision)
+            if override is not None:
+                reason = override
+
         text = f"⏰ *{verb}* timed out — I decided *{decision}* because {reason}."
         try:
             poster.post_message(channel_id, thread_ts, text, blocks=render.fyi_message(text))
@@ -354,6 +449,8 @@ async def run_loop(
 
 __all__ = [
     "OutboundDeps",
+    "ATTENTION_VERB",
+    "attention_decision_action",
     "poll_once",
     "sweep_timeouts",
     "run_loop",

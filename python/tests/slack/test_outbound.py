@@ -74,10 +74,31 @@ def _log_entry(at: str, kind: str, message: str) -> dict[str, Any]:
 
 def _signal(
     sig_id: str, *, created_at: str, title: str, summary: str = "", blocking: bool = True,
+    kind: str = "alert",
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        id=sig_id, created_at=created_at, title=title, summary=summary, blocking=blocking,
+        id=sig_id, created_at=created_at, title=title, summary=summary,
+        blocking=blocking, kind=kind,
     )
+
+
+class AttentionResolveSpy:
+    """A fake standing in for `attention.resolve` -- records every call
+    (Critical 1/2 regression coverage: outbound.py and connection.py must
+    write the Slack decision through to the REAL attention signal via this
+    seam, not just announce it)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self, project_id: str, signal_id: str, action: str, *,
+        by: str = "user", store: Any = None, **kwargs: Any,
+    ) -> Any:
+        self.calls.append(
+            {"project_id": project_id, "signal_id": signal_id, "action": action, "by": by}
+        )
+        return SimpleNamespace(state="dismissed"), None
 
 
 def _publish_event(
@@ -91,6 +112,7 @@ def _deps(
     log_entries: list[dict[str, Any]] | None = None,
     signals: list[Any] | None = None,
     publish_events: list[Any] | None = None,
+    attention_resolve_fn: Any = None,
 ) -> outbound.OutboundDeps:
     return outbound.OutboundDeps(
         store=store,
@@ -98,6 +120,9 @@ def _deps(
         team_log_fn=lambda ledger_store: list(log_entries or []),
         attention_list_open=lambda project_id, store=None: list(signals or []),
         publish_events_fn=lambda project_id: list(publish_events or []),
+        attention_resolve_fn=attention_resolve_fn or (lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("attention_resolve_fn must not be called by this test")
+        )),
     )
 
 
@@ -328,29 +353,99 @@ async def test_sweep_timeouts_declines_publish_pr_by_conservative_default() -> N
 @pytest.mark.asyncio
 async def test_sweep_timeouts_applies_declared_on_timeout_approved() -> None:
     store.stage_confirmation(
-        "attention_signal", {"signal_id": "sig-1", "on_timeout": "approved"},
+        "attention_signal",
+        {"signal_id": "sig-1", "project_id": "proj-a", "signal_kind": "alert",
+         "on_timeout": "approved"},
         "thread-3", channel_id="C1", now=1000.0,
     )
-    deps = outbound.OutboundDeps(store=store)
+    spy = AttentionResolveSpy()
+    deps = outbound.OutboundDeps(store=store, attention_resolve_fn=spy)
     poster = SyncFakePoster()
 
     outbound.sweep_timeouts(deps=deps, poster=poster, timeout_minutes=30, now=1000.0 + 31 * 60)
 
     assert "approved" in poster.messages[0]["text"].lower()
+    assert spy.calls == [
+        {"project_id": "proj-a", "signal_id": "sig-1", "action": "accept", "by": "slack-timeout"}
+    ]
 
 
 @pytest.mark.asyncio
 async def test_sweep_timeouts_defaults_to_decline_with_no_declared_on_timeout() -> None:
     store.stage_confirmation(
-        "attention_signal", {"signal_id": "sig-1"}, "thread-4",
-        channel_id="C1", now=1000.0,
+        "attention_signal",
+        {"signal_id": "sig-1", "project_id": "proj-a", "signal_kind": "alert"},
+        "thread-4", channel_id="C1", now=1000.0,
     )
-    deps = outbound.OutboundDeps(store=store)
+    spy = AttentionResolveSpy()
+    deps = outbound.OutboundDeps(store=store, attention_resolve_fn=spy)
     poster = SyncFakePoster()
 
     outbound.sweep_timeouts(deps=deps, poster=poster, timeout_minutes=30, now=1000.0 + 31 * 60)
 
     assert "declined" in poster.messages[0]["text"].lower()
+    assert spy.calls == [
+        {"project_id": "proj-a", "signal_id": "sig-1", "action": "dismiss", "by": "slack-timeout"}
+    ]
+
+
+# --- Critical 1 (Task 9 review): the timeout sweep must WRITE THROUGH the ---
+# --- decision to the real attention signal, not just announce it -----------
+
+
+@pytest.mark.asyncio
+async def test_sweep_timeouts_resolves_attention_signal_with_right_ids_and_action() -> None:
+    """The core Critical 1 regression: sweep_timeouts must call the injected
+    attention_resolve_fn with the STAGED signal_id/project_id and the
+    correctly-mapped action -- not merely post a decision message that
+    leaves the real governance signal open (which would defeat spec §5.9's
+    whole purpose: the pipeline stays stuck)."""
+    cid = store.stage_confirmation(
+        outbound.ATTENTION_VERB,
+        {"signal_id": "sig-critical-1", "project_id": "proj-z", "signal_kind": "alert",
+         "on_timeout": "declined"},
+        "thread-crit1", channel_id="C1", now=1000.0,
+    )
+    spy = AttentionResolveSpy()
+    deps = outbound.OutboundDeps(store=store, attention_resolve_fn=spy)
+    poster = SyncFakePoster()
+
+    handled = outbound.sweep_timeouts(
+        deps=deps, poster=poster, timeout_minutes=30, now=1000.0 + 31 * 60,
+    )
+
+    assert handled == [cid]
+    assert len(spy.calls) == 1
+    assert spy.calls[0]["project_id"] == "proj-z"
+    assert spy.calls[0]["signal_id"] == "sig-critical-1"
+    assert spy.calls[0]["action"] == "dismiss"
+    assert spy.calls[0]["by"] == "slack-timeout"
+
+
+@pytest.mark.asyncio
+async def test_sweep_timeouts_problem_kind_has_no_safe_action_and_skips_resolve() -> None:
+    """A "problem"-kind signal's only VALID_ACTIONS are accept/correct -- no
+    safe "clear it" action exists. The sweep must NOT invent one (esp. must
+    not auto-accept, which can spawn a task -- the opposite of the
+    conservative default a timeout is supposed to mean): it skips calling
+    attention_resolve_fn and says so in the posted message, leaving the
+    signal open for a human."""
+    store.stage_confirmation(
+        outbound.ATTENTION_VERB,
+        {"signal_id": "sig-problem-1", "project_id": "proj-a", "signal_kind": "problem"},
+        "thread-crit1b", channel_id="C1", now=1000.0,
+    )
+    spy = AttentionResolveSpy()
+    deps = outbound.OutboundDeps(store=store, attention_resolve_fn=spy)
+    poster = SyncFakePoster()
+
+    handled = outbound.sweep_timeouts(
+        deps=deps, poster=poster, timeout_minutes=30, now=1000.0 + 31 * 60,
+    )
+
+    assert handled  # still claimed (state advances to timed_out) even though unresolved
+    assert spy.calls == []  # never called with an invented, unsafe action
+    assert "no automatic action was safe" in poster.messages[0]["text"].lower()
 
 
 @pytest.mark.asyncio
@@ -463,6 +558,168 @@ async def test_button_click_wins_race_then_timeout_sweep_is_a_noop(
     assert sweep_poster.messages == []
     assert store.get_confirmation(cid)["state"] == "approved"
     assert dispatch_calls == ["spend_cloud"]  # still exactly one real dispatch
+
+
+# --- Critical 2 (Task 9 review): approving/declining an attention_signal ---
+# --- decision must resolve the real signal, not crash on tools.dispatch ----
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_approve_attention_signal_resolves_via_injected_fn() -> None:
+    """attention_signal is not a tools.TOOL_CATALOG verb -- Approving one
+    must route through attention_resolve_fn (not tools.dispatch, and never
+    with confirmed_via="block_actions"), and must not raise."""
+    cid = store.stage_confirmation(
+        outbound.ATTENTION_VERB,
+        {"signal_id": "sig-crit2-a", "project_id": "proj-a", "signal_kind": "alert"},
+        "thread-att-1", channel_id="C1",
+    )
+    spy = AttentionResolveSpy()
+    tool_deps = tools.ToolDeps(store=store, attention_resolve_fn=spy)
+    async_poster = AsyncFakePoster()
+    bridge = connection.SlackBridge(
+        None, async_poster, tool_deps, lambda member, prompt: "{}",
+        config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+    payload = {
+        "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+        "channel": {"id": "C1"}, "message": {"ts": "thread-att-1"},
+        "actions": [{"action_id": "slack_approve", "value": cid}],
+    }
+
+    await bridge.handle_interaction(payload)  # must not raise
+
+    assert spy.calls == [
+        {"project_id": "proj-a", "signal_id": "sig-crit2-a", "action": "accept", "by": "slack"}
+    ]
+    assert store.get_confirmation(cid)["state"] == "approved"
+    assert len(async_poster.messages) == 1
+    assert "executed" in async_poster.messages[0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_decline_attention_signal_resolves_with_dismiss() -> None:
+    """Unlike a real tool verb (where Decline is a pure no-op), declining an
+    attention_signal decision must still write a real resolution through --
+    a "no" answer needs to clear the block too, just with the safe/clearing
+    action instead of "accept"."""
+    cid = store.stage_confirmation(
+        outbound.ATTENTION_VERB,
+        {"signal_id": "sig-crit2-b", "project_id": "proj-a", "signal_kind": "alert"},
+        "thread-att-2", channel_id="C1",
+    )
+    spy = AttentionResolveSpy()
+    tool_deps = tools.ToolDeps(store=store, attention_resolve_fn=spy)
+    async_poster = AsyncFakePoster()
+    bridge = connection.SlackBridge(
+        None, async_poster, tool_deps, lambda member, prompt: "{}",
+        config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+    payload = {
+        "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+        "channel": {"id": "C1"}, "message": {"ts": "thread-att-2"},
+        "actions": [{"action_id": "slack_decline", "value": cid}],
+    }
+
+    await bridge.handle_interaction(payload)
+
+    assert spy.calls == [
+        {"project_id": "proj-a", "signal_id": "sig-crit2-b", "action": "dismiss", "by": "slack"}
+    ]
+    assert store.get_confirmation(cid)["state"] == "declined"
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_attention_signal_never_uses_block_actions_dispatch() -> None:
+    """The `confirmed_via="block_actions"` marker is reserved for real tool
+    verbs (tools.dispatch's injection guard) -- an attention_signal
+    resolution must never pass through tools.dispatch at all, so that
+    marker can never appear on it."""
+    cid = store.stage_confirmation(
+        outbound.ATTENTION_VERB,
+        {"signal_id": "sig-crit2-c", "project_id": "proj-a", "signal_kind": "alert"},
+        "thread-att-3", channel_id="C1",
+    )
+    dispatch_calls: list[Any] = []
+
+    def _dispatch_spy(*args: Any, **kwargs: Any) -> Any:
+        dispatch_calls.append((args, kwargs))
+        raise AssertionError("tools.dispatch must never be called for attention_signal")
+
+    tool_deps = tools.ToolDeps(store=store, attention_resolve_fn=AttentionResolveSpy())
+    async_poster = AsyncFakePoster()
+    bridge = connection.SlackBridge(
+        None, async_poster, tool_deps, lambda member, prompt: "{}",
+        config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(tools, "dispatch", _dispatch_spy)
+        payload = {
+            "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+            "channel": {"id": "C1"}, "message": {"ts": "thread-att-3"},
+            "actions": [{"action_id": "slack_approve", "value": cid}],
+        }
+        await bridge.handle_interaction(payload)
+
+    assert dispatch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_unknown_verb_posts_clean_error_not_crash() -> None:
+    """Critical 2 regression: a confirmation staged with a verb that is
+    neither outbound.ATTENTION_VERB nor a real tools.TOOL_CATALOG entry (a
+    corrupted/forged record, or a future bug) must never crash the
+    callback -- tools.dispatch's ToolError is caught, logged, and a clean
+    error is posted instead."""
+    cid = store.stage_confirmation("not_a_real_verb", {}, "thread-bad-1", channel_id="C1")
+    tool_deps = tools.ToolDeps(store=store)
+    async_poster = AsyncFakePoster()
+    bridge = connection.SlackBridge(
+        None, async_poster, tool_deps, lambda member, prompt: "{}",
+        config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+    payload = {
+        "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+        "channel": {"id": "C1"}, "message": {"ts": "thread-bad-1"},
+        "actions": [{"action_id": "slack_approve", "value": cid}],
+    }
+
+    await bridge.handle_interaction(payload)  # must not raise
+
+    # Claimed (state changed) even though the effect failed -- it cannot be
+    # retried, so the clean error is the only signal the human gets.
+    assert store.get_confirmation(cid)["state"] == "approved"
+    assert len(async_poster.messages) == 1
+    assert async_poster.messages[0]["text"] == connection._EFFECT_ERROR_TEXT
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_problem_kind_attention_signal_posts_clean_error() -> None:
+    """Approving a "problem"-kind attention_signal (no safe action exists --
+    see outbound.attention_decision_action) must not crash either."""
+    cid = store.stage_confirmation(
+        outbound.ATTENTION_VERB,
+        {"signal_id": "sig-crit2-d", "project_id": "proj-a", "signal_kind": "problem"},
+        "thread-att-4", channel_id="C1",
+    )
+    spy = AttentionResolveSpy()
+    tool_deps = tools.ToolDeps(store=store, attention_resolve_fn=spy)
+    async_poster = AsyncFakePoster()
+    bridge = connection.SlackBridge(
+        None, async_poster, tool_deps, lambda member, prompt: "{}",
+        config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+    payload = {
+        "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+        "channel": {"id": "C1"}, "message": {"ts": "thread-att-4"},
+        "actions": [{"action_id": "slack_decline", "value": cid}],
+    }
+
+    await bridge.handle_interaction(payload)  # must not raise
+
+    assert spy.calls == []
+    assert store.get_confirmation(cid)["state"] == "declined"
+    assert async_poster.messages[0]["text"] == connection._EFFECT_ERROR_TEXT
 
 
 # --- run_loop: ticks on interval, drains bindings + runs the sweep ---------

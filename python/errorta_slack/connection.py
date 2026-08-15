@@ -11,7 +11,12 @@ rest of the bridge (``concierge``, ``tools``, ``store``, ``auth``,
   look-ahead cancel scan — see the module docstring section below.
 * The verified interaction callback (``handle_interaction``): the ONLY
   place in this bridge that may call ``tools.dispatch(...,
-  confirmed_via="block_actions")``.
+  confirmed_via="block_actions")``. The one exception to "dispatch" as the
+  effect: an ``outbound.ATTENTION_VERB`` confirmation (staged by
+  ``outbound.poll_once`` for a blocking coding-team attention signal, not a
+  real ``tools.TOOL_CATALOG`` verb) resolves through the injected
+  ``deps.attention_resolve_fn`` instead — see the "Verified interaction"
+  section below.
 * Connection lifecycle (``start``/``stop``) with capped exponential
   backoff on connect failure.
 
@@ -56,11 +61,12 @@ import contextlib
 import logging
 from typing import Any, Awaitable, Callable
 
-from errorta_slack import auth, concierge, render, tools
+from errorta_slack import auth, concierge, outbound, render, tools
 
 _LOGGER = logging.getLogger(__name__)
 
 _TURN_ERROR_TEXT = "⚠️ couldn't process that — try again"
+_EFFECT_ERROR_TEXT = "⚠️ couldn't complete that action — please check the project directly"
 
 try:  # pragma: no cover - exercised by test_connection_module_import_is_safe_without_slack_sdk
     from slack_sdk.socket_mode.request import SocketModeRequest  # noqa: F401
@@ -426,6 +432,57 @@ class SlackBridge:
         text = f"Approved — {verb} executed." if approved else f"Declined — {verb} was not executed."
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
+    async def _post_effect_error(self, channel_id: Any, thread_ts: str) -> None:
+        if self._poster is None:
+            return
+        # Best-effort, mirrors _post_turn_error: if even posting the error
+        # fails, there's nothing further to do.
+        with contextlib.suppress(Exception):
+            await self._poster.post_message(channel_id, thread_ts, _EFFECT_ERROR_TEXT, blocks=None)
+
+    def _fire_confirmed_effect(
+        self, record: dict[str, Any], *, channel_id: str, thread_ts: str,
+        verb: str, decision: str, approved: bool,
+    ) -> None:
+        """Run the effect a claimed confirmation authorizes. Two routes:
+
+        * ``outbound.ATTENTION_VERB`` — not a ``tools.TOOL_CATALOG`` verb, so
+          it never reaches ``tools.dispatch``. Both Approve AND Decline do
+          real work here (unlike a tool verb, where Decline is a pure no-op):
+          the decision is written through to the real attention signal via
+          ``deps.attention_resolve_fn``, using the same decision -> action
+          mapping the Task 9 timeout sweep uses
+          (``outbound.attention_decision_action``) so approve/decline/timeout
+          all resolve identically. Raises if no safe action exists for the
+          signal's kind (e.g. a "problem", whose only actions are
+          accept/correct) or if the resolve call itself fails — caught by
+          the caller, never left to crash the callback.
+        * every real tool verb — unchanged: ``tools.dispatch(...,
+          confirmed_via="block_actions")``, and ONLY on Approve (Decline is
+          still a pure no-op for a real tool).
+        """
+        if verb == outbound.ATTENTION_VERB:
+            args = record.get("args") or {}
+            project_id = str(args.get("project_id") or "")
+            signal_id = str(args.get("signal_id") or "")
+            signal_kind = str(args.get("signal_kind") or "")
+            action = outbound.attention_decision_action(signal_kind, decision)
+            if action is None:
+                raise RuntimeError(
+                    f"no safe attention.resolve action for signal {signal_id!r} "
+                    f"(kind={signal_kind!r}, decision={decision!r})"
+                )
+            self._deps.attention_resolve_fn(
+                project_id, signal_id, action, by="slack",
+                store=self._deps.ledger_factory(project_id),
+            )
+        elif approved:
+            tools.dispatch(
+                verb, dict(record.get("args") or {}),
+                channel_id=channel_id, thread_ts=thread_ts,
+                confirmed_via="block_actions", deps=self._deps,
+            )
+
     # ----------------------------------------------------------------
     # Verified interaction (button) callback
     #
@@ -436,7 +493,11 @@ class SlackBridge:
     # team/user pass auth.is_allowed's fail-closed allowlist check; (3) it
     # WON the atomic claim on a confirmation record staged earlier by
     # tools.dispatch's confirmed_via=None path; and only for Approve — a
-    # Decline resolves the record without ever calling tools.dispatch.
+    # Decline resolves the record without ever calling tools.dispatch. The
+    # ONE exception is an outbound.ATTENTION_VERB confirmation (see
+    # _fire_confirmed_effect) — confirmed_via="block_actions" is reserved
+    # for real tool verbs only, so that marker never appears on an
+    # attention-signal resolution.
     #
     # CLAIM, not check-then-act (Task 9 review carry-over): resolving is the
     # single atomic operation that authorizes the effect. This method used to
@@ -448,6 +509,14 @@ class SlackBridge:
     # is None); whether it's still eligible to fire is decided entirely by
     # store.resolve_confirmation's own atomic pending->decision transition,
     # which reports back whether THIS caller won it.
+    #
+    # The effect itself (dispatch OR attention_resolve_fn) runs inside a
+    # try/except: an unlisted verb (tools.ToolError) or a signal kind with no
+    # safe action (RuntimeError from _fire_confirmed_effect) must never
+    # escape this callback uncaught — the confirmation is already claimed at
+    # that point (state changed, so it can't be retried), so silently
+    # crashing would leave it permanently stuck with no visible outcome. A
+    # clean, generic error is posted instead (Task 9 review Critical 2).
     # ----------------------------------------------------------------
 
     async def handle_interaction(self, payload: dict[str, Any]) -> None:
@@ -480,12 +549,19 @@ class SlackBridge:
             # effect must fire at most once, so this call is a silent no-op.
             return
 
-        if approved:
-            tools.dispatch(
-                verb, dict(record.get("args") or {}),
-                channel_id=channel_id, thread_ts=thread_ts,
-                confirmed_via="block_actions", deps=self._deps,
+        try:
+            self._fire_confirmed_effect(
+                record, channel_id=channel_id, thread_ts=thread_ts,
+                verb=verb, decision=decision, approved=approved,
             )
+        except Exception:
+            _LOGGER.exception(
+                "slack bridge: failed to execute the confirmed effect for "
+                "verb=%s (confirmation_id=%s)", verb, confirmation_id,
+            )
+            await self._post_effect_error(channel_id, thread_ts)
+            return
+
         await self._post_decision_outcome(channel_id, thread_ts, verb, approved)
 
     # ----------------------------------------------------------------

@@ -177,6 +177,13 @@ class ToolDeps:
     launch_fn: Callable[[str], dict[str, Any] | None] = _default_launch_fn
     publish_fn: Callable[[dict[str, Any]], dict[str, Any]] = _default_publish_fn
     pm_changes_mod: Any = pm_changes
+    # Task 9's outbound.py stages `attention_signal`-class confirmations
+    # (not a tools.TOOL_CATALOG verb) whose Approve/Decline click is resolved
+    # by connection.handle_interaction through THIS seam, not tools.dispatch
+    # — see outbound.attention_decision_action for the decision -> action
+    # mapping. Defaults to the real attention.resolve so production wiring
+    # needs no extra plumbing; tests inject a spy/fake.
+    attention_resolve_fn: Callable[..., Any] = attention.resolve
 
 
 # --------------------------------------------------------------------------
