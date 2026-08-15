@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+from errorta_council.coding.ledger import ProjectNotFound
+from errorta_council.coding.runtime_process import RuntimeProcessError, RuntimeProcessManager
 from errorta_slack import store, tools
 
 
@@ -320,3 +322,190 @@ def test_launch_runtime_running_returns_loopback_url_and_no_public_note(
     assert result["status"] == "running"
     assert result["url"] == "http://127.0.0.1:41234"
     assert "no public" in result["note"].lower()
+
+
+# --- resolve_decision: reject a garbage decision value ---------------------
+
+
+def test_resolve_decision_rejects_unknown_decision_value(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+
+    with pytest.raises(tools.ToolError) as exc:
+        tools.dispatch(
+            "resolve_decision", {"change_id": "chg-1", "decision": "maybe"},
+            channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+        )
+
+    assert exc.value.code == "invalid_decision"
+    fake_pm = deps.pm_changes_mod
+    assert fake_pm.accepted == []
+    assert fake_pm.declined == []
+
+
+# --- The DEFAULT launch/stop runtime path (real, lazily-imported seam) -----
+#
+# These exercise `_default_launch_fn` and `stop_runtime`'s own default
+# integration with RuntimeProcessManager directly (monkeypatched so no real
+# process starts) — the path every other test in this file bypasses by
+# injecting a fake `launch_fn`.
+
+
+class _FakeProfile:
+    def __init__(self, profile_id: str) -> None:
+        self.profile_id = profile_id
+
+
+class _FakeSession:
+    def __init__(self, allocated_ports: list[int]) -> None:
+        self.allocated_ports = allocated_ports
+
+
+class _FakeRStore:
+    def __init__(self, profiles: list[_FakeProfile]) -> None:
+        self._profiles = profiles
+
+    def list_profiles(self) -> list[_FakeProfile]:
+        return self._profiles
+
+
+class _FakeManager:
+    def __init__(
+        self,
+        profiles: list[_FakeProfile],
+        *,
+        start_result: _FakeSession | None = None,
+        start_exc: Exception | None = None,
+        stop_exc: Exception | None = None,
+    ) -> None:
+        self.rstore = _FakeRStore(profiles)
+        self._start_result = start_result
+        self._start_exc = start_exc
+        self._stop_exc = stop_exc
+        self.stopped_profile_id: str | None = None
+
+    def start(self, profile_id: str, auto_setup: bool = False) -> _FakeSession:
+        if self._start_exc is not None:
+            raise self._start_exc
+        assert self._start_result is not None
+        return self._start_result
+
+    def stop(self, profile_id: str) -> None:
+        if self._stop_exc is not None:
+            raise self._stop_exc
+        self.stopped_profile_id = profile_id
+
+
+def test_default_launch_fn_running_uses_allocated_ports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_mgr = _FakeManager(
+        [_FakeProfile("p1")], start_result=_FakeSession([54321]),
+    )
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", lambda project_id: fake_mgr)
+
+    result = tools._default_launch_fn("proj-x")
+
+    assert result == {"host": "127.0.0.1", "port": 54321}
+
+
+def test_default_launch_fn_project_not_found_is_graceful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(project_id: str) -> None:
+        raise ProjectNotFound(project_id)
+
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", _raise)
+
+    result = tools._default_launch_fn("proj-missing")
+
+    assert result is not None
+    assert result["status"] == "empty"
+    assert "reason" in result
+
+
+def test_default_launch_fn_start_failure_is_clean_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_mgr = _FakeManager(
+        [_FakeProfile("p1")], start_exc=RuntimeProcessError("setup_required"),
+    )
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", lambda project_id: fake_mgr)
+
+    result = tools._default_launch_fn("proj-x")
+
+    assert result is not None
+    assert result["status"] == "error"
+    assert "detail" in result
+
+
+def test_launch_runtime_default_path_running_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole dispatch("launch_runtime", ...) chain, with the REAL default
+    launch_fn (not a test fake) — only RuntimeProcessManager is monkeypatched
+    so no process actually starts."""
+    store.bind_channel("C1", "proj-x")
+    fake_mgr = _FakeManager(
+        [_FakeProfile("p1")], start_result=_FakeSession([54321]),
+    )
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", lambda project_id: fake_mgr)
+    deps = tools.ToolDeps(store=store)
+
+    result = tools.dispatch(
+        "launch_runtime", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "running"
+    assert result["url"] == "http://127.0.0.1:54321"
+
+
+def test_stop_runtime_default_path_project_not_found_is_graceful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-missing")
+
+    def _raise(project_id: str) -> None:
+        raise ProjectNotFound(project_id)
+
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", _raise)
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "stop_runtime", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "empty"
+    assert "reason" in result
+
+
+def test_stop_runtime_default_path_stop_failure_is_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-x")
+    fake_mgr = _FakeManager([_FakeProfile("p1")], stop_exc=RuntimeProcessError("no_worktree"))
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", lambda project_id: fake_mgr)
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "stop_runtime", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "detail" in result
+
+
+def test_stop_runtime_default_path_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-x")
+    fake_mgr = _FakeManager([_FakeProfile("p1")])
+    monkeypatch.setattr(RuntimeProcessManager, "for_project", lambda project_id: fake_mgr)
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "stop_runtime", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result == {"status": "stopped"}
+    assert fake_mgr.stopped_profile_id == "p1"

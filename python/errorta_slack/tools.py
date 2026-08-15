@@ -110,12 +110,23 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
 def _default_launch_fn(project_id: str) -> dict[str, Any] | None:
     """Start the project's runtime and report its loopback host/port.
 
-    Lazily imports ``runtime_process`` so this module never pulls in that
-    heavy process-management machinery at import time. Returns ``None`` when
-    no runtime is configured for the project (no worktree, or no
-    ``RuntimeProfile`` declared yet) — the "empty" case ``launch_runtime``
-    reports without starting anything.
+    Lazily imports ``runtime_process``/``ledger`` so this module never pulls
+    in that heavy process-management machinery at import time. Returns a
+    result dict shaped as one of:
+
+    * ``None`` — no runtime configured (kept for callers/tests that pass a
+      trivial ``lambda project_id: None`` fake).
+    * ``{"status": "empty", "reason": ...}`` — no ledger project, no
+      worktree, or no ``RuntimeProfile`` declared; nothing was started.
+    * ``{"status": "error", "detail": ...}`` — the manager raised trying to
+      start the profile (e.g. no start command, setup required).
+    * ``{"host": ..., "port": ...}`` — genuinely running.
+
+    ``RuntimeSession`` (``errorta_council.coding.runtime``) has no ``.port``
+    attribute — the allocated port(s) live in ``allocated_ports: list[int]``;
+    the first entry is used as the preview port.
     """
+    from errorta_council.coding.ledger import LedgerError
     from errorta_council.coding.runtime_process import (
         RuntimeProcessError,
         RuntimeProcessManager,
@@ -123,16 +134,20 @@ def _default_launch_fn(project_id: str) -> dict[str, Any] | None:
 
     try:
         mgr = RuntimeProcessManager.for_project(project_id)
-    except RuntimeProcessError:
-        return None
-    profiles = mgr.rstore.list_profiles()
-    if not profiles:
-        return None
-    session = mgr.start(profiles[0].profile_id, auto_setup=False)
-    port = getattr(session, "port", None)
-    if port is None:
-        return None
-    return {"host": "127.0.0.1", "port": port}
+        profiles = mgr.rstore.list_profiles()
+        if not profiles:
+            return {"status": "empty"}
+        session = mgr.start(profiles[0].profile_id, auto_setup=False)
+    except LedgerError as exc:
+        # e.g. ProjectNotFound — no ledger record for this project yet.
+        return {"status": "empty", "reason": str(exc)}
+    except RuntimeProcessError as exc:
+        # e.g. no_worktree, profile_not_found, no start command configured.
+        return {"status": "error", "detail": str(exc)}
+    ports = list(session.allocated_ports or [])
+    if not ports:
+        return {"status": "empty"}
+    return {"host": "127.0.0.1", "port": ports[0]}
 
 
 def _default_publish_fn(args: dict[str, Any]) -> dict[str, Any]:
@@ -219,8 +234,21 @@ def launch_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     result = deps.launch_fn(project_id)
     if not result:
         return {"status": "empty"}
+    status = result.get("status")
+    if status == "empty":
+        out: dict[str, Any] = {"status": "empty"}
+        if result.get("reason"):
+            out["reason"] = str(result["reason"])
+        return out
+    if status == "error":
+        out = {"status": "error"}
+        if result.get("detail"):
+            out["detail"] = str(result["detail"])
+        return out
     host = result.get("host", "127.0.0.1")
     port = result.get("port")
+    if port is None:
+        return {"status": "empty"}
     return {
         "status": "running",
         "url": f"http://{host}:{port}",
@@ -231,6 +259,7 @@ def launch_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
 def stop_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
                   deps: "ToolDeps") -> dict[str, Any]:
     project_id = _bound_project_id(deps, channel_id)
+    from errorta_council.coding.ledger import LedgerError
     from errorta_council.coding.runtime_process import (
         RuntimeProcessError,
         RuntimeProcessManager,
@@ -238,12 +267,14 @@ def stop_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
 
     try:
         mgr = RuntimeProcessManager.for_project(project_id)
-    except RuntimeProcessError:
-        return {"status": "empty"}
-    profiles = mgr.rstore.list_profiles()
-    if not profiles:
-        return {"status": "empty"}
-    mgr.stop(profiles[0].profile_id)
+        profiles = mgr.rstore.list_profiles()
+        if not profiles:
+            return {"status": "empty"}
+        mgr.stop(profiles[0].profile_id)
+    except LedgerError as exc:
+        return {"status": "empty", "reason": str(exc)}
+    except RuntimeProcessError as exc:
+        return {"status": "error", "detail": str(exc)}
     return {"status": "stopped"}
 
 
@@ -273,7 +304,13 @@ def resolve_decision(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     change_id = args.get("change_id")
     if not change_id:
         raise ToolError("missing_change_id", "resolve_decision requires args.change_id")
-    decision = str(args.get("decision") or "accept")
+    raw_decision = args.get("decision")
+    decision = "accept" if raw_decision in (None, "") else str(raw_decision)
+    if decision not in ("accept", "decline"):
+        raise ToolError(
+            "invalid_decision",
+            f"resolve_decision.decision must be 'accept' or 'decline', got {decision!r}",
+        )
     project_id = _bound_project_id(deps, channel_id)
     ledger_store = deps.ledger_factory(project_id)
     if decision == "decline":
