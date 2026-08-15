@@ -340,6 +340,34 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("mobile LAN listener not started: %s", exc)
         app.state.mobile_lan = {"running": False, "reason": "error"}
 
+    # Slack PM bridge (optional, off by default): mount its routes and bring
+    # up the live connection iff enabled + slack-sdk installed + tokens
+    # configured — see errorta_app.slack_lifecycle.sync() for the exact
+    # gates. Both the router mount AND the lifecycle sync live HERE, inside
+    # lifespan startup, rather than as a module-level `app.include_router`
+    # next to the other routers above: a bare `import errorta_app.server`
+    # (e.g. `uvicorn errorta_app.server:app` resolving the ASGI callable, or
+    # any other module doing `from errorta_app import server`) must NEVER
+    # import `errorta_slack` — that's the whole optionality guarantee this
+    # module is built around (see tests/slack/test_optionality.py). Routes
+    # added to `app.router` here, before the app starts serving, are live
+    # for every request exactly like the ones registered at module level.
+    try:
+        from errorta_slack.routes import router as slack_routes_router
+
+        app.include_router(slack_routes_router)
+    except ImportError as exc:  # pragma: no cover - exercised by optionality tests
+        logging.getLogger(__name__).info(
+            "slack routes not mounted (errorta_slack unavailable): %s", exc)
+
+    try:
+        from errorta_app import slack_lifecycle
+
+        app.state.slack_bridge = slack_lifecycle.sync()
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning("slack bridge not started: %s", exc)
+        app.state.slack_bridge = {"running": False, "reason": "error"}
+
     # F089: if remote AIAR is in managed-tunnel mode with auto_start, bring the
     # SSH tunnel up at startup (non-blocking — ensure spawns + watches in the
     # background) so the first grounding call finds it ready. Best-effort.
@@ -432,6 +460,15 @@ async def lifespan(app: FastAPI):
             from errorta_app import mobile_lifecycle
 
             mobile_lifecycle.stop()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        # Slack PM bridge: stop before the watchdog, same reasoning as mobile
+        # above. A no-op when the bridge was never started (disabled, no
+        # slack-sdk, or no tokens).
+        try:
+            from errorta_app import slack_lifecycle
+
+            slack_lifecycle.stop()
         except Exception:  # pragma: no cover - defensive
             pass
         # F089: kill every owned SSH tunnel so none leak across a restart.
