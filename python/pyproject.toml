@@ -64,6 +64,12 @@ dev = [
     "pytest-mock>=3.14",
     "pyinstaller>=6.10",
     "ruff>=0.7",
+    "slack-sdk>=3.27",
+]
+# Slack PM bridge (errorta_slack): strictly optional. Off by default; only
+# needed when the operator enables the Slack integration.
+slack = [
+    "slack-sdk>=3.27",
 ]
 # Release build profile. NOTE: `pip install '.[release]'` will currently FAIL
 # because AIAR has not yet been published to PyPI. This entry is intentionally
