@@ -6,7 +6,8 @@ import re
 
 _TOKEN_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{10,}|sk-ant-[A-Za-z0-9_\-]{10,}|"
-    r"ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,})\b"
+    r"ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|"
+    r"xoxb-[A-Za-z0-9-]{6,}|xapp-[A-Za-z0-9-]{6,})\b"
 )
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
 
