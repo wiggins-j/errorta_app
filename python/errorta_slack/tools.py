@@ -34,7 +34,7 @@ callable fields default to real (but lazily-imported) implementations.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from errorta_council.coding import attention, pm_changes, team_log

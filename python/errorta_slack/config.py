@@ -21,6 +21,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bindings": [],
     "window": 20,
     "timeout_minutes": 30,
+    # Carried from Task 7: `auth.is_allowed` reads these two keys and is
+    # fail-closed when either is empty/missing (denies everyone) — that is
+    # never overridden here. An empty default list is therefore the safe,
+    # deny-by-default starting point, not an allow-all.
+    "allowed_team_ids": [],
+    "allowed_user_ids": [],
 }
 
 
@@ -52,6 +58,12 @@ def _bindings(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def _str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG)
     if raw:
@@ -64,6 +76,8 @@ def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
             merged.get("timeout_minutes"),
             default=int(DEFAULT_CONFIG["timeout_minutes"]),
         ),
+        "allowed_team_ids": _str_list(merged.get("allowed_team_ids")),
+        "allowed_user_ids": _str_list(merged.get("allowed_user_ids")),
     }
 
 

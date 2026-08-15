@@ -21,6 +21,11 @@ def test_load_on_fresh_home_returns_defaults() -> None:
     assert loaded["bindings"] == []
     assert loaded["window"] == 20
     assert loaded["timeout_minutes"] == 30
+    # Carried from Task 7: auth.is_allowed reads these two keys. The default
+    # must be an empty list on both, matching auth's fail-closed contract
+    # (an empty allowlist denies everyone -- never allow-all).
+    assert loaded["allowed_team_ids"] == []
+    assert loaded["allowed_user_ids"] == []
 
 
 def test_save_then_load_round_trips() -> None:
@@ -59,3 +64,31 @@ def test_is_enabled_reflects_saved_config() -> None:
     config.save({"enabled": True, "bindings": [], "window": 20, "timeout_minutes": 30})
 
     assert config.is_enabled() is True
+
+
+def test_normalize_round_trips_allowlists() -> None:
+    normalized = config.normalize({
+        "allowed_team_ids": ["T123"], "allowed_user_ids": ["U123", "U456"],
+    })
+
+    assert normalized["allowed_team_ids"] == ["T123"]
+    assert normalized["allowed_user_ids"] == ["U123", "U456"]
+
+
+def test_normalize_drops_non_string_allowlist_entries() -> None:
+    normalized = config.normalize({
+        "allowed_team_ids": ["T123", 42, None], "allowed_user_ids": "not-a-list",
+    })
+
+    assert normalized["allowed_team_ids"] == ["T123"]
+    assert normalized["allowed_user_ids"] == []
+
+
+def test_empty_allowlists_keep_auth_fail_closed() -> None:
+    from errorta_slack import auth
+
+    cfg = config.load()
+
+    assert cfg["allowed_team_ids"] == []
+    assert cfg["allowed_user_ids"] == []
+    assert auth.is_allowed("T123", "U123", cfg) is False

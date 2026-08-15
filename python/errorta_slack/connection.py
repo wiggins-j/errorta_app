@@ -429,7 +429,10 @@ class SlackBridge:
     ) -> None:
         if self._poster is None:
             return
-        text = f"Approved — {verb} executed." if approved else f"Declined — {verb} was not executed."
+        text = (
+            f"Approved — {verb} executed." if approved
+            else f"Declined — {verb} was not executed."
+        )
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
     async def _post_effect_error(self, channel_id: Any, thread_ts: str) -> None:
