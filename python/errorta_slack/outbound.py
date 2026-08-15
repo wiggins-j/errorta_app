@@ -273,9 +273,31 @@ def poll_once(
             blocks = render.decision_message(
                 item.title or "Decision needed", item.detail, cid,
             )
-            poster.post_message(
-                channel_id, "", item.title or item.detail, blocks=blocks,
-            )
+            try:
+                poster.post_message(
+                    channel_id, "", item.title or item.detail, blocks=blocks,
+                )
+            except Exception:
+                # The confirmation was staged but never actually shown to a
+                # human -- an orphan. Left as "pending", it would later get
+                # auto-decided by sweep_timeouts into a confusing phantom
+                # "timed out" message for a decision nobody ever saw. Roll it
+                # back to a terminal, non-"pending" state the sweep's
+                # pop_pending_older_than ignores (this call IS itself the
+                # atomic claim -- resolve_confirmation only transitions a
+                # still-"pending" record, so it can't clobber a real human
+                # decision or a sweep that somehow already claimed it first).
+                # Do NOT advance the cursor either -- a re-run must re-stage
+                # (a fresh confirmation id) and try posting again from
+                # scratch, not skip this item as "already handled".
+                try:
+                    deps.store.resolve_confirmation(cid, "undelivered")
+                except Exception:
+                    _LOGGER.exception(
+                        "outbound: failed to roll back orphaned confirmation "
+                        "%s after a poster failure", cid,
+                    )
+                raise
         else:
             blocks = render.fyi_message(item.detail)
             poster.post_message(channel_id, "", item.detail, blocks=blocks)

@@ -234,6 +234,62 @@ def _confirmation_id_from_blocks(blocks: list[dict[str, Any]]) -> str:
     raise AssertionError("no Approve button found in blocks")
 
 
+# --- poll_once: a decision message that fails to post leaves no orphan -----
+
+
+@pytest.mark.asyncio
+async def test_poll_once_decision_post_failure_rolls_back_the_staged_confirmation() -> None:
+    """Task 9 review Important finding: staging happens before posting. If
+    the post then fails, a naive implementation leaves the confirmation
+    "pending" forever with no human ever having seen it -- and the timeout
+    sweep later "decides" it into a confusing phantom message. The staged
+    confirmation must be rolled back to a terminal, non-"pending" state (so
+    the sweep ignores it), and the cursor must NOT advance (so a re-run
+    re-stages and re-tries from scratch, with a fresh confirmation id)."""
+    signals = [
+        _signal("sig-orphan", created_at="2026-01-01T00:00:00", title="Blocked",
+                summary="needs a decision", blocking=True, kind="alert"),
+    ]
+    deps = _deps(signals=signals)
+    failing_poster = SyncFakePoster(fail_on_call=1)
+
+    with pytest.raises(RuntimeError):
+        outbound.poll_once("C1", "proj-a", deps=deps, poster=failing_poster)
+
+    # Exactly one confirmation was staged (for sig-orphan); it must now be in
+    # a terminal, non-"pending" state -- never left dangling as "pending".
+    confirmations = store._load_confirmations()  # type: ignore[attr-defined]
+    assert len(confirmations) == 1
+    (orphan,) = confirmations.values()
+    assert orphan["args"]["signal_id"] == "sig-orphan"
+    assert orphan["state"] != "pending"
+
+    # The sweep must never later "decide" it -- pop_pending_older_than only
+    # claims "pending" records.
+    sweep_poster = SyncFakePoster()
+    handled = outbound.sweep_timeouts(
+        deps=outbound.OutboundDeps(store=store), poster=sweep_poster,
+        timeout_minutes=0, now=orphan["created_at"] + 1,
+    )
+    assert handled == []
+    assert sweep_poster.messages == []
+
+    # The cursor did not advance -- a re-run re-stages a FRESH confirmation
+    # and tries posting again (rather than treating sig-orphan as "already
+    # handled" and silently dropping it forever).
+    assert store.get_cursor("C1") is None
+    healthy_poster = SyncFakePoster()
+    markers = outbound.poll_once("C1", "proj-a", deps=deps, poster=healthy_poster)
+    assert markers == ["attn:sig-orphan"]
+    assert len(healthy_poster.messages) == 1
+
+    confirmations_after = store._load_confirmations()  # type: ignore[attr-defined]
+    pending = [r for r in confirmations_after.values() if r["state"] == "pending"]
+    assert len(pending) == 1
+    assert pending[0]["args"]["signal_id"] == "sig-orphan"
+    assert pending[0]["id"] != orphan["id"]  # a fresh confirmation, not the orphan reused
+
+
 # --- poll_once: non-blocking attention signal -> plain FYI, no staging -----
 
 
