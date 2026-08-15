@@ -143,10 +143,52 @@ def test_get_confirmation_unknown_id_returns_none() -> None:
 def test_resolve_confirmation_sets_state_and_returns_record() -> None:
     cid = store.stage_confirmation("deploy", {"target": "prod"}, "ts-1")
 
-    resolved = store.resolve_confirmation(cid, "approved")
+    resolved, claimed = store.resolve_confirmation(cid, "approved")
 
+    assert claimed is True
     assert resolved["state"] == "approved"
     assert store.get_confirmation(cid)["state"] == "approved"
+
+
+def test_resolve_confirmation_second_call_does_not_reclaim() -> None:
+    """Task 9 carry-over: resolution is a CLAIM, not a blind state write --
+    only the FIRST resolver of a given confirmation gets claimed=True. A
+    second resolve on the same (already-resolved) id must report
+    claimed=False and must not stomp the first decision, so a caller can
+    safely gate firing an effect on the return value alone."""
+    cid = store.stage_confirmation("deploy", {"target": "prod"}, "ts-1")
+
+    first_record, first_claimed = store.resolve_confirmation(cid, "approved")
+    second_record, second_claimed = store.resolve_confirmation(cid, "declined")
+
+    assert first_claimed is True
+    assert first_record["state"] == "approved"
+    assert second_claimed is False
+    assert second_record["state"] == "approved"  # untouched by the losing call
+    assert store.get_confirmation(cid)["state"] == "approved"
+
+
+def test_resolve_confirmation_unknown_id_raises_key_error() -> None:
+    with pytest.raises(KeyError):
+        store.resolve_confirmation("nope", "approved")
+
+
+def test_stage_confirmation_records_channel_id() -> None:
+    cid = store.stage_confirmation(
+        "deploy", {"target": "prod"}, "ts-1", channel_id="C123",
+    )
+
+    record = store.get_confirmation(cid)
+    assert record is not None
+    assert record["channel_id"] == "C123"
+
+
+def test_stage_confirmation_channel_id_defaults_to_empty_string() -> None:
+    cid = store.stage_confirmation("deploy", {"target": "prod"}, "ts-1")
+
+    record = store.get_confirmation(cid)
+    assert record is not None
+    assert record["channel_id"] == ""
 
 
 def test_stage_confirmation_ids_are_unique() -> None:

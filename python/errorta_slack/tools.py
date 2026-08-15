@@ -374,7 +374,11 @@ def dispatch(verb: str, args: dict[str, Any], *, channel_id: str, thread_ts: str
         )
     safe_args = dict(args or {})
     if spec["trust"] == "C" and confirmed_via != "block_actions":
-        cid = deps.store.stage_confirmation(verb, safe_args, thread_ts)
+        # channel_id is threaded onto the staged record (Task 9) so the
+        # background timeout sweep -- which has no live Slack payload to read
+        # a channel off of -- can still post its auto-decided outcome back to
+        # the right channel.
+        cid = deps.store.stage_confirmation(verb, safe_args, thread_ts, channel_id=channel_id)
         return {"status": "needs_confirmation", "confirmation_id": cid}
     impl = _VERB_IMPLS[verb]
     return impl(safe_args, channel_id=channel_id, thread_ts=thread_ts, deps=deps)

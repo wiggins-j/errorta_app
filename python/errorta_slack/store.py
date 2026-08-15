@@ -214,12 +214,19 @@ def stage_confirmation(
     args: dict[str, Any],
     thread_ts: str,
     *,
+    channel_id: str = "",
     now: float | None = None,
 ) -> str:
     """Create a new pending confirmation record and return its id.
 
     Ids are generated with ``uuid4().hex`` (stdlib, not time-based) per
     the security requirement that confirmation ids be unguessable.
+
+    ``channel_id`` (Task 9) is optional and defaults to ``""`` for backward
+    compatibility with existing callers that only ever had a live Slack
+    interaction payload (which carries its own channel) to route replies —
+    it exists so a caller with no live payload, namely the Task 9 timeout
+    sweep, can still post its decision back to the right channel.
     """
     cid = uuid.uuid4().hex
     record = {
@@ -227,6 +234,7 @@ def stage_confirmation(
         "verb": verb,
         "args": args,
         "thread_ts": thread_ts,
+        "channel_id": channel_id,
         "created_at": now if now is not None else time.time(),
         "state": "pending",
     }
@@ -242,19 +250,34 @@ def get_confirmation(cid: str) -> dict[str, Any] | None:
     return _load_confirmations().get(cid)
 
 
-def resolve_confirmation(cid: str, decision: str) -> dict[str, Any]:
-    """Set the confirmation's state to ``decision`` and return the record.
+def resolve_confirmation(cid: str, decision: str) -> tuple[dict[str, Any], bool]:
+    """Atomically CLAIM ``cid``, transitioning it to ``decision`` only if it
+    is still ``"pending"``. Returns ``(record, claimed)``.
+
+    ``claimed`` is ``True`` only when THIS call performed the pending ->
+    ``decision`` transition. If the record was already resolved by someone
+    else (a prior button click, a double-click/replayed interaction, or the
+    Task 9 timeout sweep racing in via ``pop_pending_older_than``), the
+    existing record is returned unchanged with ``claimed=False`` — the
+    caller MUST NOT fire the confirmation's effect in that case. This closes
+    the check-then-act race a caller would otherwise have if it inspected
+    ``get_confirmation`` and then separately called this function: two
+    concurrent resolvers could both observe "pending" and both fire the
+    effect. Making resolution itself the atomic claim means at most one
+    caller ever sees ``claimed=True`` for a given ``cid``.
 
     Raises ``KeyError`` if ``cid`` is unknown.
     """
     with _LOCK:
         confirmations = _load_confirmations()
-        record = confirmations[cid]
+        record = confirmations[cid]  # KeyError if unknown -- unchanged behavior
+        if record.get("state") != "pending":
+            return dict(record), False
         record = dict(record)
         record["state"] = decision
         confirmations[cid] = record
         _write_json(_confirmations_path(), confirmations)
-        return record
+        return record, True
 
 
 def pop_pending_older_than(

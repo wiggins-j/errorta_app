@@ -433,10 +433,21 @@ class SlackBridge:
     # tools.dispatch(..., confirmed_via="block_actions"). It only reaches
     # that call after: (1) the payload structurally is a real block_actions
     # interaction with a recognized action_id and non-empty value: (2) the
-    # team/user pass auth.is_allowed's fail-closed allowlist check; (3) the
-    # value resolves to a PENDING confirmation record staged earlier by
+    # team/user pass auth.is_allowed's fail-closed allowlist check; (3) it
+    # WON the atomic claim on a confirmation record staged earlier by
     # tools.dispatch's confirmed_via=None path; and only for Approve — a
     # Decline resolves the record without ever calling tools.dispatch.
+    #
+    # CLAIM, not check-then-act (Task 9 review carry-over): resolving is the
+    # single atomic operation that authorizes the effect. This method used to
+    # read get_confirmation, check state == "pending", and only THEN resolve
+    # — a window in which the Task 9 background timeout sweep
+    # (store.pop_pending_older_than) could resolve the very same confirmation
+    # first, and both paths would fire the effect. Now the only existence
+    # check before the claim is "does this id exist at all" (get_confirmation
+    # is None); whether it's still eligible to fire is decided entirely by
+    # store.resolve_confirmation's own atomic pending->decision transition,
+    # which reports back whether THIS caller won it.
     # ----------------------------------------------------------------
 
     async def handle_interaction(self, payload: dict[str, Any]) -> None:
@@ -453,26 +464,29 @@ class SlackBridge:
         confirmation_id = action.get("value")
 
         record = self._deps.store.get_confirmation(confirmation_id)
-        if record is None or record.get("state") != "pending":
+        if record is None:
             return
 
         channel_id = str((payload.get("channel") or {}).get("id") or "")
         thread_ts = str(record.get("thread_ts") or "")
         verb = str(record["verb"])
         approved = action_id == "slack_approve"
+        decision = "approved" if approved else "declined"
 
-        if not approved:
-            self._deps.store.resolve_confirmation(confirmation_id, "declined")
-            await self._post_decision_outcome(channel_id, thread_ts, verb, False)
+        _, claimed = self._deps.store.resolve_confirmation(confirmation_id, decision)
+        if not claimed:
+            # Someone else already resolved it first -- a double-click/replayed
+            # interaction, or the background timeout sweep won the race. The
+            # effect must fire at most once, so this call is a silent no-op.
             return
 
-        tools.dispatch(
-            verb, dict(record.get("args") or {}),
-            channel_id=channel_id, thread_ts=thread_ts,
-            confirmed_via="block_actions", deps=self._deps,
-        )
-        self._deps.store.resolve_confirmation(confirmation_id, "approved")
-        await self._post_decision_outcome(channel_id, thread_ts, verb, True)
+        if approved:
+            tools.dispatch(
+                verb, dict(record.get("args") or {}),
+                channel_id=channel_id, thread_ts=thread_ts,
+                confirmed_via="block_actions", deps=self._deps,
+            )
+        await self._post_decision_outcome(channel_id, thread_ts, verb, approved)
 
     # ----------------------------------------------------------------
     # Connection lifecycle
