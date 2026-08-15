@@ -24,6 +24,29 @@ model runs, and now *where you stand* when you steer the team — at the termina
 from a Slack thread on your phone. The Slack bridge is a **new surface over the
 existing engine**, not new team behavior.
 
+### Optional by construction (hard requirement)
+
+The Slack bridge is **strictly optional**. Errorta's desktop app and CLI must work
+fully with the bridge absent, disabled, or its dependency uninstalled:
+
+- Ships as an **optional dependency extra** (`errorta_app[slack]`); the core install
+  does not pull the Slack SDK.
+- **Enable flag is off by default.** Disabled → no Socket Mode connection, no tokens
+  loaded, no routes active, zero behavior change anywhere else.
+- The subsystem imports lazily; if `errorta_slack` or its dependency is missing, the
+  sidecar boots normally and the feature is simply unavailable (never a hard import
+  error in the core boot path).
+- Nothing in `errorta_council` / `errorta_cli` / the desktop app may import
+  `errorta_slack` at module load — the dependency arrow points one way only.
+
+### Public-repo hygiene (hard requirement)
+
+errorta_app is a **public** repository. No token, key, bot/app token, or personal
+data (owner email, home paths, private hostnames) may be committed. Slack app tokens
+load at runtime from the existing secret store and are redacted from all bridge logs;
+tests use fake/injected seams with placeholder values (`xoxb-…`, `you@example.com`).
+Any local runtime state (bindings, cursors) is git-ignored.
+
 ### Non-goals (v1)
 
 - Not a replacement for the desktop/CLI PM or the in-run governing PM.
