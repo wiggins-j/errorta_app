@@ -908,3 +908,6 @@ files.
 - `errorta --help` and `errorta <command> --help` for the full command list.
 - `DEVELOPING.md` for the from-source setup.
 - `docs/SIDECAR_LIFECYCLE.md` for how the embedded sidecar is spawned and shared.
+- **Slack bridge (optional).** Want to drive the team from Slack instead of a
+  terminal? See [`docs/SLACK_PM_BRIDGE.md`](SLACK_PM_BRIDGE.md) — off by
+  default, a separate opt-in extra.

@@ -256,6 +256,9 @@ config gotchas.
   sidecar, shares the same on-disk store as the desktop app, and has a layered
   verbosity dial plus a `--json` surface for scripting. See
   [`docs/CLI.md`](docs/CLI.md).
+- **Slack PM bridge (optional, off by default).** Chat with the coding-team PM
+  from a Slack channel instead of the terminal. See
+  [`docs/SLACK_PM_BRIDGE.md`](docs/SLACK_PM_BRIDGE.md).
 
 ### Platform
 - **Tauri 2 desktop shell** (Rust) with a system tray (Show / Quit / check for
