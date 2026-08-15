@@ -67,7 +67,7 @@ Any local runtime state (bindings, cursors) is git-ignored.
 |---|----------|--------|
 | Interaction | What the relationship covers | **Two-way governance loop**: inbound tasking + Q&A *and* proactive PM posts (decisions-needed, PR-ready, blockers) with in-thread buttons. |
 | Trust model | Authority of a chat message | **Hybrid**: reads and launches execute immediately off the message; only the two irreversible actions — **spending on cloud-model calls** and **opening a public PR** — require a one-tap in-thread confirm. Tunable later. |
-| Availability | Where the Slack-connected sidecar lives | **Design for both**: default = "my Mac while the sidecar is up" (messages queue while asleep, catch up on wake); documented "always-on host" deployment (e.g. `senditai`) for 24/7. The bridge is deployment-agnostic. |
+| Availability | Where the Slack-connected sidecar lives | **Design for both**: default = "my Mac while the sidecar is up" (messages queue while asleep, catch up on wake); documented "always-on host" deployment (e.g. a small always-on box) for 24/7. The bridge is deployment-agnostic. |
 | Architecture | How Slack connects to the team | **Approach 1**: `errorta_slack` subsystem + a stateless **concierge** front-door agent that maps chat ⇄ a bounded tool surface over the existing engine. |
 | Ingress | Transport | **Slack Socket Mode** — the sidecar dials *out* over a WebSocket. No public URL, works behind NAT, identical on laptop or always-on host (this is what makes "both" free). |
 
