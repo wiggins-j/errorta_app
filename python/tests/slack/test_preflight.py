@@ -95,11 +95,15 @@ class _FakeWebClient:
 
 
 class _FailingWebClient:
+    """Simulates a careless SDK/network error that echoes the raw token it
+    was trying to use back in the exception message — exactly the shape
+    of leak the ``auth.test`` check must never let reach output."""
+
     def __init__(self, bot_token: str | None) -> None:
         self.bot_token = bot_token
 
     def auth_test(self) -> dict[str, Any]:
-        raise RuntimeError("invalid_auth")
+        raise RuntimeError(f"invalid_auth (token used: {self.bot_token})")
 
 
 class _FakeSocketClient:
@@ -116,11 +120,18 @@ class _FakeSocketClient:
 
 
 class _FailingSocketClient:
+    """Simulates a careless SDK/network error that echoes both raw tokens
+    it was trying to use back in the exception message."""
+
     def __init__(self, app_token: str | None, web_client: Any) -> None:
-        pass
+        self.app_token = app_token
+        self.bot_token = getattr(web_client, "bot_token", None)
 
     def connect(self) -> None:
-        raise RuntimeError("socket connect failed: timeout")
+        raise RuntimeError(
+            f"socket connect failed: timeout (app_token={self.app_token}, "
+            f"bot_token={self.bot_token})"
+        )
 
     def disconnect(self) -> None:  # pragma: no cover - never reached
         raise AssertionError("disconnect should not be called after a failed connect")
@@ -367,12 +378,17 @@ def test_auth_test_ok_uses_injected_web_client_factory() -> None:
 
 
 def test_auth_test_fail_on_exception_not_crash() -> None:
+    """Also proves the hardening from Item 1: the raising client's
+    exception message deliberately embeds the raw bot token (simulating a
+    careless SDK/network error) — the resulting CheckResult.detail must
+    degrade to ``fail`` AND must never let that raw token through."""
     results = preflight.run_checks(
         connect=True, deps=base_deps(web_client_factory=_FailingWebClient)
     )
     r = by_name(results, "auth.test")
     assert r.status == "fail"
     assert "invalid_auth" in r.detail
+    assert BOT_TOKEN not in r.detail
 
 
 def test_auth_test_fail_when_response_not_ok() -> None:
@@ -414,6 +430,10 @@ def test_socket_connect_ok_records_connect_and_disconnect() -> None:
 
 
 def test_socket_connect_fail_on_exception_not_crash() -> None:
+    """Also proves the hardening from Item 1: the raising client's
+    exception message deliberately embeds both raw tokens (simulating a
+    careless SDK/network error) — the resulting CheckResult.detail must
+    degrade to ``fail`` AND must never let either raw token through."""
     results = preflight.run_checks(
         connect=True,
         deps=base_deps(
@@ -423,6 +443,8 @@ def test_socket_connect_fail_on_exception_not_crash() -> None:
     r = by_name(results, "socket mode connect")
     assert r.status == "fail"
     assert "timeout" in r.detail
+    assert APP_TOKEN not in r.detail
+    assert BOT_TOKEN not in r.detail
 
 
 def test_connect_true_produces_eight_results_total() -> None:
@@ -463,6 +485,76 @@ def test_main_returns_zero_when_all_checks_pass(
     assert "channel linked" in out
     assert APP_TOKEN not in out
     assert BOT_TOKEN not in out
+
+
+def test_main_connect_flag_wires_through_to_connect_checks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Drives the CLI entrypoint with --connect end-to-end, exercising the
+    real argparse -> run_checks(connect=True) wiring inside main() itself
+    (not just run_checks() called directly, as the other connect tests
+    do). Injects fakes through the same _real_*_factory indirection
+    points main()'s real-deps builder uses, so no network is touched."""
+    from errorta_slack import config as real_config
+    from errorta_slack import secrets as real_secrets
+    from errorta_slack import store as real_store
+
+    real_config.save(
+        {"enabled": True, "allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]}
+    )
+    real_secrets.save_tokens(APP_TOKEN, BOT_TOKEN)
+    real_store.bind_channel("C1", "proj-1")
+
+    monkeypatch.setattr(preflight, "_real_ledger_factory", lambda: _FakeLedgerOk)
+    monkeypatch.setattr(preflight, "_real_web_client_factory", lambda: _FakeWebClient)
+
+    def socket_factory(app_token: str | None, web_client: Any) -> Any:
+        return _FakeSocketClient(app_token, web_client)
+
+    monkeypatch.setattr(preflight, "_real_socket_client_factory", lambda: socket_factory)
+
+    rc = preflight.main(["--connect", "--json"])
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    names = [item["name"] for item in payload]
+
+    assert rc == 0
+    assert len(payload) == 8
+    assert "auth.test" in names
+    assert "socket mode connect" in names
+    assert all(item["status"] != "fail" for item in payload)
+    assert APP_TOKEN not in out
+    assert BOT_TOKEN not in out
+
+
+def test_main_exit_code_zero_when_only_warn_present(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Warns don't fail the exit code: every other gate is satisfied, but
+    the bound project can't be confirmed (check 6 -> warn) -- main() must
+    still report success (0)."""
+    from errorta_slack import config as real_config
+    from errorta_slack import secrets as real_secrets
+    from errorta_slack import store as real_store
+
+    real_config.save(
+        {"enabled": True, "allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]}
+    )
+    real_secrets.save_tokens(APP_TOKEN, BOT_TOKEN)
+    real_store.bind_channel("C1", "proj-missing")
+
+    monkeypatch.setattr(preflight, "_real_ledger_factory", lambda: _FakeLedgerMissing)
+
+    rc = preflight.main(["--json"])
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    statuses = {item["status"] for item in payload}
+
+    assert "fail" not in statuses
+    assert "warn" in statuses
+    assert rc == 0
 
 
 def test_main_returns_nonzero_on_unconfigured_home(capsys: pytest.CaptureFixture) -> None:

@@ -85,6 +85,24 @@ def _default_socket_client_factory(app_token: str, web_client: Any) -> Any:
     return SocketModeClient(app_token=app_token, web_client=web_client)
 
 
+def _redact(text: str) -> str:
+    """Strip any ``xoxb-``/``xapp-``-shaped substring out of ``text``.
+
+    Defense in depth for the ``--connect`` checks: a careless SDK/network
+    exception can embed the raw token it was trying to use right in its
+    ``str(exc)`` message (e.g. some HTTP client errors echo the request
+    they attempted). Every place this module turns an exception into a
+    ``CheckResult.detail`` MUST route through this first — reuses
+    ``errorta_slack.secrets.REDACTION_PATTERNS`` so it strips a leaked
+    token even without knowing the exact configured value.
+    """
+    from errorta_slack.secrets import REDACTION_PATTERNS
+
+    for pattern in REDACTION_PATTERNS:
+        text = pattern.sub("<slack-token-redacted>", text)
+    return text
+
+
 # --------------------------------------------------------------------------
 # Checks 1-6: static, offline validation of config/secrets/store state.
 # --------------------------------------------------------------------------
@@ -212,7 +230,7 @@ def _check_auth_test(deps: PreflightDeps, tokens: dict[str, str] | None) -> Chec
         bot_user = resp.get("user") or "?"
         return CheckResult("auth.test", "ok", f"connected as {bot_user} on team {team}")
     except Exception as exc:  # noqa: BLE001 - degrade to a fail CheckResult, never crash
-        return CheckResult("auth.test", "fail", f"auth.test failed: {exc}")
+        return CheckResult("auth.test", "fail", _redact(f"auth.test failed: {exc}"))
 
 
 def _check_socket_connect(deps: PreflightDeps, tokens: dict[str, str] | None) -> CheckResult:
@@ -228,7 +246,9 @@ def _check_socket_connect(deps: PreflightDeps, tokens: dict[str, str] | None) ->
         client.connect()
         client.disconnect()
     except Exception as exc:  # noqa: BLE001 - degrade to a fail CheckResult, never crash
-        return CheckResult("socket mode connect", "fail", f"socket mode connect failed: {exc}")
+        return CheckResult(
+            "socket mode connect", "fail", _redact(f"socket mode connect failed: {exc}")
+        )
     return CheckResult("socket mode connect", "ok", "connected and disconnected cleanly")
 
 
@@ -286,6 +306,21 @@ def _real_ledger_factory() -> Callable[[str], Any]:
     return LedgerStore
 
 
+def _real_web_client_factory() -> Callable[[str], Any] | None:
+    """Indirection point so tests can inject a fake ``--connect`` web
+    client factory through the CLI (``main()``) without hitting the
+    network. ``None`` in production — the connect checks' own
+    ``deps.web_client_factory or _default_web_client_factory`` fallback
+    is what actually builds the real ``slack_sdk.WebClient``."""
+    return None
+
+
+def _real_socket_client_factory() -> Callable[[str, Any], Any] | None:
+    """Same purpose as ``_real_web_client_factory``, for the Socket Mode
+    client."""
+    return None
+
+
 def _build_real_deps() -> PreflightDeps:
     from errorta_slack import config as config_mod
     from errorta_slack import secrets as secrets_mod
@@ -296,6 +331,8 @@ def _build_real_deps() -> PreflightDeps:
         secrets_mod=secrets_mod,
         store_mod=store_mod,
         ledger_factory=_real_ledger_factory(),
+        web_client_factory=_real_web_client_factory(),
+        socket_client_factory=_real_socket_client_factory(),
     )
 
 
