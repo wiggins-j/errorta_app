@@ -1,0 +1,38 @@
+# Errorta PM — Slack app manifest
+# Create at https://api.slack.com/apps  →  "Create New App"  →  "From an app manifest"
+# Pick your workspace, paste this YAML, Create, then Install to Workspace.
+# Scopes/events below are EXACTLY what the shipped bridge uses:
+#   - chat_postMessage  -> chat:write
+#   - reactions_add     -> reactions:write
+#   - receive message events over Socket Mode -> channels:history (+ groups:history for private channels)
+#   - buttons (block_actions) -> interactivity + socket_mode
+display_information:
+  name: Errorta PM
+  description: Chat with your Errorta coding-team project manager.
+  background_color: "#1f2d3d"
+features:
+  bot_user:
+    display_name: errorta-pm
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write        # post replies / decision messages
+      - reactions:write   # 👀 / ✅ / 🤔 ack reactions
+      - channels:history  # receive message events in public channels the bot is in
+      - groups:history    # same, for private channels
+settings:
+  interactivity:
+    is_enabled: true      # Approve/Decline buttons (block_actions)
+  event_subscriptions:
+    bot_events:
+      - message.channels  # messages in public channels
+      - message.groups    # messages in private channels
+  socket_mode_enabled: true   # no public URL needed; the sidecar dials out
+  org_deploy_enabled: false
+  token_rotation_enabled: false
+
+# AFTER creating the app you still need to mint TWO tokens by hand (a manifest can't):
+#   1. Bot token (xoxb-...): "OAuth & Permissions" -> Install to Workspace -> copy "Bot User OAuth Token".
+#   2. App-level token (xapp-...): "Basic Information" -> "App-Level Tokens" -> Generate,
+#      add the  connections:write  scope, copy it. (Required for Socket Mode.)
