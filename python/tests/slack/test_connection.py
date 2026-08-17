@@ -128,6 +128,17 @@ class FakePoster:
         self.reactions.append({"channel_id": channel_id, "ts": ts, "name": name})
 
 
+class FailingReactionPoster(FakePoster):
+    """FakePoster variant whose ``add_reaction`` always raises -- stands in
+    for Slack rejecting a reaction (e.g. ``invalid_name``) so tests can
+    prove the failure is strictly best-effort and never poisons an
+    already-posted reply."""
+
+    async def add_reaction(self, channel_id, ts, name) -> None:
+        await super().add_reaction(channel_id, ts, name)
+        raise RuntimeError("simulated Slack invalid_name error")
+
+
 class _RunTurnSpy:
     """A fake standing in for ``concierge.run_turn`` — records every message
     it was called with, in order, and can simulate a slow in-flight turn for
@@ -175,14 +186,14 @@ def _message_envelope(*, event_id: str, channel: str, ts: str, thread_ts: str | 
 _DEFAULT_TEST_ALLOWLIST = {"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]}
 
 
-def _bridge(tmp_path: Path, *, caller=None, deps=None, **kwargs: Any) -> tuple[connection.SlackBridge, FakeSdkClient, FakePoster]:
+def _bridge(tmp_path: Path, *, caller=None, deps=None, poster=None, **kwargs: Any) -> tuple[connection.SlackBridge, FakeSdkClient, FakePoster]:
     sdk = FakeSdkClient()
-    poster = FakePoster()
+    the_poster = poster if poster is not None else FakePoster()
     the_deps = deps if deps is not None else _deps(tmp_path)
     the_caller = caller if caller is not None else (lambda member, prompt: "{}")
     kwargs.setdefault("config", _DEFAULT_TEST_ALLOWLIST)
-    bridge = connection.SlackBridge(sdk, poster, the_deps, the_caller, **kwargs)
-    return bridge, sdk, poster
+    bridge = connection.SlackBridge(sdk, the_poster, the_deps, the_caller, **kwargs)
+    return bridge, sdk, the_poster
 
 
 # --- (a) Event dedupe -------------------------------------------------------
@@ -373,6 +384,105 @@ async def test_turn_failure_error_message_does_not_leak_raw_message_text(
     assert len(poster.messages) == 1
     assert poster.messages[0]["text"] == connection._TURN_ERROR_TEXT
     assert "sk-supersecret" not in poster.messages[0]["text"]
+
+
+# --- Reactions are translated to Slack shortcodes and are best-effort -------
+
+
+async def test_add_reaction_receives_a_slack_shortcode_not_a_glyph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """concierge emits an emoji GLYPH (e.g. "✅") in a confident turn's
+    ``reactions`` list. Slack's reactions.add needs a SHORTCODE
+    ("white_check_mark"), not the glyph, or it errors invalid_name. The
+    translation happens at the render/egress boundary (render.reactions_for),
+    so the poster must only ever see the shortcode."""
+    store.bind_channel("C1", "proj-a")
+
+    def confident_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
+                            deps, caller, max_hops=2):
+        return {
+            "reply": f"ack:{message}", "tool_results": [{"ok": True}],
+            "reactions": ["✅"], "assumed": False,
+        }
+
+    monkeypatch.setattr(concierge, "run_turn", confident_run_turn)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    thread_ts = "950.1"
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="950.1", thread_ts=thread_ts, text="do it")
+    )
+    await bridge.wait_idle(thread_ts)
+
+    assert len(poster.reactions) == 1
+    assert poster.reactions[0]["name"] == "white_check_mark"
+
+
+async def test_add_reaction_failure_does_not_poison_an_already_posted_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reaction is cosmetic, not part of the reply. If Slack rejects the
+    reaction (e.g. invalid_name), the reply -- which already posted
+    successfully -- must stand: no spurious _TURN_ERROR_TEXT on top of a
+    good answer."""
+    store.bind_channel("C1", "proj-a")
+
+    def confident_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
+                            deps, caller, max_hops=2):
+        return {
+            "reply": f"ack:{message}", "tool_results": [{"ok": True}],
+            "reactions": ["✅"], "assumed": False,
+        }
+
+    monkeypatch.setattr(concierge, "run_turn", confident_run_turn)
+    bridge, sdk, poster = _bridge(tmp_path, poster=FailingReactionPoster())
+
+    thread_ts = "951.1"
+    with caplog.at_level(logging.WARNING, logger="errorta_slack.connection"):
+        await bridge.handle_event(
+            _message_envelope(event_id="Ev1", channel="C1", ts="951.1", thread_ts=thread_ts, text="do it")
+        )
+        await bridge.wait_idle(thread_ts)
+
+    # The reply was posted despite the reaction blowing up afterward.
+    assert any(m["text"] == "ack:do it" for m in poster.messages)
+    # No spurious turn-error was posted on top of the good reply.
+    assert not any(connection._TURN_ERROR_TEXT in m["text"] for m in poster.messages)
+    # The reaction failure was attempted (and observed) but swallowed --
+    # logged at warning, not silently dropped and not propagated.
+    assert any(
+        record.levelno == logging.WARNING for record in caplog.records
+    )
+
+
+async def test_multiple_reaction_failures_are_each_independently_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a turn asks for more than one reaction, one failing must not stop
+    the others from being attempted, and must still never poison the reply."""
+    store.bind_channel("C1", "proj-a")
+
+    def multi_reaction_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
+                                 deps, caller, max_hops=2):
+        return {
+            "reply": f"ack:{message}", "tool_results": [{"ok": True}],
+            "reactions": ["✅", "👀"], "assumed": False,
+        }
+
+    monkeypatch.setattr(concierge, "run_turn", multi_reaction_run_turn)
+    bridge, sdk, poster = _bridge(tmp_path, poster=FailingReactionPoster())
+
+    thread_ts = "952.1"
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="952.1", thread_ts=thread_ts, text="do it")
+    )
+    await bridge.wait_idle(thread_ts)
+
+    # Both reactions were attempted even though the first one raised.
+    assert [r["name"] for r in poster.reactions] == ["white_check_mark", "eyes"]
+    assert any(m["text"] == "ack:do it" for m in poster.messages)
+    assert not any(connection._TURN_ERROR_TEXT in m["text"] for m in poster.messages)
 
 
 # --- (c.5) Inbound filtering: bot/self, subtypes, allowlist ------------------
