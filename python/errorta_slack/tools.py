@@ -181,24 +181,26 @@ def _default_publish_fn(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _default_start_run(project_id: str) -> dict[str, Any]:
+def _default_start_run(
+    project_id: str, *, resume: bool = False, continue_: bool = False,
+) -> dict[str, Any]:
     """Start the coding team's run via the app's real start-run route
-    function — the identical call the app's own PM path makes
-    (``routes/coding.py:1846``): ``_start_run(project_id, {}, continue_=True)``.
+    function — ``_start_run(project_id, {}, resume=resume,
+    continue_=continue_)``, the identical call the app's own PM path makes
+    (``routes/coding.py:1846``) once the caller (``start_run`` below) has
+    picked the right mode from the project's current run state.
 
     Lazily imports ``errorta_app.routes.coding`` so this module never pulls
     in the FastAPI route layer at import time (optionality — ``tools.py``
-    must load with only ``errorta_council`` installed). ``continue_=True``
-    recovers the saved team from ``run_config`` and bypasses the fresh-start
-    ``run_setup_confirmed`` gate, matching Slice 1's already-provisioned
-    team. Raises straight through on failure (an ``HTTPException`` with
-    ``status_code`` 409 for "already in progress" / member-health preflight,
-    or any other exception) — the caller (``start_run`` below) is
-    responsible for turning that into a clean result.
+    must load with only ``errorta_council`` installed). Raises straight
+    through on failure (an ``HTTPException`` with ``status_code`` 409 for
+    "already in progress" / member-health preflight / run-setup-required, or
+    any other exception) — the caller is responsible for turning that into a
+    clean result.
     """
     from errorta_app.routes.coding import _start_run
 
-    return _start_run(project_id, {}, continue_=True)
+    return _start_run(project_id, {}, resume=resume, continue_=continue_)
 
 
 @dataclass
@@ -213,8 +215,11 @@ class ToolDeps:
     # None (not a bound default) so the lazy `_default_start_run` import of
     # `errorta_app.routes.coding` only happens on first real use, never at
     # ToolDeps-construction time — mirrored by `deps.start_run_fn or
-    # _default_start_run` at the call site in `start_run` below.
-    start_run_fn: Callable[[str], dict[str, Any]] | None = None
+    # _default_start_run` at the call site in `start_run` below. Called as
+    # `start_run_fn(project_id, resume=<bool>, continue_=<bool>)` — the mode
+    # is picked by `start_run` from the project's current run_state, not
+    # hardcoded here.
+    start_run_fn: Callable[..., dict[str, Any]] | None = None
     pm_changes_mod: Any = pm_changes
     # Task 9's outbound.py stages `attention_signal`-class confirmations
     # (not a tools.TOOL_CATALOG verb) whose Approve/Decline click is resolved
@@ -388,34 +393,72 @@ def publish_pr(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return out
 
 
+def _classify_start_exception(exc: Exception) -> dict[str, Any]:
+    """Turn a ``start_run_fn`` failure into a clean, redacted result.
+
+    Mirrors the app's own real path (``routes/coding.py:1854``), which
+    string-matches ``"already in progress" in detail`` rather than treating
+    every 409 as benign — a 409 can also mean ``run_setup_required`` (fresh
+    start, team not confirmed), ``member_health_preflight_failed`` (a
+    provider is logged out — only reachable on a FRESH start, since
+    resume/continue skip the preflight per ``routes/coding.py:2586``), or
+    ``run is not continuable`` / ``run is not recoverable`` (a stale/wrong
+    mode was picked). Only the first of these is safe to swallow as
+    "already running"; the rest are real "can't start" outcomes and must
+    say so, not lie that the team is already working.
+    """
+    status_code = getattr(exc, "status_code", None)
+    if status_code != 409:
+        # Redacted: only the exception TYPE is surfaced, never its message
+        # (which may carry tokens/paths/internal detail) — metadata-only log.
+        return {"status": "error", "detail": f"couldn't start the run ({type(exc).__name__})"}
+    detail = getattr(exc, "detail", None)
+    code = detail.get("code") if isinstance(detail, dict) else None
+    if code == "member_health_preflight_failed":
+        reason = str((detail or {}).get("message") or "a provider looks logged out")
+        return {
+            "status": "error",
+            "detail": f"can't start — a model/CLI provider looks logged out: {reason}",
+        }
+    if code == "run_setup_required":
+        return {"status": "error", "detail": "the team isn't configured yet"}
+    detail_text = detail if isinstance(detail, str) else str(detail or "")
+    if "already in progress" in detail_text:
+        return {"status": "already_running"}
+    return {"status": "error", "detail": f"couldn't start the run ({type(exc).__name__})"}
+
+
 def start_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
                deps: "ToolDeps") -> dict[str, Any]:
     """C-class — this impl only ever runs once ``dispatch`` has confirmed
     ``confirmed_via="block_actions"``; never reachable from concierge text.
+
+    Picks the start mode from the project's CURRENT run state rather than
+    always passing ``continue_=True`` — ``continue_`` only works on a run
+    whose status is ``"stopped"`` (``routes/coding.py:2620`` raises 409
+    "run is not continuable" otherwise). A fresh Slice-1 project has never
+    run (status ``"idle"``), so its first "start building" needs a genuine
+    fresh start (``resume=False, continue_=False``), not continue.
 
     ``deps.start_run_fn`` defaults to ``None`` on ``ToolDeps`` (not the lazy
     wrapper itself) precisely so the real engine import stays deferred to
     this call, not to ``ToolDeps()`` construction.
     """
     project_id = _bound_project_id(deps, channel_id)
+    ledger_store = deps.ledger_factory(project_id)
+    status = ledger_store.get_run_state().get("status") or "idle"
+    if status == "running":
+        # Check the ledger FIRST rather than relying on the route's 409 —
+        # avoids a redundant call and reads the same status project_status
+        # already surfaces.
+        return {"status": "already_running"}
+    resume = status == "interrupted"
+    continue_ = status == "stopped"
     start_fn = deps.start_run_fn or _default_start_run
     try:
-        start_fn(project_id)
+        start_fn(project_id, resume=resume, continue_=continue_)
     except Exception as exc:  # noqa: BLE001 - any engine failure -> clean result, never an uncaught raise
-        status_code = getattr(exc, "status_code", None)
-        if status_code == 409:
-            detail = getattr(exc, "detail", None)
-            if isinstance(detail, dict) and detail.get("code") == "member_health_preflight_failed":
-                reason = str(detail.get("message") or "a provider looks logged out")
-                return {
-                    "status": "error",
-                    "detail": f"can't start — a model/CLI provider looks logged out: {reason}",
-                }
-            # Benign "already in progress" — swallow, not an error.
-            return {"status": "already_running"}
-        # Redacted: only the exception TYPE is surfaced, never its message
-        # (which may carry tokens/paths/internal detail) — metadata-only log.
-        return {"status": "error", "detail": f"couldn't start the run ({type(exc).__name__})"}
+        return _classify_start_exception(exc)
     return {"status": "started"}
 
 
