@@ -148,14 +148,31 @@ class _RunTurnSpy:
 
 
 def _message_envelope(*, event_id: str, channel: str, ts: str, thread_ts: str | None,
-                       text: str, user: str = "U1") -> dict[str, Any]:
-    event: dict[str, Any] = {"type": "message", "channel": channel, "ts": ts, "text": text, "user": user}
+                       text: str, user: str | None = "U1", bot_id: str | None = None,
+                       subtype: str | None = None, team_id: str = "T1",
+                       event_type: str = "message") -> dict[str, Any]:
+    event: dict[str, Any] = {"type": event_type, "channel": channel, "ts": ts, "text": text}
+    if user is not None:
+        event["user"] = user
     if thread_ts is not None:
         event["thread_ts"] = thread_ts
+    if bot_id is not None:
+        event["bot_id"] = bot_id
+    if subtype is not None:
+        event["subtype"] = subtype
     return {
         "envelope_id": f"env-{event_id}",
-        "payload": {"event_id": event_id, "team_id": "T1", "event": event},
+        "payload": {"event_id": event_id, "team_id": team_id, "event": event},
     }
+
+
+# Default allowlist used by _bridge() below matches _message_envelope's
+# defaults (team_id="T1", user="U1") so every pre-existing handle_event
+# test in this file -- written before the allowlist gate existed -- keeps
+# exercising a genuine allowlisted message without needing to pass config
+# individually. Tests that care about a *different* allowlist (or about
+# rejection) pass their own `config=...` explicitly, which overrides this.
+_DEFAULT_TEST_ALLOWLIST = {"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]}
 
 
 def _bridge(tmp_path: Path, *, caller=None, deps=None, **kwargs: Any) -> tuple[connection.SlackBridge, FakeSdkClient, FakePoster]:
@@ -163,6 +180,7 @@ def _bridge(tmp_path: Path, *, caller=None, deps=None, **kwargs: Any) -> tuple[c
     poster = FakePoster()
     the_deps = deps if deps is not None else _deps(tmp_path)
     the_caller = caller if caller is not None else (lambda member, prompt: "{}")
+    kwargs.setdefault("config", _DEFAULT_TEST_ALLOWLIST)
     bridge = connection.SlackBridge(sdk, poster, the_deps, the_caller, **kwargs)
     return bridge, sdk, poster
 
@@ -355,6 +373,182 @@ async def test_turn_failure_error_message_does_not_leak_raw_message_text(
     assert len(poster.messages) == 1
     assert poster.messages[0]["text"] == connection._TURN_ERROR_TEXT
     assert "sk-supersecret" not in poster.messages[0]["text"]
+
+
+# --- (c.5) Inbound filtering: bot/self, subtypes, allowlist ------------------
+
+
+async def test_bot_id_message_never_invokes_run_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message event carrying bot_id (this includes the bridge's OWN
+    posts, since Slack echoes them back as bot_id-bearing message events)
+    must never reach concierge.run_turn. This is the regression test for
+    the self-feedback loop: without this drop, the bridge answers its own
+    messages forever."""
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="700.1", thread_ts=None,
+        text="here is my own reply", bot_id="B-self",
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("700.1")
+
+    assert spy.calls == []
+    assert poster.messages == []
+    # Still acked immediately -- Slack's <=3s ack requirement is unaffected
+    # by the drop, which happens strictly after the ack.
+    assert sdk.acked == ["env-Ev1"]
+
+
+async def test_message_changed_subtype_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="700.2", thread_ts=None,
+        text="edited text", subtype="message_changed",
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("700.2")
+
+    assert spy.calls == []
+    assert poster.messages == []
+
+
+async def test_bot_message_subtype_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="700.3", thread_ts=None,
+        text="a bot posted this", subtype="bot_message",
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("700.3")
+
+    assert spy.calls == []
+    assert poster.messages == []
+
+
+async def test_non_message_event_type_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="700.4", thread_ts=None,
+        text="reaction_added or similar", event_type="reaction_added",
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("700.4")
+
+    assert spy.calls == []
+
+
+async def test_event_with_no_user_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="700.5", thread_ts=None,
+        text="no author", user=None,
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("700.5")
+
+    assert spy.calls == []
+
+
+async def test_disallowed_user_is_dropped_allowed_user_is_processed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any user in the channel driving the PM without being on the
+    allowlist must be dropped -- the same fail-closed check
+    handle_interaction already applies. An allowlisted user's message is
+    unaffected."""
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(
+        tmp_path, config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+
+    await bridge.handle_event(
+        _message_envelope(
+            event_id="Ev1", channel="C1", ts="701.1", thread_ts="701.1",
+            text="drive the pm", user="U-attacker",
+        )
+    )
+    await bridge.wait_idle("701.1")
+    assert spy.calls == []
+
+    await bridge.handle_event(
+        _message_envelope(
+            event_id="Ev2", channel="C1", ts="701.2", thread_ts="701.2",
+            text="hello", user="U1",
+        )
+    )
+    await bridge.wait_idle("701.2")
+    assert spy.calls == ["hello"]
+
+
+async def test_disallowed_team_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(
+        tmp_path, config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+    )
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="701.3", thread_ts="701.3",
+        text="hi", user="U1", team_id="T-other",
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("701.3")
+
+    assert spy.calls == []
+
+
+async def test_empty_allowlist_denies_every_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-closed: with no config at all (empty allowlist), nothing gets
+    through -- never an allow-all default."""
+    store.bind_channel("C1", "proj-a")
+    spy = _RunTurnSpy()
+    monkeypatch.setattr(concierge, "run_turn", spy)
+    bridge, sdk, poster = _bridge(tmp_path, config={})
+
+    envelope = _message_envelope(
+        event_id="Ev1", channel="C1", ts="701.4", thread_ts="701.4", text="hi",
+    )
+    await bridge.handle_event(envelope)
+    await bridge.wait_idle("701.4")
+
+    assert spy.calls == []
 
 
 # --- (d) Verified interaction: Approve ---------------------------------------
