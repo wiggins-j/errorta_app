@@ -1683,3 +1683,37 @@ async def test_autopilot_on_but_no_staged_confirmation_fires_nothing(
     await bridge.wait_idle("507.1")
 
     assert _approve_button_values(poster) == []
+
+
+async def test_autopilot_surfaces_per_project_start_failure_not_executed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If autopilot fires start_run and it returns an error result (e.g. a
+    provider is logged out), the audit line must say it FAILED — not the
+    misleading '🤖 Autopilot approved & executed start_run' that hid a
+    non-running project during the live test."""
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation("start_run", {}, "700.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: {"reply": "starting", "tool_results": [
+            {"verb": "start_run", "args": {}, "result": {"status": "needs_confirmation", "confirmation_id": cid}}],
+            "reactions": [], "assumed": False},
+    )
+    # start_run dispatch returns an error status (mirrors _classify_start_exception)
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: {
+            "status": "error", "detail": "a model/CLI provider looks logged out"},
+    )
+
+    bridge, sdk, poster = _bridge(tmp_path)
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="700.1", thread_ts="700.1", text="start building")
+    )
+    await bridge.wait_idle("700.1")
+
+    texts = " ".join(m["text"] for m in poster.messages).lower()
+    assert "logged out" in texts or "couldn't" in texts or "failed" in texts
+    assert "approved & executed" not in texts  # must NOT claim success

@@ -1068,3 +1068,48 @@ def test_reconfigure_team_calls_list_available_routes_when_not_injected(
 
     assert result["status"] == "reconfigured"
     assert len(calls) == 1
+
+
+def test_default_start_run_fresh_recovers_saved_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh 'start building' on a brand-new studio project must pass the
+    project's already-confirmed team to _start_run — otherwise _start_run
+    (which only recovers the saved team on resume/continue) fails with
+    'no members' and the run never starts."""
+    import errorta_app.routes.coding as coding_routes
+    import errorta_council.coding.ledger as ledger_mod
+
+    captured: dict[str, Any] = {}
+
+    def fake_start_run(pid, body, *, resume=False, continue_=False):
+        captured.update(pid=pid, body=body, resume=resume, continue_=continue_)
+        return {"status": "started"}
+
+    class FakeLS:
+        def __init__(self, pid): pass
+        def get_run_config(self):
+            return {"members": [{"id": "pm-1", "gateway_route_id": "claude_cli.opus"},
+                                {"id": "designer-1", "gateway_route_id": "claude_cli.opus"}]}
+
+    monkeypatch.setattr(coding_routes, "_start_run", fake_start_run)
+    monkeypatch.setattr(ledger_mod, "LedgerStore", FakeLS)
+
+    tools._default_start_run("p1", resume=False, continue_=False)
+
+    assert captured["continue_"] is False and captured["resume"] is False
+    assert captured["body"] == {"members": [
+        {"id": "pm-1", "gateway_route_id": "claude_cli.opus"},
+        {"id": "designer-1", "gateway_route_id": "claude_cli.opus"},
+    ]}
+
+
+def test_default_start_run_resume_does_not_recover_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume/continue must still pass an EMPTY body — _start_run recovers the
+    saved team itself for those modes, so the fix must not double-inject."""
+    import errorta_app.routes.coding as coding_routes
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(coding_routes, "_start_run",
+                        lambda pid, body, *, resume=False, continue_=False: captured.update(body=body) or {"status": "started"})
+
+    tools._default_start_run("p1", resume=True, continue_=False)
+    assert captured["body"] == {}
