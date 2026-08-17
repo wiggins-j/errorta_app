@@ -58,6 +58,34 @@ def test_unbind_unknown_channel_is_a_no_op() -> None:
     store.unbind("C999")  # must not raise
 
 
+def test_channel_for_project_finds_bound_channel() -> None:
+    store.bind_channel("C1", "p1")
+    store.bind_channel("C2", "p2")
+
+    assert store.channel_for_project("p1") == "C1"
+    assert store.channel_for_project("p2") == "C2"
+
+
+def test_channel_for_project_returns_none_for_unknown_project() -> None:
+    store.bind_channel("C1", "p1")
+
+    assert store.channel_for_project("nope") is None
+
+
+def test_channel_for_project_ignores_studio_channel() -> None:
+    store.bind_channel("C1", "p1")
+    store.set_studio_channel("Cstudio")
+
+    assert store.channel_for_project("p1") == "C1"
+
+
+def test_channel_for_project_returns_none_after_unbind() -> None:
+    store.bind_channel("C1", "p1")
+    store.unbind("C1")
+
+    assert store.channel_for_project("p1") is None
+
+
 def test_bindings_file_written_with_owner_only_permissions() -> None:
     store.bind_channel("C123", "errorta")
 

@@ -73,6 +73,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
         "trust": "R",
         "summary": "Answer a question from context already fetched (no side effect).",
     },
+    "archive_project": {
+        "trust": "C",
+        "summary": (
+            "Spin a project down — pause it and archive its Slack channel "
+            "(reversible; does not delete the project)."
+        ),
+    },
 }
 
 
@@ -121,6 +128,7 @@ class StudioDeps:
     create_fn: Callable[..., Any] = create_project_from_charter
     list_projects_fn: Callable[[], list[dict[str, Any]]] = list_projects
     provision_fn: Callable[..., dict[str, Any]] = provisioning.create_project_channel
+    provision_archive_fn: Callable[..., dict[str, Any]] = provisioning.archive_channel
     invite_user_ids: list[str] = field(default_factory=list)
     available_routes: list[dict[str, Any]] | None = None
 
@@ -199,10 +207,56 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     }
 
 
+def archive_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                     deps: "StudioDeps") -> dict[str, Any]:
+    """Executes the real spin-down — only ever reached by ``dispatch`` after
+    the ``confirmed_via="block_actions"`` gate has already passed. Chat text
+    can NEVER reach this function; see the module docstring's injection-guard
+    rationale.
+
+    Soft and reversible (design §3.1): request-cancel a live run, pause the
+    project, then archive + unbind its Slack channel if one is bound. Never
+    raises — any channel-archive failure degrades to a clean ``"error"``
+    result (the project may already be paused; that's fine) and the channel
+    is NOT unbound unless the archive actually succeeded.
+    """
+    project_id = str(args.get("project_id") or "").strip()
+    if not project_id:
+        return {"status": "error", "detail": "project_id is required"}
+
+    ledger = deps.ledger_factory(project_id)
+    cid = deps.store.channel_for_project(project_id)
+
+    if ledger.get_run_state().get("status") == "running":
+        ledger.set_run_state(cancel_requested=True)
+
+    ledger.set_project_status("paused")
+
+    if cid:
+        try:
+            deps.provision_archive_fn(deps.web_client, cid)
+        except provisioning.ProvisioningError as exc:
+            return {"status": "error", "project_id": project_id, "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - must never escape a live Slack turn
+            _LOGGER.exception(
+                "studio archive_project: provision_archive_fn raised %s for project_id=%s",
+                type(exc).__name__, project_id,
+            )
+            return {
+                "status": "error",
+                "project_id": project_id,
+                "detail": f"channel archive failed ({type(exc).__name__})",
+            }
+        deps.store.unbind(cid)
+
+    return {"status": "archived", "project_id": project_id, "channel_id": cid}
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects_verb,
     "create_project": create_project,
     "answer_question": answer_question,
+    "archive_project": archive_project,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"

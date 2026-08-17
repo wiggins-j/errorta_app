@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from errorta_council.coding.ledger import ProjectNotFound
+from errorta_council.coding.ledger import LedgerStore, ProjectNotFound
 from errorta_council.coding.runtime_process import RuntimeProcessError, RuntimeProcessManager
+from errorta_council.coding.workspace import CodingWorkspace
 from errorta_slack import store, tools
 
 
@@ -885,3 +886,185 @@ def test_project_status_run_status_defaults_to_idle(tmp_path: Path) -> None:
     )
 
     assert result["run_status"] == "idle"
+
+
+# --- reconfigure_team ---------------------------------------------------
+#
+# Uses a REAL ``LedgerStore`` (not the fake used elsewhere in this file) so
+# ``control_actions.assign_models_by_role`` mutates and reads back a genuine
+# ``run_config`` — mirroring ``tests/coding/test_f145_control_actions.py``'s
+# ``_team_project``. ``available_routes`` is always injected so no test ever
+# probes the real gateway/Ollama.
+
+_AVAIL = [
+    {"route_id": "claude_cli.opus", "family": "opus", "provider_class": "claude_cli"},
+    {"route_id": "cursor_cli.composer-2.5", "family": "composer", "provider_class": "cursor_cli"},
+]
+
+
+def _team_project(project_id: str) -> LedgerStore:
+    real_store = LedgerStore(project_id)
+    real_store.create_project(
+        north_star="n", definition_of_done="d", target="new", repo_path=None,
+    )
+    CodingWorkspace(project_id, real_store).setup(target="new", repo_path=None)
+    real_store.set_run_config(room_id=None, members=[
+        {"id": "pm-1", "metadata": {"coding_role": "pm"}, "model_mode": "single",
+         "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"id": "dev-1", "metadata": {"coding_role": "dev"}, "model_mode": "single",
+         "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"id": "rev-1", "metadata": {"coding_role": "reviewer"}, "model_mode": "single",
+         "gateway_route_id": "cursor_cli.composer-2.5"},
+    ])
+    return real_store
+
+
+def test_reconfigure_team_trust_is_r() -> None:
+    assert tools.TOOL_CATALOG["reconfigure_team"]["trust"] == "R"
+
+
+def test_tool_deps_available_routes_defaults_to_none() -> None:
+    assert tools.ToolDeps().available_routes is None
+
+
+def test_reconfigure_team_empty_role_routes_is_a_clean_error_no_engine_call(
+    tmp_path: Path,
+) -> None:
+    # Deliberately an UNBOUND channel: if the empty-args check happened
+    # after resolving the project, this would raise `no_project_bound`
+    # instead of the friendly message — proving the empty check short-
+    # circuits before any engine/project lookup happens.
+    deps = _deps(tmp_path, available_routes=list(_AVAIL))
+
+    result = tools.dispatch(
+        "reconfigure_team", {"role_routes": {}},
+        channel_id="C-unbound", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "role" in result["detail"].lower()
+    assert "model" in result["detail"].lower()
+
+
+def test_reconfigure_team_missing_role_routes_key_is_the_same_clean_error(
+    tmp_path: Path,
+) -> None:
+    deps = _deps(tmp_path, available_routes=list(_AVAIL))
+
+    result = tools.dispatch(
+        "reconfigure_team", {}, channel_id="C-unbound", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "role" in result["detail"].lower()
+
+
+def test_reconfigure_team_valid_role_route_changes_member_and_returns_reconfigured(
+    tmp_path: Path,
+) -> None:
+    project_id = "proj-reconf-ok"
+    real_store = _team_project(project_id)
+    store.bind_channel("C1", project_id)
+    deps = _deps(tmp_path, ledger_factory=LedgerStore, available_routes=list(_AVAIL))
+
+    result = tools.dispatch(
+        "reconfigure_team", {"role_routes": {"reviewer": "opus"}},
+        channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result == {"status": "reconfigured", "changes": {"reviewer": "opus"}}
+    cfg = real_store.get_run_config()
+    rev = next(m for m in cfg["members"] if m["metadata"]["coding_role"] == "reviewer")
+    assert rev["gateway_route_id"] == "claude_cli.opus"
+    # the dev role, not named in role_routes, is untouched
+    dev = next(m for m in cfg["members"] if m["metadata"]["coding_role"] == "dev")
+    assert dev["gateway_route_id"] == "cursor_cli.composer-2.5"
+
+
+def test_reconfigure_team_unavailable_model_is_clean_error_with_candidates_no_mutation(
+    tmp_path: Path,
+) -> None:
+    project_id = "proj-reconf-bad-model"
+    real_store = _team_project(project_id)
+    store.bind_channel("C1", project_id)
+    deps = _deps(tmp_path, ledger_factory=LedgerStore, available_routes=list(_AVAIL))
+
+    result = tools.dispatch(
+        "reconfigure_team", {"role_routes": {"reviewer": "gpt5"}},
+        channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "gpt5" in result["detail"]
+    # the candidates (available models) are surfaced, not just "no match"
+    assert "claude_cli.opus" in result["detail"]
+    assert "cursor_cli.composer-2.5" in result["detail"]
+    # the team was NOT mutated
+    cfg = real_store.get_run_config()
+    rev = next(m for m in cfg["members"] if m["metadata"]["coding_role"] == "reviewer")
+    assert rev["gateway_route_id"] == "cursor_cli.composer-2.5"
+
+
+def test_reconfigure_team_role_with_no_member_is_a_clean_error(tmp_path: Path) -> None:
+    project_id = "proj-reconf-no-role"
+    _team_project(project_id)  # no "tester" role on this team
+    store.bind_channel("C1", project_id)
+    deps = _deps(tmp_path, ledger_factory=LedgerStore, available_routes=list(_AVAIL))
+
+    result = tools.dispatch(
+        "reconfigure_team", {"role_routes": {"tester": "opus"}},
+        channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "matched" in result["detail"] or "no_matching_members" in result["detail"]
+
+
+def test_reconfigure_team_arbitrary_exception_is_clean_error_not_a_crash(
+    tmp_path: Path,
+) -> None:
+    store.bind_channel("C1", "proj-reconf-boom")
+
+    class _BoomStore:
+        def get_run_config(self) -> dict[str, Any]:
+            raise RuntimeError("boom, secret token leaked here")
+
+    deps = _deps(
+        tmp_path, ledger_factory=lambda project_id: _BoomStore(),
+        available_routes=list(_AVAIL),
+    )
+
+    result = tools.dispatch(
+        "reconfigure_team", {"role_routes": {"reviewer": "opus"}},
+        channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "RuntimeError" in result["detail"]
+    assert "secret token" not in result["detail"]
+
+
+def test_reconfigure_team_calls_list_available_routes_when_not_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from errorta_council.coding import pm_reference
+
+    project_id = "proj-reconf-lazy"
+    _team_project(project_id)
+    store.bind_channel("C1", project_id)
+    calls: list[int] = []
+
+    def fake_list_available_routes() -> list[dict[str, Any]]:
+        calls.append(1)
+        return list(_AVAIL)
+
+    monkeypatch.setattr(pm_reference, "list_available_routes", fake_list_available_routes)
+    deps = _deps(tmp_path, ledger_factory=LedgerStore)  # available_routes left at default None
+
+    result = tools.dispatch(
+        "reconfigure_team", {"role_routes": {"reviewer": "opus"}},
+        channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "reconfigured"
+    assert len(calls) == 1

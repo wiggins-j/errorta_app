@@ -41,9 +41,11 @@ inbound message passes first. Like the per-project concierge,
 (its own module invariant); the ONE place this bridge may pass
 ``confirmed_via="block_actions"`` to ``studio_tools.dispatch`` is, symmetric
 with the per-project case, inside ``handle_interaction`` -- for a resolved
-``create_project`` confirmation. A studio message on a bridge with no
-``studio_caller`` configured degrades to a plain "not configured" reply
-rather than crashing; the per-project path is entirely unaffected either way.
+confirmation whose verb is in ``studio_tools.TOOL_CATALOG`` (``create_project``,
+``archive_project``, ...; see ``_fire_confirmed_effect``). A studio message on
+a bridge with no ``studio_caller`` configured degrades to a plain "not
+configured" reply rather than crashing; the per-project path is entirely
+unaffected either way.
 
 Cancel look-ahead: a per-thread worker (``_drain``) runs one turn at a
 time via ``asyncio.to_thread`` (since ``concierge.run_turn`` is
@@ -604,29 +606,54 @@ class SlackBridge:
         )
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
-    async def _post_studio_create_outcome(
-        self, channel_id: Any, thread_ts: str, approved: bool, result: dict[str, Any] | None,
+    async def _post_studio_outcome(
+        self, verb: str, channel_id: Any, thread_ts: str, approved: bool,
+        result: dict[str, Any] | None,
     ) -> None:
-        """The ``create_project``-specific counterpart of
-        ``_post_decision_outcome`` -- unlike a generic tool verb (fire-and-
-        forget, always "executed"), ``studio_tools.create_project`` can fail
-        partway through (e.g. channel provisioning) and reports that via its
-        return value's ``status``, not an exception. This is what lets the
-        channel be told "created" vs the real error detail instead of a
-        blanket "executed" that would be wrong on a partial failure."""
+        """The studio-C-verb counterpart of ``_post_decision_outcome`` --
+        unlike a generic per-project tool verb (fire-and-forget, always
+        "executed"), a studio verb (``create_project``, ``archive_project``,
+        ...) can fail partway through (e.g. channel provisioning/archiving)
+        and reports that via its return value's ``status``, not an
+        exception. This composes a clear, verb-specific outcome message
+        instead of a blanket "executed" that would be wrong on a partial
+        failure. Dispatches by ``verb`` to a small per-verb text renderer so
+        adding a future studio C-verb only means adding one more renderer
+        here, not another hardcoded routing branch upstream."""
         if self._poster is None:
             return
         if not approved:
-            text = "Declined — create_project was not executed."
-        elif result is not None and result.get("status") == "created":
-            text = (
+            text = f"Declined — {verb} was not executed."
+        elif verb == "create_project":
+            text = self._create_project_outcome_text(result)
+        elif verb == "archive_project":
+            text = self._archive_project_outcome_text(result)
+        else:
+            # A studio C-verb with no bespoke renderer yet still gets a
+            # truthful, generic status line rather than silently posting
+            # nothing (or crashing on a KeyError).
+            status = (result or {}).get("status", "unknown")
+            text = f"{verb}: {status}."
+        await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
+
+    def _create_project_outcome_text(self, result: dict[str, Any] | None) -> str:
+        if result is not None and result.get("status") == "created":
+            return (
                 f"Created project `{result.get('project_id')}` — "
                 f"channel <#{result.get('channel_id')}|{result.get('channel_name')}>."
             )
-        else:
-            detail = (result or {}).get("detail") or "unknown error"
-            text = f"⚠️ couldn't create the project — {detail}"
-        await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
+        detail = (result or {}).get("detail") or "unknown error"
+        return f"⚠️ couldn't create the project — {detail}"
+
+    def _archive_project_outcome_text(self, result: dict[str, Any] | None) -> str:
+        if result is not None and result.get("status") == "archived":
+            project_id = result.get("project_id")
+            channel_id = result.get("channel_id")
+            if channel_id:
+                return f"Spun down project `{project_id}` — channel <#{channel_id}> archived."
+            return f"Spun down project `{project_id}` (no Slack channel was bound)."
+        detail = (result or {}).get("detail") or "unknown error"
+        return f"⚠️ couldn't spin the project down — {detail}"
 
     async def _post_effect_error(self, channel_id: Any, thread_ts: str) -> None:
         if self._poster is None:
@@ -653,15 +680,24 @@ class SlackBridge:
           signal's kind (e.g. a "problem", whose only actions are
           accept/correct) or if the resolve call itself fails — caught by
           the caller, never left to crash the callback.
-        * ``"create_project"`` — the studio's one **C**-class verb (Task 6).
-          Not in ``tools.TOOL_CATALOG`` at all, so it is routed to
+        * any verb in ``studio_tools.TOOL_CATALOG`` (e.g. ``create_project``,
+          ``archive_project``) — every studio **C**-class verb. None of these
+          are in ``tools.TOOL_CATALOG`` at all, so they are routed to
           ``studio_tools.dispatch`` instead of ``tools.dispatch``, using a
           ``StudioDeps`` built via ``_build_studio_deps`` — the SAME
           ``confirmed_via="block_actions"`` marker, but the studio's own
           bounded tool surface. Only on Approve; its ``{"status": ...}``
           result is returned (rather than discarded, unlike the other two
-          routes) so ``handle_interaction`` can tell the channel whether the
-          project was actually created or the create failed partway through.
+          routes) so ``handle_interaction`` can tell the channel what
+          actually happened (created vs. archived vs. failed partway
+          through). Checking membership in the catalog — rather than a
+          hardcoded ``verb == "create_project"`` string — is deliberate: a
+          hardcoded check silently stops routing every NEW studio C-verb to
+          ``studio_tools.dispatch``, sending it to the per-project
+          ``tools.dispatch`` instead, where it isn't in that catalog either
+          and fails closed with ``tool_not_allowed`` — the verb's real,
+          verified effect would then simply never fire. This is exactly the
+          gap ``archive_project`` shipped into before this fix.
         * every real per-project tool verb — unchanged: ``tools.dispatch(...,
           confirmed_via="block_actions")``, and ONLY on Approve (Decline is
           still a pure no-op for a real tool).
@@ -682,7 +718,7 @@ class SlackBridge:
                 store=self._deps.ledger_factory(project_id),
             )
             return None
-        if verb == "create_project":
+        if verb in studio_tools.TOOL_CATALOG:
             if not approved:
                 return None
             return studio_tools.dispatch(
@@ -712,11 +748,12 @@ class SlackBridge:
     # ONE exception is an outbound.ATTENTION_VERB confirmation (see
     # _fire_confirmed_effect) — confirmed_via="block_actions" is reserved
     # for real tool verbs only, so that marker never appears on an
-    # attention-signal resolution. A studio "create_project" confirmation
-    # (Task 6) is a second, symmetric special case: same claim-then-fire
-    # discipline, but routed to studio_tools.dispatch instead of
-    # tools.dispatch (see _fire_confirmed_effect) since it isn't a
-    # per-project verb at all.
+    # attention-signal resolution. Any studio C-verb confirmation (e.g.
+    # "create_project", "archive_project" — anything in
+    # studio_tools.TOOL_CATALOG) is a second, symmetric special case: same
+    # claim-then-fire discipline, but routed to studio_tools.dispatch
+    # instead of tools.dispatch (see _fire_confirmed_effect) since none of
+    # them are per-project verbs at all.
     #
     # CLAIM, not check-then-act (Task 9 review carry-over): resolving is the
     # single atomic operation that authorizes the effect. This method used to
@@ -781,8 +818,10 @@ class SlackBridge:
             await self._post_effect_error(channel_id, thread_ts)
             return
 
-        if verb == "create_project":
-            await self._post_studio_create_outcome(channel_id, thread_ts, approved, effect_result)
+        if verb in studio_tools.TOOL_CATALOG:
+            await self._post_studio_outcome(
+                verb, channel_id, thread_ts, approved, effect_result,
+            )
         else:
             await self._post_decision_outcome(channel_id, thread_ts, verb, approved)
 

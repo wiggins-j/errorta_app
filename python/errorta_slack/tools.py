@@ -113,6 +113,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "preview."
         ),
     },
+    "reconfigure_team": {
+        "trust": "R",
+        "summary": (
+            "Change which model a role (pm/dev/reviewer/tester) uses on "
+            "this project."
+        ),
+    },
 }
 
 
@@ -228,6 +235,11 @@ class ToolDeps:
     # mapping. Defaults to the real attention.resolve so production wiring
     # needs no extra plumbing; tests inject a spy/fake.
     attention_resolve_fn: Callable[..., Any] = attention.resolve
+    # Injected in tests so `reconfigure_team` never probes the real gateway
+    # (which may hit Ollama). `None` (not `[]`) means "not injected" — the
+    # verb impl calls `pm_reference.list_available_routes()` lazily on first
+    # use, at most once per turn, never at ToolDeps-construction time.
+    available_routes: list[dict[str, Any]] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -473,6 +485,58 @@ def stop_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return {"status": "stopping"}
 
 
+def _control_action_error_detail(exc: Any) -> str:
+    """Turn a ``control_actions.ControlActionError`` into a single detail
+    string carrying both the reason and any candidate/available models —
+    the grounded-or-refuse info the PM relays to the user (e.g. "I don't
+    have a model matching 'gpt5' — available: ..."). ``resolve_route``
+    stashes candidates under ``.extra["candidates"]`` (ambiguous match) or
+    ``.extra["available"]`` (no match at all); ``no_matching_members``/
+    ``no_team`` carry neither, so those stay a clean bare message."""
+    detail = str(exc)
+    extra = getattr(exc, "extra", None) or {}
+    candidates = extra.get("candidates") or extra.get("available")
+    if candidates:
+        detail = f"{detail} — available: {', '.join(str(c) for c in candidates)}"
+    return detail
+
+
+def reconfigure_team(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                      deps: "ToolDeps") -> dict[str, Any]:
+    """R-class — applies immediately (reversible, undoable PmChange); the
+    reply announces the change. ``role_routes`` (coding role -> human model
+    name, e.g. ``{"reviewer": "opus"}``) comes straight from the concierge's
+    parsed args. Grounded-or-refuse against the live/injected model catalog
+    via ``control_actions.assign_models_by_role`` — an unresolvable or
+    ambiguous model, or a role with no member, becomes a clean error naming
+    the reason and any candidates, never a crash or a silent no-op.
+    """
+    role_routes = args.get("role_routes") or {}
+    if not role_routes:
+        return {
+            "status": "error",
+            "detail": "tell me which role → which model, e.g. reviewer → opus",
+        }
+    from errorta_council.coding import control_actions, pm_reference
+
+    project_id = _bound_project_id(deps, channel_id)
+    available = (
+        deps.available_routes if deps.available_routes is not None
+        else pm_reference.list_available_routes()
+    )
+    ledger_store = deps.ledger_factory(project_id)
+    try:
+        control_actions.assign_models_by_role(
+            ledger_store, {str(k): str(v) for k, v in role_routes.items()},
+            available=available,
+        )
+    except control_actions.ControlActionError as exc:
+        return {"status": "error", "detail": _control_action_error_detail(exc)}
+    except Exception as exc:  # noqa: BLE001 - any engine failure -> clean result, never an uncaught raise
+        return {"status": "error", "detail": f"couldn't reconfigure ({type(exc).__name__})"}
+    return {"status": "reconfigured", "changes": dict(role_routes)}
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects,
     "switch_project": switch_project,
@@ -487,6 +551,7 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "publish_pr": publish_pr,
     "start_run": start_run,
     "stop_run": stop_run,
+    "reconfigure_team": reconfigure_team,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"

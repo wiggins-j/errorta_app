@@ -19,10 +19,13 @@ from errorta_slack import provisioning, studio_tools
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, *, events: list[str] | None = None) -> None:
         self.staged: list[tuple[str, dict[str, Any], str, str]] = []
         self.bound: list[tuple[str, str]] = []
+        self.unbound: list[str] = []
+        self.channel_map: dict[str, str] = {}
         self._next_cid = 0
+        self._events = events
 
     def stage_confirmation(self, verb: str, args: dict[str, Any], thread_ts: str, *,
                             channel_id: str = "") -> str:
@@ -37,6 +40,42 @@ class FakeStore:
 
     def bind_channel(self, channel_id: str, project_id: str) -> None:
         self.bound.append((channel_id, project_id))
+
+    def channel_for_project(self, project_id: str) -> str | None:
+        return self.channel_map.get(project_id)
+
+    def unbind(self, channel_id: str) -> None:
+        self.unbound.append(channel_id)
+        if self._events is not None:
+            self._events.append("unbind")
+
+
+class FakeLedger:
+    """Fake of the ``LedgerStore(project_id)`` object ``deps.ledger_factory``
+    returns — tracks run-state and status writes for the spin-down verb."""
+
+    def __init__(self, project_id: str, *, run_status: str = "idle",
+                 events: list[str] | None = None) -> None:
+        self.project_id = project_id
+        self._run_state = {"status": run_status}
+        self.status_calls: list[str] = []
+        self.run_state_patches: list[dict[str, Any]] = []
+        self._events = events
+
+    def get_run_state(self) -> dict[str, Any]:
+        return dict(self._run_state)
+
+    def set_run_state(self, **patch: Any) -> dict[str, Any]:
+        self.run_state_patches.append(patch)
+        self._run_state.update(patch)
+        if self._events is not None:
+            self._events.append("set_run_state")
+        return dict(self._run_state)
+
+    def set_project_status(self, status: str) -> None:
+        self.status_calls.append(status)
+        if self._events is not None:
+            self._events.append(f"set_project_status:{status}")
 
 
 class FakeProject:
@@ -310,3 +349,180 @@ def test_project_id_from_title_never_dot_or_dotdot() -> None:
 def test_project_id_from_title_truncates_to_64_chars() -> None:
     pid = studio_tools._project_id_from_title("a" * 100)
     assert len(pid) <= 64
+
+
+# --- archive_project (Task 2): the spin-down C-class verb -----------------
+#
+# Trust class C, same non-negotiable injection discipline as create_project:
+# a chat-text call (confirmed_via=None) must stage a confirmation and touch
+# NONE of set_run_state/set_project_status/archive/unbind. Only a verified
+# confirmed_via="block_actions" re-entry may execute the real effect.
+
+
+def test_archive_project_trust_class_is_c() -> None:
+    assert studio_tools.TOOL_CATALOG["archive_project"]["trust"] == "C"
+
+
+def test_archive_project_unconfirmed_stages_and_never_touches_engine() -> None:
+    events: list[str] = []
+    store = FakeStore(events=events)
+    store.channel_map["p1"] = "C1"
+    ledger = FakeLedger("p1", run_status="running", events=events)
+    archive_calls: list[tuple[Any, str]] = []
+
+    def _archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        archive_calls.append((web_client, channel_id))
+        return {"channel_id": channel_id, "archived": True}
+
+    deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=_archive_fn,
+    )
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+    assert result["confirmation_id"] == "cid-1"
+    assert ledger.status_calls == []
+    assert ledger.run_state_patches == []
+    assert archive_calls == []
+    assert store.unbound == []
+    assert events == []
+
+
+def test_archive_project_confirmed_via_wrong_provenance_still_stages() -> None:
+    ledger = FakeLedger("p1")
+    deps = studio_tools.StudioDeps(store=FakeStore(), ledger_factory=lambda pid: ledger)
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via="chat_text", deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+    assert ledger.status_calls == []
+
+
+def test_archive_project_confirmed_running_project_cancels_pauses_archives_unbinds_in_order() -> None:
+    events: list[str] = []
+    store = FakeStore(events=events)
+    store.channel_map["p1"] = "C1"
+    ledger = FakeLedger("p1", run_status="running", events=events)
+
+    def _archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        events.append("archive")
+        return {"channel_id": channel_id, "archived": True}
+
+    deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=_archive_fn,
+    )
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result == {"status": "archived", "project_id": "p1", "channel_id": "C1"}
+    assert ledger.run_state_patches == [{"cancel_requested": True}]
+    assert events == ["set_run_state", "set_project_status:paused", "archive", "unbind"]
+    assert store.unbound == ["C1"]
+
+
+def test_archive_project_confirmed_non_running_project_skips_cancel() -> None:
+    events: list[str] = []
+    store = FakeStore(events=events)
+    store.channel_map["p1"] = "C1"
+    ledger = FakeLedger("p1", run_status="idle", events=events)
+
+    def _archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        events.append("archive")
+        return {"channel_id": channel_id, "archived": True}
+
+    deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=_archive_fn,
+    )
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "archived"
+    assert ledger.run_state_patches == []
+    assert events == ["set_project_status:paused", "archive", "unbind"]
+
+
+def test_archive_project_confirmed_no_bound_channel_pauses_only() -> None:
+    store = FakeStore()  # no channel bound for p1
+    ledger = FakeLedger("p1", run_status="idle")
+    archive_calls: list[str] = []
+
+    def _archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        archive_calls.append(channel_id)
+        return {"channel_id": channel_id, "archived": True}
+
+    deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=_archive_fn,
+    )
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result == {"status": "archived", "project_id": "p1", "channel_id": None}
+    assert ledger.status_calls == ["paused"]
+    assert archive_calls == []
+    assert store.unbound == []
+
+
+def test_archive_project_confirmed_archive_provisioning_error_returns_clean_error_no_unbind() -> None:
+    store = FakeStore()
+    store.channel_map["p1"] = "C1"
+    ledger = FakeLedger("p1", run_status="idle")
+
+    def _failing_archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        raise provisioning.ProvisioningError("missing_scope", "conversations_archive failed")
+
+    deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=_failing_archive_fn,
+    )
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert result["project_id"] == "p1"
+    assert "missing_scope" in result["detail"] or "conversations_archive" in result["detail"]
+    # The project may already be paused by the time the archive call fails —
+    # that's fine (soft spin-down is idempotent on retry); what must NOT
+    # happen is unbinding a channel that never actually got archived.
+    assert ledger.status_calls == ["paused"]
+    assert store.unbound == []
+
+
+def test_archive_project_confirmed_archive_arbitrary_exception_returns_clean_error() -> None:
+    store = FakeStore()
+    store.channel_map["p1"] = "C1"
+    ledger = FakeLedger("p1")
+
+    def _raising_archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        raise RuntimeError("boom, path=/secret/workspace")
+
+    deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=_raising_archive_fn,
+    )
+
+    result = studio_tools.dispatch(
+        "archive_project", {"project_id": "p1"}, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "/secret/workspace" not in result["detail"]
+    assert "RuntimeError" in result["detail"]
+    assert store.unbound == []

@@ -131,6 +131,16 @@ def unbind(channel_id: str) -> None:
         _write_json(_bindings_path(), bindings)
 
 
+def channel_for_project(project_id: str) -> str | None:
+    """Return the channel id bound to ``project_id``, or ``None`` if no
+    binding exists for it (the reverse of ``binding_for``, which looks up
+    by channel id)."""
+    for binding in _load_bindings().values():
+        if binding.get("project_id") == project_id:
+            return binding.get("channel_id")
+    return None
+
+
 # --- Outbound cursor ---------------------------------------------------
 
 
@@ -390,6 +400,7 @@ __all__ = [
     "binding_for",
     "list_bindings",
     "unbind",
+    "channel_for_project",
     "get_cursor",
     "advance_cursor",
     "seen_event",

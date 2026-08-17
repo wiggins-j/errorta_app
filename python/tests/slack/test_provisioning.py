@@ -300,3 +300,85 @@ def test_create_project_channel_swallows_topic_errors() -> None:
         client, title="Homeschool Game!", invite_user_ids=[], purpose="anything"
     )
     assert result == {"channel_id": "C9", "name": "homeschool-game"}
+
+
+# --- archive_channel ---------------------------------------------------
+
+
+class _ArchiveWebClient:
+    """Fake client recording ``conversations_archive`` calls."""
+
+    def __init__(self) -> None:
+        self.archive_calls: list[dict[str, Any]] = []
+
+    def conversations_archive(self, *, channel: str) -> dict[str, Any]:
+        self.archive_calls.append({"channel": channel})
+        return {"ok": True}
+
+
+class _ArchiveFailsWebClient:
+    def __init__(self, error: str) -> None:
+        self._error = error
+        self.archive_calls: list[dict[str, Any]] = []
+
+    def conversations_archive(self, *, channel: str) -> dict[str, Any]:
+        self.archive_calls.append({"channel": channel})
+        raise _SlackApiErrorLike(self._error)
+
+
+class _ArchiveRaisesPlainRuntimeErrorWebClient:
+    def __init__(self) -> None:
+        self.archive_calls: list[dict[str, Any]] = []
+
+    def conversations_archive(self, *, channel: str) -> dict[str, Any]:
+        self.archive_calls.append({"channel": channel})
+        raise RuntimeError("boom")
+
+
+def test_archive_channel_happy_path_returns_archived_true() -> None:
+    client = _ArchiveWebClient()
+    result = provisioning.archive_channel(client, "C1")
+    assert result == {"channel_id": "C1", "archived": True}
+    assert client.archive_calls == [{"channel": "C1"}]
+
+
+def test_archive_channel_already_archived_is_treated_as_success() -> None:
+    client = _ArchiveFailsWebClient("already_archived")
+    result = provisioning.archive_channel(client, "C1")
+    assert result == {"channel_id": "C1", "archived": True}
+
+
+def test_archive_channel_wraps_cant_archive_general_as_provisioning_error() -> None:
+    client = _ArchiveFailsWebClient("cant_archive_general")
+    with pytest.raises(provisioning.ProvisioningError) as exc_info:
+        provisioning.archive_channel(client, "C1")
+    assert exc_info.value.code == "cant_archive_general"
+
+
+def test_archive_channel_wraps_missing_scope_as_provisioning_error() -> None:
+    client = _ArchiveFailsWebClient("missing_scope")
+    with pytest.raises(provisioning.ProvisioningError) as exc_info:
+        provisioning.archive_channel(client, "C1")
+    assert exc_info.value.code == "missing_scope"
+
+
+def test_archive_channel_wraps_channel_not_found_as_provisioning_error() -> None:
+    client = _ArchiveFailsWebClient("channel_not_found")
+    with pytest.raises(provisioning.ProvisioningError) as exc_info:
+        provisioning.archive_channel(client, "C1")
+    assert exc_info.value.code == "channel_not_found"
+
+
+def test_archive_channel_does_not_leak_raw_slack_api_error() -> None:
+    client = _ArchiveFailsWebClient("missing_scope")
+    with pytest.raises(Exception) as exc_info:
+        provisioning.archive_channel(client, "C1")
+    assert isinstance(exc_info.value, provisioning.ProvisioningError)
+    assert not isinstance(exc_info.value, _SlackApiErrorLike)
+
+
+def test_archive_channel_reraises_non_slack_shaped_error_unwrapped() -> None:
+    client = _ArchiveRaisesPlainRuntimeErrorWebClient()
+    with pytest.raises(RuntimeError, match="boom") as exc_info:
+        provisioning.archive_channel(client, "C1")
+    assert not isinstance(exc_info.value, provisioning.ProvisioningError)
