@@ -99,6 +99,20 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
         "trust": "C",
         "summary": "Open or update a public pull request.",
     },
+    "start_run": {
+        "trust": "C",
+        "summary": (
+            "Start the coding team working on the project (spends model "
+            "calls up to the iteration cap) — NOT the runtime preview."
+        ),
+    },
+    "stop_run": {
+        "trust": "R",
+        "summary": (
+            "Gracefully stop the running coding team — NOT the runtime "
+            "preview."
+        ),
+    },
 }
 
 
@@ -167,6 +181,26 @@ def _default_publish_fn(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _default_start_run(project_id: str) -> dict[str, Any]:
+    """Start the coding team's run via the app's real start-run route
+    function — the identical call the app's own PM path makes
+    (``routes/coding.py:1846``): ``_start_run(project_id, {}, continue_=True)``.
+
+    Lazily imports ``errorta_app.routes.coding`` so this module never pulls
+    in the FastAPI route layer at import time (optionality — ``tools.py``
+    must load with only ``errorta_council`` installed). ``continue_=True``
+    recovers the saved team from ``run_config`` and bypasses the fresh-start
+    ``run_setup_confirmed`` gate, matching Slice 1's already-provisioned
+    team. Raises straight through on failure (an ``HTTPException`` with
+    ``status_code`` 409 for "already in progress" / member-health preflight,
+    or any other exception) — the caller (``start_run`` below) is
+    responsible for turning that into a clean result.
+    """
+    from errorta_app.routes.coding import _start_run
+
+    return _start_run(project_id, {}, continue_=True)
+
+
 @dataclass
 class ToolDeps:
     """Every engine seam ``dispatch`` reaches through — all injectable so
@@ -176,6 +210,11 @@ class ToolDeps:
     ledger_factory: Callable[[str], Any] = LedgerStore
     launch_fn: Callable[[str], dict[str, Any] | None] = _default_launch_fn
     publish_fn: Callable[[dict[str, Any]], dict[str, Any]] = _default_publish_fn
+    # None (not a bound default) so the lazy `_default_start_run` import of
+    # `errorta_app.routes.coding` only happens on first real use, never at
+    # ToolDeps-construction time — mirrored by `deps.start_run_fn or
+    # _default_start_run` at the call site in `start_run` below.
+    start_run_fn: Callable[[str], dict[str, Any]] | None = None
     pm_changes_mod: Any = pm_changes
     # Task 9's outbound.py stages `attention_signal`-class confirmations
     # (not a tools.TOOL_CATALOG verb) whose Approve/Decline click is resolved
@@ -223,7 +262,8 @@ def project_status(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     ledger_store = deps.ledger_factory(project_id)
     tasks = team_log.build_team_log(ledger_store)
     blockers = attention.list_open(project_id, store=ledger_store)
-    return {"tasks": tasks, "blockers": blockers}
+    run_status = ledger_store.get_run_state().get("status") or "idle"
+    return {"tasks": tasks, "blockers": blockers, "run_status": run_status}
 
 
 def recent_activity(args: dict[str, Any], *, channel_id: str, thread_ts: str,
@@ -348,6 +388,48 @@ def publish_pr(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return out
 
 
+def start_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+               deps: "ToolDeps") -> dict[str, Any]:
+    """C-class — this impl only ever runs once ``dispatch`` has confirmed
+    ``confirmed_via="block_actions"``; never reachable from concierge text.
+
+    ``deps.start_run_fn`` defaults to ``None`` on ``ToolDeps`` (not the lazy
+    wrapper itself) precisely so the real engine import stays deferred to
+    this call, not to ``ToolDeps()`` construction.
+    """
+    project_id = _bound_project_id(deps, channel_id)
+    start_fn = deps.start_run_fn or _default_start_run
+    try:
+        start_fn(project_id)
+    except Exception as exc:  # noqa: BLE001 - any engine failure -> clean result, never an uncaught raise
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 409:
+            detail = getattr(exc, "detail", None)
+            if isinstance(detail, dict) and detail.get("code") == "member_health_preflight_failed":
+                reason = str(detail.get("message") or "a provider looks logged out")
+                return {
+                    "status": "error",
+                    "detail": f"can't start — a model/CLI provider looks logged out: {reason}",
+                }
+            # Benign "already in progress" — swallow, not an error.
+            return {"status": "already_running"}
+        # Redacted: only the exception TYPE is surfaced, never its message
+        # (which may carry tokens/paths/internal detail) — metadata-only log.
+        return {"status": "error", "detail": f"couldn't start the run ({type(exc).__name__})"}
+    return {"status": "started"}
+
+
+def stop_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+             deps: "ToolDeps") -> dict[str, Any]:
+    project_id = _bound_project_id(deps, channel_id)
+    ledger_store = deps.ledger_factory(project_id)
+    current_status = ledger_store.get_run_state().get("status") or "idle"
+    if current_status == "idle":
+        return {"status": "not_running"}
+    ledger_store.set_run_state(cancel_requested=True)
+    return {"status": "stopping"}
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects,
     "switch_project": switch_project,
@@ -360,6 +442,8 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "resolve_decision": resolve_decision,
     "spend_cloud": spend_cloud,
     "publish_pr": publish_pr,
+    "start_run": start_run,
+    "stop_run": stop_run,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"
