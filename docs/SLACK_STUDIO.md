@@ -121,11 +121,6 @@ team* in `SLACK_PM_BRIDGE.md` ("switch the reviewer to opus").
 - **One studio channel.** Like project bindings, the studio channel is a
   singleton — binding a new one replaces the old one, it doesn't add a
   second studio surface.
-- **Public channels only.** The channel the studio manager creates is a
-  public channel; private-channel provisioning is not in v1.
-- **One studio channel.** Like project bindings, the studio channel is a
-  singleton — binding a new one replaces the old one, it doesn't add a
-  second studio surface.
 
 ## Public-repo hygiene
 
