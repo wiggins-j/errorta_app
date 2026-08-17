@@ -194,6 +194,17 @@ actually writing code — directly from the PM:
 These are distinct from `launch_runtime` / `stop_runtime`, which start and stop a
 **preview** of the *built* code (a dev server) — not the coding team's run.
 
+## Reconfigure the team
+
+In a project's channel you can change which model a role uses — *"switch the
+reviewer to opus"*, *"put the devs on cursor composer 2.5"* → `reconfigure_team`.
+It's **grounded-or-refuse**: the model name is resolved against the routes that
+are actually available/installed, and an unknown or ambiguous name is refused
+with the list of candidates — the PM never silently picks the wrong model. The
+change is applied immediately, announced back to you, takes effect on the team's
+**next turn** (you can reconfigure mid-run), and is recorded as an **undoable**
+change. Roles are `pm` / `dev` / `reviewer` / `tester`.
+
 ## Public-repo hygiene
 
 This module and its tests never contain a real Slack token, contact Slack,

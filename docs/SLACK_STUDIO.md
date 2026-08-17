@@ -89,12 +89,38 @@ doesn't change.
 5. Tapping **Decline** (or letting the confirmation time out) creates
    nothing; you can just keep chatting to revise the charter.
 
+## Spin a project down
+
+Tell the studio manager to spin a project down (e.g. *"shut down the homeschool
+game project"*) → `archive_project`. This is a **C-class** action — it changes
+real state, so the manager posts an **Approve** button and only your tap runs it.
+It is a **reversible soft spin-down**:
+
+- If a run is live, it requests a graceful **cancel**.
+- It sets the project to **paused** (the project and its history are kept — this
+  is not a delete).
+- It **archives the project's Slack channel** and drops the channel↔project
+  binding.
+
+Hard delete (destroying the project's workspace and ledger) is **not** in this
+slice — spin-down is the reversible option.
+
+## Reconfigure the team
+
+That's done in the **project's own channel**, not here — see *Reconfigure the
+team* in `SLACK_PM_BRIDGE.md` ("switch the reviewer to opus").
+
 ## v1 scope
 
-- **Project created IDLE.** `create_project` only creates the project and its
-  channel — it does not start a run. Kicking off the first build is a
-  separate, later action in the new project channel (a future slice), the
-  same way `launch_runtime` already works for existing projects.
+- **Project created IDLE, then you start it.** `create_project` creates the
+  project + channel but doesn't start a run. In the new project channel, tell
+  the PM to **start building** (see *Run control* in `SLACK_PM_BRIDGE.md`) — an
+  Approve button kicks off the coding team.
+- **Public channels only.** The channel the studio manager creates is a
+  public channel; private-channel provisioning is not in v1.
+- **One studio channel.** Like project bindings, the studio channel is a
+  singleton — binding a new one replaces the old one, it doesn't add a
+  second studio surface.
 - **Public channels only.** The channel the studio manager creates is a
   public channel; private-channel provisioning is not in v1.
 - **One studio channel.** Like project bindings, the studio channel is a
