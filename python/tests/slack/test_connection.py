@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from errorta_slack import concierge, connection, store, studio_concierge, studio_tools, tools
+from errorta_slack import concierge, config, connection, store, studio_concierge, studio_tools, tools
 
 pytestmark = pytest.mark.asyncio
 
@@ -168,10 +168,12 @@ class _StudioRunTurnSpy:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.model_routes: list[Any] = []
 
     def __call__(self, message, thread_msgs, *, channel_id, thread_ts,
-                 deps, caller, max_hops=2) -> dict[str, Any]:
+                 deps, caller, max_hops=2, model_route=None) -> dict[str, Any]:
         self.calls.append(message)
+        self.model_routes.append(model_route)
         return {
             "reply": f"studio-ack:{message}", "tool_results": [],
             "reactions": [], "assumed": False,
@@ -985,6 +987,41 @@ async def test_studio_channel_message_routes_to_studio_concierge_not_project(
     assert studio_spy.calls == ["hi studio"]
     assert project_spy.calls == []
     assert any(m["text"] == "studio-ack:hi studio" for m in poster.messages)
+
+
+async def test_studio_channel_message_passes_configured_model_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fix/slack-studio-model: the studio manager has no per-project ledger
+    to resolve a route from, so ``_process_studio`` must resolve
+    ``config.load()["studio_model_route"]`` itself and pass it through to
+    ``studio_concierge.run_turn`` -- never an empty/unset route (that is
+    exactly the bug this branch fixes: an empty-route request falls through
+    to local Ollama and errors as ``local_provider_unavailable``)."""
+    store.set_studio_channel("C-studio")
+
+    studio_spy = _StudioRunTurnSpy()
+    monkeypatch.setattr(studio_concierge, "run_turn", studio_spy)
+
+    bridge, sdk, poster = _bridge(
+        tmp_path,
+        studio_caller=lambda member, prompt: "{}",
+        studio_deps_factory=lambda: studio_tools.StudioDeps(store=store),
+    )
+
+    thread_ts = "410.5"
+    await bridge.handle_event(
+        _message_envelope(
+            event_id="Ev1", channel="C-studio", ts="410.5", thread_ts=thread_ts, text="hi studio",
+        )
+    )
+    await bridge.wait_idle(thread_ts)
+
+    assert studio_spy.calls == ["hi studio"]
+    assert len(studio_spy.model_routes) == 1
+    route = studio_spy.model_routes[0]
+    assert isinstance(route, str) and route.strip()
+    assert route == config.load()["studio_model_route"]
 
 
 async def test_bound_project_channel_still_routes_to_project_concierge(
