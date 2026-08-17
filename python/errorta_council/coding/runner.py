@@ -3016,6 +3016,63 @@ def _capability_gap_note(store: LedgerStore) -> str:
         "re-dispatch the same work to a role whose manifest cannot discharge it.\n")
 
 
+def _design_contract_text(store: LedgerStore, task: Task | None = None) -> str:
+    """Slice 1 §4 — the ``design_contract`` prompt segment for DEV / REVIEWER turns.
+
+    Rendered from the APPROVED design_spec artifact: a token summary, the current
+    task's relevant screen layout intent (matched by screen name when possible),
+    and the do/don'ts, plus the standing "consume tokens, never invent raw values"
+    instruction. Returns "" when there is no approved design_spec — so a project
+    without a design contract (every non-UI project, and any UI project before its
+    contract is approved) renders a prompt byte-identical to before, which is what
+    keeps the golden prompt-segment lock intact (spec §4: the golden update is the
+    deliberate one-time insertion of this renderer call at a reserved position)."""
+    try:
+        from .governance import GovernanceStore
+        artifact = GovernanceStore.for_ledger(store).latest_approved_artifact(
+            "design_spec")
+    except Exception:  # noqa: BLE001 — prompt context is best-effort
+        artifact = None
+    if artifact is None:
+        return ""
+    body = artifact.body_json if isinstance(artifact.body_json, dict) else {}
+    lines = ["DESIGN CONTRACT (the approved design_spec — build to it; consume its "
+             "tokens, never invent raw colors/sizes/spacing):"]
+    tokens = body.get("tokens")
+    if isinstance(tokens, dict) and tokens:
+        lines.append("Tokens: " + ", ".join(sorted(tokens.keys())) + ".")
+    matrix = body.get("direction_matrix")
+    if isinstance(matrix, dict) and matrix:
+        lines.append("Direction: " + "; ".join(
+            f"{axis}={matrix[axis]}" for axis in sorted(matrix)
+            if isinstance(matrix.get(axis), str)) + ".")
+    screens = body.get("screens")
+    if isinstance(screens, list) and screens:
+        title = str(getattr(task, "title", "") or "").lower()
+        detail = str(getattr(task, "detail", "") or "").lower()
+        relevant = None
+        for screen in screens:
+            if isinstance(screen, dict):
+                name = str(screen.get("screen", "")).lower()
+                if name and (name in title or name in detail):
+                    relevant = screen
+                    break
+        if isinstance(relevant, dict):
+            lines.append(
+                f"This task's screen '{relevant.get('screen')}': "
+                f"layout={relevant.get('layout')}; hierarchy="
+                f"{relevant.get('hierarchy')}; purpose={relevant.get('purpose')}.")
+        else:
+            names = ", ".join(str(s.get("screen")) for s in screens
+                              if isinstance(s, dict) and s.get("screen"))
+            if names:
+                lines.append(f"Screens in the contract: {names}.")
+    markdown = str(getattr(artifact, "body_markdown", "") or "").strip()
+    if markdown:
+        lines.append("Do/don'ts & rationale: " + markdown.splitlines()[0][:400])
+    return "\n".join(lines) + "\n"
+
+
 def _designer_prompt(store: LedgerStore) -> str:
     """Slice 1 §2 — the Designer's design_spec authoring prompt.
 
@@ -4036,6 +4093,10 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
         PromptSegment("prior_outputs",
                       _latest_context_response_text(store, task.task_id,
                                                     task=task)),
+        # Slice 1 §4: the design_contract segment (empty unless an approved
+        # design_spec exists — byte-identical for non-design projects, the
+        # deliberate one-time golden insertion).
+        PromptSegment("design_contract", _design_contract_text(store, task)),
         # Spec 17 (Item 3): the last tool failure this task hit, carried forward on
         # its next dispatch (a rejected unknown tool never reaches the corrective-
         # retry path, so the ONLY way the model sees it is on the next composed
@@ -4107,7 +4168,7 @@ def _task_is_governance_sourced(task: Task) -> bool:
 def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
                       project_context: str, scope_task: Task | None = None,
                       *, gate_text: str = "", repo_read: bool = False,
-                      gate: bool = False) -> str:
+                      gate: bool = False, design_contract: str = "") -> str:
     diff = _filter_generated_from_diff(diff)
     cap = diff[:_REVIEW_DIFF_CAP]
     truncated = len(diff) > _REVIEW_DIFF_CAP
@@ -4176,14 +4237,15 @@ def _review_pr_prompt(task: Task, pr: dict[str, Any], diff: str,
     return _register_pending_composition(_review_pr_prompt_segments(
         task, pr, project_context, task_scope=task_scope, bar=bar, cap=cap,
         trunc=trunc, trunc_note=trunc_note, verdict_example=verdict_example,
-        gate_text=gate_text, repo_read=repo_read, gate=gate))
+        gate_text=gate_text, repo_read=repo_read, gate=gate,
+        design_contract=design_contract))
 
 
 def _review_pr_prompt_segments(
         task: Task, pr: dict[str, Any], project_context: str, *,
         task_scope: str, bar: str, cap: str, trunc: str, trunc_note: str,
         verdict_example: str, gate_text: str = "", repo_read: bool = False,
-        gate: bool = False) -> list[PromptSegment]:
+        gate: bool = False, design_contract: str = "") -> list[PromptSegment]:
     """F143-01 Slice F: the reviewer prompt as ordered labeled segments. Joined
     verbatim this equals the pre-refactor ``_review_pr_prompt`` string byte-for-byte
     (golden-locked). The branchy truncation/scope logic stays in ``_review_pr_prompt``;
@@ -4240,6 +4302,9 @@ def _review_pr_prompt_segments(
                       f"The scope of THIS PR is ONE task: {task_scope}\n"),
         # North Star / merged surface / grounding — the project context.
         PromptSegment("project_context", project_context),
+        # Slice 1 §4: the design_contract segment (empty unless an approved
+        # design_spec exists). The reviewer's token-compliance check reads it.
+        PromptSegment("design_contract", design_contract),
         # Standing review rules + acceptance bar.
         PromptSegment("role_instructions", review_rules),
         # The PR diff under review (+ optional truncation flag).
@@ -7491,12 +7556,14 @@ def build_run_turn(
                     or review_member.get("dev_repo_read_root"))
 
                 def _review_once(extra: str = "") -> Any:
+                    scope_task = _fetch_task(store, str(pr.get("task_id") or ""))
                     prompt = _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        scope_task=scope_task,
                         gate_text=_gate_state.latest_gate_text(store),
                         repo_read=review_repo_read,
-                        gate=_gate_state.gate_available(store))
+                        gate=_gate_state.gate_available(store),
+                        design_contract=_design_contract_text(store, scope_task))
                     return _parse_member_turn(
                         REVIEWER, task.task_id, review_member, prompt + extra,
                         context=f"task {task.task_id}",
@@ -7823,10 +7890,12 @@ def build_run_turn(
                     REVIEWER, task.task_id, pm_review_member,
                     _review_pr_prompt(
                         task, pr, diff, ctx,
-                        scope_task=_fetch_task(store, str(pr.get("task_id") or "")),
+                        scope_task=(_pm_scope_task := _fetch_task(
+                            store, str(pr.get("task_id") or ""))),
                         gate_text=_gate_state.latest_gate_text(store),
                         repo_read=pm_review_repo_read,
-                        gate=_gate_state.gate_available(store)),
+                        gate=_gate_state.gate_available(store),
+                        design_contract=_design_contract_text(store, _pm_scope_task)),
                     context=f"task {task.task_id}", related_task_ids=[task.task_id])
                 pm_findings: list[dict[str, Any]] = []
                 if isinstance(parsed, TurnParseError):
