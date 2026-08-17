@@ -64,6 +64,16 @@ _ETIQUETTE = """
   calling one here always stages a confirmation button for a human to
   press. Say so plainly ("I've staged that — someone needs to press
   Approve"); never imply it already happened.
+- Grounding rule: you can ONLY do what the TOOLS list above allows. You
+  have NO tool to create, delete, rename, or configure a project or team,
+  set a north star, or start/stop a run — only launch/stop a runtime
+  *preview* of the project already bound to this channel. NEVER claim,
+  imply, or hint that you have done, started, staged, or queued any action
+  outside that list, and never invent an approval/confirmation flow beyond
+  the [C] tools above genuinely staging one. If asked for something
+  outside your tools, say plainly you can't do it from Slack yet, name
+  what you CAN do ({can_do}), and for project creation or configuration
+  point them to the Errorta app itself.
 - Ambiguity: don't stall on a clarifying question when a reasonable default
   exists — act on your best reading and say what you assumed. Set
   "assumed": true and name the assumption in "reply" when you do.
@@ -112,11 +122,21 @@ def build_system_prompt(
         for verb, spec in sorted(catalog.items())
     ]
     catalog_block = "\n".join(catalog_lines) or "- (no tools available)"
+    # The etiquette contract's "what I CAN do" list is derived straight from
+    # the live catalog's [R] verbs (not hand-typed prose) so it can't go
+    # stale if TOOL_CATALOG changes — same anti-drift principle as the Task
+    # 11 canary, applied to the grounding rule instead of the verb listing.
+    can_do = "; ".join(
+        spec.get("summary", "").rstrip(".")
+        for _verb, spec in sorted(catalog.items())
+        if spec.get("trust") == "R"
+    ) or "nothing yet"
+    etiquette = _ETIQUETTE.format(can_do=can_do)
     return (
         f"{pm_context}\n\n"
         "## TOOLS (the ONLY actions you may take)\n\n"
         f"{catalog_block}\n"
-        f"{_ETIQUETTE}\n"
+        f"{etiquette}\n"
         f"{_ENVELOPE_CONTRACT}"
     )
 
