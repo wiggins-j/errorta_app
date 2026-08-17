@@ -31,6 +31,20 @@ exactly one place in this whole bridge: inside ``handle_interaction``,
 after verifying the payload is a real ``block_actions`` interaction and
 resolving a staged confirmation record via ``store``.
 
+Studio routing (Task 6): a message in the configured studio channel
+(``store.is_studio(channel_id)``) is tagged ``item["route"] = "studio"`` in
+``handle_event`` and, in ``_process``, answered by
+``studio_concierge.run_turn`` instead of the per-project ``concierge.run_turn``
+-- through the exact same ack/bot-filter/subtype/allowlist gate every other
+inbound message passes first. Like the per-project concierge,
+``studio_concierge.run_turn`` always dispatches with ``confirmed_via=None``
+(its own module invariant); the ONE place this bridge may pass
+``confirmed_via="block_actions"`` to ``studio_tools.dispatch`` is, symmetric
+with the per-project case, inside ``handle_interaction`` -- for a resolved
+``create_project`` confirmation. A studio message on a bridge with no
+``studio_caller`` configured degrades to a plain "not configured" reply
+rather than crashing; the per-project path is entirely unaffected either way.
+
 Cancel look-ahead: a per-thread worker (``_drain``) runs one turn at a
 time via ``asyncio.to_thread`` (since ``concierge.run_turn`` is
 synchronous). While that turn is in flight, the worker also watches its
@@ -61,12 +75,13 @@ import contextlib
 import logging
 from typing import Any, Awaitable, Callable
 
-from errorta_slack import auth, concierge, outbound, render, tools
+from errorta_slack import auth, concierge, outbound, render, studio_concierge, studio_tools, tools
 
 _LOGGER = logging.getLogger(__name__)
 
 _TURN_ERROR_TEXT = "⚠️ couldn't process that — try again"
 _EFFECT_ERROR_TEXT = "⚠️ couldn't complete that action — please check the project directly"
+_STUDIO_NOT_CONFIGURED_TEXT = "The studio manager isn't configured on this bridge yet."
 
 try:  # pragma: no cover - exercised by test_connection_module_import_is_safe_without_slack_sdk
     from slack_sdk.socket_mode.request import SocketModeRequest  # noqa: F401
@@ -143,6 +158,8 @@ class SlackBridge:
         backoff_max_attempts: int | None = None,
         sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
         cancel_hook: Callable[[str, dict[str, Any]], None] | None = None,
+        studio_caller: Any = None,
+        studio_deps_factory: Callable[[], "studio_tools.StudioDeps"] | None = None,
     ) -> None:
         self._sdk_client = sdk_client
         self._poster = poster
@@ -154,6 +171,17 @@ class SlackBridge:
         self._backoff_max_attempts = backoff_max_attempts
         self._sleep_fn = sleep_fn
         self._cancel_hook = cancel_hook
+        # Studio config is entirely optional (Task 6): a bridge built with
+        # neither still routes project-channel traffic exactly as before.
+        # ``studio_caller`` mirrors ``caller`` (member dict, prompt) -> text,
+        # but bound to whatever model the studio surface uses. When
+        # ``studio_deps_factory`` is None, a fresh default ``StudioDeps`` is
+        # built per-turn from this bridge's own ``self._deps.store`` -- so
+        # ``store.is_studio`` (the routing check) and the deps that later
+        # stage/execute a studio confirmation always agree on which store
+        # they're reading/writing.
+        self._studio_caller = studio_caller
+        self._studio_deps_factory = studio_deps_factory
 
         self._queues: dict[str, "asyncio.Queue[Any]"] = {}
         self._workers: dict[str, "asyncio.Task[Any]"] = {}
@@ -227,6 +255,14 @@ class SlackBridge:
             "user": event.get("user"),
             "project_id": project_id,
         }
+        # Studio routing (Task 6): checked AFTER every filter above (ack,
+        # bot-filter, subtype, allowlist) has already run -- a studio-channel
+        # message gets no less scrutiny than a project-channel one. Tagging
+        # the item rather than branching here keeps this method's only job
+        # "ack, filter, dedupe, resolve, enqueue" -- the routing decision
+        # itself is made once, in _process.
+        if channel_id and self._deps.store.is_studio(channel_id):
+            item["route"] = "studio"
         await self._enqueue(thread_ts, item)
 
     async def _ack(self, envelope_id: Any) -> None:
@@ -383,6 +419,10 @@ class SlackBridge:
 
     async def _process(self, thread_ts: str, item: dict[str, Any]) -> None:
         channel_id = item.get("channel_id")
+        if item.get("route") == "studio":
+            await self._process_studio(thread_ts, item)
+            return
+
         project_id = item.get("project_id")
         if not project_id:
             await self._post_unbound(channel_id, thread_ts)
@@ -431,6 +471,71 @@ class SlackBridge:
                 thread_ts, channel_id,
             )
             await self._post_turn_error(channel_id, thread_ts)
+
+    async def _process_studio(self, thread_ts: str, item: dict[str, Any]) -> None:
+        """The studio-channel counterpart of the block above. Same shape
+        (to_thread the synchronous run_turn, append history, _post_result on
+        success, log+post a generic error on failure) but through
+        ``studio_concierge.run_turn`` -- which, like ``concierge.run_turn``,
+        always dispatches with ``confirmed_via=None``. Degrades to a clear
+        "not configured" reply, rather than crashing, when this bridge has no
+        ``studio_caller`` wired up."""
+        channel_id = item.get("channel_id")
+        if self._studio_caller is None:
+            await self._post_studio_not_configured(channel_id, thread_ts)
+            return
+
+        history = self._thread_history.setdefault(thread_ts, [])
+        try:
+            result = await asyncio.to_thread(
+                studio_concierge.run_turn,
+                item.get("text", ""),
+                list(history),
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                deps=self._build_studio_deps(),
+                caller=self._studio_caller,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Same no-message-content-in-logs discipline as the per-project
+            # path above.
+            _LOGGER.exception(
+                "slack bridge: studio turn failed (thread_ts=%s, channel_id=%s)",
+                thread_ts, channel_id,
+            )
+            await self._post_turn_error(channel_id, thread_ts)
+            return
+
+        history.append({"role": "user", "text": item.get("text", "")})
+        reply = result.get("reply")
+        if reply:
+            history.append({"role": "assistant", "text": reply})
+
+        try:
+            await self._post_result(channel_id, thread_ts, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception(
+                "slack bridge: posting the studio reply failed (thread_ts=%s, channel_id=%s)",
+                thread_ts, channel_id,
+            )
+            await self._post_turn_error(channel_id, thread_ts)
+
+    def _build_studio_deps(self) -> "studio_tools.StudioDeps":
+        """The one seam both the studio message path (``_process_studio``)
+        and the verified studio button path (``handle_interaction``) use to
+        get a ``StudioDeps``. Prefers the injected factory (so tests, or a
+        real caller, can fully control every engine seam); with none
+        configured, falls back to a plain ``StudioDeps`` built on this
+        bridge's own ``self._deps.store`` -- the same store
+        ``store.is_studio``/the routing check already reads, so a studio
+        confirmation staged here is read back consistently."""
+        if self._studio_deps_factory is not None:
+            return self._studio_deps_factory()
+        return studio_tools.StudioDeps(store=self._deps.store)
 
     async def _post_turn_error(self, channel_id: Any, thread_ts: str) -> None:
         if self._poster is None:
@@ -481,6 +586,13 @@ class SlackBridge:
             blocks=None,
         )
 
+    async def _post_studio_not_configured(self, channel_id: Any, thread_ts: str) -> None:
+        if self._poster is None:
+            return
+        await self._poster.post_message(
+            channel_id, thread_ts, _STUDIO_NOT_CONFIGURED_TEXT, blocks=None,
+        )
+
     async def _post_decision_outcome(
         self, channel_id: Any, thread_ts: str, verb: str, approved: bool,
     ) -> None:
@@ -490,6 +602,30 @@ class SlackBridge:
             f"Approved — {verb} executed." if approved
             else f"Declined — {verb} was not executed."
         )
+        await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
+
+    async def _post_studio_create_outcome(
+        self, channel_id: Any, thread_ts: str, approved: bool, result: dict[str, Any] | None,
+    ) -> None:
+        """The ``create_project``-specific counterpart of
+        ``_post_decision_outcome`` -- unlike a generic tool verb (fire-and-
+        forget, always "executed"), ``studio_tools.create_project`` can fail
+        partway through (e.g. channel provisioning) and reports that via its
+        return value's ``status``, not an exception. This is what lets the
+        channel be told "created" vs the real error detail instead of a
+        blanket "executed" that would be wrong on a partial failure."""
+        if self._poster is None:
+            return
+        if not approved:
+            text = "Declined — create_project was not executed."
+        elif result is not None and result.get("status") == "created":
+            text = (
+                f"Created project `{result.get('project_id')}` — "
+                f"channel <#{result.get('channel_id')}|{result.get('channel_name')}>."
+            )
+        else:
+            detail = (result or {}).get("detail") or "unknown error"
+            text = f"⚠️ couldn't create the project — {detail}"
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
     async def _post_effect_error(self, channel_id: Any, thread_ts: str) -> None:
@@ -503,8 +639,8 @@ class SlackBridge:
     def _fire_confirmed_effect(
         self, record: dict[str, Any], *, channel_id: str, thread_ts: str,
         verb: str, decision: str, approved: bool,
-    ) -> None:
-        """Run the effect a claimed confirmation authorizes. Two routes:
+    ) -> dict[str, Any] | None:
+        """Run the effect a claimed confirmation authorizes. Three routes:
 
         * ``outbound.ATTENTION_VERB`` — not a ``tools.TOOL_CATALOG`` verb, so
           it never reaches ``tools.dispatch``. Both Approve AND Decline do
@@ -517,7 +653,16 @@ class SlackBridge:
           signal's kind (e.g. a "problem", whose only actions are
           accept/correct) or if the resolve call itself fails — caught by
           the caller, never left to crash the callback.
-        * every real tool verb — unchanged: ``tools.dispatch(...,
+        * ``"create_project"`` — the studio's one **C**-class verb (Task 6).
+          Not in ``tools.TOOL_CATALOG`` at all, so it is routed to
+          ``studio_tools.dispatch`` instead of ``tools.dispatch``, using a
+          ``StudioDeps`` built via ``_build_studio_deps`` — the SAME
+          ``confirmed_via="block_actions"`` marker, but the studio's own
+          bounded tool surface. Only on Approve; its ``{"status": ...}``
+          result is returned (rather than discarded, unlike the other two
+          routes) so ``handle_interaction`` can tell the channel whether the
+          project was actually created or the create failed partway through.
+        * every real per-project tool verb — unchanged: ``tools.dispatch(...,
           confirmed_via="block_actions")``, and ONLY on Approve (Decline is
           still a pure no-op for a real tool).
         """
@@ -536,12 +681,22 @@ class SlackBridge:
                 project_id, signal_id, action, by="slack",
                 store=self._deps.ledger_factory(project_id),
             )
-        elif approved:
+            return None
+        if verb == "create_project":
+            if not approved:
+                return None
+            return studio_tools.dispatch(
+                verb, dict(record.get("args") or {}),
+                channel_id=channel_id, thread_ts=thread_ts,
+                confirmed_via="block_actions", deps=self._build_studio_deps(),
+            )
+        if approved:
             tools.dispatch(
                 verb, dict(record.get("args") or {}),
                 channel_id=channel_id, thread_ts=thread_ts,
                 confirmed_via="block_actions", deps=self._deps,
             )
+        return None
 
     # ----------------------------------------------------------------
     # Verified interaction (button) callback
@@ -557,7 +712,11 @@ class SlackBridge:
     # ONE exception is an outbound.ATTENTION_VERB confirmation (see
     # _fire_confirmed_effect) — confirmed_via="block_actions" is reserved
     # for real tool verbs only, so that marker never appears on an
-    # attention-signal resolution.
+    # attention-signal resolution. A studio "create_project" confirmation
+    # (Task 6) is a second, symmetric special case: same claim-then-fire
+    # discipline, but routed to studio_tools.dispatch instead of
+    # tools.dispatch (see _fire_confirmed_effect) since it isn't a
+    # per-project verb at all.
     #
     # CLAIM, not check-then-act (Task 9 review carry-over): resolving is the
     # single atomic operation that authorizes the effect. This method used to
@@ -610,7 +769,7 @@ class SlackBridge:
             return
 
         try:
-            self._fire_confirmed_effect(
+            effect_result = self._fire_confirmed_effect(
                 record, channel_id=channel_id, thread_ts=thread_ts,
                 verb=verb, decision=decision, approved=approved,
             )
@@ -622,7 +781,10 @@ class SlackBridge:
             await self._post_effect_error(channel_id, thread_ts)
             return
 
-        await self._post_decision_outcome(channel_id, thread_ts, verb, approved)
+        if verb == "create_project":
+            await self._post_studio_create_outcome(channel_id, thread_ts, approved, effect_result)
+        else:
+            await self._post_decision_outcome(channel_id, thread_ts, verb, approved)
 
     # ----------------------------------------------------------------
     # Connection lifecycle

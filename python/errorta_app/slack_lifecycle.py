@@ -100,6 +100,27 @@ def _build_poster(bot_token: str) -> Any:
     return _WebClientPoster()
 
 
+def _build_studio_deps_factory(bot_token: str, tool_deps: Any) -> Any:
+    """A callable that lazily builds a ``studio_tools.StudioDeps`` wired
+    with a real ``slack_sdk.WebClient`` for channel provisioning (the
+    studio manager's ``create_project`` calls ``conversations.create`` /
+    ``invite`` / ``setTopic`` through it). Mirrors ``_build_poster``'s
+    guard: ``slack_sdk`` is imported only inside this function, never at
+    this module's top level. ``tool_deps.store`` is reused (rather than a
+    second import of ``errorta_slack.store``) so this always agrees with
+    the same store the bridge's own project-channel deps read/write."""
+    from slack_sdk import WebClient
+
+    from errorta_slack import studio_tools as slack_studio_tools
+
+    web_client = WebClient(token=bot_token)
+
+    def _factory() -> Any:
+        return slack_studio_tools.StudioDeps(store=tool_deps.store, web_client=web_client)
+
+    return _factory
+
+
 def _build_sdk_client(app_token: str, bot_token: str, bridge_holder: dict[str, Any],
                        loop: "asyncio.AbstractEventLoop") -> Any:
     """A ``connection.SlackBridge``-shaped ``sdk_client`` backed by a real
@@ -183,8 +204,19 @@ def _start_locked(cfg: dict[str, Any], app_token: str, bot_token: str) -> dict[s
     sdk_client = _build_sdk_client(app_token, bot_token, bridge_holder, loop)
     deps = slack_tools.ToolDeps()
     caller = gateway_member_caller(LocalGateway())
+    # Studio manager (Task 6/7): its own member/route, resolved like a PM,
+    # and its own provisioning WebClient (channel creation/invite/topic) --
+    # both entirely optional from the bridge's point of view (a bridge with
+    # no studio channel bound still serves project channels unaffected; see
+    # connection.py's `_process_studio` degrade-to-"not configured" path).
+    studio_caller = gateway_member_caller(LocalGateway())
+    studio_deps_factory = _build_studio_deps_factory(bot_token, deps)
 
-    bridge = slack_connection.SlackBridge(sdk_client, poster, deps, caller, config=cfg)
+    bridge = slack_connection.SlackBridge(
+        sdk_client, poster, deps, caller, config=cfg,
+        studio_caller=studio_caller,
+        studio_deps_factory=studio_deps_factory,
+    )
     bridge_holder["bridge"] = bridge
 
     # Fire-and-forget: `bridge.start()` connects (and, on failure, retries

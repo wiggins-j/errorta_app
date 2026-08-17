@@ -341,6 +341,50 @@ def get_prefs(channel_id: str) -> dict[str, Any]:
     return _load_all_prefs().get(channel_id, {})
 
 
+# --- Studio channel (singleton) --------------------------------------------
+
+
+def _studio_path() -> Path:
+    return config.slack_dir() / "studio.json"
+
+
+def _load_studio() -> dict[str, Any]:
+    raw = _read_json(_studio_path(), {})
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def set_studio_channel(channel_id: str) -> None:
+    """Set the studio channel, overwriting any prior value (singleton).
+
+    Independent of ``bindings.json`` -- a channel can be the studio channel
+    and/or hold a project binding at the same time; this never touches
+    ``bindings.json``.
+    """
+    with _LOCK:
+        _write_json(_studio_path(), {"channel_id": channel_id})
+
+
+def studio_channel() -> str | None:
+    """Return the studio channel id, or ``None`` if never set."""
+    channel_id = _load_studio().get("channel_id")
+    return channel_id if isinstance(channel_id, str) else None
+
+
+def is_studio(channel_id: str) -> bool:
+    """Return whether ``channel_id`` is the configured studio channel."""
+    return studio_channel() == channel_id
+
+
+def clear_studio_channel() -> None:
+    """Clear the studio channel, if any. No-op if never set."""
+    with _LOCK:
+        if not _studio_path().exists():
+            return
+        _write_json(_studio_path(), {})
+
+
 __all__ = [
     "bind_channel",
     "binding_for",
@@ -355,4 +399,8 @@ __all__ = [
     "pop_pending_older_than",
     "set_pref",
     "get_prefs",
+    "set_studio_channel",
+    "studio_channel",
+    "is_studio",
+    "clear_studio_channel",
 ]

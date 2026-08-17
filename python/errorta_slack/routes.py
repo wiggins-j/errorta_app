@@ -31,6 +31,10 @@ class LinkApproveRequest(BaseModel):
     link_id: str
 
 
+class StudioBindRequest(BaseModel):
+    channel_id: str
+
+
 @router.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True}
@@ -83,6 +87,22 @@ def approve_link(body: LinkApproveRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="link_not_found") from None
     except linking.LinkingError as exc:
         raise HTTPException(status_code=409, detail=exc.code) from exc
+
+
+@router.post("/studio/bind")
+def bind_studio(body: StudioBindRequest) -> dict[str, Any]:
+    """Owner action: designate ``channel_id`` as the studio channel -- the
+    one place the app-level studio manager (Task 6) listens for a north
+    star and creates new project channels. A singleton, like
+    ``store.set_studio_channel`` itself: binding again overwrites the prior
+    value rather than erroring."""
+    store.set_studio_channel(body.channel_id)
+    return {"ok": True, "studio_channel": body.channel_id}
+
+
+@router.get("/studio")
+def get_studio() -> dict[str, Any]:
+    return {"studio_channel": store.studio_channel()}
 
 
 __all__ = ["router"]

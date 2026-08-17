@@ -182,3 +182,41 @@ def test_slack_router_mounts_exactly_once_across_repeated_lifespan_entries() -> 
         app.openapi()
     dup_warnings = [w for w in caught if "Duplicate Operation ID" in str(w.message)]
     assert not dup_warnings, [str(w.message) for w in dup_warnings]
+
+
+# --- studio modules never import slack_sdk at module load -------------------
+
+
+def test_studio_modules_do_not_import_slack_sdk_at_load(tmp_path: Path) -> None:
+    """The studio manager's provisioning WebClient (Task 7) is built lazily,
+    inside ``slack_lifecycle._start_locked``, exactly like the existing
+    poster/sdk_client -- never at any of these modules' top level. A fresh
+    subprocess import of each module must not pull ``slack_sdk`` into
+    ``sys.modules``."""
+    modules = [
+        "errorta_slack.studio_tools",
+        "errorta_slack.studio_concierge",
+        "errorta_slack.provisioning",
+        "errorta_slack.routes",
+    ]
+    for module_name in modules:
+        snippet = (
+            "import sys\n"
+            f"import {module_name}\n"
+            "assert 'slack_sdk' not in sys.modules, "
+            f"'{module_name} import pulled in slack_sdk at module load'\n"
+            "print('OK')\n"
+        )
+        env = {**__import__("os").environ, "ERRORTA_HOME": str(tmp_path)}
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=str(Path(__file__).resolve().parents[2]),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, (
+            f"subprocess failed for {module_name}:\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
+        assert proc.stdout.strip() == "OK"
