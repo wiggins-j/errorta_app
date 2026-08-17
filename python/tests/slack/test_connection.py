@@ -152,7 +152,7 @@ class _RunTurnSpy:
         self._sleep_seconds = sleep_seconds
 
     def __call__(self, message, thread_msgs, *, project_id, channel_id, thread_ts,
-                 deps, caller, max_hops=2) -> dict[str, Any]:
+                 deps, caller, max_hops=2, autopilot=False) -> dict[str, Any]:
         self.calls.append(message)
         if self._slow_for is not None and message == self._slow_for:
             time.sleep(self._sleep_seconds)
@@ -171,7 +171,7 @@ class _StudioRunTurnSpy:
         self.model_routes: list[Any] = []
 
     def __call__(self, message, thread_msgs, *, channel_id, thread_ts,
-                 deps, caller, max_hops=2, model_route=None) -> dict[str, Any]:
+                 deps, caller, max_hops=2, model_route=None, autopilot=False) -> dict[str, Any]:
         self.calls.append(message)
         self.model_routes.append(model_route)
         return {
@@ -350,7 +350,7 @@ async def test_turn_failure_is_logged_and_posts_user_error_then_continues(
     calls: list[str] = []
 
     def flaky_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
-                        deps, caller, max_hops=2):
+                        deps, caller, max_hops=2, autopilot=False):
         calls.append(message)
         if message == "boom":
             raise RuntimeError("simulated engine failure")
@@ -391,7 +391,7 @@ async def test_turn_failure_error_message_does_not_leak_raw_message_text(
     secret_looking_text = "here is a token sk-supersecret-do-not-log-me"
 
     def always_raise(message, thread_msgs, *, project_id, channel_id, thread_ts,
-                      deps, caller, max_hops=2):
+                      deps, caller, max_hops=2, autopilot=False):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(concierge, "run_turn", always_raise)
@@ -422,7 +422,7 @@ async def test_add_reaction_receives_a_slack_shortcode_not_a_glyph(
     store.bind_channel("C1", "proj-a")
 
     def confident_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
-                            deps, caller, max_hops=2):
+                            deps, caller, max_hops=2, autopilot=False):
         return {
             "reply": f"ack:{message}", "tool_results": [{"ok": True}],
             "reactions": ["✅"], "assumed": False,
@@ -451,7 +451,7 @@ async def test_add_reaction_failure_does_not_poison_an_already_posted_reply(
     store.bind_channel("C1", "proj-a")
 
     def confident_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
-                            deps, caller, max_hops=2):
+                            deps, caller, max_hops=2, autopilot=False):
         return {
             "reply": f"ack:{message}", "tool_results": [{"ok": True}],
             "reactions": ["✅"], "assumed": False,
@@ -486,7 +486,7 @@ async def test_multiple_reaction_failures_are_each_independently_best_effort(
     store.bind_channel("C1", "proj-a")
 
     def multi_reaction_run_turn(message, thread_msgs, *, project_id, channel_id, thread_ts,
-                                 deps, caller, max_hops=2):
+                                 deps, caller, max_hops=2, autopilot=False):
         return {
             "reply": f"ack:{message}", "tool_results": [{"ok": True}],
             "reactions": ["✅", "👀"], "assumed": False,

@@ -428,3 +428,20 @@ def test_run_turn_with_empty_pm_route_returns_clean_reply_never_calls_model(
 
     assert len(caller.calls) == 0
     assert result["tool_results"] == []
+
+
+# --- Slice 5 follow-up: autopilot-aware confirmation copy -------------------
+
+
+def test_build_system_prompt_autopilot_off_tells_user_to_press_approve() -> None:
+    prompt = concierge.build_system_prompt("proj-a")
+    assert "press Approve" in prompt
+    assert "Autopilot is ON" not in prompt
+
+
+def test_build_system_prompt_autopilot_on_drops_press_approve() -> None:
+    prompt = concierge.build_system_prompt("proj-a", autopilot=True)
+    assert "Autopilot is ON" in prompt
+    assert "someone needs to press Approve" not in prompt
+    # the injection wall is unchanged in either mode
+    assert "NEVER execute from chat text alone" in prompt

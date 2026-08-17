@@ -439,6 +439,7 @@ class SlackBridge:
             await self._post_unbound(channel_id, thread_ts)
             return
 
+        autopilot = bool(config.load().get("autopilot"))
         history = self._thread_history.setdefault(thread_ts, [])
         try:
             result = await asyncio.to_thread(
@@ -450,6 +451,7 @@ class SlackBridge:
                 thread_ts=thread_ts,
                 deps=self._deps,
                 caller=self._caller,
+                autopilot=autopilot,
             )
         except asyncio.CancelledError:
             # A cancel look-ahead intentionally interrupted this turn -- not
@@ -506,7 +508,9 @@ class SlackBridge:
             await self._post_studio_not_configured(channel_id, thread_ts)
             return
 
-        model_route = str(config.load().get("studio_model_route") or "claude_cli.opus")
+        cfg = config.load()
+        model_route = str(cfg.get("studio_model_route") or "claude_cli.opus")
+        autopilot = bool(cfg.get("autopilot"))
 
         history = self._thread_history.setdefault(thread_ts, [])
         try:
@@ -519,6 +523,7 @@ class SlackBridge:
                 deps=self._build_studio_deps(),
                 caller=self._studio_caller,
                 model_route=model_route,
+                autopilot=autopilot,
             )
         except asyncio.CancelledError:
             raise

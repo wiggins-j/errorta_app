@@ -411,3 +411,19 @@ def test_create_project_dispatch_never_passes_block_actions(
     )
 
     assert seen_confirmed_via == [None]
+
+
+# --- Slice 5 follow-up: autopilot-aware confirmation copy -------------------
+
+
+def test_studio_build_system_prompt_autopilot_off_tells_user_to_press_approve() -> None:
+    prompt = studio_concierge.build_system_prompt()
+    assert "press Approve" in prompt
+    assert "Autopilot is ON" not in prompt
+
+
+def test_studio_build_system_prompt_autopilot_on_drops_press_approve() -> None:
+    prompt = studio_concierge.build_system_prompt(autopilot=True)
+    assert "Autopilot is ON" in prompt
+    assert "someone needs to press Approve" not in prompt
+    assert "NEVER execute from chat text alone" in prompt
