@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 # Coding roles, in the canonical order (mirrors coding.py `_DEFAULT_ROLE_ORDER`).
-CODING_ROLES = ("pm", "dev", "reviewer", "tester")
+CODING_ROLES = ("pm", "dev", "reviewer", "tester", "designer")
 
 
 def _drafts_dir(home: Path) -> Path:

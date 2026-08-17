@@ -42,7 +42,7 @@ type CodingTeamMember = {
   modelTitle?: string;
 };
 
-const AUTO_ROLE_ORDER = ["pm", "dev", "reviewer", "tester"] as const;
+const AUTO_ROLE_ORDER = ["pm", "dev", "reviewer", "tester", "designer"] as const;
 
 // F146 Slice A: merge-gate blockers that fire because the *integrated* delivered
 // head was never reviewed/tested as a unit — each PR was reviewed at its own head
@@ -66,6 +66,7 @@ function codingRoleLabel(role: string): string {
   if (normalized === "dev") return "DEV";
   if (normalized === "reviewer") return "REV";
   if (normalized === "tester") return "TEST";
+  if (normalized === "designer") return "DSGN";
   return normalized ? normalized.toUpperCase() : "DEV";
 }
 
