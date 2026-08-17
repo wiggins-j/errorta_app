@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from . import gate_state
 from .schemas import TurnErrorCode
-from .topology import DEV, PM, REVIEWER, TESTER
+from .topology import DESIGNER, DEV, PM, REVIEWER, TESTER
 from .turn_controller import allowed_tools_for_role
 
 
@@ -63,7 +63,8 @@ class RoleCapability:
 # No role can run a command from inside a turn: execution is engine-driven (the
 # F087-14 WS-3 rationale — the gate/tester runs commands, roles consume the
 # output). This is a structural fact, not a policy, so it is a constant here.
-_CAN_EXECUTE: dict[str, bool] = {PM: False, DEV: False, REVIEWER: False, TESTER: False}
+_CAN_EXECUTE: dict[str, bool] = {
+    PM: False, DEV: False, REVIEWER: False, TESTER: False, DESIGNER: False}
 
 
 def _repo_read_for(role: str, policy) -> bool:
@@ -118,6 +119,10 @@ def _summary_for(role: str, tools: tuple[str, ...], repo_read: bool,
     if role == PM:
         return ("plans and steers; creates tasks but cannot run commands or write "
                 "code — must route execution work to the gate")
+    if role == DESIGNER:
+        return ("authors the design contract (design_spec artifact) and reads the "
+                "repo; cannot run commands or write code — code changes it wants "
+                "happen via DEV tasks")
     return f"{tool_txt}{read_txt}"
 
 
@@ -134,7 +139,7 @@ def capability_manifest(store, policy=None) -> dict[str, RoleCapability]:
         gate = False
     dispatch = tester_dispatchable(store)
     manifest: dict[str, RoleCapability] = {}
-    for role in (PM, DEV, REVIEWER, TESTER):
+    for role in (PM, DEV, REVIEWER, TESTER, DESIGNER):
         tools = tuple(allowed_tools_for_role(role))
         repo_read = _repo_read_for(role, policy)
         manifest[role] = RoleCapability(
@@ -431,6 +436,10 @@ CLOSURE_TABLE: dict[str, tuple[str, str]] = {
     # The unit-command registry is writable mid-run (``PUT /test-commands``), so
     # this gap can close without restarting — and IS re-checked after every merge.
     TESTER: ("execution", DEFERRED),
+    # The Designer, like the PM, authors via its typed intent and holds no
+    # executable tool, so ``audit_grant_or_delete`` can never flag it. Always
+    # capable.
+    DESIGNER: ("design_authoring", CAPABLE),
 }
 
 _REMEDIES: dict[str, str] = {

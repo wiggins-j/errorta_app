@@ -2267,7 +2267,7 @@ def pm_control(project_id: str, body: dict[str, Any], request: Request) -> dict[
 _RUNS: dict[str, dict[str, Any]] = {}
 
 
-_DEFAULT_ROLE_ORDER = ("pm", "dev", "reviewer", "tester")
+_DEFAULT_ROLE_ORDER = ("pm", "dev", "reviewer", "tester", "designer")
 
 
 def _ensure_coding_roles(members: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "description": "Host-side OFL/permissively-licensed design asset library (Slice 1 §3). Every file here is vendored on disk with its license; the network is never touched at runtime.",
+  "font_families": [
+    {
+      "id": "archivo",
+      "name": "archivo",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "grotesque-sans",
+        "geometric",
+        "versatile",
+        "display"
+      ],
+      "license": "OFL",
+      "license_file": "archivo/OFL.txt",
+      "files": [
+        "archivo/Archivo[wdth,wght].ttf"
+      ]
+    },
+    {
+      "id": "bebasneue",
+      "name": "bebasneue",
+      "weights": [
+        400
+      ],
+      "personality_tags": [
+        "display",
+        "condensed",
+        "bold",
+        "impactful"
+      ],
+      "license": "OFL",
+      "license_file": "bebasneue/OFL.txt",
+      "files": [
+        "bebasneue/BebasNeue-Regular.ttf"
+      ]
+    },
+    {
+      "id": "bitter",
+      "name": "bitter",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "slab-serif",
+        "readable",
+        "editorial"
+      ],
+      "license": "OFL",
+      "license_file": "bitter/OFL.txt",
+      "files": [
+        "bitter/Bitter[wght].ttf"
+      ]
+    },
+    {
+      "id": "ibmplexmono",
+      "name": "ibmplexmono",
+      "weights": [
+        700,
+        500,
+        400,
+        600
+      ],
+      "personality_tags": [
+        "monospace",
+        "technical",
+        "neutral"
+      ],
+      "license": "OFL",
+      "license_file": "ibmplexmono/OFL.txt",
+      "files": [
+        "ibmplexmono/IBMPlexMono-Bold.ttf",
+        "ibmplexmono/IBMPlexMono-Medium.ttf",
+        "ibmplexmono/IBMPlexMono-Regular.ttf",
+        "ibmplexmono/IBMPlexMono-SemiBold.ttf"
+      ]
+    },
+    {
+      "id": "inter",
+      "name": "inter",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "humanist-sans",
+        "ui",
+        "neutral",
+        "screen"
+      ],
+      "license": "OFL",
+      "license_file": "inter/OFL.txt",
+      "files": [
+        "inter/Inter[opsz,wght].ttf"
+      ]
+    },
+    {
+      "id": "jetbrainsmono",
+      "name": "jetbrainsmono",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "monospace",
+        "code",
+        "technical"
+      ],
+      "license": "OFL",
+      "license_file": "jetbrainsmono/OFL.txt",
+      "files": [
+        "jetbrainsmono/JetBrainsMono[wght].ttf"
+      ]
+    },
+    {
+      "id": "lora",
+      "name": "lora",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "serif",
+        "editorial",
+        "readable",
+        "warm"
+      ],
+      "license": "OFL",
+      "license_file": "lora/OFL.txt",
+      "files": [
+        "lora/Lora[wght].ttf"
+      ]
+    },
+    {
+      "id": "nunito",
+      "name": "nunito",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "humanist-sans",
+        "rounded",
+        "friendly",
+        "soft"
+      ],
+      "license": "OFL",
+      "license_file": "nunito/OFL.txt",
+      "files": [
+        "nunito/Nunito[wght].ttf"
+      ]
+    },
+    {
+      "id": "playfairdisplay",
+      "name": "playfairdisplay",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "display-serif",
+        "elegant",
+        "high-contrast",
+        "editorial"
+      ],
+      "license": "OFL",
+      "license_file": "playfairdisplay/OFL.txt",
+      "files": [
+        "playfairdisplay/PlayfairDisplay[wght].ttf"
+      ]
+    },
+    {
+      "id": "poppins",
+      "name": "poppins",
+      "weights": [
+        700,
+        500,
+        400,
+        600
+      ],
+      "personality_tags": [
+        "geometric-sans",
+        "geometric",
+        "clean",
+        "friendly"
+      ],
+      "license": "OFL",
+      "license_file": "poppins/OFL.txt",
+      "files": [
+        "poppins/Poppins-Bold.ttf",
+        "poppins/Poppins-Medium.ttf",
+        "poppins/Poppins-Regular.ttf",
+        "poppins/Poppins-SemiBold.ttf"
+      ]
+    },
+    {
+      "id": "robotoslab",
+      "name": "robotoslab",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "slab-serif",
+        "sturdy",
+        "readable"
+      ],
+      "license": "Apache-2.0",
+      "license_file": "robotoslab/LICENSE.txt",
+      "files": [
+        "robotoslab/RobotoSlab[wght].ttf"
+      ]
+    },
+    {
+      "id": "sourcesans3",
+      "name": "sourcesans3",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "humanist-sans",
+        "neutral",
+        "readable",
+        "ui"
+      ],
+      "license": "OFL",
+      "license_file": "sourcesans3/OFL.txt",
+      "files": [
+        "sourcesans3/SourceSans3[wght].ttf"
+      ]
+    },
+    {
+      "id": "spacemono",
+      "name": "spacemono",
+      "weights": [
+        700,
+        400
+      ],
+      "personality_tags": [
+        "monospace",
+        "retro",
+        "display",
+        "quirky"
+      ],
+      "license": "OFL",
+      "license_file": "spacemono/OFL.txt",
+      "files": [
+        "spacemono/SpaceMono-Bold.ttf",
+        "spacemono/SpaceMono-Regular.ttf"
+      ]
+    },
+    {
+      "id": "worksans",
+      "name": "worksans",
+      "weights": [
+        "variable"
+      ],
+      "personality_tags": [
+        "humanist-sans",
+        "neutral",
+        "ui",
+        "readable"
+      ],
+      "license": "OFL",
+      "license_file": "worksans/OFL.txt",
+      "files": [
+        "worksans/WorkSans[wght].ttf"
+      ]
+    },
+    {
+      "id": "zillaslab",
+      "name": "zillaslab",
+      "weights": [
+        700,
+        500,
+        400,
+        600
+      ],
+      "personality_tags": [
+        "slab-serif",
+        "editorial",
+        "warm"
+      ],
+      "license": "OFL",
+      "license_file": "zillaslab/OFL.txt",
+      "files": [
+        "zillaslab/ZillaSlab-Bold.ttf",
+        "zillaslab/ZillaSlab-Medium.ttf",
+        "zillaslab/ZillaSlab-Regular.ttf",
+        "zillaslab/ZillaSlab-SemiBold.ttf"
+      ]
+    }
+  ],
+  "icon_sets": [
+    {
+      "id": "lucide",
+      "name": "lucide",
+      "style": "stroke",
+      "license": "ISC",
+      "license_file": "icons/lucide/LICENSE",
+      "files": [
+        "icons/lucide/arrow-left.svg",
+        "icons/lucide/arrow-right.svg",
+        "icons/lucide/bell.svg",
+        "icons/lucide/bookmark.svg",
+        "icons/lucide/calendar.svg",
+        "icons/lucide/check.svg",
+        "icons/lucide/chevron-down.svg",
+        "icons/lucide/chevron-right.svg",
+        "icons/lucide/circle-alert.svg",
+        "icons/lucide/clock.svg",
+        "icons/lucide/download.svg",
+        "icons/lucide/eye.svg",
+        "icons/lucide/heart.svg",
+        "icons/lucide/house.svg",
+        "icons/lucide/lock.svg",
+        "icons/lucide/mail.svg",
+        "icons/lucide/menu.svg",
+        "icons/lucide/minus.svg",
+        "icons/lucide/plus.svg",
+        "icons/lucide/search.svg",
+        "icons/lucide/settings.svg",
+        "icons/lucide/star.svg",
+        "icons/lucide/trash-2.svg",
+        "icons/lucide/upload.svg",
+        "icons/lucide/user.svg"
+      ]
+    }
+  ]
+}

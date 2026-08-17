@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .topology import DEV, PM, REVIEWER, TESTER
+from .topology import DEV, DESIGNER, PM, REVIEWER, TESTER
 
 # Role -> superpowers skills (first entry is the role's primary discipline).
 ROLE_SKILLS: dict[str, list[str]] = {
@@ -20,6 +20,8 @@ ROLE_SKILLS: dict[str, list[str]] = {
     DEV: ["test-driven-development", "executing-plans", "systematic-debugging"],
     REVIEWER: ["requesting-code-review", "receiving-code-review"],
     TESTER: ["verification-before-completion"],
+    # Designer (Slice 1 §1): authors the design contract before UI work begins.
+    DESIGNER: ["brainstorming", "writing-plans"],
     # workspace/merge discipline (applied by F087-05, not a turn-taking role).
     "workspace": ["using-git-worktrees", "finishing-a-development-branch"],
 }

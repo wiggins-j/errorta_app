@@ -27,10 +27,15 @@ PM = "pm"
 DEV = "dev"
 REVIEWER = "reviewer"
 TESTER = "tester"
+# Designer role (Slice 1 §1): authors the design contract; reads the repo +
+# authors governance artifacts, NEVER writes code (no code_write — see
+# turn_controller._ROLE_TOOLS). Seated only for UI modalities (recipes.py).
+DESIGNER = "designer"
 
 # Drain the pipeline before starting new dev work: finish reviewing/validating
-# what's in flight, then do new development.
-_WORKER_PRIORITY = (TESTER, REVIEWER, DEV)
+# what's in flight, then do new development. The Designer runs before new DEV
+# work because a design verdict redirects dev work (spec §1).
+_WORKER_PRIORITY = (TESTER, REVIEWER, DESIGNER, DEV)
 
 
 class QueryLedger(Protocol):
@@ -830,7 +835,7 @@ def coding_role_of(member: dict[str, Any]) -> str:
     defaulting to ``dev`` so an unmarked member is a worker, not a planner."""
     meta = member.get("metadata") or {}
     role = member.get("coding_role") or meta.get("coding_role")
-    return str(role) if role in (PM, DEV, REVIEWER, TESTER) else DEV
+    return str(role) if role in (PM, DEV, REVIEWER, TESTER, DESIGNER) else DEV
 
 
 @dataclass(frozen=True)

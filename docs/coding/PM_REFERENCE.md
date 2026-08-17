@@ -42,7 +42,10 @@ run tests. Work fans out across members up to a parallelism limit; PRs merge to
 master under a review gate; the run stops at checkpoints, on blocking problems, or
 at completion. You (the PM) shape all of this.
 
-**Roles** (`metadata.coding_role`): `pm`, `dev`, `reviewer`, `tester`.
+**Roles** (`metadata.coding_role`): `pm`, `dev`, `reviewer`, `tester`, `designer`.
+The `designer` (Slice 1) is seated only on UI-modality projects (`static` /
+`server` / `desktop`); it authors the `design_spec` governance contract and reads
+the repo but **never** writes code (no `code_write`).
 
 ### What each role's turn can actually do (Spec 17)
 
@@ -729,7 +732,7 @@ and FastAPI routers. Update the prose and this contract together.
 {
   "schema_version": 1,
   "provider_classes": ["anthropic", "claude_cli", "codex_cli", "cursor_cli", "custom", "google", "local", "openai"],
-  "coding_roles": ["dev", "pm", "reviewer", "tester"],
+  "coding_roles": ["designer", "dev", "pm", "reviewer", "tester"],
   "model_modes": ["multi", "single"],
   "pm_model_modes": ["single"],
   "run_setup_fields": ["block_on_problems", "checkpoint_cadence", "checkpoint_n", "delivery_review_round_limit", "governance_mode", "grounding", "guardrail_enabled", "human_code_approval", "max_iterations", "max_model_calls", "max_parallel_workers", "max_review_rounds", "member_failure_limit", "members", "preflight_enabled", "team_room_id"],

@@ -44,7 +44,7 @@ class FocusTransitionError(LedgerError):
     """Raised when a Current Focus lifecycle transition is not allowed."""
 
 
-_VALID_ROLES = ("pm", "dev", "reviewer", "tester")
+_VALID_ROLES = ("pm", "dev", "reviewer", "tester", "designer")
 
 # Spec 09 §1: task states that SATISFY a `depends_on` edge. `done` is the happy
 # path; `dropped` is terminal-and-uncompletable (the PM re-scoped the task away),

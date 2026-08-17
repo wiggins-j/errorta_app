@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 SCHEMA_VERSION = "coding_turn.v1"
 
-CodingRole = Literal["pm", "dev", "reviewer", "tester"]
+CodingRole = Literal["pm", "dev", "reviewer", "tester", "designer"]
 Confidence = Literal["low", "medium", "high"]
 
 
@@ -513,9 +513,32 @@ class BlockedIntent(BaseModel):
         return self
 
 
+class DesignerSpecIntent(BaseModel):
+    """Slice 1 §2 — the Designer's design_spec authoring turn.
+
+    Deliberately lenient: it requires only that the turn carries SOME content
+    (markdown or json). The rich ``body_json`` shape (direction_matrix / tokens /
+    assets / screens / components) is validated at artifact-append time by
+    ``design_spec.validate_design_body`` so a partial draft still PARSES and can be
+    bounced to ``changes_requested`` with named fields (spec §8) rather than failing
+    the whole turn. Like the PM plan turn, this is NOT bound to a single task_id."""
+    model_config = {"extra": "ignore"}
+    kind: Literal["design_spec"]
+    title: str = ""
+    body_markdown: str = ""
+    body_json: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _requires_content(self) -> "DesignerSpecIntent":
+        if not self.body_markdown.strip() and not self.body_json:
+            raise ValueError(
+                "design_spec requires body_markdown or a non-empty body_json")
+        return self
+
+
 RoleIntent = Union[
     PMPlanIntent, DeveloperToolPlanIntent, ReviewerVerdictIntent, TesterPlanIntent,
-    BlockedIntent,
+    DesignerSpecIntent, BlockedIntent,
 ]
 
 _INTENT_BY_ROLE: dict[str, type[BaseModel]] = {
@@ -523,6 +546,7 @@ _INTENT_BY_ROLE: dict[str, type[BaseModel]] = {
     "dev": DeveloperToolPlanIntent,
     "reviewer": ReviewerVerdictIntent,
     "tester": TesterPlanIntent,
+    "designer": DesignerSpecIntent,
 }
 
 
@@ -571,6 +595,27 @@ _MINIMAL_INTENT_EXAMPLES: dict[tuple[str, str], dict[str, Any]] = {
         "kind": "test_plan", "command_ids": ["<a registered command id>"],
         "scope": "changed_files",
     },
+    # Slice 1 §2 — the Designer authors the design contract. Its body_json is the
+    # enforcement surface (direction_matrix axes, tokens, assets, screens,
+    # components); the example carries a minimal-but-real shape a model can copy.
+    ("designer", "design_spec"): {
+        "kind": "design_spec",
+        "title": "Design contract",
+        "body_markdown": "Aesthetic direction, do/don'ts, per-screen layout intent.",
+        "body_json": {
+            "direction_matrix": {
+                "typography": "humanist sans", "color": "warm neutral + one accent",
+                "density": "comfortable", "shape": "soft-rounded", "motion": "subtle",
+                "era_mood": "modern editorial",
+            },
+            "tokens": {"palette": {"bg": "#faf7f2", "fg": "#1a1a1a"}},
+            "assets": {"font_family_ids": ["<from the asset manifest>"],
+                       "icon_set_id": "<from the asset manifest>"},
+            "screens": [{"screen": "home", "purpose": "...", "layout": "...",
+                         "hierarchy": "...", "key_states": ["default"]}],
+            "components": [{"name": "button", "usage": "..."}],
+        },
+    },
 }
 
 # The kind a role is normally asked for — the example a corrective prompt shows
@@ -578,6 +623,7 @@ _MINIMAL_INTENT_EXAMPLES: dict[tuple[str, str], dict[str, Any]] = {
 _DEFAULT_INTENT_KIND: dict[str, str] = {
     "pm": "plan", "dev": "tool_plan",
     "reviewer": "review_verdict", "tester": "test_plan",
+    "designer": "design_spec",
 }
 
 BLOCKED_EXAMPLE_INTENT: dict[str, Any] = {
@@ -604,7 +650,7 @@ def minimal_valid_example(role: str, kind: Optional[str] = None, *,
             _MINIMAL_INTENT_EXAMPLES.get((role, wanted))
             or _MINIMAL_INTENT_EXAMPLES[(role, _DEFAULT_INTENT_KIND[role])])
     envelope: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "role": role}
-    if role != "pm":
+    if role not in ("pm", "designer"):
         envelope["task_id"] = task_id
     envelope["intent"] = intent
     return json.dumps(envelope, ensure_ascii=False)
@@ -810,9 +856,10 @@ def parse_coding_turn(
             TurnErrorCode.role_mismatch,
             f"envelope role {envelope.role!r} != scheduled {role!r}")
 
-    # PM plan turns are not bound to a single task_id; every other role must
-    # answer for exactly the assigned task.
-    if role != "pm" and envelope.task_id != task_id:
+    # PM plan turns — and the Designer's design_spec authoring turn — are not bound
+    # to a single task_id; every other role must answer for exactly the assigned
+    # task.
+    if role not in ("pm", "designer") and envelope.task_id != task_id:
         return TurnParseError(
             TurnErrorCode.task_mismatch,
             f"envelope task_id {envelope.task_id!r} != assigned {task_id!r}")
@@ -859,7 +906,7 @@ __all__ = [
     "DeveloperToolPlanIntent", "DeveloperContextRequestIntent",
     "ContextRequestScope", "ReviewerVerdictIntent", "TesterPlanIntent",
     "PMTask", "ToolCall", "Finding", "ParsedTurn", "TurnParseError",
-    "TurnErrorCode", "parse_coding_turn",
+    "TurnErrorCode", "parse_coding_turn", "DesignerSpecIntent",
     # Spec 25 — the always-legal turn, its typed ask, and the example table the
     # corrective prompts teach from (and the invariant test enumerates).
     "BlockedIntent", "CapabilityAsk", "BLOCKED_EXAMPLE_INTENT",
