@@ -114,9 +114,28 @@ def fyi_message(text: str) -> list[dict]:
     ]
 
 
+# concierge.py emits emoji GLYPHS (e.g. "🤔", "✅") in a turn result's
+# ``reactions`` list -- that matches concierge's own behavioral contract and
+# tests. Slack's ``reactions.add`` API takes a SHORTCODE (e.g.
+# "thinking_face"), not the glyph itself -- passing the glyph straight
+# through errors ``invalid_name``. This module is the render/egress boundary
+# where that translation belongs, so concierge never has to know about
+# Slack's naming scheme.
+_REACTION_SHORTCODES = {
+    "🤔": "thinking_face",
+    "✅": "white_check_mark",
+    "👀": "eyes",
+}
+
+
 def reactions_for(turn_result: dict) -> list[str]:
-    """The emoji reaction names a turn result asked to be added, if any."""
-    return turn_result.get("reactions", [])
+    """The Slack reaction shortcodes a turn result asked to be added, if
+    any -- translated from concierge's emoji glyphs via
+    ``_REACTION_SHORTCODES``. A glyph with no known shortcode is skipped
+    (never forwarded as-is) so an unmapped value never reaches Slack's API
+    and triggers ``invalid_name``."""
+    glyphs = turn_result.get("reactions", [])
+    return [_REACTION_SHORTCODES[g] for g in glyphs if g in _REACTION_SHORTCODES]
 
 
 __all__ = ["status_card", "decision_message", "fyi_message", "reactions_for"]

@@ -450,7 +450,27 @@ class SlackBridge:
         posted = await self._poster.post_message(channel_id, thread_ts, text, blocks=blocks)
         ts = posted.get("ts") if isinstance(posted, dict) else None
         for name in render.reactions_for(result):
-            await self._poster.add_reaction(channel_id, ts or thread_ts, name)
+            await self._add_reaction_best_effort(channel_id, ts or thread_ts, name)
+
+    async def _add_reaction_best_effort(self, channel_id: Any, ts: Any, name: str) -> None:
+        """A reaction is cosmetic, not part of the reply -- the reply has
+        already posted successfully by the time this runs. If Slack rejects
+        it (e.g. ``invalid_name``) or the call otherwise fails, that must
+        never surface as a turn error on top of an already-good reply.
+        ``asyncio.CancelledError`` still propagates (it's not a reaction
+        failure, it's the worker being torn down)."""
+        try:
+            await self._poster.add_reaction(channel_id, ts, name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Metadata only (channel/thread + reaction name + exception
+            # type) -- never message text/tokens.
+            _LOGGER.warning(
+                "slack bridge: add_reaction failed (channel_id=%s, thread_ts=%s, "
+                "name=%s, exception_type=%s)",
+                channel_id, ts, name, type(exc).__name__,
+            )
 
     async def _post_unbound(self, channel_id: Any, thread_ts: str) -> None:
         if self._poster is None:

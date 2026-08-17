@@ -136,14 +136,35 @@ def test_status_card_accepts_object_style_blockers_with_title_attr() -> None:
 
 
 # --- reactions_for ---------------------------------------------------------
+#
+# concierge.py emits emoji GLYPHS (e.g. "🤔", "✅") -- that's the behavioral
+# contract concierge's own tests pin down. But Slack's reactions.add API
+# needs a SHORTCODE (e.g. "thinking_face"), not the glyph, or it errors
+# invalid_name. reactions_for is the render/egress boundary that translates
+# glyph -> shortcode, so concierge never has to know about Slack's naming.
 
 
-def test_reactions_for_returns_reactions_list_from_turn_result() -> None:
-    assert render.reactions_for({"reactions": ["white_check_mark", "eyes"]}) == [
-        "white_check_mark",
-        "eyes",
-    ]
+def test_reactions_for_translates_thinking_face_glyph_to_shortcode() -> None:
+    assert render.reactions_for({"reactions": ["🤔"]}) == ["thinking_face"]
+
+
+def test_reactions_for_translates_check_mark_glyph_to_shortcode() -> None:
+    assert render.reactions_for({"reactions": ["✅"]}) == ["white_check_mark"]
+
+
+def test_reactions_for_translates_eyes_glyph_to_shortcode() -> None:
+    assert render.reactions_for({"reactions": ["👀"]}) == ["eyes"]
+
+
+def test_reactions_for_skips_unknown_glyphs_rather_than_forwarding_them() -> None:
+    """An emoji with no known Slack shortcode must never be forwarded as-is
+    -- Slack would reject it with invalid_name. Skip it instead."""
+    assert render.reactions_for({"reactions": ["🚀"]}) == []
 
 
 def test_reactions_for_defaults_to_empty_list_when_missing() -> None:
     assert render.reactions_for({}) == []
+
+
+def test_reactions_for_empty_list_stays_empty() -> None:
+    assert render.reactions_for({"reactions": []}) == []
