@@ -14,7 +14,7 @@ from typing import Any
 
 from .ledger import LedgerStore, Task
 from .schemas import TurnErrorCode
-from .topology import DEV, PM, REVIEWER, TESTER
+from .topology import DESIGNER, DEV, PM, REVIEWER, TESTER
 from .workspace import CodingWorkspace
 
 # F087-14 WS-3: advertise ONLY tools that are actually executed. The dev's
@@ -29,6 +29,11 @@ _ROLE_TOOLS: dict[str, tuple[str, ...]] = {
     DEV: ("code_write",),
     REVIEWER: (),
     TESTER: (),
+    # Designer (Slice 1 §1): read tools + artifact authoring ONLY. It NEVER gets
+    # code_write — code changes it wants happen via DEV tasks, so only DEV writes
+    # to the worktree (tool discipline preserved). Its authored output is the
+    # design_spec governance artifact, produced through its typed turn, not a tool.
+    DESIGNER: (),
 }
 
 

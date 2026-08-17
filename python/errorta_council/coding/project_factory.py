@@ -100,7 +100,10 @@ def create_project_from_charter(
 
     resolved_members = members if members is not None else recipes.resolve_team(
         recipe, available_routes if available_routes is not None
-        else pm_reference.list_available_routes())
+        else pm_reference.list_available_routes(),
+        # Slice 1 §1: seat a Designer only for UI modalities. The charter's modality
+        # is the single input to that gate.
+        modality=str(charter.get("modality") or "") or None)
 
     if resolved_members:
         store.set_run_config(room_id=None, members=resolved_members)

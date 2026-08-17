@@ -62,6 +62,7 @@ def _edit(ctx: Context, mutate) -> dict[str, Any]:
 # role flag / alias -> canonical coding role.
 _ROLE_FLAGS = {
     "pm": "pm", "dev": "dev", "reviewer": "reviewer", "tester": "tester",
+    "designer": "designer",
     "test": "tester", "prog": "dev", "programmer": "dev",
 }
 
@@ -75,7 +76,9 @@ def _add_role_value(args: dict[str, Any], a: Any, b: Any) -> tuple[str, str]:
     flagged = sorted({_ROLE_FLAGS[f] for f in _ROLE_FLAGS if args.get(f)})
     if flagged:
         if len(flagged) > 1:
-            raise CliError("pick exactly one role: --pm / --dev / --reviewer / --tester.")
+            raise CliError(
+                "pick exactly one role: --pm / --dev / --reviewer / --tester / "
+                "--designer.")
         return flagged[0], (str(a).strip() if a else "")
     role = _ROLE_FLAGS.get(str(a or "").strip().lower(), str(a or "").strip().lower())
     return role, (str(b).strip() if b else "")
@@ -211,7 +214,9 @@ def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str
     if sub == "add":
         role, value = _add_role_value(args, a, b)
         if role not in teamdraft.CODING_ROLES:
-            return _base.usage("team add --<pm|dev|reviewer|tester> <route|provider> [--count N]")
+            return _base.usage(
+                "team add --<pm|dev|reviewer|tester|designer> <route|provider> "
+                "[--count N]")
         if not value:
             return _base.usage("team add --<role> <route|provider> [--count N]")
         count = _add_count(args)
@@ -366,6 +371,8 @@ register(
             Param("dev", "team add: role = developer.", is_flag=True),
             Param("reviewer", "team add: role = reviewer.", is_flag=True),
             Param("tester", "team add: role = tester.", is_flag=True),
+            Param("designer", "team add: role = designer (UI-modality projects).",
+                  is_flag=True),
             Param("test", "team add: alias of --tester.", is_flag=True),
             Param("prog", "team add: alias of --dev.", is_flag=True),
             Param("programmer", "team add: alias of --dev.", is_flag=True),

@@ -28,6 +28,7 @@ _ROLE_STYLE = {
     "dev": "cyan",
     "reviewer": "yellow",
     "tester": "green",
+    "designer": "bright_magenta",
     "system": "dim",
     "user": "bold blue",
 }
@@ -38,6 +39,7 @@ THEME = Theme(
         "cli.role.dev": "cyan",
         "cli.role.reviewer": "yellow",
         "cli.role.tester": "green",
+        "cli.role.designer": "bright_magenta",
         "cli.role.system": "dim",
         "cli.role.user": "bold blue",
         "cli.head": "bold",

@@ -90,7 +90,9 @@ def test_create_builds_runnable_project(tmp_errorta_home: Path, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["created"] is True
-    assert body["team_size"] == 4  # pm + 2 dev + reviewer
+    # Slice 1 §1: a UI-modality project (a tip splitter is a static web app) seats a
+    # Designer, so pm + 2 dev + reviewer + designer = 5.
+    assert body["team_size"] == 5
     assert body["run_setup_confirmed"] is True
     # the project really exists, runnable, with the charter + a seeded brainstorm
     store = LedgerStore("tip-split")
@@ -99,7 +101,7 @@ def test_create_builds_runnable_project(tmp_errorta_home: Path, monkeypatch):
     assert proj.north_star.startswith("A tip-split")
     cfg = store.get_run_config()
     roles = {(m.get("metadata") or {}).get("coding_role") for m in cfg["members"]}
-    assert {"pm", "dev", "reviewer"} <= roles
+    assert {"pm", "dev", "reviewer", "designer"} <= roles
     # session is discarded after create
     assert wizard.get_session(sid) is None
 

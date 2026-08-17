@@ -24,7 +24,7 @@ from ..render import is_no_project, muted, no_project, render
 from ..session import Context
 from . import _base, _mutate
 
-_ROLES = ("pm", "dev", "reviewer", "tester")
+_ROLES = ("pm", "dev", "reviewer", "tester", "designer")
 
 
 def _call(client: SidecarClient, ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +107,8 @@ register(Command(
     params=(
         Param("sub", "new | set", default=""),
         Param("a", "title (new) or task_id (set).", default=None),
-        Param("role", "task role (new/set): pm|dev|reviewer|tester.", is_flag=False),
+        Param("role", "task role (new/set): pm|dev|reviewer|tester|designer.",
+              is_flag=False),
         Param("detail", "task detail body.", is_flag=False),
         Param("state", "set: new task state (todo|doing|blocked|done|dropped).",
               is_flag=False),

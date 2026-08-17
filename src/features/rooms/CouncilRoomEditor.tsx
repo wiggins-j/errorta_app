@@ -197,6 +197,7 @@ const CODING_ROLE_OPTIONS = [
   { value: "dev", label: "Developer (writes code + tests)" },
   { value: "reviewer", label: "Reviewer" },
   { value: "tester", label: "Tester (runs/validates)" },
+  { value: "designer", label: "Designer (authors the design contract; UI projects)" },
 ];
 
 interface MemberDraft {
@@ -932,7 +933,7 @@ function newMemberDraft(idx: number, existing: MemberDraft[] = []): MemberDraft 
 
 type CodingMemberSlot = {
   id: string;
-  role: "pm" | "dev" | "reviewer" | "tester";
+  role: "pm" | "dev" | "reviewer" | "tester" | "designer";
   provider: string;
   preferredRoutes: string[];
   maxOutputTokens: string;
@@ -2645,7 +2646,7 @@ export default function CouncilRoomEditor({ roomId, onClose, onSaved }: Props) {
                     Coding role{" "}
                     <InfoBubble
                       label="Coding role"
-                      text="This member's job when the room runs as a Coding Team: PM directs, dev writes code + tests, reviewer reviews, tester runs/validates."
+                      text="This member's job when the room runs as a Coding Team: PM directs, dev writes code + tests, reviewer reviews, tester runs/validates, designer authors the design contract (UI projects)."
                     />
                   </span>
                   <select

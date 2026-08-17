@@ -29,7 +29,7 @@ from errorta_council.coding.runtime import (
     SANDBOX_CHOICES,
 )
 from errorta_council.coding.runtime_launchers import registered_modalities
-from errorta_council.coding.topology import DEV, PM, REVIEWER, TESTER
+from errorta_council.coding.topology import DEV, DESIGNER, PM, REVIEWER, TESTER
 from errorta_council.validation import MODEL_MODES, PM_MODEL_MODES
 from errorta_model_gateway.policy import VALID_PROVIDERS
 from errorta_project_grounding.corpus_binding import VALID_BINDING_MODES
@@ -55,7 +55,7 @@ def test_reference_contract_matches_executable_schemas() -> None:
 
     assert contract["schema_version"] == 1
     assert contract["provider_classes"] == _sorted(VALID_PROVIDERS - {"off"})
-    assert contract["coding_roles"] == sorted([PM, DEV, REVIEWER, TESTER])
+    assert contract["coding_roles"] == sorted([PM, DEV, REVIEWER, TESTER, DESIGNER])
     assert contract["model_modes"] == _sorted(MODEL_MODES)
     assert contract["pm_model_modes"] == _sorted(PM_MODEL_MODES)
     assert contract["run_setup_fields"] == sorted(_RunSetupConfirmBody.model_fields)

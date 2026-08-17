@@ -35,7 +35,7 @@ _AUTONOMY_KNOBS = frozenset({
     "max_parallel_workers",
 })
 _GOVERNANCE_FIELDS = frozenset({"mode", "block_on_problems", "max_review_rounds"})
-_TASK_ROLES = frozenset({"pm", "dev", "reviewer", "tester"})
+_TASK_ROLES = frozenset({"pm", "dev", "reviewer", "tester", "designer"})
 # Every action ``type`` the PM may legitimately emit. ``start_run`` is route-handled
 # (see module docstring). Used to validate a fenced envelope before executing it.
 KNOWN_ACTION_TYPES = frozenset({

@@ -27,10 +27,15 @@ PM = "pm"
 DEV = "dev"
 REVIEWER = "reviewer"
 TESTER = "tester"
+# Designer role (Slice 1 §1): authors the design contract; reads the repo +
+# authors governance artifacts, NEVER writes code (no code_write — see
+# turn_controller._ROLE_TOOLS). Seated only for UI modalities (recipes.py).
+DESIGNER = "designer"
 
 # Drain the pipeline before starting new dev work: finish reviewing/validating
-# what's in flight, then do new development.
-_WORKER_PRIORITY = (TESTER, REVIEWER, DEV)
+# what's in flight, then do new development. The Designer runs before new DEV
+# work because a design verdict redirects dev work (spec §1).
+_WORKER_PRIORITY = (TESTER, REVIEWER, DESIGNER, DEV)
 
 
 class QueryLedger(Protocol):
@@ -117,6 +122,19 @@ class GateRun:
 
 
 @dataclass(frozen=True)
+class DesignPlan:
+    """Slice 1 §2/§4: give the Designer its authoring turn for the design_spec.
+
+    Scheduled once, immediately, when a Designer is seated (UI modality) and no
+    design_spec artifact exists yet. The runner's DesignPlan arm builds the
+    ``_designer_prompt``, parses the ``design_spec`` intent, validates the body,
+    and appends the artifact (approved on a valid body, changes_requested with the
+    named fields otherwise — spec §8). Not scheduled for non-UI projects (no
+    Designer seated => this never fires => the whole spec is inert)."""
+    member_id: str
+
+
+@dataclass(frozen=True)
 class GovernancePlan:
     """Give the PM a governance artifact turn (brainstorm/spec/plan)."""
     member_id: str
@@ -150,6 +168,7 @@ CodingAction = (
     | LastWord
     | Merge
     | GateRun
+    | DesignPlan
     | GovernancePlan
     | GovernanceReview
     | GovernanceMaterialize
@@ -287,6 +306,16 @@ def decide_next(
     if governance is not None:
         return governance
 
+    # Slice 1 §2: the Designer authors the design contract before UI dev work. Fires
+    # once (no design_spec yet) and only when a Designer is seated — inert for
+    # non-UI projects. Runs after governance so the charter is settled first.
+    design = _design_preflight(ledger, by_role)
+    if design is not None:
+        return design
+    # While the design_spec is not yet approved, UI dev tasks are held (spec §2's
+    # governance gate). Non-UI tasks are never blocked.
+    ui_blocked = _design_blocks_ui(ledger, by_role)
+
     # 0) F087-17: integrate first. A PR that is reviewer-approved AND tests-green
     #    (status "mergeable") is handed to the PM to merge into master before more
     #    dev work, so accumulated work lands and later tasks branch off it.
@@ -338,6 +367,11 @@ def decide_next(
         # past to the next dispatchable task.
         candidates = ledger.next_tasks(role, len(member_ids) + 32)
         for task in candidates:
+            # Slice 1 §2: while the design_spec is unapproved, hold UI dev tasks —
+            # advance to the next candidate so non-UI dev work (and every other role)
+            # is never blocked by the gate. Inert unless a Designer is seated.
+            if role == DEV and ui_blocked and _design_is_ui_task(task):
+                continue
             # F127: skip members this task has barred (escalate-up reassignment);
             # among the rest prefer the highest tier. If none are eligible right
             # now, advance to the next task (the loop raises an attention Problem
@@ -433,6 +467,13 @@ def plan_next_batch(
     governance = _governance_preflight(ledger, by_role)
     if governance is not None:
         return [governance]
+
+    # Slice 1 §2: the Designer authors the contract before UI dev work (exclusive
+    # action, like a Merge — one authoring turn). Inert for non-UI projects.
+    design = _design_preflight(ledger, by_role)
+    if design is not None:
+        return [design]
+    ui_blocked = _design_blocks_ui(ledger, by_role)
 
     batch: list[CodingAction] = []
     used_members: set[str] = set()
@@ -535,6 +576,10 @@ def plan_next_batch(
                                   or planning_clamped) else 0)
         tasks = ledger.next_tasks(role, want, exclude=chosen_tasks)
         for task in tasks:
+            # Slice 1 §2: hold UI dev tasks while the design_spec is unapproved;
+            # advance to non-UI work so the gate never blocks anything but UI dev.
+            if role == DEV and ui_blocked and _design_is_ui_task(task):
+                continue
             # F159: serialize hot-file / frozen-file contention. A task that would
             # touch a frozen path (unless it IS the centralize owner) or a hot path
             # already held this tick waits — its member gets a non-colliding task
@@ -710,6 +755,41 @@ def _governance_preflight(
         return None
 
 
+def _design_preflight(
+    ledger: QueryLedger,
+    by_role: dict[str, list[str]],
+) -> CodingAction | None:
+    """Slice 1 §2: the Designer's authoring turn, or None. Inert (None) whenever no
+    Designer is seated — the modality gate for the whole spec."""
+    try:
+        from .design_scheduler import next_design_action
+        return next_design_action(ledger, by_role)
+    except Exception:
+        return None
+
+
+def _design_blocks_ui(
+    ledger: QueryLedger,
+    by_role: dict[str, list[str]],
+) -> bool:
+    """Slice 1 §2: True iff UI dev dispatch must be held (Designer seated + design
+    contract not yet approved). Inert (False) with no Designer seated."""
+    try:
+        from .design_scheduler import design_gate_blocks_ui
+        return design_gate_blocks_ui(ledger, by_role)
+    except Exception:
+        return False
+
+
+def _design_is_ui_task(task: Any) -> bool:
+    """Slice 1 §2: whether a dev task touches UI paths (so the gate holds it)."""
+    try:
+        from .design_scheduler import is_ui_task
+        return is_ui_task(task)
+    except Exception:
+        return False
+
+
 class MutateLedger(Protocol):
     """Write surface the reconciler needs."""
 
@@ -830,7 +910,7 @@ def coding_role_of(member: dict[str, Any]) -> str:
     defaulting to ``dev`` so an unmarked member is a worker, not a planner."""
     meta = member.get("metadata") or {}
     role = member.get("coding_role") or meta.get("coding_role")
-    return str(role) if role in (PM, DEV, REVIEWER, TESTER) else DEV
+    return str(role) if role in (PM, DEV, REVIEWER, TESTER, DESIGNER) else DEV
 
 
 @dataclass(frozen=True)

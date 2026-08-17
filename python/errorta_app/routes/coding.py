@@ -2093,7 +2093,10 @@ def wizard_create(session_id: str, body: dict[str, Any], request: Request) -> di
 
     delivery_root = str((body or {}).get("delivery_root") or "").strip() or None
     recipe, autonomous = charter["team_recipe"], charter["autonomous"]
-    members = recipes.resolve_team(recipe, pm_reference.list_available_routes())
+    # Slice 1 §1: seat a Designer only for UI modalities (static/server/desktop).
+    members = recipes.resolve_team(
+        recipe, pm_reference.list_available_routes(),
+        modality=str(charter.get("modality") or "") or None)
     warnings: list[str] = []
 
     # All-or-nothing: if any setup step fails after create_project, remove the
@@ -2267,7 +2270,7 @@ def pm_control(project_id: str, body: dict[str, Any], request: Request) -> dict[
 _RUNS: dict[str, dict[str, Any]] = {}
 
 
-_DEFAULT_ROLE_ORDER = ("pm", "dev", "reviewer", "tester")
+_DEFAULT_ROLE_ORDER = ("pm", "dev", "reviewer", "tester", "designer")
 
 
 def _ensure_coding_roles(members: list[dict[str, Any]]) -> list[dict[str, Any]]:

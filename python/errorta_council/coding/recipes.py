@@ -15,6 +15,12 @@ RECIPES = ("balanced", "fast_cheap", "highest_quality", "private_offline")
 _STRONG = ("anthropic", "openai", "google")
 _CHEAP = ("local", "claude_cli", "codex_cli", "cursor_cli")
 
+# Slice 1 §1 — a Designer is seated ONLY for UI modalities. `cli` / `binary` /
+# `container` (and an unspecified modality) get no Designer and none of the
+# design-contract behaviour; the presence of a seated Designer IS the modality
+# gate every downstream design path keys on.
+_UI_MODALITIES = frozenset({"static", "server", "desktop"})
+
 
 def autonomy_overrides(recipe: str, *, autonomous: bool) -> dict[str, Any]:
     """CodingAutonomyPolicy knob overrides for a recipe. Only the *real* levers
@@ -44,10 +50,18 @@ def _pick(routes: list[dict[str, Any]], prefer: tuple[str, ...]) -> str | None:
     return str(best["route_id"])
 
 
-def resolve_team(recipe: str, available_routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """A grounded team (2 devs + 1 reviewer + 1 PM) assigned from *available*
-    routes by the recipe's tier preference. Returns ``[]`` when nothing is
-    available — the caller must warn (grounded-or-refuse: never invent a route)."""
+def resolve_team(recipe: str, available_routes: list[dict[str, Any]],
+                 *, modality: str | None = None) -> list[dict[str, Any]]:
+    """A grounded team (2 devs + 1 reviewer + 1 PM, + 1 Designer for UI modalities)
+    assigned from *available* routes by the recipe's tier preference. Returns ``[]``
+    when nothing is available — the caller must warn (grounded-or-refuse: never
+    invent a route).
+
+    ``modality`` (Slice 1 §1): when it is a UI modality (``static`` / ``server`` /
+    ``desktop``) one Designer is added; ``cli`` / ``binary`` / ``container`` and an
+    unspecified modality seat no Designer (byte-identical to the pre-Designer team,
+    so every existing caller is unaffected). The Designer must be tool-capable and
+    multimodal (Slice 2 reads PNGs), so it rides the reviewer route."""
     avail = [r for r in available_routes if r.get("route_id")]
     if recipe == "private_offline":
         avail = [r for r in avail if str(r.get("provider_class")) == "local"]
@@ -69,12 +83,19 @@ def resolve_team(recipe: str, available_routes: list[dict[str, Any]]) -> list[di
             "gateway_route_id": route,
         }
 
-    return [
+    team = [
         member("pm-1", "pm", rev_route),
         member("dev-1", "dev", dev_route),
         member("dev-2", "dev", dev_route),
         member("reviewer-1", "reviewer", rev_route),
     ]
+    if modality in _UI_MODALITIES:
+        # The Designer rides the reviewer route (tool-capable + multimodal). Seated
+        # only for UI modalities — this single line is the modality gate for the
+        # whole spec: no Designer here => no design phase, no materialize, no
+        # design_contract segment anywhere downstream.
+        team.append(member("designer-1", "designer", rev_route))
+    return team
 
 
 __all__ = ["RECIPES", "governance_overrides", "autonomy_overrides", "resolve_team"]

@@ -25,6 +25,7 @@ from errorta_council.coding.gate_state import gate_available, latest_gate_text
 from errorta_council.coding.ledger import LedgerStore
 from errorta_council.coding.runner import (
     _composition_from_segments,
+    _design_contract_text,
     _dev_prompt,
     _dev_prompt_segments,
     _grounding_packet_text,
@@ -234,6 +235,11 @@ def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
         # fixture case, and the only case this golden asserts — it returns "" and
         # the DEV prompt stays byte-identical to the pre-refactor string.
         f"{_latest_context_response_text(store, task.task_id, task=task)}"
+        # Slice 1 §4: the design_contract renderer is called at its reserved
+        # position. It returns "" for every fixture here (none has an approved
+        # design_spec), so the DEV prompt stays byte-identical — the deliberate
+        # one-time golden insertion the spec calls out.
+        f"{_design_contract_text(store, task)}"
         f"{existing}"
         f"{latest_gate_text(store)}"          # Spec 12 inserts here
         # Spec 17 widens the catalog call: repo_read is resolved per-member (False
@@ -324,6 +330,14 @@ def _gate_text_for_review() -> str:
     return ""
 
 
+def _design_contract_for_review() -> str:
+    """Slice 1 §4: same seam as ``_gate_text_for_review`` — the reviewer reference
+    has no ``store``, and the real prompt threads the design_contract text as a
+    param (default ""). Both sides are "" for every fixture here, so the golden
+    holds; the design_contract segment is placed just after project_context."""
+    return ""
+
+
 def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> str:
     from errorta_council.coding.runner import (
         _REVIEW_DIFF_CAP,
@@ -373,6 +387,7 @@ def _old_review_pr_prompt(task, pr, diff, project_context, scope_task=None) -> s
         f"Review this PR (branch {pr.get('branch')}) before it merges to master.\n"
         f"The scope of THIS PR is ONE task: {task_scope}\n"
         f"{project_context}"
+        f"{_design_contract_for_review()}"          # Slice 1 §4 inserts here
         "This PR implements ONE scoped task, not the whole product. "
         f"{bar}\n"
         "REQUEST CHANGES (blocking) if EITHER holds:\n"
