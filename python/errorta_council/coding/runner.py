@@ -69,11 +69,13 @@ from .testing import (
     run_test_commands,
 )
 from .topology import (
+    DESIGNER,
     DEV,
     PM,
     REVIEWER,
     TESTER,
     Assign,
+    DesignPlan,
     GateRun,
     GovernanceMaterialize,
     GovernancePlan,
@@ -3012,6 +3014,66 @@ def _capability_gap_note(store: LedgerStore) -> str:
         "task needs an interface it lacks — re-plan or route that work to a "
         "role/gate that HAS the capability (grant it, or drop the task). Do NOT "
         "re-dispatch the same work to a role whose manifest cannot discharge it.\n")
+
+
+def _designer_prompt(store: LedgerStore) -> str:
+    """Slice 1 §2 — the Designer's design_spec authoring prompt.
+
+    Shows the North Star / Definition of Done, the host asset-library manifest to
+    pick from, the six direction-matrix axes the Designer must commit, and asks for
+    a ``design_spec`` coding_turn.v1 envelope. Not bound to a task (like the PM)."""
+    from . import design_library
+    from .design_spec import DIRECTION_AXES
+
+    try:
+        project = store.get_project()
+        north_star = str(getattr(project, "north_star", "") or "")
+        dod = str(getattr(project, "definition_of_done", "") or "")
+    except Exception:  # noqa: BLE001 — prompt context is best-effort
+        north_star = dod = ""
+    try:
+        manifest_summary = design_library.manifest_summary_for_prompt()
+    except Exception:  # noqa: BLE001 — a missing library must not crash the turn
+        manifest_summary = "(asset library unavailable)"
+    axes = ", ".join(DIRECTION_AXES)
+    envelope_example = json.dumps({
+        "schema_version": "coding_turn.v1",
+        "role": "designer",
+        "intent": {
+            "kind": "design_spec",
+            "title": "Design contract",
+            "body_markdown": "Aesthetic direction + rationale, do/don'ts, per-screen "
+                             "layout intent in prose.",
+            "body_json": {
+                "direction_matrix": {axis: "<your pick>" for axis in DIRECTION_AXES},
+                "tokens": {"palette": {}, "type_scale": {}, "spacing": {},
+                           "radii": {}, "shadows": {}},
+                "assets": {"font_family_ids": ["<id from the manifest>"],
+                           "icon_set_id": "<id from the manifest>"},
+                "screens": [{"screen": "...", "purpose": "...", "layout": "...",
+                             "hierarchy": "...", "key_states": ["..."]}],
+                "components": [{"name": "...", "usage": "..."}],
+            },
+        },
+    })
+    return (
+        f"{_skill_line(DESIGNER)} You are the DESIGNER of an autonomous coding team. "
+        "Author the DESIGN CONTRACT (a design_spec) that every UI dev and reviewer "
+        "will build to. The contract is the source of truth: the app is brought to "
+        "the contract, never the reverse. You read the repo and author this "
+        "artifact; you do NOT write code — code changes happen via DEV tasks.\n"
+        f"North Star: {north_star}\n"
+        f"Definition of Done: {dod}\n"
+        f"{manifest_summary}\n"
+        f"Commit an explicit pick for EACH direction-matrix axis ({axes}) so the "
+        "design does not collapse to a generic default. Choose font families and "
+        "an icon set by id from the asset library above (only ids that appear "
+        "there). Give tokens (palette, type scale, spacing, radii, shadows), a "
+        "per-screen inventory ({screen, purpose, layout, hierarchy, key_states}), "
+        "and a component inventory with usage rules.\n"
+        "Reply with ONLY a coding_turn.v1 envelope: "
+        f"{envelope_example}."
+    )
 
 
 def _pm_prompt(store: LedgerStore) -> str:
@@ -6118,6 +6180,66 @@ def build_run_turn(
         _apply_merge_gate(store, pr_id, tester_seated=_tester_seated())
 
     def _execute(action: Any, ledger: Any) -> TurnOutcome:
+        if isinstance(action, DesignPlan):
+            # Slice 1 §2/§4 — the Designer authors the design_spec. A valid body is
+            # accepted (state approved) and spawns the one materialize DEV task; an
+            # invalid body is bounced to changes_requested with the named fields (§8).
+            from .design_materialize import spawn_materialize_task_if_needed
+            from .design_spec import validate_design_body
+            from .governance import GovernanceStore
+            from .schemas import TurnParseError, parse_coding_turn
+
+            member = _member(DESIGNER, action.member_id)
+            governance = GovernanceStore.for_ledger(store)
+            record_turn_skill(
+                store, member_id=member.get("id", "m-designer"),
+                task_id="design", role=DESIGNER)
+            prompt = _designer_prompt(store)
+            parsed = parse_coding_turn(DESIGNER, None, caller(member, prompt))
+            retries = 0
+            while (isinstance(parsed, TurnParseError)
+                   and retries < _INTENT_CORRECTIVE_RETRIES):
+                retries += 1
+                store.record_decision(
+                    title="designer turn rejected", context="design",
+                    choice="designer_turn_rejected",
+                    rationale=f"{parsed.code.value}: {parsed.detail}")
+                prompt = _governance_corrective_prompt(
+                    prompt, parsed.code.value, parsed.detail,
+                    retry=retries, max_retries=_INTENT_CORRECTIVE_RETRIES)
+                parsed = parse_coding_turn(DESIGNER, None, caller(member, prompt))
+            if isinstance(parsed, TurnParseError):
+                store.record_decision(
+                    title="designer turn rejected", context="design",
+                    choice="designer_turn_rejected",
+                    rationale=f"{parsed.code.value}: {parsed.detail}")
+                return TurnOutcome(kind="governance_progress", made_progress=False,
+                                   hard_blocker=True, reason="designer_turn_unparseable")
+            intent = parsed.intent
+            body_json = getattr(intent, "body_json", {}) or {}
+            ok, errors = validate_design_body(body_json)
+            state = "approved" if ok else "changes_requested"
+            governance.append_artifact(
+                kind="design_spec",
+                title=getattr(intent, "title", "") or "Design contract",
+                body_markdown=getattr(intent, "body_markdown", ""),
+                body_json=body_json, state=state,
+                author={"role": DESIGNER, "member_id": str(member.get("id", ""))})
+            if ok:
+                created = spawn_materialize_task_if_needed(store, governance)
+                store.record_decision(
+                    title="design contract approved", context="design",
+                    choice="design_spec_approved",
+                    rationale=("design_spec approved; "
+                               + ("materialize task spawned" if created
+                                  else "materialize task already present")))
+                return TurnOutcome(kind="governance_progress", made_progress=True)
+            store.record_decision(
+                title="design contract needs changes", context="design",
+                choice="design_spec_changes_requested",
+                rationale="; ".join(errors))
+            return TurnOutcome(kind="governance_progress", made_progress=False)
+
         if isinstance(action, GovernancePlan):
             from .governance import GovernanceStore
             from .governance_prompts import build_pm_governance_prompt
@@ -7784,6 +7906,8 @@ def build_run_turn(
             # SPEC-23: attributed to the PM, keyed by the detector that asked, so
             # the transcript shows WHY the harness spent this turn.
             role, task_id = PM, f"last-word:{action.detector}"
+        elif isinstance(action, DesignPlan):
+            role, task_id = DESIGNER, "design"
         elif isinstance(action, GovernancePlan):
             role, task_id = PM, f"governance:{action.phase}"
         elif isinstance(action, GovernanceReview):
