@@ -110,6 +110,16 @@ slice — spin-down is the reversible option.
 That's done in the **project's own channel**, not here — see *Reconfigure the
 team* in `SLACK_PM_BRIDGE.md` ("switch the reviewer to opus").
 
+## Autopilot
+
+`create_project` and `archive_project` are **C**-class, so by default they
+post an **Approve** button and wait for your tap. If you enable **autopilot**
+(see *Autopilot* in `SLACK_PM_BRIDGE.md` — one config flag, off by default),
+the studio manager approves and runs them itself the moment it has a charter,
+posting a `🤖 Autopilot approved …` audit line instead of a button. The same
+security tradeoff described there applies; spin-down keeps everything
+reversible.
+
 ## v1 scope
 
 - **Project created IDLE, then you start it.** `create_project` creates the

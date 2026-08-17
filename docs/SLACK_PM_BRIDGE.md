@@ -205,6 +205,43 @@ change is applied immediately, announced back to you, takes effect on the team's
 **next turn** (you can reconfigure mid-run), and is recorded as an **undoable**
 change. Roles are `pm` / `dev` / `reviewer` / `tester`.
 
+## Autopilot — let the PM approve & execute itself
+
+By default, a **C**-class action you request in chat ("start building", "open
+the PR", "create the project") posts an **Approve / Decline** button and waits
+for your tap — the button is the anti-prompt-injection gate (chat text alone,
+even text that says "approve", can never fire a C-class action).
+
+If you'd rather talk to a PM that just *does the thing*, turn on **autopilot**.
+With it on, when the PM stages a C-class action it immediately approves and
+executes it itself — through the *exact same verified internal path* a button
+tap uses — and posts a `🤖 Autopilot approved …` line so nothing happens
+silently. It covers every C-class verb: `start_run`, `spend_cloud`,
+`publish_pr`, and the studio's `create_project` / `archive_project`.
+
+Autopilot is **off by default**. Enable it deliberately, from a machine you
+trust, by writing the flag to the bridge config:
+
+```
+python -c "
+from errorta_slack import config
+cfg = config.load(); cfg['autopilot'] = True; config.save(cfg)
+"
+```
+
+Set it back to `False` to return to button-gated approvals.
+
+**Security tradeoff (read before enabling).** The button is a second human
+factor. With autopilot on there is none, so content *you paste* into the
+channel that the model treats as an instruction could drive a C-class action
+(spend, publish). The mitigations that remain: (1) it's **off by default** —
+opt-in only; (2) only **allowlisted** team/user ids can drive the PM at all,
+autopilot or not; (3) every autopilot action posts a loud in-thread audit
+line; (4) everything it does is **reversible from chat** — `stop` a run,
+"spin down" a project. The tool-layer injection guard itself is unchanged:
+autopilot only ever fires an action the PM *structurally staged*, never raw
+chat text.
+
 ## Public-repo hygiene
 
 This module and its tests never contain a real Slack token, contact Slack,
