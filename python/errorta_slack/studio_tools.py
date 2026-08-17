@@ -191,7 +191,51 @@ def _default_team_members(team_specs: list[dict[str, Any]]) -> list[dict[str, An
     return members
 
 
-_VALID_CODING_ROLES = frozenset({"pm", "dev", "reviewer", "tester"})
+_VALID_CODING_ROLES = frozenset({"pm", "dev", "reviewer", "tester", "designer"})
+
+
+def _designer_route(default_specs: list[dict[str, Any]]) -> str:
+    """The route the studio seats a Designer on — the designer entry in the
+    effective default team (``studio_default_team``), or ``claude_cli.opus``
+    if none is configured."""
+    for spec in default_specs:
+        if str(spec.get("coding_role") or "").strip() == "designer":
+            route = str(spec.get("gateway_route_id") or "").strip()
+            if route:
+                return route
+    return "claude_cli.opus"
+
+
+def _gate_designer_by_modality(
+    team_specs: list[dict[str, Any]], modality: Any,
+    default_specs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply the Designer modality gate (spec §1) to a studio team.
+
+    The studio path passes ``members=`` explicitly, bypassing
+    ``recipes.resolve_team`` (which is where the engine normally seats the
+    Designer), so the gate is applied here instead — reusing the engine's OWN
+    ``recipes._UI_MODALITIES`` frozenset so the two can never drift:
+
+    * UI modality (``static`` / ``server`` / ``desktop``) → ensure exactly one
+      Designer is present (append one on the configured designer route if the
+      team doesn't already carry one).
+    * anything else (``cli`` / ``binary`` / ``container`` / unspecified) →
+      strip every Designer, so the whole design spec stays provably inert.
+    """
+    from errorta_council.coding.recipes import _UI_MODALITIES
+
+    def _role(spec: dict[str, Any]) -> str:
+        return str(spec.get("coding_role") or "").strip()
+
+    is_ui = str(modality or "").strip().lower() in _UI_MODALITIES
+    if not is_ui:
+        return [spec for spec in team_specs if _role(spec) != "designer"]
+    if any(_role(spec) == "designer" for spec in team_specs):
+        return team_specs
+    return list(team_specs) + [
+        {"coding_role": "designer", "gateway_route_id": _designer_route(default_specs)}
+    ]
 
 
 def _charter_team_specs(
@@ -266,6 +310,10 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     # Honor the team the user asked for in the charter (validated against the
     # configured routes); fall back to the default when unspecified/invalid.
     team_specs = _charter_team_specs(charter, default_specs) or default_specs
+    # Seat/strip the Designer by modality (spec §1) — UI projects get one,
+    # cli/binary/container stay design-inert.
+    team_specs = _gate_designer_by_modality(
+        team_specs, charter.get("modality"), default_specs)
     members = _default_team_members(team_specs)
 
     try:

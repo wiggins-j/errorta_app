@@ -77,10 +77,13 @@ def test_studio_model_route_override_round_trips() -> None:
     assert loaded["studio_model_route"] == "claude_cli.sonnet"
 
 
-def test_studio_default_team_default_has_six_role_route_specs() -> None:
+def test_studio_default_team_default_includes_designer_on_opus() -> None:
     # fix/slack-studio-default-team: the studio spins up projects with an
     # explicit, configurable default team (not a probed-availability
     # projection) so a freshly created project always has a working PM.
+    # Designer role (spec §1): the default team carries a designer on
+    # claude_cli.opus; create_project's modality gate keeps it for UI
+    # modalities and strips it for cli/binary/container.
     loaded = config.load()
 
     assert loaded["studio_default_team"] == [
@@ -90,6 +93,7 @@ def test_studio_default_team_default_has_six_role_route_specs() -> None:
         {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
         {"coding_role": "reviewer", "gateway_route_id": "claude_cli.sonnet"},
         {"coding_role": "tester", "gateway_route_id": "claude_cli.sonnet"},
+        {"coding_role": "designer", "gateway_route_id": "claude_cli.opus"},
     ]
 
 
