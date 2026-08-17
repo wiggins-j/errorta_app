@@ -110,6 +110,19 @@ slice — spin-down is the reversible option.
 That's done in the **project's own channel**, not here — see *Reconfigure the
 team* in `SLACK_PM_BRIDGE.md` ("switch the reviewer to opus").
 
+## Choosing the team's models
+
+Tell the studio manager which model each role should use during the charter
+chat — *"use Opus for all roles"*, *"put the devs on Cursor Composer"* — and it
+records a per-role team on the charter and creates the project with exactly
+that. It's **grounded**: the manager can only assign the
+`gateway_route_id`s you've actually configured (the routes in
+`studio_default_team`), so it can't strand a project on a model that isn't
+wired up — an unrecognized choice falls back to the default team. If you don't
+mention models, the configured default team is used. You can also change any
+role's model later from the project channel with *"switch the reviewer to
+opus"* (see *Reconfigure the team* in `SLACK_PM_BRIDGE.md`).
+
 ## Autopilot
 
 `create_project` and `archive_project` are **C**-class, so by default they

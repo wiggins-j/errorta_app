@@ -49,6 +49,7 @@ import json
 import re
 from typing import Any, Callable
 
+from errorta_slack import config as _config
 from errorta_slack import studio_tools
 
 MemberCaller = Callable[[dict[str, Any], str], str]
@@ -72,6 +73,22 @@ _CHARTER_FIELDS = (
     "title", "north_star", "audience", "modality",
     "definition_of_done", "entrypoint", "team_recipe", "autonomous",
 )
+
+_MODELS_GUIDANCE = """
+## TEAM MODELS (optional)
+
+The coding team has four roles: pm, dev (usually 3), reviewer, tester. When
+the user tells you which model each role should use (e.g. "Opus for all
+roles", "put the devs on composer"), include a `team` array in
+`create_project`'s args: a list of {{"coding_role", "gateway_route_id"}}
+objects, one per team member (repeat "dev" for multiple devs). Use ONLY these
+configured gateway_route_ids: {routes}. Map plain names to them (e.g. "opus"
+-> a *.opus route, "sonnet" -> a *.sonnet route, "composer"/"cursor" -> a
+cursor_cli.* route). If the user does not specify models, OMIT `team` entirely
+and a sensible default team is used. NEVER invent a gateway_route_id that is
+not in that list — an unrecognized one is ignored and the default team is
+used instead.
+"""
 
 _INTAKE_CONTRACT = """
 ## CHARTER INTAKE
@@ -200,8 +217,20 @@ def build_system_prompt(
     ) or "nothing yet"
     confirm_rule = _CONFIRM_RULE_AUTOPILOT if autopilot else _CONFIRM_RULE_BUTTON
     etiquette = _ETIQUETTE.format(can_do=can_do, confirm_rule=confirm_rule)
+    # The configured, connectivity-verified routes the manager may assign to
+    # roles — the SAME set create_project validates a charter `team` against
+    # (see studio_tools._charter_team_specs), so the prompt can't advertise a
+    # route the executor would reject.
+    default_specs = _config.load().get(
+        "studio_default_team", _config.DEFAULT_CONFIG["studio_default_team"])
+    routes = sorted(
+        {str(s.get("gateway_route_id") or "").strip() for s in default_specs}
+        - {""}
+    )
+    models_guidance = _MODELS_GUIDANCE.format(routes=", ".join(routes) or "(none configured)")
     return (
         f"{_INTAKE_CONTRACT}\n"
+        f"{models_guidance}\n"
         "## TOOLS (the ONLY actions you may take)\n\n"
         f"{catalog_block}\n"
         f"{etiquette}\n"

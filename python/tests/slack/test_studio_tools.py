@@ -643,3 +643,82 @@ def test_archive_project_confirmed_archive_arbitrary_exception_returns_clean_err
     assert "/secret/workspace" not in result["detail"]
     assert "RuntimeError" in result["detail"]
     assert store.unbound == []
+
+
+# --- charter-specified team (honor the models the user asked for) -----------
+
+
+def test_create_project_honors_charter_team_of_uniform_opus() -> None:
+    """The user said 'Opus for all roles' — create_project must build the team
+    from the charter's `team`, not silently use the mixed default."""
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+    team = [{"coding_role": r, "gateway_route_id": "claude_cli.opus"}
+            for r in ("pm", "dev", "dev", "dev", "reviewer", "tester")]
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(team=team), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    members = create_calls[0]["members"]
+    assert [m["gateway_route_id"] for m in members] == ["claude_cli.opus"] * 6
+    assert [m["metadata"]["coding_role"] for m in members] == \
+        ["pm", "dev", "dev", "dev", "reviewer", "tester"]
+    assert [m["id"] for m in members] == \
+        ["pm-1", "dev-1", "dev-2", "dev-3", "reviewer-1", "tester-1"]
+
+
+def test_create_project_charter_team_unknown_route_falls_back_to_default() -> None:
+    """Grounded-or-fall-back: a route the operator hasn't configured makes the
+    WHOLE custom team fall back to the known-good default rather than shipping
+    a broken/hallucinated team."""
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+    team = [{"coding_role": "pm", "gateway_route_id": "made_up.route"}]
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(team=team), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    routes = [m["gateway_route_id"] for m in create_calls[0]["members"]]
+    assert routes == [
+        "claude_cli.opus", "cursor_cli.composer-2.5", "cursor_cli.composer-2.5",
+        "cursor_cli.composer-2.5", "claude_cli.sonnet", "claude_cli.sonnet",
+    ]
+
+
+def test_create_project_charter_team_validated_against_effective_default_routes() -> None:
+    """The allowed route set is whatever team is actually in effect (an
+    injected default_team here) — a charter team using those routes is honored."""
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        create_fn=_recording_create_fn_kwargs(create_calls),
+        default_team=[{"coding_role": "pm", "gateway_route_id": "x.y"}],
+    )
+    team = [{"coding_role": "pm", "gateway_route_id": "x.y"},
+            {"coding_role": "dev", "gateway_route_id": "x.y"}]
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(team=team), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert [m["gateway_route_id"] for m in create_calls[0]["members"]] == ["x.y", "x.y"]
+
+
+def test_create_project_no_charter_team_still_uses_default() -> None:
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+
+    studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    routes = [m["gateway_route_id"] for m in create_calls[0]["members"]]
+    assert routes[0] == "claude_cli.opus" and "cursor_cli.composer-2.5" in routes

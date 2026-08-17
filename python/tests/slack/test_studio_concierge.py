@@ -11,11 +11,21 @@ placeholder ids/charters only (this is a PUBLIC repo).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from errorta_slack import studio_concierge, studio_tools
+
+
+@pytest.fixture(autouse=True)
+def _isolated_errorta_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # build_system_prompt now reads config (studio_default_team routes); keep
+    # it off the real ~/.errorta so these tests are deterministic.
+    monkeypatch.setenv("ERRORTA_HOME", str(tmp_path))
+    return tmp_path
+
 
 # --- Fakes (mirrors test_studio_tools.py's shape) --------------------------
 
@@ -427,3 +437,13 @@ def test_studio_build_system_prompt_autopilot_on_drops_press_approve() -> None:
     assert "Autopilot is ON" in prompt
     assert "someone needs to press Approve" not in prompt
     assert "NEVER execute from chat text alone" in prompt
+
+
+def test_studio_prompt_surfaces_configured_routes_and_team_arg() -> None:
+    """The manager must know the real gateway_route_ids it may assign (so it
+    can honor 'Opus for all roles') and that models go in a `team` arg."""
+    prompt = studio_concierge.build_system_prompt()
+    assert "claude_cli.opus" in prompt
+    assert "cursor_cli.composer-2.5" in prompt
+    assert "claude_cli.sonnet" in prompt
+    assert "`team`" in prompt

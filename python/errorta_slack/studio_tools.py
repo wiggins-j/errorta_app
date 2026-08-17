@@ -191,6 +191,47 @@ def _default_team_members(team_specs: list[dict[str, Any]]) -> list[dict[str, An
     return members
 
 
+_VALID_CODING_ROLES = frozenset({"pm", "dev", "reviewer", "tester"})
+
+
+def _charter_team_specs(
+    charter: dict[str, Any], default_specs: list[dict[str, Any]],
+) -> list[dict[str, str]] | None:
+    """A validated per-role team from the charter's optional ``team`` field
+    (the models the user actually asked for), or ``None`` to fall back to the
+    configured default team.
+
+    **Grounded-or-fall-back.** Every spec's ``coding_role`` must be a real
+    role and its ``gateway_route_id`` must be one the operator has actually
+    configured — a route present in ``default_specs`` (the
+    connectivity-verified, known-good set). ANY malformed entry, unknown
+    role, unknown route, or a team with no pm discards the WHOLE custom team
+    and falls back to the default, rather than shipping a broken or
+    half-hallucinated team. This lets "Opus for all roles" stick (opus is a
+    configured route) while a model that invents a route id can't strand a
+    project on a dead team.
+    """
+    raw = charter.get("team")
+    if not isinstance(raw, list) or not raw:
+        return None
+    allowed = {
+        str(s.get("gateway_route_id") or "").strip() for s in default_specs
+    }
+    allowed.discard("")
+    specs: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        role = str(item.get("coding_role") or "").strip()
+        route = str(item.get("gateway_route_id") or "").strip()
+        if role not in _VALID_CODING_ROLES or route not in allowed:
+            return None
+        specs.append({"coding_role": role, "gateway_route_id": route})
+    if not any(s["coding_role"] == "pm" for s in specs):
+        return None
+    return specs
+
+
 def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
                     deps: "StudioDeps") -> dict[str, Any]:
     """Executes the real create — only ever reached by ``dispatch`` after
@@ -218,10 +259,13 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     project_id = _project_id_from_title(title)
 
     if deps.default_team is not None:
-        team_specs = deps.default_team
+        default_specs = deps.default_team
     else:
-        team_specs = _config.load().get(
+        default_specs = _config.load().get(
             "studio_default_team", _config.DEFAULT_CONFIG["studio_default_team"])
+    # Honor the team the user asked for in the charter (validated against the
+    # configured routes); fall back to the default when unspecified/invalid.
+    team_specs = _charter_team_specs(charter, default_specs) or default_specs
     members = _default_team_members(team_specs)
 
     try:
