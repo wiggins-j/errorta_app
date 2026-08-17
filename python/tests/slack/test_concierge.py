@@ -120,6 +120,36 @@ def test_build_system_prompt_includes_catalog_and_etiquette() -> None:
     assert "confirmation button" in prompt or "Approve" in prompt
 
 
+def test_build_system_prompt_grounds_the_concierge_to_its_real_tools() -> None:
+    """The PM confabulated a capability it has no tool for (staged a
+    project-creation "Approve" flow that doesn't exist). The prompt must
+    explicitly forbid claiming/staging/inventing any action outside the
+    TOOL_CATALOG, name project creation/config as something it cannot do,
+    and never say it can be done from Slack."""
+    prompt = concierge.build_system_prompt("proj-a")
+
+    lowered = prompt.lower()
+    # Explicitly disclaims the verbs it does NOT have.
+    assert "create" in lowered and "project" in lowered
+    assert "north star" in lowered
+    # Forbids claiming/staging actions it can't perform and inventing flows.
+    assert "never claim" in lowered or "never imply" in lowered
+    assert "invent" in lowered
+    # Points elsewhere for what it can't do.
+    assert "errorta app" in lowered
+
+
+def test_build_system_prompt_grounding_lists_real_catalog_capabilities() -> None:
+    """The "what I CAN do" list in the grounding rule must be derived from
+    the live TOOL_CATALOG (not hand-typed prose) so it can't drift stale if
+    the catalog changes — every R-trust verb's summary should appear."""
+    prompt = concierge.build_system_prompt("proj-a")
+
+    for verb, spec in tools.TOOL_CATALOG.items():
+        if spec.get("trust") == "R":
+            assert spec["summary"] in prompt
+
+
 # --- Happy path: status query -> dispatch -> reply --------------------------
 
 
