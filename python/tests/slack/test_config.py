@@ -26,6 +26,10 @@ def test_load_on_fresh_home_returns_defaults() -> None:
     # (an empty allowlist denies everyone -- never allow-all).
     assert loaded["allowed_team_ids"] == []
     assert loaded["allowed_user_ids"] == []
+    # fix/slack-studio-model: the studio manager (app-level PM) isn't tied
+    # to a project, so it needs its own configured model route -- default
+    # is the known-good claude_cli.opus.
+    assert loaded["studio_model_route"] == "claude_cli.opus"
 
 
 def test_save_then_load_round_trips() -> None:
@@ -42,6 +46,14 @@ def test_save_then_load_round_trips() -> None:
     assert loaded["bindings"] == [{"channel": "C123", "project": "errorta"}]
     assert loaded["window"] == 50
     assert loaded["timeout_minutes"] == 15
+
+
+def test_studio_model_route_override_round_trips() -> None:
+    config.save({"studio_model_route": "claude_cli.sonnet"})
+
+    loaded = config.load()
+
+    assert loaded["studio_model_route"] == "claude_cli.sonnet"
 
 
 def test_slack_dir_created_with_owner_only_permissions() -> None:

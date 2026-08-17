@@ -27,6 +27,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # deny-by-default starting point, not an allow-all.
     "allowed_team_ids": [],
     "allowed_user_ids": [],
+    # The studio manager (app-level PM) isn't tied to any one project, so it
+    # can't borrow a project's PM route the way `concierge.run_turn` does --
+    # it needs its own configured model route. `claude_cli.opus` is the
+    # known-good default; see `studio_concierge.run_turn`'s `model_route`
+    # kwarg and `connection._process_studio`, which reads this key.
+    "studio_model_route": "claude_cli.opus",
 }
 
 
@@ -64,6 +70,12 @@ def _str_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+def _str(value: Any, *, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value
+    return default
+
+
 def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG)
     if raw:
@@ -78,6 +90,10 @@ def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
         ),
         "allowed_team_ids": _str_list(merged.get("allowed_team_ids")),
         "allowed_user_ids": _str_list(merged.get("allowed_user_ids")),
+        "studio_model_route": _str(
+            merged.get("studio_model_route"),
+            default=str(DEFAULT_CONFIG["studio_model_route"]),
+        ),
     }
 
 

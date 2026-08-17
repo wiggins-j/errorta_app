@@ -77,7 +77,16 @@ import contextlib
 import logging
 from typing import Any, Awaitable, Callable
 
-from errorta_slack import auth, concierge, outbound, render, studio_concierge, studio_tools, tools
+from errorta_slack import (
+    auth,
+    concierge,
+    config,
+    outbound,
+    render,
+    studio_concierge,
+    studio_tools,
+    tools,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -481,11 +490,23 @@ class SlackBridge:
         ``studio_concierge.run_turn`` -- which, like ``concierge.run_turn``,
         always dispatches with ``confirmed_via=None``. Degrades to a clear
         "not configured" reply, rather than crashing, when this bridge has no
-        ``studio_caller`` wired up."""
+        ``studio_caller`` wired up.
+
+        The studio manager has no per-project ledger to resolve a PM route
+        from (unlike ``concierge.run_turn``'s ``_resolve_pm_member``), so its
+        model route is resolved here, from config, on every turn --
+        ``config.load()["studio_model_route"]`` (persisted, user-overridable;
+        normalizes to the known-good ``"claude_cli.opus"`` default when
+        unset) -- and threaded through as ``model_route``. Without this,
+        ``studio_concierge.run_turn`` would fall back to its own default,
+        but a turn here should always reflect whatever the user has actually
+        configured."""
         channel_id = item.get("channel_id")
         if self._studio_caller is None:
             await self._post_studio_not_configured(channel_id, thread_ts)
             return
+
+        model_route = str(config.load().get("studio_model_route") or "claude_cli.opus")
 
         history = self._thread_history.setdefault(thread_ts, [])
         try:
@@ -497,6 +518,7 @@ class SlackBridge:
                 thread_ts=thread_ts,
                 deps=self._build_studio_deps(),
                 caller=self._studio_caller,
+                model_route=model_route,
             )
         except asyncio.CancelledError:
             raise

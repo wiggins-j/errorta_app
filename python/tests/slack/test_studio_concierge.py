@@ -200,6 +200,63 @@ def test_create_project_envelope_stages_confirmation_never_executes(tmp_path: An
     assert result["reactions"] == ["✅"]
 
 
+# --- model_route wiring (fix/slack-studio-model) ----------------------------
+#
+# The studio manager has no per-project ledger to resolve a PM member's
+# gateway_route_id from (see the module docstring) -- it needs its OWN
+# configured route, threaded through via ``run_turn``'s ``model_route`` kwarg
+# and merged onto ``_STUDIO_MEMBER`` before it ever reaches ``caller``. This
+# is the load-bearing key ``gateway_member_caller`` reads
+# (``member.get("gateway_route_id")``); without it every studio turn falls
+# through to an empty-route request.
+
+
+def test_run_turn_passes_model_route_to_caller_as_gateway_route_id() -> None:
+    deps = _deps()
+    caller = _ScriptedCaller([
+        _envelope(reply="hi there", tool_calls=[]),
+    ])
+
+    studio_concierge.run_turn(
+        "hello", [], channel_id="C1", thread_ts="t1",
+        deps=deps, caller=caller, model_route="claude_cli.opus",
+    )
+
+    assert len(caller.calls) == 1
+    member, _prompt = caller.calls[0]
+    assert member["gateway_route_id"] == "claude_cli.opus"
+
+
+def test_run_turn_defaults_model_route_to_claude_cli_opus_when_omitted() -> None:
+    deps = _deps()
+    caller = _ScriptedCaller([
+        _envelope(reply="hi there", tool_calls=[]),
+    ])
+
+    studio_concierge.run_turn(
+        "hello", [], channel_id="C1", thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    member, _prompt = caller.calls[0]
+    assert member["gateway_route_id"] == "claude_cli.opus"
+
+
+def test_run_turn_member_still_carries_studio_manager_identity() -> None:
+    deps = _deps()
+    caller = _ScriptedCaller([
+        _envelope(reply="hi there", tool_calls=[]),
+    ])
+
+    studio_concierge.run_turn(
+        "hello", [], channel_id="C1", thread_ts="t1",
+        deps=deps, caller=caller, model_route="claude_cli.opus",
+    )
+
+    member, _prompt = caller.calls[0]
+    assert member["member_id"] == "studio-manager"
+    assert member["role"] == "studio_pm"
+
+
 # --- Malformed JSON on turn 1, valid on the corrective retry ----------------
 
 

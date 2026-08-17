@@ -330,6 +330,7 @@ def run_turn(
     deps: Any,
     caller: MemberCaller,
     max_hops: int = 2,
+    model_route: str | None = None,
 ) -> dict[str, Any]:
     """Run one stateless studio-concierge turn and return
     ``{"reply": str, "tool_results": list, "reactions": list[str], "assumed": bool}``.
@@ -348,18 +349,26 @@ def run_turn(
 
     Unlike ``concierge.run_turn``, there is no per-project PM member to
     resolve here — the studio concierge is not scoped to any one project's
-    ledger/run_config. ``caller`` arrives already bound to whatever
-    model/route the studio surface is wired to; this function always calls
-    it with the same stable ``_STUDIO_MEMBER`` identity dict.
+    ledger/run_config, so it can't borrow a team's configured PM route the
+    way ``concierge.run_turn`` does. Instead it takes its own ``model_route``
+    (the caller resolves this from ``errorta_slack.config``'s
+    ``studio_model_route`` — see ``connection._process_studio``), defaulting
+    to the known-good ``"claude_cli.opus"`` when omitted, and merges it onto
+    ``_STUDIO_MEMBER`` as ``gateway_route_id`` — the key
+    ``gateway_member_caller`` reads to route the request. Without this, the
+    member dict has no route at all and the request falls through to local
+    Ollama.
     """
+    member = {**_STUDIO_MEMBER, "gateway_route_id": model_route or "claude_cli.opus"}
+
     system_prompt = build_system_prompt()
 
     prompt = _build_prompt(system_prompt, thread_msgs, message)
-    raw = caller(_STUDIO_MEMBER, prompt) or ""
+    raw = caller(member, prompt) or ""
     envelope = _extract_json(raw)
     if envelope is None:
         retry_prompt = _build_prompt(system_prompt, thread_msgs, message, correction=True)
-        raw_retry = caller(_STUDIO_MEMBER, retry_prompt) or ""
+        raw_retry = caller(member, retry_prompt) or ""
         envelope = _extract_json(raw_retry)
     if envelope is None:
         return _fallback_result([])
@@ -388,7 +397,7 @@ def run_turn(
         follow_prompt = _build_prompt(
             system_prompt, thread_msgs, message, tool_results=tool_results,
         )
-        raw = caller(_STUDIO_MEMBER, follow_prompt) or ""
+        raw = caller(member, follow_prompt) or ""
         next_envelope = _extract_json(raw)
         if next_envelope is None:
             # Keep the tool results and the last known-good reply rather than
