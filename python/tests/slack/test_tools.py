@@ -33,6 +33,11 @@ class FakeLedgerStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.added_tasks: list[dict[str, Any]] = []
         self._next_id = 0
+        self.run_state: dict[str, Any] = {
+            "status": "idle", "stop_reason": None, "started_at": None,
+            "ended_at": None, "cancel_requested": False,
+            "last_error": None, "counters": None,
+        }
 
     def list_tasks(self) -> list[Any]:
         return []
@@ -53,6 +58,13 @@ class FakeLedgerStore:
         )
         self._next_id += 1
         return FakeTask(f"t-{self._next_id}")
+
+    def get_run_state(self) -> dict[str, Any]:
+        return dict(self.run_state)
+
+    def set_run_state(self, **patch: Any) -> dict[str, Any]:
+        self.run_state.update(patch)
+        return dict(self.run_state)
 
 
 def _deps(tmp_path: Path, **overrides: Any) -> tools.ToolDeps:
@@ -509,3 +521,367 @@ def test_stop_runtime_default_path_success(
 
     assert result == {"status": "stopped"}
     assert fake_mgr.stopped_profile_id == "p1"
+
+
+# --- start_run / stop_run trust classes -------------------------------------
+
+
+def test_start_run_is_trust_c_and_stop_run_is_trust_r() -> None:
+    assert tools.TOOL_CATALOG["start_run"]["trust"] == "C"
+    assert tools.TOOL_CATALOG["stop_run"]["trust"] == "R"
+
+
+# --- start_run: THE injection guard test ------------------------------------
+
+
+def test_start_run_without_block_actions_stages_and_never_calls_start_run_fn(
+    tmp_path: Path,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        calls.append((project_id, resume, continue_))
+        return {"started": True}
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+    assert "confirmation_id" in result
+    assert calls == []
+
+
+# --- start_run: mode is picked from the project's current run state --------
+
+
+def test_start_run_idle_project_does_a_fresh_start(tmp_path: Path) -> None:
+    """The critical-bug regression test: a freshly-created Slice-1 project
+    has never run (status "idle"), so its FIRST "start building" must be a
+    genuine fresh start (resume=False, continue_=False) — NOT continue_=True,
+    which 409s "run is not continuable" on an idle project."""
+    store.bind_channel("C1", "proj-a")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        calls.append((project_id, resume, continue_))
+        return {"started": True}
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+    # default fake ledger run_state status is "idle" — no setup needed.
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [("proj-a", False, False)]
+
+
+def test_start_run_stopped_project_continues(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        calls.append((project_id, resume, continue_))
+        return {"started": True}
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+    deps.ledger_factory("proj-a").run_state["status"] = "stopped"
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [("proj-a", False, True)]
+
+
+def test_start_run_interrupted_project_resumes(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        calls.append((project_id, resume, continue_))
+        return {"started": True}
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+    deps.ledger_factory("proj-a").run_state["status"] = "interrupted"
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [("proj-a", True, False)]
+
+
+def test_start_run_already_running_short_circuits_without_calling_start_run_fn(
+    tmp_path: Path,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        calls.append((project_id, resume, continue_))
+        return {"started": True}
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+    deps.ledger_factory("proj-a").run_state["status"] = "running"
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "already_running"
+    assert calls == []
+
+
+# --- start_run: 409-shaped "already in progress" is swallowed --------------
+
+
+def test_start_run_409_already_in_progress_is_swallowed(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+
+    class _AlreadyRunning(Exception):
+        status_code = 409
+        detail = "a run is already in progress"
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        raise _AlreadyRunning()
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "already_running"
+
+
+# --- start_run: 409 "run is not continuable" is NOT swallowed as already_running
+
+
+def test_start_run_409_not_continuable_is_a_clean_error_not_already_running(
+    tmp_path: Path,
+) -> None:
+    """The previously-swallowed shape: a 409 whose detail does NOT contain
+    "already in progress" (e.g. a stale/wrong mode was picked) must surface
+    as a clean error, not falsely claim the team is already running."""
+    store.bind_channel("C1", "proj-a")
+
+    class _NotContinuable(Exception):
+        status_code = 409
+        detail = "run is not continuable"
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        raise _NotContinuable()
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+    deps.ledger_factory("proj-a").run_state["status"] = "stopped"
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert result["status"] != "already_running"
+
+
+# --- start_run: run_setup_required 409 (fresh start, team not confirmed) ---
+
+
+def test_start_run_run_setup_required_409_is_a_clean_error(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+
+    class _SetupRequired(Exception):
+        status_code = 409
+        detail = {
+            "code": "run_setup_required",
+            "message": "Run setup hasn't been confirmed for this project.",
+        }
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        raise _SetupRequired()
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "configured" in result["detail"]
+
+
+# --- start_run: member-health preflight 409 is a real "can't start" --------
+#
+# Only reachable on a FRESH start — resume/continue skip the preflight
+# (routes/coding.py:2586) — so this test deliberately leaves run_state at
+# its default "idle" (fresh start is what gets attempted).
+
+
+def test_start_run_member_health_preflight_409_surfaces_reason(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+
+    class _Preflight(Exception):
+        status_code = 409
+        detail = {
+            "code": "member_health_preflight_failed",
+            "message": "provider 'claude-cli' is logged out",
+        }
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        raise _Preflight()
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "logged out" in result["detail"]
+
+
+# --- start_run: arbitrary exception -> clean error, no crash ----------------
+
+
+def test_start_run_arbitrary_exception_is_clean_error_not_a_crash(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+
+    def start_run_fn(
+        project_id: str, *, resume: bool = False, continue_: bool = False,
+    ) -> dict[str, Any]:
+        raise RuntimeError("boom, secret token leaked here")
+
+    deps = _deps(tmp_path, start_run_fn=start_run_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "RuntimeError" in result["detail"]
+    assert "boom" not in result["detail"]
+    assert "secret token" not in result["detail"]
+
+
+# --- start_run: default seam is lazily imported, never at module load ------
+
+
+def test_default_start_run_lazily_imports_and_calls_start_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import errorta_app.routes.coding as coding_routes
+
+    calls: list[tuple[str, dict[str, Any], bool, bool]] = []
+
+    def fake_start_run(project_id: str, body: dict[str, Any], *, continue_: bool = False,
+                        resume: bool = False) -> dict[str, Any]:
+        calls.append((project_id, body, resume, continue_))
+        return {"started": True}
+
+    monkeypatch.setattr(coding_routes, "_start_run", fake_start_run)
+
+    result = tools._default_start_run("proj-z", resume=False, continue_=True)
+
+    assert result == {"started": True}
+    assert calls == [("proj-z", {}, False, True)]
+
+
+# --- stop_run ----------------------------------------------------------------
+
+
+def test_stop_run_when_running_sets_cancel_requested(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger_store = deps.ledger_factory("proj-a")
+    ledger_store.run_state["status"] = "running"
+
+    result = tools.dispatch(
+        "stop_run", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "stopping"
+    assert ledger_store.run_state["cancel_requested"] is True
+
+
+def test_stop_run_when_idle_is_a_friendly_no_op(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger_store = deps.ledger_factory("proj-a")
+
+    result = tools.dispatch(
+        "stop_run", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["status"] == "not_running"
+    assert ledger_store.run_state["cancel_requested"] is False
+
+
+def test_stop_run_is_r_class_and_does_not_stage(tmp_path: Path) -> None:
+    """stop_run is R-class: even with confirmed_via=None it executes
+    directly (no staged confirmation)."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger_store = deps.ledger_factory("proj-a")
+    ledger_store.run_state["status"] = "running"
+
+    result = tools.dispatch(
+        "stop_run", {}, channel_id="C1", thread_ts="t1", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "stopping"
+    assert result.get("status") != "needs_confirmation"
+
+
+# --- project_status gains run_status ----------------------------------------
+
+
+def test_project_status_includes_run_status(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger_store = deps.ledger_factory("proj-a")
+    ledger_store.run_state["status"] = "running"
+
+    result = tools.dispatch(
+        "project_status", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["run_status"] == "running"
+    # existing keys are preserved
+    assert "tasks" in result
+    assert "blockers" in result
+
+
+def test_project_status_run_status_defaults_to_idle(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "project_status", {}, channel_id="C1", thread_ts="t1", deps=deps,
+    )
+
+    assert result["run_status"] == "idle"

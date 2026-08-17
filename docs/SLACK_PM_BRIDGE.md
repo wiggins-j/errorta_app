@@ -170,6 +170,30 @@ TLS-pinning, since Slack messages don't carry a pinned device certificate.
   back to the thread with the reasoning, and writes through the same audited
   approval store a desktop/CLI decision would.
 
+## Run control (start / stop / status)
+
+In a project's channel you can drive the coding team's **run** — the team
+actually writing code — directly from the PM:
+
+- **"start building" / "go" →** `start_run`. This is a **C-class** action: it
+  spends real money on the team's model calls, so it never fires from a chat
+  message alone — the PM posts an **Approve** button and only your tap starts
+  the run. Once started, the team works in the background (a sidecar thread that
+  keeps going after the reply) up to the run's **iteration cap** (default 200;
+  there is no dollar cap — the honest limit is iterations/model-calls, not USD).
+  The PM picks the right mode from the current state: a fresh project starts
+  clean, a stopped run continues, an interrupted run resumes, and an
+  already-running project is reported as such without restarting.
+- **"stop" →** `stop_run`. A **graceful** cancel — the team finishes its current
+  step, then halts (the signal is durable, so it survives a sidecar restart).
+  Stopping an idle project is a friendly no-op.
+- **"how's it going?" →** `project_status` now reports the run's lifecycle state
+  (`idle` / `running` / `stopped` / `failed` / `interrupted`) alongside the
+  task and blocker summary.
+
+These are distinct from `launch_runtime` / `stop_runtime`, which start and stop a
+**preview** of the *built* code (a dev server) — not the coding team's run.
+
 ## Public-repo hygiene
 
 This module and its tests never contain a real Slack token, contact Slack,

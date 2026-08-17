@@ -43,6 +43,14 @@ class FakeLedgerStore:
             run_config if run_config is not None
             else {"members": [dict(_DEFAULT_PM_MEMBER)]}
         )
+        self._run_state: dict[str, Any] = {"status": "idle", "cancel_requested": False}
+
+    def get_run_state(self) -> dict[str, Any]:
+        return dict(self._run_state)
+
+    def set_run_state(self, **patch: Any) -> dict[str, Any]:
+        self._run_state.update(patch)
+        return dict(self._run_state)
 
     def list_tasks(self) -> list[Any]:
         return []
