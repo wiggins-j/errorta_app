@@ -722,3 +722,60 @@ def test_create_project_no_charter_team_still_uses_default() -> None:
 
     routes = [m["gateway_route_id"] for m in create_calls[0]["members"]]
     assert routes[0] == "claude_cli.opus" and "cursor_cli.composer-2.5" in routes
+
+
+# --- designer seating by modality (spec §1 gate, studio path) ---------------
+
+
+def _member_roles(members: list[dict[str, Any]]) -> list[str]:
+    return [m["metadata"]["coding_role"] for m in members]
+
+
+def test_create_project_seats_designer_for_ui_modality() -> None:
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+
+    studio_tools.dispatch(
+        "create_project", _charter(modality="static"), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    members = create_calls[0]["members"]
+    assert "designer" in _member_roles(members)
+    designer = next(m for m in members if m["metadata"]["coding_role"] == "designer")
+    assert designer["gateway_route_id"] == "claude_cli.opus"
+    assert designer["id"] == "designer-1"
+
+
+def test_create_project_strips_designer_for_cli_modality() -> None:
+    """Modality gate: cli/binary/container get NO designer — the whole design
+    spec must stay provably inert for non-UI projects."""
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+
+    for modality in ("cli", "binary", "container"):
+        create_calls.clear()
+        studio_tools.dispatch(
+            "create_project", _charter(modality=modality), channel_id="C1", thread_ts="t1",
+            confirmed_via="block_actions", deps=deps,
+        )
+        assert "designer" not in _member_roles(create_calls[0]["members"]), modality
+
+
+def test_create_project_appends_designer_to_charter_team_for_ui() -> None:
+    """Even when the user dictates the team ('Opus for all roles'), a UI
+    project still gets a Designer seated (on the configured designer route)."""
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+    team = [{"coding_role": r, "gateway_route_id": "claude_cli.opus"}
+            for r in ("pm", "dev", "dev", "dev", "reviewer", "tester")]
+
+    studio_tools.dispatch(
+        "create_project", _charter(team=team, modality="server"),
+        channel_id="C1", thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    roles = _member_roles(create_calls[0]["members"])
+    assert roles.count("designer") == 1
+    designer = next(m for m in create_calls[0]["members"] if m["metadata"]["coding_role"] == "designer")
+    assert designer["gateway_route_id"] == "claude_cli.opus"

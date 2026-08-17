@@ -110,6 +110,16 @@ slice — spin-down is the reversible option.
 That's done in the **project's own channel**, not here — see *Reconfigure the
 team* in `SLACK_PM_BRIDGE.md` ("switch the reviewer to opus").
 
+## The Designer role
+
+For **UI** projects (`static` / `server` / `desktop`) the studio automatically
+seats a **Designer** on the team (default `claude_cli.opus`, configurable as the
+`designer` entry in `studio_default_team`). The Designer authors a design
+contract that gates the UI dev work until it's approved, then a design system is
+materialized into the repo. Non-UI projects (`cli` / `binary` / `container`) get
+**no** Designer and none of that behavior. You don't ask for the Designer — the
+project's modality decides.
+
 ## Choosing the team's models
 
 Tell the studio manager which model each role should use during the charter

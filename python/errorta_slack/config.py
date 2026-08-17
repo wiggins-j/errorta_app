@@ -60,6 +60,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
         {"coding_role": "reviewer", "gateway_route_id": "claude_cli.sonnet"},
         {"coding_role": "tester", "gateway_route_id": "claude_cli.sonnet"},
+        # Designer role (spec §1): seated for UI projects only. It rides
+        # claude_cli.opus by default (tool-capable + multimodal, as Slice 2
+        # requires). `studio_tools.create_project`'s modality gate keeps this
+        # entry for static/server/desktop and strips it for
+        # cli/binary/container so non-UI projects stay design-inert.
+        {"coding_role": "designer", "gateway_route_id": "claude_cli.opus"},
     ],
 }
 
