@@ -287,6 +287,64 @@ def test_concurrent_resolve_confirmation_loses_no_updates() -> None:
         assert record["state"] == "approved", f"confirmation {cid} update was lost to a race"
 
 
+# --- Studio channel (singleton) -----------------------------------------
+
+
+def test_studio_channel_unset_returns_none() -> None:
+    assert store.studio_channel() is None
+    assert store.is_studio("C1") is False
+
+
+def test_set_studio_channel_then_studio_channel_and_is_studio() -> None:
+    store.set_studio_channel("C1")
+
+    assert store.studio_channel() == "C1"
+    assert store.is_studio("C1") is True
+    assert store.is_studio("C2") is False
+
+
+def test_set_studio_channel_overwrites_singleton() -> None:
+    store.set_studio_channel("C1")
+    store.set_studio_channel("C2")
+
+    assert store.studio_channel() == "C2"
+    assert store.is_studio("C1") is False
+    assert store.is_studio("C2") is True
+
+
+def test_clear_studio_channel_resets_to_none() -> None:
+    store.set_studio_channel("C1")
+    store.clear_studio_channel()
+
+    assert store.studio_channel() is None
+    assert store.is_studio("C1") is False
+
+
+def test_clear_studio_channel_when_unset_is_a_no_op() -> None:
+    store.clear_studio_channel()  # must not raise
+
+    assert store.studio_channel() is None
+
+
+def test_studio_channel_independent_of_bindings() -> None:
+    store.bind_channel("Cproj", "p1")
+    store.set_studio_channel("Cstudio")
+
+    binding = store.binding_for("Cproj")
+    assert binding is not None
+    assert binding["project_id"] == "p1"
+    assert store.studio_channel() == "Cstudio"
+
+
+def test_studio_file_written_with_owner_only_permissions() -> None:
+    store.set_studio_channel("C1")
+
+    from errorta_slack import config
+
+    path = config.slack_dir() / "studio.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_store_module_does_not_import_slack_sdk() -> None:
     """store.py must not pull in slack_sdk at module load.
 
