@@ -380,18 +380,17 @@ Also required:
   misreporting the current branch's uncommitted `connection.py` change fixes.
 - Anti-drift canary green for both catalogs.
 
-## 5. Interaction with the branch's uncommitted work
+## 5. Prerequisites already landed
 
-`fix/slack-fresh-start-team` already carries two uncommitted fixes this slice depends on
-and must not regress:
+`fix/slack-fresh-start-team` merged to `main` as `e9691a9` while this design was being
+written. It carries two fixes this slice depends on and must not regress:
 - `tools._default_start_run` passes the project's saved `run_config` members on a **fresh**
   start (`tools.py:207-225`), because `_start_run` recovers the saved team only on
   resume/continue. Without it, adopting abovo and starting fails with "no members".
 - `connection._fire_confirmed_effect` reports an autopilot-executed verb that returned
-  `{"status": "error"}` as a failure instead of claiming success.
+  `{"status": "error"}` as a failure instead of claiming success (`connection.py:717-721`).
 
-Land those first (they are independently correct and independently tested), then build
-this slice on top.
+Both are verified present on `main`, so this slice builds directly on top.
 
 ### 5.1 Implementation order
 
