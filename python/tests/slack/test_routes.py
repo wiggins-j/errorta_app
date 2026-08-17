@@ -142,3 +142,35 @@ def test_link_approve_already_resolved_returns_409(client: TestClient) -> None:
     resp = client.post("/slack/link/approve", json={"link_id": link_id})
 
     assert resp.status_code == 409
+
+
+# --- POST /slack/studio/bind / GET /slack/studio ----------------------------
+
+
+def test_studio_bind_then_get_roundtrips(client: TestClient) -> None:
+    resp = client.post("/slack/studio/bind", json={"channel_id": "C1"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "studio_channel": "C1"}
+
+    resp = client.get("/slack/studio")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"studio_channel": "C1"}
+
+
+def test_studio_get_before_bind_is_none(client: TestClient) -> None:
+    resp = client.get("/slack/studio")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"studio_channel": None}
+
+
+def test_studio_bind_overwrites_prior_value(client: TestClient) -> None:
+    client.post("/slack/studio/bind", json={"channel_id": "C1"})
+
+    resp = client.post("/slack/studio/bind", json={"channel_id": "C2"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "studio_channel": "C2"}
+    assert client.get("/slack/studio").json() == {"studio_channel": "C2"}

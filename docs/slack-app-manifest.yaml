@@ -1,11 +1,13 @@
 # Errorta PM — Slack app manifest
 # Create at https://api.slack.com/apps  →  "Create New App"  →  "From an app manifest"
 # Pick your workspace, paste this YAML, Create, then Install to Workspace.
-# Scopes/events below are EXACTLY what the shipped bridge uses:
+# Scopes/events below are what the shipped bridge uses:
 #   - chat_postMessage  -> chat:write
 #   - reactions_add     -> reactions:write
 #   - receive message events over Socket Mode -> channels:history (+ groups:history for private channels)
 #   - buttons (block_actions) -> interactivity + socket_mode
+#   - the studio manager's conversations.create/invite/setTopic (creating a
+#     new project's Slack channel) -> channels:manage; see docs/SLACK_STUDIO.md
 display_information:
   name: Errorta PM
   description: Chat with your Errorta coding-team project manager.
@@ -21,6 +23,7 @@ oauth_config:
       - reactions:write   # 👀 / ✅ / 🤔 ack reactions
       - channels:history  # receive message events in public channels the bot is in
       - groups:history    # same, for private channels
+      - channels:manage   # studio manager: create a project's Slack channel, invite, set topic
 settings:
   interactivity:
     is_enabled: true      # Approve/Decline buttons (block_actions)
