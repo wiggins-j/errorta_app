@@ -580,6 +580,138 @@ class SlackBridge:
         ts = posted.get("ts") if isinstance(posted, dict) else None
         for name in render.reactions_for(result):
             await self._add_reaction_best_effort(channel_id, ts or thread_ts, name)
+        await self._handle_staged_confirmations(channel_id, thread_ts, result)
+
+    # ----------------------------------------------------------------
+    # Slice 5: inbound decision rendering + autopilot auto-fire
+    #
+    # A C-class turn stages a confirmation and returns, inside the turn's
+    # ``tool_results``, an entry ``{"verb", "args", "result": {"status":
+    # "needs_confirmation", "confirmation_id": cid}}`` (see
+    # ``concierge._dispatch_calls`` / ``studio_concierge``). This is the ONE
+    # seam that decides what happens to that staged confirmation on the
+    # INBOUND (chat) path:
+    #
+    #   * autopilot OFF (default) -> post ``render.decision_message`` so the
+    #     owner gets a real Approve/Decline button. Before Slice 5 the inbound
+    #     path posted no button at all -- a chat-staged C-class action was
+    #     un-approvable (latent bug). The verified button callback
+    #     (``handle_interaction``) then fires it exactly as before.
+    #   * autopilot ON -> claim the confirmation with the SAME atomic
+    #     ``resolve_confirmation`` the button/timeout paths use, then run the
+    #     SAME ``_fire_confirmed_effect``. Autopilot supplies the verified
+    #     approval for a *structurally staged* action; it never dispatches
+    #     from chat text, and the tool-layer injection guard is untouched
+    #     (``dispatch`` still gets ``confirmed_via="block_actions"``).
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _staged_confirmations(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """The ``{cid, verb}`` of every needs_confirmation staged this turn."""
+        staged: list[dict[str, Any]] = []
+        for entry in result.get("tool_results") or []:
+            if not isinstance(entry, dict):
+                continue
+            res = entry.get("result")
+            if not isinstance(res, dict) or res.get("status") != "needs_confirmation":
+                continue
+            cid = res.get("confirmation_id")
+            if cid:
+                staged.append({"cid": str(cid), "verb": entry.get("verb")})
+        return staged
+
+    _CONFIRMATION_COPY: dict[str, tuple[str, str]] = {
+        "create_project": (
+            "Create project", "Approve to create the project and its Slack channel."),
+        "archive_project": (
+            "Spin project down", "Approve to pause the project and archive its channel."),
+        "start_run": (
+            "Start the coding run", "Approve to start the team building (spends model calls)."),
+        "spend_cloud": (
+            "Spend on a cloud model call", "Approve to spend on this cloud call."),
+        "publish_pr": ("Open a public PR", "Approve to open the pull request."),
+    }
+
+    def _confirmation_title(self, record: dict[str, Any]) -> tuple[str, str]:
+        """A short (title, detail) for the decision button, from the staged
+        record's verb + args. Only ever surfaces what the owner already
+        typed (a project title/id) -- no secrets."""
+        verb = str(record.get("verb") or "")
+        args = record.get("args") or {}
+        base_title, detail = self._CONFIRMATION_COPY.get(
+            verb, (f"Confirm {verb}", "Approve to run this action."),
+        )
+        label = args.get("title") or args.get("project_id")
+        title = f"{base_title} — {label}" if label else base_title
+        return title, detail
+
+    async def _handle_staged_confirmations(
+        self, channel_id: Any, thread_ts: str, result: dict[str, Any],
+    ) -> None:
+        if self._poster is None:
+            return
+        staged = self._staged_confirmations(result)
+        if not staged:
+            return
+        autopilot = bool(config.load().get("autopilot"))
+        for item in staged:
+            cid = item["cid"]
+            if autopilot:
+                await self._autopilot_fire(channel_id, thread_ts, cid)
+            else:
+                await self._post_decision_button(channel_id, thread_ts, cid)
+
+    async def _post_decision_button(self, channel_id: Any, thread_ts: str, cid: str) -> None:
+        record = self._deps.store.get_confirmation(cid)
+        if record is None:
+            # Already resolved/expired between staging and now -- nothing to
+            # approve, so nothing to render.
+            return
+        title, detail = self._confirmation_title(record)
+        await self._poster.post_message(
+            channel_id, thread_ts, title, blocks=render.decision_message(title, detail, cid),
+        )
+
+    async def _autopilot_fire(self, channel_id: Any, thread_ts: str, cid: str) -> None:
+        # Same atomic claim the button + timeout sweep share: only the winner
+        # fires. A concurrent tap/sweep having already claimed it -> no-op.
+        record, claimed = self._deps.store.resolve_confirmation(cid, "approved")
+        if not claimed:
+            return
+        verb = str(record["verb"])
+        try:
+            effect_result = self._fire_confirmed_effect(
+                record, channel_id=str(channel_id or ""), thread_ts=thread_ts,
+                verb=verb, decision="approved", approved=True,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "slack bridge: autopilot failed to execute the confirmed effect "
+                "for verb=%s (confirmation_id=%s)", verb, cid,
+            )
+            await self._post_effect_error(channel_id, thread_ts)
+            return
+        await self._post_autopilot_outcome(verb, channel_id, thread_ts, effect_result)
+
+    async def _post_autopilot_outcome(
+        self, verb: str, channel_id: Any, thread_ts: str,
+        effect_result: dict[str, Any] | None,
+    ) -> None:
+        if self._poster is None:
+            return
+        if verb in studio_tools.TOOL_CATALOG:
+            # Reuse the verb-specific studio outcome copy (created / archived /
+            # partial failure), prefixed so the audit trail is unmistakable.
+            if verb == "create_project":
+                detail = self._create_project_outcome_text(effect_result)
+            elif verb == "archive_project":
+                detail = self._archive_project_outcome_text(effect_result)
+            else:
+                detail = f"{verb}: {(effect_result or {}).get('status', 'done')}."
+            text = f"🤖 Autopilot approved — {detail}"
+        else:
+            text = f"🤖 Autopilot approved & executed *{verb}*."
+        await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
     async def _add_reaction_best_effort(self, channel_id: Any, ts: Any, name: str) -> None:
         """A reaction is cosmetic, not part of the reply -- the reply has

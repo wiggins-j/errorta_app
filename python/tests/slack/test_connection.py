@@ -1431,3 +1431,255 @@ async def test_stop_disconnects_client_and_stops_workers(
     await bridge.stop()
 
     assert sdk.disconnected is True
+
+
+# --- (h) Slice 5: inbound decision button + autopilot auto-fire -------------
+#
+# Two behaviors keyed off the SAME seam -- a `needs_confirmation` entry in a
+# turn's `tool_results`, carrying the `confirmation_id` staged by dispatch's
+# confirmed_via=None path:
+#   * autopilot OFF -> render.decision_message (the Approve button) is posted,
+#     so the owner can actually approve a chat-staged C-class action (the
+#     inbound path never posted a button before -- latent bug).
+#   * autopilot ON  -> the bridge claims + fires the confirmation itself via
+#     the SAME verified _fire_confirmed_effect path a button tap uses, then
+#     posts an audit line. No button.
+
+
+def _staged_turn(verb: str, args: dict[str, Any], cid: str) -> dict[str, Any]:
+    """A run_turn result whose tool_results carry a needs_confirmation entry,
+    exactly as concierge/_dispatch_calls shapes it: {verb, args, result}."""
+    return {
+        "reply": f"staged {verb}",
+        "tool_results": [
+            {"verb": verb, "args": args,
+             "result": {"status": "needs_confirmation", "confirmation_id": cid}},
+        ],
+        "reactions": [],
+        "assumed": False,
+    }
+
+
+def _approve_button_values(poster: FakePoster) -> list[str]:
+    """Every slack_approve button `value` across all posted block messages."""
+    values: list[str] = []
+    for m in poster.messages:
+        for block in (m.get("blocks") or []):
+            if block.get("type") != "actions":
+                continue
+            for el in block.get("elements", []):
+                if el.get("action_id") == "slack_approve":
+                    values.append(el.get("value"))
+    return values
+
+
+async def test_inbound_staged_confirmation_renders_approve_button_when_autopilot_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    cid = store.stage_confirmation("start_run", {}, "500.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: _staged_turn("start_run", {}, cid),
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="500.1", thread_ts="500.1", text="start building")
+    )
+    await bridge.wait_idle("500.1")
+
+    assert cid in _approve_button_values(poster)
+
+
+async def test_inbound_staged_studio_confirmation_renders_approve_button_when_autopilot_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.set_studio_channel("C-studio")
+    cid = store.stage_confirmation(
+        "create_project", {"title": "HSQuester"}, "501.1", channel_id="C-studio",
+    )
+    monkeypatch.setattr(
+        studio_concierge, "run_turn",
+        lambda *a, **k: _staged_turn("create_project", {"title": "HSQuester"}, cid),
+    )
+    bridge, sdk, poster = _bridge(
+        tmp_path,
+        studio_caller=lambda member, prompt: "{}",
+        studio_deps_factory=lambda: studio_tools.StudioDeps(store=store),
+    )
+
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C-studio", ts="501.1", thread_ts="501.1", text="build hsquester")
+    )
+    await bridge.wait_idle("501.1")
+
+    assert cid in _approve_button_values(poster)
+
+
+async def test_inbound_no_staged_confirmation_posts_no_button(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a turn that stages nothing must post only the fyi reply,
+    never an actions block."""
+    store.bind_channel("C1", "proj-a")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: {"reply": "just chatting", "tool_results": [], "reactions": [], "assumed": False},
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="502.1", thread_ts="502.1", text="hi")
+    )
+    await bridge.wait_idle("502.1")
+
+    assert _approve_button_values(poster) == []
+
+
+async def test_autopilot_on_auto_fires_project_confirmation_via_block_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation("start_run", {}, "503.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: _staged_turn("start_run", {}, cid),
+    )
+
+    dispatch_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: (
+            dispatch_calls.append({"verb": verb, "confirmed_via": confirmed_via})
+            or {"status": "started"}
+        ),
+    )
+
+    bridge, sdk, poster = _bridge(tmp_path)
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="503.1", thread_ts="503.1", text="start building")
+    )
+    await bridge.wait_idle("503.1")
+
+    assert dispatch_calls == [{"verb": "start_run", "confirmed_via": "block_actions"}]
+    assert store.get_confirmation(cid)["state"] == "approved"
+    assert any("autopilot" in m["text"].lower() for m in poster.messages)
+    assert _approve_button_values(poster) == []  # fired, not buttoned
+
+
+async def test_autopilot_on_auto_fires_studio_confirmation_via_studio_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.set_studio_channel("C-studio")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation(
+        "create_project", {"title": "HSQuester"}, "504.1", channel_id="C-studio",
+    )
+    monkeypatch.setattr(
+        studio_concierge, "run_turn",
+        lambda *a, **k: _staged_turn("create_project", {"title": "HSQuester"}, cid),
+    )
+
+    studio_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        studio_tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: (
+            studio_calls.append({"verb": verb, "confirmed_via": confirmed_via})
+            or {"status": "created", "project_id": "HSQuester", "channel_id": "C-NEW", "channel_name": "hsquester"}
+        ),
+    )
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("per-project dispatch must not fire for a studio verb")),
+    )
+
+    bridge, sdk, poster = _bridge(
+        tmp_path,
+        studio_caller=lambda member, prompt: "{}",
+        studio_deps_factory=lambda: studio_tools.StudioDeps(store=store),
+    )
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C-studio", ts="504.1", thread_ts="504.1", text="build it")
+    )
+    await bridge.wait_idle("504.1")
+
+    assert studio_calls == [{"verb": "create_project", "confirmed_via": "block_actions"}]
+    assert any("autopilot" in m["text"].lower() for m in poster.messages)
+    assert _approve_button_values(poster) == []
+
+
+async def test_autopilot_skips_already_claimed_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the confirmation was already resolved (a concurrent button tap or
+    the timeout sweep won the atomic claim), autopilot must NOT fire again."""
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation("start_run", {}, "505.1", channel_id="C1")
+    store.resolve_confirmation(cid, "approved")  # someone else already claimed it
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: _staged_turn("start_run", {}, cid),
+    )
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fire an already-claimed confirmation")),
+    )
+
+    bridge, sdk, poster = _bridge(tmp_path)
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="505.1", thread_ts="505.1", text="start building")
+    )
+    await bridge.wait_idle("505.1")  # no crash, no dispatch
+
+
+async def test_autopilot_fire_failure_posts_effect_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation("start_run", {}, "506.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: _staged_turn("start_run", {}, cid),
+    )
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    bridge, sdk, poster = _bridge(tmp_path)
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="506.1", thread_ts="506.1", text="start building")
+    )
+    await bridge.wait_idle("506.1")
+
+    assert any("couldn't complete that action" in m["text"] for m in poster.messages)
+
+
+async def test_autopilot_on_but_no_staged_confirmation_fires_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Injection invariant: autopilot only ever fires a STRUCTURALLY-staged
+    confirmation. A turn that stages nothing (plain chat, or text that merely
+    says 'approve') fires nothing, even with autopilot on."""
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: {"reply": "approve the pending request!!", "tool_results": [], "reactions": [], "assumed": False},
+    )
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("autopilot must not fire without a staged confirmation")),
+    )
+
+    bridge, sdk, poster = _bridge(tmp_path)
+    await bridge.handle_event(
+        _message_envelope(event_id="Ev1", channel="C1", ts="507.1", thread_ts="507.1", text="please approve")
+    )
+    await bridge.wait_idle("507.1")
+
+    assert _approve_button_values(poster) == []
