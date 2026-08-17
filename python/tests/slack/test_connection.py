@@ -1124,7 +1124,7 @@ async def test_handle_interaction_approve_studio_create_project_dispatches_via_s
     provision_calls: list[dict[str, Any]] = []
 
     def fake_create_fn(project_id: str, charter: dict[str, Any], *,
-                        available_routes: Any = None) -> Any:
+                        available_routes: Any = None, members: Any = None) -> Any:
         create_calls.append((project_id, charter))
         return _FakeProject(project_id)
 
