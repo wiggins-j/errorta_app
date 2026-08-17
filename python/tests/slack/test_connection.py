@@ -1147,6 +1147,104 @@ async def test_handle_interaction_approve_studio_create_project_dispatches_via_s
     assert "homeschool-game" in poster.messages[0]["text"] or "C-NEW" in poster.messages[0]["text"]
 
 
+class _ArchiveFakeLedger:
+    """Minimal fake of the ``LedgerStore(project_id)`` object
+    ``archive_project`` needs -- tracks run-state/status writes without
+    touching any real ledger files."""
+
+    def __init__(self, project_id: str, *, run_status: str = "idle") -> None:
+        self.project_id = project_id
+        self._run_state = {"status": run_status}
+        self.status_calls: list[str] = []
+        self.run_state_patches: list[dict[str, Any]] = []
+
+    def get_run_state(self) -> dict[str, Any]:
+        return dict(self._run_state)
+
+    def set_run_state(self, **patch: Any) -> dict[str, Any]:
+        self.run_state_patches.append(patch)
+        self._run_state.update(patch)
+        return dict(self._run_state)
+
+    def set_project_status(self, status: str) -> None:
+        self.status_calls.append(status)
+
+
+async def test_handle_interaction_approve_studio_archive_project_dispatches_via_studio_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the Critical wiring gap: a verified block_actions
+    Approve for a staged studio ``archive_project`` confirmation must
+    dispatch through ``studio_tools.dispatch`` (never the per-project
+    ``tools.dispatch``, which has no such verb and would fail closed with
+    ``tool_not_allowed`` -- silently swallowing the spin-down) with
+    ``confirmed_via="block_actions"``, and the spin-down must actually fire:
+    the project paused, its channel archived and unbound."""
+    store.bind_channel("C-proj", "proj-archive")
+    cid = store.stage_confirmation(
+        "archive_project", {"project_id": "proj-archive"}, "412.1", channel_id="C-studio",
+    )
+
+    ledger = _ArchiveFakeLedger("proj-archive", run_status="idle")
+    archive_calls: list[str] = []
+
+    def fake_archive_fn(web_client: Any, channel_id: str) -> dict[str, Any]:
+        archive_calls.append(channel_id)
+        return {"channel_id": channel_id, "archived": True}
+
+    studio_dispatch_calls: list[dict[str, Any]] = []
+    orig_studio_dispatch = studio_tools.dispatch
+
+    def spy_studio_dispatch(verb, args, *, channel_id, thread_ts, confirmed_via=None, deps):
+        studio_dispatch_calls.append({"verb": verb, "confirmed_via": confirmed_via})
+        return orig_studio_dispatch(
+            verb, args, channel_id=channel_id, thread_ts=thread_ts,
+            confirmed_via=confirmed_via, deps=deps,
+        )
+
+    monkeypatch.setattr(studio_tools, "dispatch", spy_studio_dispatch)
+
+    def project_dispatch_must_not_fire(*a: Any, **k: Any) -> Any:
+        raise AssertionError("per-project tools.dispatch must never fire for a studio verb")
+
+    monkeypatch.setattr(tools, "dispatch", project_dispatch_must_not_fire)
+
+    studio_deps = studio_tools.StudioDeps(
+        store=store, ledger_factory=lambda pid: ledger, provision_archive_fn=fake_archive_fn,
+    )
+    bridge, sdk, poster = _bridge(
+        tmp_path,
+        config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]},
+        studio_deps_factory=lambda: studio_deps,
+    )
+
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "T1"},
+        "user": {"id": "U1"},
+        "channel": {"id": "C-studio"},
+        "message": {"ts": "412.1"},
+        "actions": [{"action_id": "slack_approve", "value": cid}],
+    }
+    await bridge.handle_interaction(payload)
+
+    assert len(studio_dispatch_calls) == 1
+    assert studio_dispatch_calls[0]["verb"] == "archive_project"
+    assert studio_dispatch_calls[0]["confirmed_via"] == "block_actions"
+    assert ledger.status_calls == ["paused"]
+    assert archive_calls == ["C-proj"]
+    assert store.channel_for_project("proj-archive") is None  # unbound after archiving
+
+    record = store.get_confirmation(cid)
+    assert record is not None
+    assert record["state"] == "approved"
+
+    assert len(poster.messages) == 1
+    text = poster.messages[0]["text"].lower()
+    assert "spun down" in text or "archived" in text
+    assert "proj-archive" in poster.messages[0]["text"]
+
+
 async def test_studio_message_text_saying_approve_never_reaches_block_actions_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
