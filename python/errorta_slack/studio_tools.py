@@ -39,6 +39,7 @@ from typing import Any, Callable
 
 from errorta_council.coding.ledger import LedgerError, LedgerStore, list_projects
 from errorta_council.coding.project_factory import create_project_from_charter
+from errorta_slack import config as _config
 from errorta_slack import provisioning
 from errorta_slack import store as _slack_store
 
@@ -131,6 +132,12 @@ class StudioDeps:
     provision_archive_fn: Callable[..., dict[str, Any]] = provisioning.archive_channel
     invite_user_ids: list[str] = field(default_factory=list)
     available_routes: list[dict[str, Any]] | None = None
+    # fix/slack-studio-default-team: explicit team the studio hands to
+    # ``create_fn`` as ``members=`` when spinning up a project, bypassing
+    # ``resolve_team``/``available_routes`` (see ``create_project`` below).
+    # ``None`` (the default) means "read config.load()['studio_default_team']
+    # at call time"; tests inject a list here to avoid touching config.
+    default_team: list[dict[str, Any]] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -150,6 +157,40 @@ def answer_question(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return {"status": "ok"}
 
 
+def _default_team_members(team_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand minimal ``{"coding_role", "gateway_route_id"}`` specs (the
+    ``studio_default_team`` config shape) into full team-member dicts, in the
+    canonical shape ``recipes.resolve_team`` produces --
+    ``{"id", "role", "enabled", "model_mode", "metadata", "gateway_route_id",
+    "provider_kind"}`` -- so ``create_project_from_charter`` can set them
+    verbatim via ``members=``.
+
+    ``id`` is ``f"{coding_role}-{n}"`` where ``n`` counts occurrences of that
+    role within ``team_specs`` (1-based) -- e.g. three "dev" specs become
+    "dev-1", "dev-2", "dev-3". ``provider_kind`` is the route prefix before
+    the first "." (e.g. "claude_cli" from "claude_cli.opus"). Specs missing
+    either field are skipped rather than producing a broken member.
+    """
+    counts: dict[str, int] = {}
+    members: list[dict[str, Any]] = []
+    for spec in team_specs:
+        role = str(spec.get("coding_role") or "").strip()
+        route = str(spec.get("gateway_route_id") or "").strip()
+        if not role or not route:
+            continue
+        counts[role] = counts.get(role, 0) + 1
+        members.append({
+            "id": f"{role}-{counts[role]}",
+            "role": "answerer",
+            "enabled": True,
+            "model_mode": "single",
+            "metadata": {"coding_role": role},
+            "gateway_route_id": route,
+            "provider_kind": route.split(".", 1)[0],
+        })
+    return members
+
+
 def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
                     deps: "StudioDeps") -> dict[str, Any]:
     """Executes the real create — only ever reached by ``dispatch`` after
@@ -160,13 +201,34 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     project was created, the project is not lost — its id is returned in
     the error result — and the channel is never bound to a half-created
     state.
+
+    The team is passed explicitly as ``members=`` (an expansion of
+    ``deps.default_team``, or ``config.load()["studio_default_team"]`` when
+    that's unset) rather than left to ``create_fn``'s own
+    ``resolve_team(recipe, available_routes)`` fallback. That fallback probes
+    ``pm_reference.list_available_routes()``, which reflects only routes the
+    desktop app's Test button has marked "connected" -- on a machine where
+    that hasn't happened it can return a route set that produces the wrong
+    (or an empty) team, leaving the spun-up project without a working PM.
+    Passing ``members`` explicitly bypasses that probe entirely so a
+    studio-created project always gets a working team.
     """
     charter = dict(args or {})
     title = str(charter.get("title") or charter.get("north_star") or "").strip()
     project_id = _project_id_from_title(title)
 
+    if deps.default_team is not None:
+        team_specs = deps.default_team
+    else:
+        team_specs = _config.load().get(
+            "studio_default_team", _config.DEFAULT_CONFIG["studio_default_team"])
+    members = _default_team_members(team_specs)
+
     try:
-        deps.create_fn(project_id, charter, available_routes=deps.available_routes)
+        deps.create_fn(
+            project_id, charter,
+            available_routes=deps.available_routes, members=members,
+        )
     except (ValueError, LedgerError) as exc:
         # These are the two known, safe-to-surface failure shapes: a
         # friendly "missing charter field" note (ValueError) or a ledger

@@ -33,6 +33,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # known-good default; see `studio_concierge.run_turn`'s `model_route`
     # kwarg and `connection._process_studio`, which reads this key.
     "studio_model_route": "claude_cli.opus",
+    # fix/slack-studio-default-team: `create_project_from_charter` normally
+    # resolves a team via `recipes.resolve_team(recipe, available_routes)`,
+    # where `available_routes` defaults to the live
+    # `pm_reference.list_available_routes()` -- on a machine where the
+    # desktop app's Test probe hasn't marked claude_cli/cursor_cli
+    # "connected", that returns only `custom.senditai`, so a studio-spun-up
+    # project ends up with the wrong (or an empty) team and no working PM.
+    # The studio instead builds an explicit `members=` team from this
+    # config, bypassing resolve_team + the availability probe entirely.
+    # Minimal role->route shape (not full member dicts) -- expanded into
+    # canonical member dicts by `errorta_slack.studio_tools._default_team_members`
+    # at use time.
+    "studio_default_team": [
+        {"coding_role": "pm", "gateway_route_id": "claude_cli.opus"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "reviewer", "gateway_route_id": "claude_cli.sonnet"},
+        {"coding_role": "tester", "gateway_route_id": "claude_cli.sonnet"},
+    ],
 }
 
 
@@ -76,6 +96,25 @@ def _str(value: Any, *, default: str) -> str:
     return default
 
 
+def _team_specs(value: Any) -> list[dict[str, str]]:
+    default = [dict(spec) for spec in DEFAULT_CONFIG["studio_default_team"]]
+    if not isinstance(value, list):
+        return default
+    specs: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("coding_role")
+        route = item.get("gateway_route_id")
+        if (isinstance(role, str) and role.strip()
+                and isinstance(route, str) and route.strip()):
+            specs.append({"coding_role": role, "gateway_route_id": route})
+    # A partial/empty result (e.g. every entry missing a field, or an empty
+    # list) falls back to the default team rather than shipping a project
+    # with a broken or empty team.
+    return specs or default
+
+
 def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG)
     if raw:
@@ -94,6 +133,7 @@ def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
             merged.get("studio_model_route"),
             default=str(DEFAULT_CONFIG["studio_model_route"]),
         ),
+        "studio_default_team": _team_specs(merged.get("studio_default_team")),
     }
 
 

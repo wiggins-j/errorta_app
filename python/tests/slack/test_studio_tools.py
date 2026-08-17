@@ -100,8 +100,23 @@ def _charter(**overrides: Any) -> dict[str, Any]:
 
 def _recording_create_fn(calls: list[tuple[str, dict[str, Any]]]) -> Any:
     def _create_fn(project_id: str, charter: dict[str, Any], *,
-                    available_routes: Any = None) -> FakeProject:
+                    available_routes: Any = None, members: Any = None) -> FakeProject:
         calls.append((project_id, charter))
+        return FakeProject(project_id)
+    return _create_fn
+
+
+def _recording_create_fn_kwargs(calls: list[dict[str, Any]]) -> Any:
+    """Like ``_recording_create_fn`` but records the full kwargs each call
+    was made with, for tests asserting on ``members``/``available_routes``."""
+    def _create_fn(project_id: str, charter: dict[str, Any], *,
+                    available_routes: Any = None, members: Any = None) -> FakeProject:
+        calls.append({
+            "project_id": project_id,
+            "charter": charter,
+            "available_routes": available_routes,
+            "members": members,
+        })
         return FakeProject(project_id)
     return _create_fn
 
@@ -198,6 +213,108 @@ def test_create_project_confirmed_via_wrong_provenance_still_stages() -> None:
     assert create_calls == []
 
 
+# --- Default team: bypass the unavailable-routes probe --------------------
+#
+# fix/slack-studio-default-team: `deps.available_routes` defaults to None,
+# which makes `create_project_from_charter` call the live
+# `pm_reference.list_available_routes()` — on a machine where the desktop
+# app's Test probe hasn't marked claude_cli/cursor_cli "connected", that
+# returns only `custom.senditai`, so `resolve_team` builds the wrong (or an
+# empty) team and the spun-up project's PM can't work. The studio must
+# instead pass an explicit `members=` team, which `create_project_from_charter`
+# sets verbatim (bypassing resolve_team + available_routes entirely).
+
+
+def test_create_project_passes_config_default_team_as_members() -> None:
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(create_fn=_recording_create_fn_kwargs(create_calls))
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert len(create_calls) == 1
+    members = create_calls[0]["members"]
+    assert members == [
+        {
+            "id": "pm-1", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "pm"},
+            "gateway_route_id": "claude_cli.opus", "provider_kind": "claude_cli",
+        },
+        {
+            "id": "dev-1", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "dev"},
+            "gateway_route_id": "cursor_cli.composer-2.5", "provider_kind": "cursor_cli",
+        },
+        {
+            "id": "dev-2", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "dev"},
+            "gateway_route_id": "cursor_cli.composer-2.5", "provider_kind": "cursor_cli",
+        },
+        {
+            "id": "dev-3", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "dev"},
+            "gateway_route_id": "cursor_cli.composer-2.5", "provider_kind": "cursor_cli",
+        },
+        {
+            "id": "reviewer-1", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "reviewer"},
+            "gateway_route_id": "claude_cli.sonnet", "provider_kind": "claude_cli",
+        },
+        {
+            "id": "tester-1", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "tester"},
+            "gateway_route_id": "claude_cli.sonnet", "provider_kind": "claude_cli",
+        },
+    ]
+    # available_routes is still threaded through (harmless -- ignored by
+    # create_project_from_charter whenever members is non-empty).
+    assert create_calls[0]["available_routes"] == deps.available_routes
+
+
+def test_create_project_honors_injected_default_team_over_config() -> None:
+    create_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        create_fn=_recording_create_fn_kwargs(create_calls),
+        default_team=[{"coding_role": "pm", "gateway_route_id": "x.y"}],
+    )
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert create_calls[0]["members"] == [
+        {
+            "id": "pm-1", "role": "answerer", "enabled": True,
+            "model_mode": "single", "metadata": {"coding_role": "pm"},
+            "gateway_route_id": "x.y", "provider_kind": "x",
+        },
+    ]
+
+
+def test_default_team_members_expands_role_route_specs() -> None:
+    specs = [
+        {"coding_role": "pm", "gateway_route_id": "claude_cli.opus"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+    ]
+
+    members = studio_tools._default_team_members(specs)
+
+    assert [m["id"] for m in members] == ["pm-1", "dev-1", "dev-2"]
+    assert members[0]["provider_kind"] == "claude_cli"
+    assert members[0]["metadata"] == {"coding_role": "pm"}
+    assert members[1]["gateway_route_id"] == "cursor_cli.composer-2.5"
+    for m in members:
+        assert m["role"] == "answerer"
+        assert m["enabled"] is True
+        assert m["model_mode"] == "single"
+
+
 # --- Fail-closed: unknown verb ---------------------------------------------
 
 
@@ -248,7 +365,7 @@ def test_channel_provisioning_failure_after_project_created_returns_error() -> N
 
 def test_create_fn_value_error_returns_clean_error_not_crash() -> None:
     def _raising_create_fn(project_id: str, charter: dict[str, Any], *,
-                            available_routes: Any = None) -> Any:
+                            available_routes: Any = None, members: Any = None) -> Any:
         raise ValueError("charter missing required field: 'north_star'")
 
     provision_calls: list[dict[str, Any]] = []
@@ -276,7 +393,7 @@ def test_create_fn_arbitrary_exception_returns_clean_error_not_crash() -> None:
     # must not leak the raw exception message (which could carry a path or
     # other internal detail), only the exception's type name.
     def _raising_create_fn(project_id: str, charter: dict[str, Any], *,
-                            available_routes: Any = None) -> Any:
+                            available_routes: Any = None, members: Any = None) -> Any:
         raise OSError("disk")
 
     store = FakeStore()

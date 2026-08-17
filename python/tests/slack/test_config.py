@@ -56,6 +56,43 @@ def test_studio_model_route_override_round_trips() -> None:
     assert loaded["studio_model_route"] == "claude_cli.sonnet"
 
 
+def test_studio_default_team_default_has_six_role_route_specs() -> None:
+    # fix/slack-studio-default-team: the studio spins up projects with an
+    # explicit, configurable default team (not a probed-availability
+    # projection) so a freshly created project always has a working PM.
+    loaded = config.load()
+
+    assert loaded["studio_default_team"] == [
+        {"coding_role": "pm", "gateway_route_id": "claude_cli.opus"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "dev", "gateway_route_id": "cursor_cli.composer-2.5"},
+        {"coding_role": "reviewer", "gateway_route_id": "claude_cli.sonnet"},
+        {"coding_role": "tester", "gateway_route_id": "claude_cli.sonnet"},
+    ]
+
+
+def test_studio_default_team_override_round_trips() -> None:
+    custom = [{"coding_role": "pm", "gateway_route_id": "claude_cli.sonnet"}]
+
+    config.save({"studio_default_team": custom})
+
+    assert config.load()["studio_default_team"] == custom
+
+
+def test_studio_default_team_falls_back_to_default_when_empty_or_invalid() -> None:
+    assert config.normalize({"studio_default_team": []})["studio_default_team"] == \
+        config.DEFAULT_CONFIG["studio_default_team"]
+    assert config.normalize({"studio_default_team": "nope"})["studio_default_team"] == \
+        config.DEFAULT_CONFIG["studio_default_team"]
+    # Entries missing either field are dropped; if that empties the list,
+    # the whole thing falls back to default rather than shipping a partial
+    # or empty team.
+    assert config.normalize(
+        {"studio_default_team": [{"coding_role": "pm"}]}
+    )["studio_default_team"] == config.DEFAULT_CONFIG["studio_default_team"]
+
+
 def test_slack_dir_created_with_owner_only_permissions() -> None:
     slack_dir = config.slack_dir()
 
