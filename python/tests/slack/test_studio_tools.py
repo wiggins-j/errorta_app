@@ -20,12 +20,18 @@ from errorta_slack import provisioning, studio_tools
 
 class FakeStore:
     def __init__(self) -> None:
-        self.staged: list[tuple[str, dict[str, Any], str]] = []
+        self.staged: list[tuple[str, dict[str, Any], str, str]] = []
         self.bound: list[tuple[str, str]] = []
         self._next_cid = 0
 
-    def stage_confirmation(self, verb: str, args: dict[str, Any], thread_ts: str) -> str:
-        self.staged.append((verb, args, thread_ts))
+    def stage_confirmation(self, verb: str, args: dict[str, Any], thread_ts: str, *,
+                            channel_id: str = "") -> str:
+        # channel_id is load-bearing in the real store: outbound.sweep_timeouts
+        # reads it off every pending confirmation record to post its timeout
+        # auto-decision back to the right channel. Recording it here (rather
+        # than accepting **kwargs and dropping it) is what would have caught
+        # the studio_tools.dispatch call that originally omitted it.
+        self.staged.append((verb, args, thread_ts, channel_id))
         self._next_cid += 1
         return f"cid-{self._next_cid}"
 
@@ -104,7 +110,7 @@ def test_create_project_unconfirmed_stages_and_never_touches_engine() -> None:
     assert create_calls == []
     assert provision_calls == []
     assert store.bound == []
-    assert store.staged == [("create_project", _charter(), "t1")]
+    assert store.staged == [("create_project", _charter(), "t1", "C1")]
 
 
 def test_create_project_confirmed_via_block_actions_executes_in_order() -> None:
@@ -222,6 +228,36 @@ def test_create_fn_value_error_returns_clean_error_not_crash() -> None:
     assert "north_star" in result["detail"]
     # provision_fn must not run once create_fn has failed.
     assert provision_calls == []
+
+
+def test_create_fn_arbitrary_exception_returns_clean_error_not_crash() -> None:
+    # Any engine exception beyond the two known-safe shapes (ValueError,
+    # LedgerError) — e.g. OSError from workspace I/O — must still be caught
+    # by dispatch rather than blow up a live Slack turn. The returned detail
+    # must not leak the raw exception message (which could carry a path or
+    # other internal detail), only the exception's type name.
+    def _raising_create_fn(project_id: str, charter: dict[str, Any], *,
+                            available_routes: Any = None) -> Any:
+        raise OSError("disk")
+
+    store = FakeStore()
+    provision_calls: list[dict[str, Any]] = []
+    deps = studio_tools.StudioDeps(
+        store=store,
+        create_fn=_raising_create_fn,
+        provision_fn=_recording_provision_fn(provision_calls),
+    )
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "disk" not in result["detail"]
+    assert "OSError" in result["detail"]
+    assert provision_calls == []
+    assert store.bound == []
 
 
 # --- list_projects ---------------------------------------------------------

@@ -32,6 +32,7 @@ import) implementations.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -40,6 +41,8 @@ from errorta_council.coding.ledger import LedgerError, LedgerStore, list_project
 from errorta_council.coding.project_factory import create_project_from_charter
 from errorta_slack import provisioning
 from errorta_slack import store as _slack_store
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ToolError(Exception):
@@ -157,7 +160,25 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     try:
         deps.create_fn(project_id, charter, available_routes=deps.available_routes)
     except (ValueError, LedgerError) as exc:
+        # These are the two known, safe-to-surface failure shapes: a
+        # friendly "missing charter field" note (ValueError) or a ledger
+        # validation failure (LedgerError). Neither message carries secrets.
         return {"status": "error", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - must never escape a live Slack turn
+        # Any other engine exception (OSError from workspace I/O, KeyError
+        # from a malformed charter, etc.) must not blow up dispatch. The
+        # full exception (with traceback) goes to the module logger for
+        # operators; only the exception's type name — never its message,
+        # which could carry a filesystem path, token, or other internal
+        # detail — is returned to the caller.
+        _LOGGER.exception(
+            "studio create_project: create_fn raised %s for project_id=%s",
+            type(exc).__name__, project_id,
+        )
+        return {
+            "status": "error",
+            "detail": f"project creation failed ({type(exc).__name__})",
+        }
 
     try:
         chan = deps.provision_fn(
@@ -207,7 +228,14 @@ def dispatch(verb: str, args: dict[str, Any], *, channel_id: str, thread_ts: str
         # create_fn nor provision_fn nor store.bind_channel is reachable
         # from here; only a verified block_actions callback resolves this
         # confirmation and re-enters dispatch with confirmed_via set.
-        cid = deps.store.stage_confirmation(verb, safe_args, thread_ts)
+        #
+        # channel_id MUST be threaded onto the staged record: the shared
+        # outbound.sweep_timeouts background loop reads channel_id off every
+        # pending confirmation (it has no live Slack payload to read one
+        # from) to post its auto-decided timeout outcome back to the right
+        # channel. Omitting it here would silently strand a timed-out
+        # create_project request — the requester would never be told.
+        cid = deps.store.stage_confirmation(verb, safe_args, thread_ts, channel_id=channel_id)
         return {"status": "needs_confirmation", "confirmation_id": cid}
     impl = _VERB_IMPLS[verb]
     return impl(safe_args, channel_id=channel_id, thread_ts=thread_ts, deps=deps)
