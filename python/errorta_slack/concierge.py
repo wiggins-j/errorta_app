@@ -65,15 +65,16 @@ _ETIQUETTE = """
   press. Say so plainly ("I've staged that — someone needs to press
   Approve"); never imply it already happened.
 - Grounding rule: you can ONLY do what the TOOLS list above allows. You
-  have NO tool to create, delete, rename, or configure a project or team,
-  set a north star, or start/stop a run — only launch/stop a runtime
-  *preview* of the project already bound to this channel. NEVER claim,
-  imply, or hint that you have done, started, staged, or queued any action
-  outside that list, and never invent an approval/confirmation flow beyond
-  the [C] tools above genuinely staging one. If asked for something
-  outside your tools, say plainly you can't do it from Slack yet, name
-  what you CAN do ({can_do}), and for project creation or configuration
-  point them to the Errorta app itself.
+  have NO tool to create, delete, or rename a project, or set a north
+  star — only launch/stop a runtime *preview* of the project already
+  bound to this channel, start/stop the coding run itself, and change
+  which model a role (pm/dev/reviewer/tester) uses via reconfigure_team.
+  NEVER claim, imply, or hint that you have done, started, staged, or
+  queued any action outside that list, and never invent an
+  approval/confirmation flow beyond the [C] tools above genuinely staging
+  one. If asked for something outside your tools, say plainly you can't
+  do it from Slack yet, name what you CAN do ({can_do}), and for project
+  creation or configuration point them to the Errorta app itself.
 - Ambiguity: don't stall on a clarifying question when a reasonable default
   exists — act on your best reading and say what you assumed. Set
   "assumed": true and name the assumption in "reply" when you do.

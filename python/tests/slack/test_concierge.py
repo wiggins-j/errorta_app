@@ -158,6 +158,24 @@ def test_build_system_prompt_grounding_lists_real_catalog_capabilities() -> None
             assert spec["summary"] in prompt
 
 
+def test_grounding_no_longer_claims_it_cannot_reconfigure_a_team() -> None:
+    """Slice 3: the concierge gained ``reconfigure_team`` (role -> model).
+    The hand-written negative in the etiquette contract must no longer
+    contradict that — the grounding rule may still deny creating, deleting,
+    or renaming a PROJECT, but not deny reconfiguring the TEAM."""
+    prompt = concierge.build_system_prompt("proj-a")
+    lowered = prompt.lower()
+
+    # The grounding rule's negative no longer lumps "team" in with the
+    # things it truly can't do.
+    assert "configure a project or team" not in lowered
+    # It still truthfully can't create/delete/rename a project.
+    assert "create, delete, or rename a project" in lowered
+    # reconfigure_team's own catalog summary is present (mentions role and
+    # model), so the prompt is not silently missing the capability either.
+    assert "reconfigure_team" in prompt
+
+
 # --- Happy path: status query -> dispatch -> reply --------------------------
 
 
