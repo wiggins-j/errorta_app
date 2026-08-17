@@ -56,6 +56,20 @@ def create_project_from_charter(
     for field_name in REQUIRED_CHARTER_FIELDS:
         if not charter.get(field_name):
             raise ValueError(f"charter missing required field: {field_name!r}")
+    # REQUIRED_CHARTER_FIELDS mirrors wizard.py's tuple verbatim (kept identical
+    # so it stays a faithful mirror of the canonical source), which doesn't cover
+    # team_recipe/autonomous — wizard.finalize() enforces those separately via
+    # _compute_missing() before it ever hands back a charter. This function
+    # dereferences both below (charter["team_recipe"], charter["autonomous"])
+    # AFTER writing the project + workspace to disk, so they must be validated
+    # here too, up front, or a caller-supplied charter missing either one leaves
+    # an orphaned project/workspace behind when the KeyError fires.
+    if not charter.get("team_recipe"):
+        raise ValueError("charter missing required field: 'team_recipe'")
+    # `autonomous` is a real yes/no choice and False is a legitimate answer, so
+    # check presence (like wizard's _is_explicit_bool), not truthiness.
+    if "autonomous" not in charter or charter.get("autonomous") is None:
+        raise ValueError("charter missing required field: 'autonomous'")
 
     from . import pm_reference, recipes
     from .autonomy import load_policy, policy_from_dict, policy_to_dict, save_policy

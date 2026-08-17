@@ -84,6 +84,27 @@ def test_missing_north_star_raises_value_error(tmp_errorta_home: Path):
         create_project_from_charter("hs-game5", bad, available_routes=ROUTES)
 
 
+def test_missing_team_recipe_raises_before_any_disk_write(tmp_errorta_home: Path):
+    # team_recipe/autonomous aren't in REQUIRED_CHARTER_FIELDS but ARE
+    # dereferenced later (after create_project/CodingWorkspace.setup write to
+    # disk) — a missing one must be caught up front so no orphan is left.
+    bad = dict(CHARTER)
+    del bad["team_recipe"]
+    with pytest.raises(ValueError):
+        create_project_from_charter("hs-game6", bad, available_routes=ROUTES)
+    with pytest.raises(Exception):
+        LedgerStore("hs-game6").get_project()
+
+
+def test_missing_autonomous_raises_before_any_disk_write(tmp_errorta_home: Path):
+    bad = dict(CHARTER)
+    del bad["autonomous"]
+    with pytest.raises(ValueError):
+        create_project_from_charter("hs-game7", bad, available_routes=ROUTES)
+    with pytest.raises(Exception):
+        LedgerStore("hs-game7").get_project()
+
+
 def test_unsafe_project_id_raises(tmp_errorta_home: Path):
     with pytest.raises(LedgerError):
         create_project_from_charter("../x", CHARTER, available_routes=ROUTES)
