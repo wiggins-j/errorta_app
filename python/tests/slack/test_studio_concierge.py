@@ -154,6 +154,21 @@ def test_build_system_prompt_grounding_lists_real_catalog_capabilities() -> None
             assert spec["summary"] in prompt
 
 
+def test_build_system_prompt_no_longer_claims_it_cant_spin_down_a_project() -> None:
+    # Task 2 (spin-down): the studio manager now has archive_project — the
+    # hand-written grounding negative claiming it has "NO tool to ...
+    # delete[/archive]" a project would directly contradict the catalog it
+    # renders just above it. That stale negative must be gone.
+    prompt = studio_concierge.build_system_prompt()
+
+    lowered = prompt.lower()
+    assert "archive_project" in lowered
+    assert "no tool to edit, rename, delete, or reconfigure" not in lowered
+    # Truthful negatives must survive: still no rename, still no hard-delete.
+    assert "rename" in lowered
+    assert "hard-delete" in lowered or "hard delete" in lowered or "destroy" in lowered
+
+
 # --- Happy path: charter-gathering message -> create_project -> staged -----
 
 
