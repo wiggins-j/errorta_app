@@ -172,10 +172,31 @@ def _fallback_result(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _synthetic_member(project_id: str) -> dict[str, Any]:
-    """The ``member`` dict handed to ``caller`` — a synthetic identity; the
-    concierge is not a persisted room member."""
-    return {"id": "concierge", "role": "concierge", "coding_role": "pm", "project_id": project_id}
+def _resolve_pm_member(store: Any) -> dict[str, Any] | None:
+    """The PM member from the project's persisted run config, or ``None`` if
+    the team isn't configured yet. Mirrors ``routes/coding.py``'s
+    ``_resolve_pm_member`` exactly (inlined here — this module must not
+    import ``errorta_app.routes.*``, which would pull the FastAPI app into
+    the concierge's dependency graph)."""
+    from errorta_council.coding.topology import PM, coding_role_of
+    members = store.get_run_config().get("members") or []
+    for m in members:
+        if (isinstance(m, dict) and m.get("enabled", True)
+                and coding_role_of(m) == PM):
+            return m
+    return None
+
+
+def _unconfigured_result(project_id: str) -> dict[str, Any]:
+    return {
+        "reply": (
+            f"I don't have a model configured for the PM role on project "
+            f"'{project_id}' yet — set the PM member's model and try again."
+        ),
+        "tool_results": [],
+        "reactions": [],
+        "assumed": False,
+    }
 
 
 def _render_thread(thread_msgs: list[dict[str, Any]]) -> str:
@@ -278,9 +299,22 @@ def run_turn(
     final reply can use them — bounded by ``max_hops`` so this never loops
     unbounded. An unknown verb (``tools.ToolError``) also degrades to the
     catalog-listing fallback rather than crashing.
+
+    The model is reached through the project's PM team member — resolved
+    from ``deps.ledger_factory(project_id).get_run_config()`` — so the
+    concierge's "brain" uses whatever model the team's PM is actually
+    configured with (``gateway_route_id``). If no PM member is configured,
+    or the PM member has no route to dispatch through, the model is never
+    called at all: a clean "not configured" reply is returned instead of
+    risking an empty-route crash in the gateway.
     """
+    ledger_store = deps.ledger_factory(project_id)
+    pm = _resolve_pm_member(ledger_store)
+    if pm is None or not str(pm.get("gateway_route_id") or "").strip():
+        return _unconfigured_result(project_id)
+    member = {**pm, "project_id": project_id}
+
     system_prompt = build_system_prompt(project_id)
-    member = _synthetic_member(project_id)
 
     prompt = _build_prompt(system_prompt, thread_msgs, message)
     raw = caller(member, prompt) or ""
