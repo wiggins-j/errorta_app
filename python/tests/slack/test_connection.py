@@ -46,6 +46,17 @@ class FakeLedgerStore:
     def get_project(self) -> Any:
         raise RuntimeError("no project")
 
+    def get_run_config(self) -> dict[str, Any]:
+        # concierge.run_turn resolves the model through the project's PM
+        # team member — give every test here a routable one by default so
+        # the existing exercised-through-run_turn tests keep calling the
+        # (scripted/spy) model exactly as before this seam existed.
+        return {"members": [
+            {"member_id": "m-pm", "role": "answerer", "enabled": True,
+             "gateway_route_id": "claude_cli.opus", "provider_kind": "cli",
+             "metadata": {"coding_role": "pm"}},
+        ]}
+
     def add_task(self, *, title: str, role: str, detail: str = "",
                  task_type: str = "implementation", **_: Any) -> FakeTask:
         return FakeTask("t-1")

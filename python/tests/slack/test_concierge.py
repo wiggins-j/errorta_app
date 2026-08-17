@@ -23,11 +23,26 @@ class FakeTask:
         self.task_id = task_id
 
 
+# The default PM member every test gets unless it overrides ``run_config`` —
+# a real ``gateway_route_id`` so tests written before this seam existed keep
+# exercising the caller exactly as before.
+_DEFAULT_PM_MEMBER = {
+    "member_id": "m-pm", "role": "answerer", "enabled": True,
+    "gateway_route_id": "claude_cli.opus", "provider_kind": "cli",
+    "metadata": {"coding_role": "pm"},
+}
+
+
 class FakeLedgerStore:
-    def __init__(self, project_id: str, tmp_path: Path) -> None:
+    def __init__(self, project_id: str, tmp_path: Path,
+                 run_config: dict[str, Any] | None = None) -> None:
         self.project_id = project_id
         self.dir = tmp_path / f"ledger-{project_id}"
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._run_config = (
+            run_config if run_config is not None
+            else {"members": [dict(_DEFAULT_PM_MEMBER)]}
+        )
 
     def list_tasks(self) -> list[Any]:
         return []
@@ -40,6 +55,9 @@ class FakeLedgerStore:
 
     def get_project(self) -> Any:
         raise RuntimeError("no project")
+
+    def get_run_config(self) -> dict[str, Any]:
+        return self._run_config
 
     def add_task(self, *, title: str, role: str, detail: str = "",
                  task_type: str = "implementation", **_: Any) -> FakeTask:
@@ -54,10 +72,12 @@ class _FakePmChanges:
         raise AssertionError("decline must never be called from an unconfirmed concierge turn")
 
 
-def _deps(tmp_path: Path, **overrides: Any) -> tools.ToolDeps:
+def _deps(tmp_path: Path, *, run_config: dict[str, Any] | None = None,
+          **overrides: Any) -> tools.ToolDeps:
     kwargs: dict[str, Any] = {
         "store": store,
-        "ledger_factory": lambda project_id: FakeLedgerStore(project_id, tmp_path),
+        "ledger_factory": lambda project_id: FakeLedgerStore(
+            project_id, tmp_path, run_config=run_config),
         "launch_fn": lambda project_id: None,
         "publish_fn": lambda args: (_ for _ in ()).throw(
             AssertionError("publish_fn must never run from an unconfirmed concierge turn")
@@ -279,3 +299,76 @@ def test_resolve_decision_from_model_text_never_executes(tmp_path: Path) -> None
     assert dispatched["status"] == "needs_confirmation"
     # _FakePmChanges.accept/decline raise AssertionError if ever invoked —
     # reaching this line at all is part of the proof they were not.
+
+
+# --- PM-member model route (concierge's "brain" uses the team's PM route) --
+
+
+def test_run_turn_dispatches_through_the_pm_members_gateway_route(
+        tmp_path: Path) -> None:
+    """The concierge is not a persisted room member — it has no route of its
+    own. It must borrow the project's configured PM member's
+    ``gateway_route_id`` rather than a routeless synthetic identity that can
+    never reach a real model."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, run_config={"members": [
+        {"member_id": "m-pm", "role": "answerer", "enabled": True,
+         "gateway_route_id": "claude_cli.opus", "provider_kind": "cli",
+         "metadata": {"coding_role": "pm"}},
+    ]})
+    caller = _ScriptedCaller([
+        _envelope(reply="Here's the status: no blockers.", tool_calls=[]),
+    ])
+
+    result = concierge.run_turn(
+        "how's it going", [],
+        project_id="proj-a", channel_id="C1", thread_ts="t1",
+        deps=deps, caller=caller,
+    )
+
+    assert len(caller.calls) == 1
+    member_used = caller.calls[0][0]
+    assert member_used["gateway_route_id"] == "claude_cli.opus"
+    assert result["reply"] == "Here's the status: no blockers."
+
+
+def test_run_turn_with_no_pm_member_returns_clean_reply_never_calls_model(
+        tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, run_config={"members": []})
+    caller = _ScriptedCaller([])
+
+    result = concierge.run_turn(
+        "how's it going", [],
+        project_id="proj-a", channel_id="C1", thread_ts="t1",
+        deps=deps, caller=caller,
+    )
+
+    assert len(caller.calls) == 0
+    assert "proj-a" in result["reply"]
+    assert "PM" in result["reply"]
+    assert result["tool_results"] == []
+    assert result["reactions"] == []
+    assert result["assumed"] is False
+
+
+def test_run_turn_with_empty_pm_route_returns_clean_reply_never_calls_model(
+        tmp_path: Path) -> None:
+    """A PM member exists but has no route wired (e.g. team configured but
+    the PM's model was never assigned) — same clean-refusal outcome as no PM
+    at all, not a crash inside the gateway on an empty route_id."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, run_config={"members": [
+        {"member_id": "m-pm", "role": "answerer", "enabled": True,
+         "gateway_route_id": "", "metadata": {"coding_role": "pm"}},
+    ]})
+    caller = _ScriptedCaller([])
+
+    result = concierge.run_turn(
+        "how's it going", [],
+        project_id="proj-a", channel_id="C1", thread_ts="t1",
+        deps=deps, caller=caller,
+    )
+
+    assert len(caller.calls) == 0
+    assert result["tool_results"] == []
