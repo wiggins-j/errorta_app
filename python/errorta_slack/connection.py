@@ -167,18 +167,55 @@ class SlackBridge:
     # ----------------------------------------------------------------
 
     async def handle_event(self, envelope: dict[str, Any]) -> None:
-        """Ack, dedupe, resolve binding, enqueue. Never dispatches a tool
-        itself — every effect this path can trigger runs through
-        ``concierge.run_turn``, which always passes ``confirmed_via=None``."""
+        """Ack, filter, dedupe, resolve binding, enqueue. Never dispatches a
+        tool itself — every effect this path can trigger runs through
+        ``concierge.run_turn``, which always passes ``confirmed_via=None``.
+
+        After the ack (which must stay first — Slack's <=3s requirement —
+        and unconditional, regardless of what's dropped below), this drops
+        anything that isn't a genuine allowlisted human chat message:
+
+        * non-``message`` events,
+        * bot-authored posts (``bot_id`` set) — this INCLUDES the bridge's
+          own messages, which Slack echoes back as events; without this
+          drop the bridge answers itself forever (the feedback-loop bug),
+        * any event carrying a ``subtype`` (``bot_message``,
+          ``message_changed``, ``message_deleted``, ``channel_join``,
+          etc.) — genuine user messages never have one,
+        * events with no human ``user``,
+        * a team/user pair that fails ``auth.is_allowed``'s fail-closed
+          allowlist check — mirrors the exact discipline
+          ``handle_interaction`` already applies before it will act on a
+          button click.
+        """
         await self._ack(envelope.get("envelope_id"))
 
         payload = envelope.get("payload") or {}
+        event = payload.get("event") or {}
+        channel_id = event.get("channel")
+
+        if event.get("type") != "message":
+            return
+        if event.get("bot_id"):
+            return
+        if event.get("subtype"):
+            return
+        user_id = event.get("user")
+        if not user_id:
+            return
+
+        team_id = str((payload.get("team") or {}).get("id") or payload.get("team_id") or "")
+        if not auth.is_allowed(team_id, str(user_id), self._config):
+            _LOGGER.warning(
+                "slack bridge: dropped inbound message from disallowed "
+                "team/user (channel=%s user=%s)", channel_id, user_id,
+            )
+            return
+
         event_id = payload.get("event_id")
         if event_id is not None and self._deps.store.seen_event(str(event_id)):
             return
 
-        event = payload.get("event") or {}
-        channel_id = event.get("channel")
         binding = self._deps.store.binding_for(channel_id) if channel_id else None
         project_id = binding.get("project_id") if binding else None
         thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
