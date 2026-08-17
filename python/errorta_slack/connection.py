@@ -714,6 +714,11 @@ class SlackBridge:
             else:
                 detail = f"{verb}: {(effect_result or {}).get('status', 'done')}."
             text = f"🤖 Autopilot approved — {detail}"
+        elif (effect_result or {}).get("status") == "error":
+            # The verb ran but reported failure (e.g. start_run -> a provider
+            # is logged out). Say so plainly rather than claiming success.
+            reason = (effect_result or {}).get("detail") or "check the project directly"
+            text = f"⚠️ Autopilot approved *{verb}*, but it didn't complete — {reason}"
         else:
             text = f"🤖 Autopilot approved & executed *{verb}*."
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
@@ -886,7 +891,12 @@ class SlackBridge:
                 confirmed_via="block_actions", deps=self._build_studio_deps(),
             )
         if approved:
-            tools.dispatch(
+            # Return the dispatch result (rather than discarding it) so an
+            # autopilot audit line can be honest about a verb that "ran" but
+            # reported a failure status (e.g. start_run -> provider logged
+            # out). handle_interaction's per-project outcome ignores this
+            # return, so surfacing it changes nothing on the button path.
+            return tools.dispatch(
                 verb, dict(record.get("args") or {}),
                 channel_id=channel_id, thread_ts=thread_ts,
                 confirmed_via="block_actions", deps=self._deps,

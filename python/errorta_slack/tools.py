@@ -207,7 +207,21 @@ def _default_start_run(
     """
     from errorta_app.routes.coding import _start_run
 
-    return _start_run(project_id, {}, resume=resume, continue_=continue_)
+    body: dict[str, Any] = {}
+    if not (resume or continue_):
+        # Fresh start: ``_start_run`` recovers the project's saved team ONLY on
+        # resume/continue (``routes/coding.py`` ~:2562), so a fresh start with
+        # an empty body fails with "no members" — which is exactly why a Slack
+        # "start building" on a brand-new studio project silently never ran.
+        # Pass the project's already-confirmed team explicitly, the same way
+        # the desktop frontend does on its first Start Run.
+        from errorta_council.coding.ledger import LedgerStore
+
+        cfg = LedgerStore(project_id).get_run_config()
+        members = [m for m in (cfg.get("members") or []) if isinstance(m, dict)]
+        if members:
+            body = {"members": members}
+    return _start_run(project_id, body, resume=resume, continue_=continue_)
 
 
 @dataclass
