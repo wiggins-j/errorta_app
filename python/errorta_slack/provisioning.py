@@ -144,3 +144,28 @@ def create_project_channel(
             pass
 
     return {"channel_id": channel_id, "name": name}
+
+
+def archive_channel(web_client: Any, channel_id: str) -> dict[str, Any]:
+    """Archives ``channel_id`` (part of the reversible spin-down flow).
+
+    Returns ``{"channel_id": str, "archived": True}``. ``already_archived``
+    is treated as success (idempotent — the channel is archived either
+    way). Any other Slack error code is wrapped in ``ProvisioningError``
+    (with ``.code`` set) so the caller can surface a clear message; a
+    non-Slack-shaped exception (no ``.response``) is not a Slack error
+    code at all and propagates unwrapped, mirroring
+    ``_create_channel_with_retry``.
+    """
+    try:
+        web_client.conversations_archive(channel=channel_id)
+    except Exception as exc:  # noqa: BLE001 - duck-typed Slack error
+        code = _slack_error_code(exc)
+        if code is None:
+            # Not a Slack-API-shaped error at all; don't mask it as a
+            # provisioning failure with a fabricated code.
+            raise
+        if code == "already_archived":
+            return {"channel_id": channel_id, "archived": True}
+        raise ProvisioningError(code, f"conversations_archive failed: {code}") from exc
+    return {"channel_id": channel_id, "archived": True}
