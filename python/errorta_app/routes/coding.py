@@ -2093,7 +2093,10 @@ def wizard_create(session_id: str, body: dict[str, Any], request: Request) -> di
 
     delivery_root = str((body or {}).get("delivery_root") or "").strip() or None
     recipe, autonomous = charter["team_recipe"], charter["autonomous"]
-    members = recipes.resolve_team(recipe, pm_reference.list_available_routes())
+    # Slice 1 §1: seat a Designer only for UI modalities (static/server/desktop).
+    members = recipes.resolve_team(
+        recipe, pm_reference.list_available_routes(),
+        modality=str(charter.get("modality") or "") or None)
     warnings: list[str] = []
 
     # All-or-nothing: if any setup step fails after create_project, remove the
