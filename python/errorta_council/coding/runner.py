@@ -3043,8 +3043,12 @@ def _design_contract_text(store: LedgerStore, task: Task | None = None) -> str:
         lines.append("Tokens: " + ", ".join(sorted(tokens.keys())) + ".")
     matrix = body.get("direction_matrix")
     if isinstance(matrix, dict) and matrix:
+        from .design_spec import DIRECTION_AXES
+        # Canonical axis order (not alphabetical) so the contract reads naturally.
+        ordered = [a for a in DIRECTION_AXES if a in matrix] + [
+            a for a in matrix if a not in DIRECTION_AXES]
         lines.append("Direction: " + "; ".join(
-            f"{axis}={matrix[axis]}" for axis in sorted(matrix)
+            f"{axis}={matrix[axis]}" for axis in ordered
             if isinstance(matrix.get(axis), str)) + ".")
     screens = body.get("screens")
     if isinstance(screens, list) and screens:
@@ -6247,12 +6251,21 @@ def build_run_turn(
     def _execute(action: Any, ledger: Any) -> TurnOutcome:
         if isinstance(action, DesignPlan):
             # Slice 1 §2/§4 — the Designer authors the design_spec. A valid body is
-            # accepted (state approved) and spawns the one materialize DEV task; an
-            # invalid body is bounced to changes_requested with the named fields (§8).
+            # accepted (state approved) and spawns the one materialize DEV task. A
+            # PARSE error OR a semantically-invalid body (missing axis/section) is
+            # re-prompted in-turn with the named problem (bounded by
+            # `_INTENT_CORRECTIVE_RETRIES`); only if it is STILL invalid after the
+            # retry is it appended as `changes_requested` (§8). Doing the recovery
+            # in-turn — not by re-scheduling — keeps the authoring turn one-shot and
+            # avoids a scheduler loop, while closing the "invalid body wedges UI
+            # dispatch forever" hole (the Designer almost always fixes a named field
+            # on the second try). NOTE: TurnParseError / parse_coding_turn are used
+            # module-globals here (imported at module scope) — do NOT re-import them
+            # locally, or Python makes them locals across the whole _execute body and
+            # every other dispatch arm UnboundLocalErrors.
             from .design_materialize import spawn_materialize_task_if_needed
             from .design_spec import validate_design_body
             from .governance import GovernanceStore
-            from .schemas import TurnParseError, parse_coding_turn
 
             member = _member(DESIGNER, action.member_id)
             governance = GovernanceStore.for_ledger(store)
@@ -6261,33 +6274,39 @@ def build_run_turn(
                 task_id="design", role=DESIGNER)
             prompt = _designer_prompt(store)
             parsed = parse_coding_turn(DESIGNER, None, caller(member, prompt))
-            retries = 0
-            while (isinstance(parsed, TurnParseError)
-                   and retries < _INTENT_CORRECTIVE_RETRIES):
-                retries += 1
+            body_json: dict[str, Any] = {}
+            ok, errors = False, ["no valid design_spec turn produced"]
+            attempts = 0
+            while True:
+                if isinstance(parsed, TurnParseError):
+                    problem_code, problem_detail = parsed.code.value, parsed.detail
+                else:
+                    body_json = getattr(parsed.intent, "body_json", {}) or {}
+                    ok, errors = validate_design_body(body_json)
+                    if ok:
+                        break
+                    problem_code = "design_spec_invalid_body"
+                    problem_detail = "; ".join(errors)
                 store.record_decision(
                     title="designer turn rejected", context="design",
                     choice="designer_turn_rejected",
-                    rationale=f"{parsed.code.value}: {parsed.detail}")
+                    rationale=f"{problem_code}: {problem_detail}")
+                if attempts >= _INTENT_CORRECTIVE_RETRIES:
+                    break
+                attempts += 1
                 prompt = _governance_corrective_prompt(
-                    prompt, parsed.code.value, parsed.detail,
-                    retry=retries, max_retries=_INTENT_CORRECTIVE_RETRIES)
+                    prompt, problem_code, problem_detail,
+                    retry=attempts, max_retries=_INTENT_CORRECTIVE_RETRIES)
                 parsed = parse_coding_turn(DESIGNER, None, caller(member, prompt))
             if isinstance(parsed, TurnParseError):
-                store.record_decision(
-                    title="designer turn rejected", context="design",
-                    choice="designer_turn_rejected",
-                    rationale=f"{parsed.code.value}: {parsed.detail}")
+                # Never parsed a turn at all — a clear blocker, not a silent stall.
                 return TurnOutcome(kind="governance_progress", made_progress=False,
                                    hard_blocker=True, reason="designer_turn_unparseable")
-            intent = parsed.intent
-            body_json = getattr(intent, "body_json", {}) or {}
-            ok, errors = validate_design_body(body_json)
             state = "approved" if ok else "changes_requested"
             governance.append_artifact(
                 kind="design_spec",
-                title=getattr(intent, "title", "") or "Design contract",
-                body_markdown=getattr(intent, "body_markdown", ""),
+                title=getattr(parsed.intent, "title", "") or "Design contract",
+                body_markdown=getattr(parsed.intent, "body_markdown", ""),
                 body_json=body_json, state=state,
                 author={"role": DESIGNER, "member_id": str(member.get("id", ""))})
             if ok:

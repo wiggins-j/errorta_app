@@ -91,13 +91,37 @@ def test_ui_dev_task_dispatched_once_approved(tmp_errorta_home: Path) -> None:
 
 # --- cli modality is inert (no designer, no design phase) ---------------------
 
+def test_cli_project_seats_no_designer(tmp_errorta_home: Path) -> None:
+    """The team-composition half of the inert path: a cli/binary/container recipe
+    seats no Designer at all (spec §1)."""
+    from errorta_council.coding import recipes
+    from errorta_council.coding.topology import coding_role_of
+    routes = [{"route_id": "local.q", "provider_class": "local"}]
+    for modality in ("cli", "binary", "container"):
+        members = recipes.resolve_team("balanced", routes, modality=modality)
+        assert "designer" not in [coding_role_of(m) for m in members], modality
+
+
 def test_cli_project_has_no_design_phase(tmp_errorta_home: Path) -> None:
+    """The scheduling half of the inert path: with no Designer seated, the design
+    preflight schedules nothing, the UI-dispatch gate never engages, and a UI dev
+    task is dispatched exactly as a pre-Designer run would — even if a design_spec
+    artifact somehow existed. Every design path in the spec is inert."""
+    from errorta_council.coding.design_scheduler import (
+        design_gate_blocks_ui,
+        next_design_action,
+    )
     store = _store("design-cli")
     ui = store.add_task(title="Build the landing page", role="dev",
                         target_files=["index.html"])
+    by_role = {"pm": ["m-pm"], "dev": ["m-dev"]}  # no designer
+
+    # The design phase and gate are provably inert (not just "no designer in team").
+    assert next_design_action(store, by_role) is None
+    assert design_gate_blocks_ui(store, by_role) is False
+
+    # No DesignPlan is ever scheduled, and the UI task is dispatched normally.
     action = decide_next(store, _CLI_TEAM)
-    # No DesignPlan is ever scheduled, and the UI task is dispatched normally —
-    # the whole spec is inert without a seated Designer.
     assert not isinstance(action, DesignPlan)
     assert isinstance(action, Assign)
     assert action.task_id == ui.task_id
