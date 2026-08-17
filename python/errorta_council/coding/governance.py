@@ -49,6 +49,9 @@ ArtifactKind = Literal[
     "plan_amendment",
     "slice_acceptance",
     "completion_summary",
+    # Slice 1 §2 — the Designer's design contract, using the same
+    # draft -> under_review -> changes_requested -> approved state machine.
+    "design_spec",
 ]
 ArtifactState = Literal[
     "draft",
@@ -813,7 +816,7 @@ def _artifact_kind(value: object) -> ArtifactKind:
     text = str(value or "brainstorm")
     allowed = {
         "brainstorm", "spec", "implementation_plan", "plan_amendment",
-        "slice_acceptance", "completion_summary",
+        "slice_acceptance", "completion_summary", "design_spec",
     }
     return text if text in allowed else "brainstorm"  # type: ignore[return-value]
 
