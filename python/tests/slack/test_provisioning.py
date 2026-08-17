@@ -117,6 +117,15 @@ class _CreateFailsWebClient(_FakeWebClient):
         raise _SlackApiErrorLike(self._error)
 
 
+class _CreateRaisesPlainRuntimeErrorWebClient(_FakeWebClient):
+    """Create raises a plain exception with no ``.response`` at all —
+    not a SlackApiError-shaped error, e.g. a network/library bug."""
+
+    def conversations_create(self, *, name: str, is_private: bool) -> dict[str, Any]:
+        self.create_calls.append({"name": name, "is_private": is_private})
+        raise RuntimeError("boom")
+
+
 class _InviteFailsWebClient(_FakeWebClient):
     def __init__(self, invite_error: str) -> None:
         super().__init__()
@@ -156,6 +165,19 @@ def test_create_project_channel_invites_given_user_ids() -> None:
         client, title="Homeschool Game!", invite_user_ids=["U1", "U2"]
     )
     assert client.invite_calls == [{"channel": "C9", "users": ["U1", "U2"]}]
+
+
+def test_create_project_channel_skips_invite_call_when_no_user_ids() -> None:
+    """An empty invite list must not call conversations_invite at all —
+    on real Slack an empty ``users`` list can itself error, and any such
+    error not in the swallow-whitelist would otherwise raise even though
+    the channel was already created."""
+    client = _FakeWebClient()
+    result = provisioning.create_project_channel(
+        client, title="Homeschool Game!", invite_user_ids=[]
+    )
+    assert result == {"channel_id": "C9", "name": "homeschool-game"}
+    assert client.invite_calls == []
 
 
 def test_create_project_channel_sets_topic_when_purpose_given() -> None:
@@ -230,6 +252,16 @@ def test_create_project_channel_does_not_leak_raw_slack_api_error() -> None:
         provisioning.create_project_channel(client, title="Homeschool Game!", invite_user_ids=[])
     assert isinstance(exc_info.value, provisioning.ProvisioningError)
     assert not isinstance(exc_info.value, _SlackApiErrorLike)
+
+
+def test_create_project_channel_reraises_non_slack_shaped_create_error_unwrapped() -> None:
+    """An exception with no ``.response`` (not SlackApiError-shaped) is a
+    bug/network failure, not a Slack error code — must propagate as-is,
+    not be masked as a fabricated ProvisioningError."""
+    client = _CreateRaisesPlainRuntimeErrorWebClient()
+    with pytest.raises(RuntimeError, match="boom") as exc_info:
+        provisioning.create_project_channel(client, title="Homeschool Game!", invite_user_ids=[])
+    assert not isinstance(exc_info.value, provisioning.ProvisioningError)
 
 
 # --- create_project_channel: invite best-effort ------------------------------

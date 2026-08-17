@@ -129,12 +129,13 @@ def create_project_channel(
     channel_id = channel["id"]
     name = channel["name"]
 
-    try:
-        web_client.conversations_invite(channel=channel_id, users=invite_user_ids)
-    except Exception as exc:  # noqa: BLE001 - best-effort invite
-        code = _slack_error_code(exc)
-        if code not in ("already_in_channel", "cant_invite_self"):
-            raise
+    if invite_user_ids:
+        try:
+            web_client.conversations_invite(channel=channel_id, users=invite_user_ids)
+        except Exception as exc:  # noqa: BLE001 - best-effort invite
+            code = _slack_error_code(exc)
+            if code not in ("already_in_channel", "cant_invite_self"):
+                raise
 
     if purpose:
         try:
