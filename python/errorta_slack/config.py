@@ -18,6 +18,14 @@ from errorta_app.paths import errorta_home
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
+    # Slice 5: when true, the PM approves+executes staged C-class actions
+    # itself (via the same verified internal fire path a button tap uses),
+    # instead of posting an Approve button and waiting. Default FALSE keeps
+    # the safe, button-gated behavior for everyone -- turning on autonomous
+    # spend/publish is the owner's own deliberate config write. The
+    # tool-layer injection guard is unchanged either way; see
+    # `connection._handle_staged_confirmations`.
+    "autopilot": False,
     "bindings": [],
     "window": 20,
     "timeout_minutes": 30,
@@ -121,6 +129,7 @@ def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
         merged.update(raw)
     return {
         "enabled": _bool(merged.get("enabled")),
+        "autopilot": _bool(merged.get("autopilot")),
         "bindings": _bindings(merged.get("bindings")),
         "window": _int(merged.get("window"), default=int(DEFAULT_CONFIG["window"])),
         "timeout_minutes": _int(

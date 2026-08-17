@@ -14,9 +14,30 @@ def _isolated_errorta_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
     return tmp_path
 
 
+def test_autopilot_defaults_off() -> None:
+    # Slice 5: autopilot lets the PM approve+execute C-class actions itself.
+    # It MUST default off -- enabling autonomous spend/publish is the owner's
+    # own deliberate config write, never a side effect of installing.
+    assert config.load()["autopilot"] is False
+
+
+def test_autopilot_true_round_trips() -> None:
+    config.save({"autopilot": True})
+    assert config.load()["autopilot"] is True
+
+
+def test_autopilot_normalizes_to_bool() -> None:
+    # A truthy non-bool coerces to True, a falsy one to False -- never raises.
+    config.save({"autopilot": "yes"})
+    assert config.load()["autopilot"] is True
+    config.save({"autopilot": 0})
+    assert config.load()["autopilot"] is False
+
+
 def test_load_on_fresh_home_returns_defaults() -> None:
     loaded = config.load()
 
+    assert loaded["autopilot"] is False
     assert loaded["enabled"] is False
     assert loaded["bindings"] == []
     assert loaded["window"] == 20
