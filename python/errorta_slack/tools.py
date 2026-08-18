@@ -127,6 +127,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "against right now (the North Star stays a reference guardrail)."
         ),
     },
+    "set_north_star": {
+        "trust": "C",
+        "summary": (
+            "Rewrite the project's North Star / definition of done (the "
+            "durable charter, not the current goal)."
+        ),
+    },
 }
 
 
@@ -608,6 +615,50 @@ def set_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     }
 
 
+def set_north_star(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                    deps: "ToolDeps") -> dict[str, Any]:
+    """C-class — rewrites the durable charter; only ever reached once
+    ``dispatch`` saw ``confirmed_via="block_actions"``.
+
+    Writes through ``LedgerStore.promote_north_star`` (ledger.py:1878) — the
+    ONLY lock-held authoritative writer, which bumps ``revision`` and
+    forward-stamps ``north_star_met_at`` for ``target == "existing"``.
+    Deliberately NOT the ``PUT /north-star`` route (routes/coding.py:4175),
+    whose unlocked read-modify-write against the private ``_project_path`` can
+    lose-update against a concurrent run write and skips that stamp.
+
+    Refuses mid-run, mirroring ``accept_north_star_proposal``'s 409
+    (routes/coding.py:4598-4599): rewriting the charter under a live run
+    changes what the team is building mid-flight.
+
+    An omitted/empty ``definition_of_done`` PRESERVES the stored one rather
+    than blanking it — the in-app modal only ever sends the north star
+    (src/features/coding/index.tsx:1177-1183), so a blanking default would
+    silently destroy the DoD.
+    """
+    north_star = str(args.get("north_star") or "").strip()
+    if not north_star:
+        return {"status": "error", "detail": "north_star is required"}
+    project_id = _bound_project_id(deps, channel_id)
+    ledger_store = deps.ledger_factory(project_id)
+    try:
+        if (ledger_store.get_run_state().get("status") or "idle") == "running":
+            return {
+                "status": "error",
+                "detail": "can't rewrite the north star mid-run — stop the run first",
+            }
+        dod = str(args.get("definition_of_done") or "").strip()
+        if not dod:
+            dod = str(ledger_store.get_project().definition_of_done or "")
+        project = ledger_store.promote_north_star(north_star, dod)
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {
+            "status": "error",
+            "detail": f"couldn't set the north star ({type(exc).__name__})",
+        }
+    return {"status": "north_star_set", "revision": getattr(project, "revision", 0)}
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects,
     "switch_project": switch_project,
@@ -624,6 +675,7 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "stop_run": stop_run,
     "reconfigure_team": reconfigure_team,
     "set_next_goal": set_next_goal,
+    "set_north_star": set_north_star,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"

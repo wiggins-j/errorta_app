@@ -1255,3 +1255,97 @@ def test_start_run_proceeds_once_a_goal_is_set(tmp_path: Path) -> None:
 
     assert result["status"] == "started"
     assert calls == [("proj-goal", False, False)]
+
+
+# --- set_north_star: writes through the lock-held authoritative writer -----
+
+
+def test_set_north_star_writes_through_promote_north_star(tmp_path: Path) -> None:
+    """Must use LedgerStore.promote_north_star (ledger.py:1878) — the only
+    lock-held writer, which bumps revision. NOT the PUT /north-star route's
+    unlocked read-modify-write, which can lose-update against a concurrent
+    run write (see spec §2.2)."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-ns")
+    ledger.create_project(
+        north_star="Old star.", definition_of_done="Old done.",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    before = ledger.get_project().revision
+    store.bind_channel("C1", "proj-ns")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_north_star",
+        {"north_star": "New star.", "definition_of_done": "New done."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "north_star_set"
+    project = LedgerStore("proj-ns").get_project()
+    assert project.north_star == "New star."
+    assert project.definition_of_done == "New done."
+    assert project.revision == before + 1
+
+
+def test_set_north_star_preserves_dod_when_omitted(tmp_path: Path) -> None:
+    """The in-app modal sends only northStar and never definitionOfDone
+    (src/features/coding/index.tsx:1177-1183). An omitted DoD must leave the
+    stored one intact, not blank it."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-dod")
+    ledger.create_project(
+        north_star="Old star.", definition_of_done="Keep me.",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-dod")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    tools.dispatch(
+        "set_north_star", {"north_star": "New star."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert LedgerStore("proj-dod").get_project().definition_of_done == "Keep me."
+
+
+def test_set_north_star_refuses_mid_run(tmp_path: Path) -> None:
+    """Mirrors accept_north_star_proposal's 409 guard
+    (routes/coding.py:4598-4599): rewriting the charter under a live run
+    changes what the team is building mid-flight."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-live")
+    ledger.create_project(
+        north_star="Old star.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_state(status="running")
+    store.bind_channel("C1", "proj-live")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_north_star", {"north_star": "New star."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "run" in result["detail"].lower()
+    assert LedgerStore("proj-live").get_project().north_star == "Old star."
+
+
+def test_set_north_star_from_chat_text_only_stages(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "set_north_star", {"north_star": "Injected star."},
+        channel_id="C1", thread_ts="1.0", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
