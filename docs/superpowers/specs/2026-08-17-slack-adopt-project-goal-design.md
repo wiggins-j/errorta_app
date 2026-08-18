@@ -29,7 +29,7 @@ stored goal goes stale silently.** Verified on `abovo`:
 - Its ledger `north_star` was written 2026-08-07 and describes "the ONLY remaining
   tasks ... 14 tick engine+game loop, 15 JSONL transcript+determinism golden, 16 human
   CLI ... 22 integration smoke+gate", plus a "CRITICAL CURRENT STATE" preamble.
-- The actual repo at `/Users/wiggins/GitHub/abovo` was last committed **2026-08-17**,
+- The actual repo at the project's `repo_path` was last committed **2026-08-17**,
   is on branch `main`, and its HEAD is `docs: handoff at P2a ~85% — status, conformance
   ledger P2 in progress` — a `PawnMindReducer` migration. It carries 38 plan docs, the
   newest being `2026-08-14-player-cockpit-redesign.md`. Nothing in the stored north star
@@ -114,7 +114,7 @@ slice renders through it too rather than formatting focuses by hand.
   is dev-prompt-shaped.
 - `pm_reference.py` reads **no repo files at all**.
 
-`abovo.target == "existing"` and `repo_path == /Users/wiggins/GitHub/abovo`, and
+`abovo.target == "existing"` with a `repo_path` set to a local checkout, and
 `CodingWorkspace._workspace(...)` 409s with "no worktree for this project yet" when
 absent (`coding.py:3883-3894`). → **Read `project.repo_path` via `read_bounded`**, with
 `workspace.list_files(scope="master")` as a fallback only when `repo_path` is unset.

@@ -6,7 +6,10 @@
 #   golf-3 must stay GREEN (SPEC-38's interaction fix not regressed)
 set -u
 WS="$HOME/.errorta/council/apply-workspaces"
-REPO="/Users/wiggins/GitHub/errorta_app"
+# Derive the repo root from this script's own location rather than hardcoding a
+# maintainer's absolute path: the literal baked in a local account name into a
+# PUBLIC repo, and the script only ran on one machine.
+REPO="${0:a:h:h}"
 export PLAYWRIGHT_BROWSERS_PATH="$HOME/Library/Caches/ms-playwright"
 
 for name in gravity-golf-2 gravity-golf-3 gravity-golf-4; do
