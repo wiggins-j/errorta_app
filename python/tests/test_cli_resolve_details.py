@@ -59,11 +59,23 @@ def test_detailed_reports_path_source(tmp_path, monkeypatch) -> None:
 
 
 def test_detailed_reports_app_bundle_source(tmp_path, monkeypatch) -> None:
-    # Empty PATH so the only hit is the extra_paths (app-bundle) fallback.
+    # Empty PATH + a nonexistent home so the only hit is the extra_paths
+    # (app-bundle) fallback.
+    #
+    # The resolved name must NOT be a real vendor CLI. Emptying PATH is not
+    # enough: `_clean_subprocess_env` deliberately re-appends /opt/homebrew/bin,
+    # /usr/local/bin, /usr/bin and /bin (a GUI .app inherits a minimal PATH), and
+    # the common-dir loop probes those same hardcoded paths. This test asked for
+    # "codex", so on any machine that actually has codex installed — i.e. a real
+    # developer machine — it resolved source="path" from /opt/homebrew/bin/codex
+    # and never reached the branch under test. A name no machine can have keeps
+    # it hermetic, which is what the module docstring already promises.
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     monkeypatch.setattr(_cli_common.Path, "home", classmethod(lambda cls: tmp_path / "nohome"))
-    bundle = _make_executable(tmp_path / "Bundled.app-codex")
-    out = _cli_common.resolve_cli_binary_detailed(["codex"], extra_paths=[bundle])
+    bundle = _make_executable(tmp_path / "Bundled.app-errorta-absent-cli")
+    out = _cli_common.resolve_cli_binary_detailed(
+        ["errorta-absent-cli"], extra_paths=[bundle]
+    )
     assert out is not None
     assert out["source"] == "app_bundle"
     assert out["path"] == bundle

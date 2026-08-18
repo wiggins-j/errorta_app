@@ -480,20 +480,26 @@ def test_legacy_sweep_flag_is_passed_through() -> None:
     argv the default node runner builds, since that is the only place the flags cross
     from Python into the browser probe.
     """
+    # The spawn moved to errorta_tools.runner.node_probe when web_probe stopped
+    # importing subprocess (the F039 egress invariant forbids errorta_council
+    # from importing it). web_probe imports run_node_probe lazily INSIDE
+    # _default_node_runner, so it resolves the attribute off this module at call
+    # time and patching here is what intercepts the spawn.
     import errorta_council.coding.web_probe as wp
+    import errorta_tools.runner.node_probe as np
 
     seen = {}
 
     def _fake_run(argv, **kw):
-        seen["argv"] = argv
-        raise RuntimeError("stop here — argv is what we are asserting")
+        seen["argv"] = list(argv)
+        return None  # the fail-open "probe could not run" signal
 
-    orig = wp.subprocess.run
-    wp.subprocess.run = _fake_run
+    orig = np.run_node_probe
+    np.run_node_probe = _fake_run
     try:
         wp._default_node_runner("http://x/", 30, legacy_sweep=True, whitebox=False)
     finally:
-        wp.subprocess.run = orig
+        np.run_node_probe = orig
     # _probe_script_path() returns None outside a repo tree; only assert when it ran.
     if "argv" in seen:
         assert "--legacy-sweep" in seen["argv"]

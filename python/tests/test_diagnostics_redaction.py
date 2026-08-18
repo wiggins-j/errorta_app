@@ -52,6 +52,73 @@ def test_apply_pipeline_includes_ssh_host() -> None:
     assert counts.get("ssh_host", 0) >= 1
 
 
+# --- foreign home paths (not this process's own $HOME) ----------------------
+
+
+def test_redact_home_like_paths_covers_other_accounts() -> None:
+    """`redact_home_path` only rewrites the path of the account this process
+    runs as. Free text authored by a person or a model routinely names someone
+    ELSE's home — that still leaks a username and a directory layout."""
+    out, n = redact.redact_home_like_paths("ship it via /Users/example/.ssh/id")
+    assert out == "ship it via $HOME/.ssh/id"
+    assert n == 1
+
+    out2, n2 = redact.redact_home_like_paths("wire /home/alice/secrets.txt")
+    assert out2 == "wire $HOME/secrets.txt"
+    assert n2 == 1
+
+
+def test_redact_home_like_paths_leaves_accountless_prefixes_alone() -> None:
+    """A bare `/home/` or `/Users/` names nobody — redacting it would mangle
+    prose without protecting anyone."""
+    for text in ("see /home/ for details", "under /Users/ somewhere"):
+        out, n = redact.redact_home_like_paths(text)
+        assert out == text and n == 0
+
+
+def test_apply_pipeline_redacts_a_foreign_home_path() -> None:
+    out, counts = redact.apply_pipeline("ship it via /Users/example/.ssh/id")
+    assert "/Users/example" not in out
+    assert counts.get("home_like_path", 0) == 1
+
+
+def test_home_like_rule_does_not_defeat_corpus_redaction() -> None:
+    """Ordering lock: the home-like rule must run AFTER corpus redaction.
+
+    Run earlier it rewrote the home prefix a corpus root starts with, so the
+    literal root no longer matched and the corpus NAME leaked —
+    "$HOME/legal-docs/case.pdf" instead of "<corpus-path>/case.pdf".
+    """
+    out, counts = redact.apply_pipeline(
+        "opened /home/shared/legal-docs/case-1234.pdf",
+        corpus_roots=["/home/shared/legal-docs"],
+    )
+    assert out == "opened <corpus-path>/case-1234.pdf"
+    assert "legal-docs" not in out
+    assert counts.get("corpus_paths", 0) == 1
+
+
+def test_home_like_rule_leaves_url_path_segments_alone() -> None:
+    """A /home/... segment inside a URL is a route, not a home directory.
+
+    Errorta previews user web projects and redacts the log tail, so a project
+    with a /home route is ordinary; rewriting it to $HOME destroyed the request
+    path an operator is reading.
+    """
+    line = "GET http://localhost:3000/home/dashboard 200"
+    out, _ = redact.apply_pipeline(line)
+    assert out == line
+
+    # ...but a file:// URL genuinely names a home directory and must redact.
+    out2, _ = redact.apply_pipeline("open file:///Users/carol/x.txt")
+    assert "/Users/carol" not in out2
+
+
+def test_home_like_rule_keeps_trailing_punctuation() -> None:
+    out, _ = redact.apply_pipeline("see (/Users/bob) now")
+    assert out == "see ($HOME) now"
+
+
 # --- route: tail redacts ----------------------------------------------------
 
 

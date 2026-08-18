@@ -16,6 +16,24 @@ from typing import Tuple
 _IP_KEEP = {"127.0.0.1", "0.0.0.0", "::1"}
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# Any account's home prefix, not just this process's own $HOME — see
+# `redact_home_like_paths`. The account segment is required (so a bare
+# "/home/" or "/Users/" is left alone) and must not itself be a path
+# separator.
+#
+# The lookbehind keeps this to FILESYSTEM paths. Without it the rule also ate
+# URL path segments: "GET http://localhost:3000/home/dashboard" became
+# "GET http://localhost:3000$HOME", destroying the request path in a redacted
+# log tail — and Errorta previews user web projects, so a /home route is
+# ordinary. A real path is preceded by start-of-string, whitespace, or a
+# delimiter like "(" or "/" (as in file:///Users/…), never by the tail of a
+# hostname.
+#
+# The account segment also stops at closing punctuation so "(/Users/bob)"
+# does not swallow the ")".
+_HOME_LIKE_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])/(?:Users|home)/[^/\s\"',;)\]}]+"
+)
 
 # Tokens we redact: OpenAI-style (sk-...), Anthropic-style (sk-ant-...),
 # GitHub PAT (ghp_...), AWS access key ids (AKIA...). Each is conservatively
@@ -61,6 +79,24 @@ def redact_home_path(text: str, home: str | None = None) -> Tuple[str, int]:
         return text, 0
     n = text.count(h)
     return text.replace(h, "$HOME"), n
+
+
+def redact_home_like_paths(text: str) -> Tuple[str, int]:
+    """Replace ANY user's home-directory prefix with ``$HOME``.
+
+    ``redact_home_path`` only rewrites the path of the account this process is
+    running as. That covers machine-generated diagnostics, but not free text
+    **authored by a person or a model** — a North Star reading "ship it via
+    /Users/example/.ssh/id", or a task titled "wire /home/alice/secrets.txt
+    loader", names a directory layout and a username belonging to someone
+    else entirely and still leaks when projected to a paired phone.
+
+    Matches the POSIX shapes macOS and Linux actually use (``/Users/<name>``
+    and ``/home/<name>``) and rewrites only the prefix, so the trailing path
+    survives for context: ``/Users/example/.ssh/id`` -> ``$HOME/.ssh/id``.
+    ``/home/`` alone (no account segment) is left untouched — it names no one.
+    """
+    return _sub_count(_HOME_LIKE_RE, "$HOME", text)
 
 
 def redact_username(text: str, username: str | None = None) -> Tuple[str, int]:
@@ -159,4 +195,12 @@ def apply_pipeline(
     text, counts["ips"] = redact_ips(text)
     text, counts["tokens"] = redact_tokens(text)
     text, counts["corpus_paths"] = redact_corpus_paths(text, corpus_roots=corpus_roots)
+    # LAST, and specifically after corpus_paths: this rule rewrites a home
+    # prefix, which would otherwise destroy the literal root
+    # `redact_corpus_paths` matches on. Running it earlier turned
+    # "/home/shared/legal-docs/case.pdf" (corpus root /home/shared/legal-docs)
+    # into "$HOME/legal-docs/case.pdf", leaking the corpus name that used to
+    # redact to <corpus-path>. Whatever home prefixes survive the earlier rules
+    # are cleaned up here.
+    text, counts["home_like_path"] = redact_home_like_paths(text)
     return text, counts

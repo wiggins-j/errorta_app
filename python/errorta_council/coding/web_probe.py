@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -168,15 +167,19 @@ def _default_node_runner(
         argv.append("--legacy-sweep")
     if not whitebox:
         argv.append("--no-whitebox")
-    try:
-        proc = subprocess.run(  # noqa: S603 — trusted engine script, argv-only
-            argv, cwd=str(script.parent.parent), capture_output=True,
-            text=True, timeout=_NODE_TIMEOUT_S, check=False)
-    except Exception:  # noqa: BLE001 — spawn/timeout failure -> no evidence
+    # The spawn itself lives in ``errorta_tools`` — the F039 egress invariant
+    # forbids ``errorta_council`` from importing ``subprocess`` (this module is
+    # what broke it), the same reason ``workspace.py`` reaches git through
+    # ``apply_workspace``. Imported lazily so this module stays cheap to import.
+    from errorta_tools.runner.node_probe import run_node_probe
+
+    stdout = run_node_probe(
+        argv, cwd=str(script.parent.parent), timeout_s=_NODE_TIMEOUT_S)
+    if stdout is None:  # spawn/timeout failure -> no evidence
         return None
     # The script prints exactly one JSON line to stdout; take the last JSON line
     # so any stray warning above it is ignored.
-    for line in reversed((proc.stdout or "").splitlines()):
+    for line in reversed(stdout.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
             continue
