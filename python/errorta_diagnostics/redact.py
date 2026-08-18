@@ -20,7 +20,20 @@ _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # `redact_home_like_paths`. The account segment is required (so a bare
 # "/home/" or "/Users/" is left alone) and must not itself be a path
 # separator.
-_HOME_LIKE_RE = re.compile(r"/(?:Users|home)/[^/\s\"']+")
+#
+# The lookbehind keeps this to FILESYSTEM paths. Without it the rule also ate
+# URL path segments: "GET http://localhost:3000/home/dashboard" became
+# "GET http://localhost:3000$HOME", destroying the request path in a redacted
+# log tail — and Errorta previews user web projects, so a /home route is
+# ordinary. A real path is preceded by start-of-string, whitespace, or a
+# delimiter like "(" or "/" (as in file:///Users/…), never by the tail of a
+# hostname.
+#
+# The account segment also stops at closing punctuation so "(/Users/bob)"
+# does not swallow the ")".
+_HOME_LIKE_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])/(?:Users|home)/[^/\s\"',;)\]}]+"
+)
 
 # Tokens we redact: OpenAI-style (sk-...), Anthropic-style (sk-ant-...),
 # GitHub PAT (ghp_...), AWS access key ids (AKIA...). Each is conservatively
@@ -175,10 +188,6 @@ def apply_pipeline(
     """
     counts: dict[str, int] = {}
     text, counts["home_path"] = redact_home_path(text, home=home)
-    # After the exact-$HOME pass so this process's own home still counts under
-    # "home_path"; this catches OTHER accounts' home prefixes, which appear in
-    # human/model-authored free text (a North Star naming /Users/example/...).
-    text, counts["home_like_path"] = redact_home_like_paths(text)
     text, counts["username"] = redact_username(text, username=username)
     # SSH host before IPs so a ``user@1.2.3.4`` target redacts as a whole
     # rather than leaving a dangling ``user@<ip-redacted>``.
@@ -186,4 +195,12 @@ def apply_pipeline(
     text, counts["ips"] = redact_ips(text)
     text, counts["tokens"] = redact_tokens(text)
     text, counts["corpus_paths"] = redact_corpus_paths(text, corpus_roots=corpus_roots)
+    # LAST, and specifically after corpus_paths: this rule rewrites a home
+    # prefix, which would otherwise destroy the literal root
+    # `redact_corpus_paths` matches on. Running it earlier turned
+    # "/home/shared/legal-docs/case.pdf" (corpus root /home/shared/legal-docs)
+    # into "$HOME/legal-docs/case.pdf", leaking the corpus name that used to
+    # redact to <corpus-path>. Whatever home prefixes survive the earlier rules
+    # are cleaned up here.
+    text, counts["home_like_path"] = redact_home_like_paths(text)
     return text, counts
