@@ -16,6 +16,11 @@ from typing import Tuple
 _IP_KEEP = {"127.0.0.1", "0.0.0.0", "::1"}
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# Any account's home prefix, not just this process's own $HOME — see
+# `redact_home_like_paths`. The account segment is required (so a bare
+# "/home/" or "/Users/" is left alone) and must not itself be a path
+# separator.
+_HOME_LIKE_RE = re.compile(r"/(?:Users|home)/[^/\s\"']+")
 
 # Tokens we redact: OpenAI-style (sk-...), Anthropic-style (sk-ant-...),
 # GitHub PAT (ghp_...), AWS access key ids (AKIA...). Each is conservatively
@@ -61,6 +66,24 @@ def redact_home_path(text: str, home: str | None = None) -> Tuple[str, int]:
         return text, 0
     n = text.count(h)
     return text.replace(h, "$HOME"), n
+
+
+def redact_home_like_paths(text: str) -> Tuple[str, int]:
+    """Replace ANY user's home-directory prefix with ``$HOME``.
+
+    ``redact_home_path`` only rewrites the path of the account this process is
+    running as. That covers machine-generated diagnostics, but not free text
+    **authored by a person or a model** — a North Star reading "ship it via
+    /Users/example/.ssh/id", or a task titled "wire /home/alice/secrets.txt
+    loader", names a directory layout and a username belonging to someone
+    else entirely and still leaks when projected to a paired phone.
+
+    Matches the POSIX shapes macOS and Linux actually use (``/Users/<name>``
+    and ``/home/<name>``) and rewrites only the prefix, so the trailing path
+    survives for context: ``/Users/example/.ssh/id`` -> ``$HOME/.ssh/id``.
+    ``/home/`` alone (no account segment) is left untouched — it names no one.
+    """
+    return _sub_count(_HOME_LIKE_RE, "$HOME", text)
 
 
 def redact_username(text: str, username: str | None = None) -> Tuple[str, int]:
@@ -152,6 +175,10 @@ def apply_pipeline(
     """
     counts: dict[str, int] = {}
     text, counts["home_path"] = redact_home_path(text, home=home)
+    # After the exact-$HOME pass so this process's own home still counts under
+    # "home_path"; this catches OTHER accounts' home prefixes, which appear in
+    # human/model-authored free text (a North Star naming /Users/example/...).
+    text, counts["home_like_path"] = redact_home_like_paths(text)
     text, counts["username"] = redact_username(text, username=username)
     # SSH host before IPs so a ``user@1.2.3.4`` target redacts as a whole
     # rather than leaving a dangling ``user@<ip-redacted>``.
