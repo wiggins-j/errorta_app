@@ -160,3 +160,35 @@ def test_propose_next_goal_treats_repo_text_as_data_not_instructions() -> None:
     lowered = prompt.lower()
     assert "data" in lowered and "never a command" in lowered
     assert "propose" in lowered
+
+
+def test_gather_project_read_never_globs_cwd_when_repo_path_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: an unset repo_path must never cause the plan-doc scan to
+    glob the process's cwd. ``Path("").expanduser() == Path(".")`` — without a
+    guard on the plan-doc loop that is independent of which reader is in use,
+    this test's own working directory's docs/superpowers/plans would leak
+    into a blob that is headed straight into a model prompt. Deliberately
+    chdir's into a directory that DOES contain a decoy plan doc, so this
+    holds regardless of where the suite happens to run from."""
+    decoy_cwd = tmp_path / "somewhere_else"
+    decoy_plans = decoy_cwd / "docs" / "superpowers" / "plans"
+    decoy_plans.mkdir(parents=True)
+    (decoy_plans / "2026-08-17-not-this-projects-plan.md").write_text("CWD LEAK\n")
+    monkeypatch.chdir(decoy_cwd)
+
+    class FakeProject:
+        repo_path = None
+        target = "existing"
+
+    read = next_goal.gather_project_read(
+        FakeProject(),
+        read_fn=lambda path, **kw: {
+            "blob": "fake blob", "files": [], "has_readme": False, "empty": False},
+        git_log_fn=lambda path: ([], ""),
+    )
+
+    assert read["files"] == []
+    assert read["blob"] == "fake blob"
+    assert "CWD LEAK" not in read["blob"]

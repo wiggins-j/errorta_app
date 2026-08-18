@@ -176,12 +176,20 @@ def gather_project_read(project: Any, *, read_fn: Any = None,
     Returns ``{"blob", "files", "commits", "branch"}``. With the DEFAULT
     reader, a project with no ``repo_path``, or a path that isn't a
     directory, yields an empty read rather than raising or reading the
-    process's own working directory. That guard is skipped when a caller
-    supplies its own ``read_fn`` (every test in this module does): the
+    process's own working directory. That top-level guard is skipped when a
+    caller supplies its own ``read_fn`` (every test in this module does): the
     caller's fake owns whatever it returns for whatever path it's given, and
     validating filesystem state that isn't actually being read would only
     reject valid test fixtures (e.g. a project with no ``repo_path`` set yet,
     read through an injected fake).
+
+    The plan-doc scan below is a REAL local filesystem walk regardless of
+    which reader is in use, so it is gated on its own: it only runs when
+    ``repo_path`` names an actual directory. Without that, an empty
+    ``repo_path`` resolves to ``Path("").expanduser() == Path(".")`` and the
+    scan would glob whatever ``docs/superpowers/plans`` happens to exist
+    relative to the process's cwd — silently folding unrelated local files
+    into a blob that is about to go into a model prompt.
     """
     used_default_read = read_fn is None
     if read_fn is None:
@@ -203,9 +211,11 @@ def gather_project_read(project: Any, *, read_fn: Any = None,
     plan_paths = {f for f in raw_files if _is_plan_doc_path(f)}
     files = [f for f in raw_files if f not in plan_paths]
     parts = [_strip_read_bounded_paths(str(read.get("blob") or ""), plan_paths)]
-    for rel, text in _recent_plan_docs(Path(repo_path).expanduser()):
-        parts.append(f"===== {rel} =====\n{text}\n")
-        files.append(rel)
+    repo_root = Path(repo_path).expanduser() if repo_path else None
+    if repo_root is not None and repo_root.is_dir():
+        for rel, text in _recent_plan_docs(repo_root):
+            parts.append(f"===== {rel} =====\n{text}\n")
+            files.append(rel)
     commits, branch = git_log_fn(repo_path)
     return {"blob": "".join(parts), "files": files,
             "commits": list(commits), "branch": str(branch)}
