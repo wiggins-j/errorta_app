@@ -480,3 +480,20 @@ def test_build_system_prompt_survives_an_unreadable_project() -> None:
     prompt = concierge.build_system_prompt("no-such-project-at-all")
 
     assert "SLACK ETIQUETTE CONTRACT" in prompt
+
+
+def test_grounding_no_longer_claims_it_cannot_set_a_north_star() -> None:
+    """Slice 4: the concierge gained set_north_star and set_next_goal. The
+    hand-written negative must no longer contradict that — a model told it
+    has "NO tool to set a north star" will keep refusing to use the tool it
+    now has. Mirrors the Slice 3 reconfigure_team fix."""
+    prompt = concierge.build_system_prompt("proj-a")
+    lowered = prompt.lower()
+
+    assert "no tool to create, delete, or rename a project, or set a north" not in lowered
+    # It still truthfully can't create/delete/rename a project.
+    assert "create, delete, or rename a project" in lowered
+    # And the new capabilities are named.
+    assert "set_north_star" in prompt
+    assert "set_next_goal" in prompt
+    assert "propose_next_goal" in prompt
