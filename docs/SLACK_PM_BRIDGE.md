@@ -113,12 +113,27 @@ log redactor strips any `xoxb-…`/`xapp-…`-shaped string on sight). There is
 no HTTP route that accepts raw tokens — write them once via the store module
 directly, from a machine you trust, e.g.:
 
+This snippet **prompts** for the two values rather than carrying them inline,
+so there is no placeholder to paste by accident and neither token is echoed to
+the terminal or into your shell history:
+
 ```
 python -c "
 from errorta_slack import secrets
-secrets.save_tokens(app_token='xapp-...', bot_token='xoxb-...')
+import getpass
+app = getpass.getpass('xapp- app-level token: ').strip()
+bot = getpass.getpass('xoxb- bot token: ').strip()
+secrets.save_tokens(app, bot)
+print('saved:', secrets.mask())
 "
 ```
+
+> **Why prompted, not inline.** The previous version of this snippet carried
+> `app_token='xapp-...'` literally. Run unedited — which is exactly what a
+> copy-paste setup step invites — it wrote the 8-character placeholders over
+> live credentials, which are unrecoverable from disk. `save_tokens` now
+> refuses placeholder-shaped values *before* touching the file, so existing
+> tokens survive the mistake, but prompting removes the trap entirely.
 
 Then flip the bridge on:
 

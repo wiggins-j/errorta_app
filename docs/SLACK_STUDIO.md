@@ -45,6 +45,14 @@ name — find it via *"Copy link"* on the channel in the Slack client, or
 `GET /slack/status`/your own workspace tooling. Binding again overwrites the
 previous studio channel (it's a singleton, one studio channel at a time).
 
+> **Substitute the placeholder.** An earlier version of this step was once run
+> unedited, writing a literal `C_YOUR_STUDIO_CHANNEL_ID` into `studio.json`;
+> studio routing then silently failed and every message in the studio channel
+> answered "this channel isn't bound to a project yet". `set_studio_channel`
+> now rejects anything that isn't shaped like a Slack conversation id *before*
+> writing, so an unedited placeholder fails loudly and the existing binding
+> survives.
+
 Check the current binding any time:
 
 ```

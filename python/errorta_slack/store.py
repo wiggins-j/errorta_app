@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -365,15 +366,39 @@ def _load_studio() -> dict[str, Any]:
     return raw
 
 
+# A Slack conversation id is a C/G/D prefix followed by alphanumerics. This
+# rule exists to catch an unedited PLACEHOLDER, not to be a strict format
+# validator — the same posture as `secrets._validate_token`. Every placeholder
+# shape seen in the docs is separable by the characters it uses:
+# ``C_YOUR_STUDIO_CHANNEL_ID`` (underscores), ``<CHANNEL_ID>`` (brackets),
+# ``C...`` (dots). A hyphen is deliberately tolerated: it appears in test
+# fixtures and in no placeholder, so rejecting it would buy nothing.
+_CHANNEL_ID_RE = re.compile(r"[CGD][A-Za-z0-9-]+\Z")
+
+
 def set_studio_channel(channel_id: str) -> None:
     """Set the studio channel, overwriting any prior value (singleton).
 
     Independent of ``bindings.json`` -- a channel can be the studio channel
     and/or hold a project binding at the same time; this never touches
     ``bindings.json``.
+
+    Raises ``ValueError`` for anything that cannot be a Slack conversation id,
+    BEFORE the file is written, so a refused call leaves the existing binding
+    intact. The documented bind snippet carries ``C_YOUR_STUDIO_CHANNEL_ID``;
+    running it unedited once wrote that literal here and every studio message
+    then fell through to "this channel isn't bound to a project yet".
     """
+    text = (channel_id or "").strip()
+    if not _CHANNEL_ID_RE.fullmatch(text):
+        # Never echo the value — this surfaces through an HTTP route.
+        raise ValueError(
+            "channel_id is not a Slack conversation id (expected a C/G/D "
+            "prefix followed by alphanumerics, e.g. C0BQJRYQ003) — it looks "
+            "like an unedited placeholder. Nothing was written."
+        )
     with _LOCK:
-        _write_json(_studio_path(), {"channel_id": channel_id})
+        _write_json(_studio_path(), {"channel_id": text})
 
 
 def studio_channel() -> str | None:
