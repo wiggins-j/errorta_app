@@ -1349,3 +1349,87 @@ def test_set_north_star_from_chat_text_only_stages(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "needs_confirmation"
+
+
+def test_propose_next_goal_returns_a_proposal_and_writes_nothing(tmp_path: Path) -> None:
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-propose")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-propose")
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=lambda store_, **kw: {
+            "title": "Route mind writes through the reducer",
+            "body": "P2a task 4b", "evidence": ["abovo/mind.py"], "stale": True},
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    # R-class: runs immediately from chat text, no confirmation needed.
+    assert result["status"] == "proposed"
+    assert result["title"] == "Route mind writes through the reducer"
+    assert result["stale"] is True
+    assert LedgerStore("proj-propose").active_focuses() == []
+
+
+def test_propose_next_goal_reports_a_thin_repo_instead_of_inventing(tmp_path: Path) -> None:
+    """An empty title means the read was too thin to ground a goal. The verb
+    must say so rather than pass an empty goal along as if it were real."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-thin")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-thin")
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=lambda store_, **kw: {
+            "title": "", "body": "", "evidence": [], "stale": False},
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "no_proposal"
+
+
+def test_tool_deps_propose_goal_fn_defaults_to_none(tmp_path: Path) -> None:
+    """Must default to None, not the real helper — the real one imports
+    repo_reader and shells out to git, neither of which may happen at
+    ToolDeps() construction time."""
+    assert tools.ToolDeps().propose_goal_fn is None
+
+
+def test_propose_next_goal_refuses_without_a_model_caller(tmp_path: Path) -> None:
+    """goal_caller defaults to None (no model wired up). The verb must refuse
+    cleanly rather than call None and raise inside a live Slack turn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-nocaller")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-nocaller")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "model" in result["detail"].lower()

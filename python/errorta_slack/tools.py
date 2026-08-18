@@ -134,6 +134,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "durable charter, not the current goal)."
         ),
     },
+    "propose_next_goal": {
+        "trust": "R",
+        "summary": (
+            "Read the project's actual repo, docs and recent commits and "
+            "propose the team's next goal (proposal only — writes nothing)."
+        ),
+    },
 }
 
 
@@ -268,6 +275,17 @@ class ToolDeps:
     # verb impl calls `pm_reference.list_available_routes()` lazily on first
     # use, at most once per turn, never at ToolDeps-construction time.
     available_routes: list[dict[str, Any]] | None = None
+    # Slice 4 §3.2: the repo-grounded goal proposer. `None` (not the real
+    # helper) so `next_goal`'s repo_reader import and its `git log` subprocess
+    # stay deferred to first real use, never ToolDeps() construction — the
+    # same reason `start_run_fn` defaults to None. Called as
+    # `propose_goal_fn(ledger_store, member=..., caller=...)`.
+    propose_goal_fn: Callable[..., dict[str, Any]] | None = None
+    # The model seam `propose_goal_fn` calls. `concierge.run_turn` sets this to
+    # the same PM-member caller it uses for its own turn, so the proposal is
+    # routed through the team's configured gateway route. `None` means no model
+    # is wired up — `propose_next_goal` refuses cleanly rather than crashing.
+    goal_caller: Callable[[dict[str, Any], str], str] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -659,6 +677,51 @@ def set_north_star(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return {"status": "north_star_set", "revision": getattr(project, "revision", 0)}
 
 
+def propose_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                       deps: "ToolDeps") -> dict[str, Any]:
+    """R-class — reads the project's real repo and returns a PROPOSED next
+    goal. Writes nothing, which is why it may run straight from chat text.
+
+    The proposal reaches the ledger only through ``set_next_goal``, whose
+    confirmation renders the full title and body so a human reads the exact
+    text before it becomes the team's scope. That two-step split is what makes
+    reading untrusted repo content safe here.
+    """
+    project_id = _bound_project_id(deps, channel_id)
+    ledger_store = deps.ledger_factory(project_id)
+    propose_fn = deps.propose_goal_fn
+    if propose_fn is None:
+        from errorta_council.coding.next_goal import propose_next_goal as _propose
+
+        propose_fn = _propose
+    member = dict(args.get("member") or {}) or {"gateway_route_id": "", "role": "pm"}
+    caller = deps.goal_caller
+    if caller is None:
+        return {"status": "error", "detail": "no model is wired up for this bridge yet"}
+    try:
+        proposal = propose_fn(ledger_store, member=member, caller=caller)
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {
+            "status": "error",
+            "detail": f"couldn't read the project ({type(exc).__name__})",
+        }
+    if not str(proposal.get("title") or "").strip():
+        return {
+            "status": "no_proposal",
+            "detail": (
+                "I couldn't ground a next goal in what's in the repo — "
+                "tell me the goal and I'll set it."
+            ),
+        }
+    return {
+        "status": "proposed",
+        "title": proposal.get("title", ""),
+        "body": proposal.get("body", ""),
+        "evidence": list(proposal.get("evidence") or []),
+        "stale": bool(proposal.get("stale")),
+    }
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects,
     "switch_project": switch_project,
@@ -676,6 +739,7 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "reconfigure_team": reconfigure_team,
     "set_next_goal": set_next_goal,
     "set_north_star": set_north_star,
+    "propose_next_goal": propose_next_goal,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"
