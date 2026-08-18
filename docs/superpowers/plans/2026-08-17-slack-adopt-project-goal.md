@@ -525,9 +525,12 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
+
+# NOTE: no `import subprocess` here, deliberately. errorta_council must never
+# import it (F039 egress invariant, enforced by two ast-walking tests over the
+# whole package). Process work goes through errorta_tools — see `_git_log`.
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1078,23 +1081,38 @@ _PLAN_DIRS = ("docs/superpowers/plans", "docs/plans")
 def _git_log(repo_path: str) -> tuple[list[str], str]:
     """Last ``_COMMIT_COUNT`` commit subjects and the current branch.
 
-    Best-effort: a non-repo, a missing git, or a timeout yields ``([], "")``
-    rather than raising — a PM turn must not die because git is unavailable.
+    Best-effort: a non-repo, a missing git, or any git failure yields
+    ``([], "")`` rather than raising — a PM turn must not die because git is
+    unavailable.
+
+    Shells out through ``errorta_tools.runner.apply_workspace._git_try``, NOT
+    ``subprocess``. ``errorta_council`` must never import ``subprocess``: the
+    F039 egress invariant is enforced by
+    ``test_errorta_council_runner_imports_no_process_egress_modules`` and
+    ``test_errorta_council_tool_use_imports_no_egress_modules``, which walk
+    every ``.py`` in the package with ast and fail on the import. This is the
+    same rule ``coding/workspace.py`` follows (it reaches git through
+    ``apply_workspace`` — see its lazy import at workspace.py:224), and the
+    same one ``coding/web_probe.py`` violated until its spawn was moved to
+    ``errorta_tools.runner.node_probe``.
     """
-    def _run(args: list[str]) -> str:
+    from pathlib import Path as _Path
+
+    from errorta_tools.runner.apply_workspace import _git_try
+
+    def _run(*args: str) -> str:
         try:
-            proc = subprocess.run(
-                args, cwd=repo_path, capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
+            code, out, _err = _git_try(_Path(repo_path), *args)
+        except Exception:  # noqa: BLE001 — git missing/not a repo -> no evidence
             return ""
-        return proc.stdout if proc.returncode == 0 else ""
+        return out if code == 0 else ""
 
     subjects = [
-        line.strip() for line in
-        _run(["git", "log", f"-{_COMMIT_COUNT}", "--format=%s"]).splitlines()
+        line.strip()
+        for line in _run("log", f"-{_COMMIT_COUNT}", "--format=%s").splitlines()
         if line.strip()
     ]
-    branch = _run(["git", "branch", "--show-current"]).strip()
+    branch = _run("branch", "--show-current").strip()
     return subjects, branch
 
 
