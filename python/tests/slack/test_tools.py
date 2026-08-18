@@ -1113,3 +1113,83 @@ def test_default_start_run_resume_does_not_recover_team(monkeypatch: pytest.Monk
 
     tools._default_start_run("p1", resume=True, continue_=False)
     assert captured["body"] == {}
+
+
+# --- set_next_goal: the anti-inert proof + injection wall -------------------
+
+
+def test_set_next_goal_reaches_the_run_loops_pm_prompt(tmp_path: Path) -> None:
+    """THE anti-inert test (spec §2.1, §4). runner._pm_prompt scopes the
+    team's planning by store.active_focuses() and explicitly demotes the
+    north star to "REFERENCE ONLY — not a list of things to build now"
+    (runner.py:3160-3167). So a goal set from Slack is only real if it lands
+    in a Focus row that _pm_prompt renders.
+
+    Asserting add_focus was called would NOT prove that. This builds the
+    actual PM prompt from a real ledger and greps it."""
+    from errorta_council.coding.ledger import LedgerStore
+    from errorta_council.coding.runner import _pm_prompt
+
+    ledger = LedgerStore("proj-inert")
+    ledger.create_project(
+        north_star="Stale north star nobody should plan from.",
+        definition_of_done="Whatever.",
+        target="new", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-inert")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_next_goal",
+        {"title": "Route mind writes through the reducer", "body": "P2a task 4b"},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "goal_set"
+    assert result["focus_id"]
+
+    prompt = _pm_prompt(LedgerStore("proj-inert"))
+    assert "Route mind writes through the reducer" in prompt
+    assert "P2a task 4b" in prompt
+    assert "CURRENT FOCUS" in prompt
+
+
+def test_set_next_goal_from_chat_text_only_stages(tmp_path: Path) -> None:
+    """C-class injection wall: pasted Slack text must never write a goal the
+    team then executes. Only a verified block_actions click may."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "set_next_goal", {"title": "Injected goal"},
+        channel_id="C1", thread_ts="1.0", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+    assert result["confirmation_id"]
+    ledger = deps._ledger_stores.get("proj-a")
+    assert ledger is None or not getattr(ledger, "added_focuses", [])
+
+
+def test_set_next_goal_rejects_an_empty_title(tmp_path: Path) -> None:
+    """add_focus raises LedgerError on an empty title (ledger.py:1721) —
+    that must become a clean result, never an uncaught raise in a live turn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-empty")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="new", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-empty")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_next_goal", {"title": "   "},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "title" in result["detail"].lower()

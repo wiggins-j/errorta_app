@@ -120,6 +120,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "this project."
         ),
     },
+    "set_next_goal": {
+        "trust": "C",
+        "summary": (
+            "Set the team's next goal — the operative scope they plan "
+            "against right now (the North Star stays a reference guardrail)."
+        ),
+    },
 }
 
 
@@ -551,6 +558,43 @@ def reconfigure_team(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return {"status": "reconfigured", "changes": dict(role_routes)}
 
 
+def set_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                   deps: "ToolDeps") -> dict[str, Any]:
+    """C-class — writes the team's operative scope, so it directly steers real
+    spend; only ever reached once ``dispatch`` saw
+    ``confirmed_via="block_actions"``.
+
+    Writes a **Focus** (F137), not the north star: ``runner._pm_prompt`` reads
+    ``store.active_focuses()`` and pins "Plan ONLY these, in order" while
+    demoting the north star to "REFERENCE ONLY — not a list of things to build
+    now" (runner.py:3160-3167). A north-star write would be near-inert here.
+
+    Reversibility is Focus's own lifecycle (``update_focus`` -> ``archived``,
+    ledger.py:1763), not a new ``pm_changes`` restore target —
+    ``RESTORE_TARGETS`` (pm_changes.py:26) has no focus slot and widening it is
+    a larger cross-surface change than this earns.
+    """
+    from errorta_council.coding.ledger import LedgerError
+
+    title = str(args.get("title") or "").strip()
+    body = str(args.get("body") or "")
+    project_id = _bound_project_id(deps, channel_id)
+    try:
+        focus = deps.ledger_factory(project_id).add_focus(
+            title=title, body=body, origin="slack_pm")
+    except LedgerError as exc:
+        # The known, safe-to-surface shape: an empty title. Message carries no
+        # secrets (ledger.py:1721).
+        return {"status": "error", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error", "detail": f"couldn't set the goal ({type(exc).__name__})"}
+    return {
+        "status": "goal_set",
+        "focus_id": getattr(focus, "id", ""),
+        "title": getattr(focus, "title", title),
+    }
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects,
     "switch_project": switch_project,
@@ -566,6 +610,7 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "start_run": start_run,
     "stop_run": stop_run,
     "reconfigure_team": reconfigure_team,
+    "set_next_goal": set_next_goal,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"
