@@ -117,6 +117,55 @@ _CONFIRM_RULE_AUTOPILOT = (
 )
 
 
+def _project_state_block(project_id: str, *, store: Any = None) -> str:
+    """The project's own goal state, which ``build_pm_reference_context``
+    omits entirely: ``pm_reference.build_live_state`` returns only
+    ``{available_routes, project: {autonomy, governance, guardrail_enabled,
+    runtime, room}}`` (pm_reference.py:194-201). The in-app PM chat injects
+    north star + DoD + Current Focus (routes/coding.py:1789-1799); without
+    this the Slack PM cannot answer "what are we working on".
+
+    Focus is rendered through ``format_focus_lines`` — the canonical F137
+    renderer shared with the governance prompt, the PM planning prompt and
+    the interjection text — so this surface can never drift from those.
+
+    Degrades to "" rather than raising: a Slack turn must survive an
+    unreadable/missing project record, the same way ``runner._pm_prompt``
+    guards its own focus read.
+    """
+    from errorta_council.coding.ledger import LedgerStore, format_focus_lines
+
+    try:
+        ledger = store if store is not None else LedgerStore(project_id)
+        project = ledger.get_project()
+    except Exception:  # noqa: BLE001 - a missing/corrupt project must not kill the turn
+        return ""
+
+    lines = ["## THIS PROJECT'S GOAL STATE", ""]
+    north_star = str(getattr(project, "north_star", "") or "").strip()
+    dod = str(getattr(project, "definition_of_done", "") or "").strip()
+    if north_star:
+        lines.append(f"North Star (reference guardrail, NOT a work list): {north_star}")
+    if dod:
+        lines.append(f"Definition of done: {dod}")
+
+    try:
+        focuses = ledger.active_focuses()
+    except Exception:  # noqa: BLE001 - focus ledger unreadable -> omit, don't raise
+        focuses = []
+    if focuses:
+        lines.append("")
+        lines.append("Current Focus — what the team is scoped to right now:")
+        lines.extend(format_focus_lines(focuses))
+    else:
+        lines.append("")
+        lines.append(
+            "Current Focus: NONE. The team has no operative goal, so a run "
+            "would plan against the North Star alone, which may be stale."
+        )
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     project_id: str,
     *,
@@ -150,8 +199,11 @@ def build_system_prompt(
     ) or "nothing yet"
     confirm_rule = _CONFIRM_RULE_AUTOPILOT if autopilot else _CONFIRM_RULE_BUTTON
     etiquette = _ETIQUETTE.format(can_do=can_do, confirm_rule=confirm_rule)
+    state_block = _project_state_block(project_id, store=store)
+    state_section = f"{state_block}\n\n" if state_block else ""
     return (
         f"{pm_context}\n\n"
+        f"{state_section}"
         "## TOOLS (the ONLY actions you may take)\n\n"
         f"{catalog_block}\n"
         f"{etiquette}\n"
