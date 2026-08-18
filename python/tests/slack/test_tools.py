@@ -1193,3 +1193,65 @@ def test_set_next_goal_rejects_an_empty_title(tmp_path: Path) -> None:
 
     assert result["status"] == "error"
     assert "title" in result["detail"].lower()
+
+
+# --- start_run: shared start_gate refuses a run with no operative goal -----
+
+
+def test_start_run_refuses_when_the_project_has_no_goal(tmp_path: Path) -> None:
+    """Spec §3.4: adopting abovo and pressing start today would launch a run
+    whose PM plans against a ten-day-stale north star. Refuse, name the
+    remedy, and — critically — do NOT call start_run_fn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-nogoal")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-nogoal")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def _start_fn(pid: str, *, resume: bool = False, continue_: bool = False) -> dict:
+        calls.append((pid, resume, continue_))
+        return {"status": "started"}
+
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+                 start_run_fn=_start_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "refused"
+    assert "goal" in result["detail"].lower()
+    assert calls == []
+
+
+def test_start_run_proceeds_once_a_goal_is_set(tmp_path: Path) -> None:
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-goal")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.add_focus(title="Build the tick engine", origin="slack_pm")
+    store.bind_channel("C1", "proj-goal")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def _start_fn(pid: str, *, resume: bool = False, continue_: bool = False) -> dict:
+        calls.append((pid, resume, continue_))
+        return {"status": "started"}
+
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+                 start_run_fn=_start_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [("proj-goal", False, False)]

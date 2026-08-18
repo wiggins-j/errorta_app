@@ -476,6 +476,11 @@ def start_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     ``deps.start_run_fn`` defaults to ``None`` on ``ToolDeps`` (not the lazy
     wrapper itself) precisely so the real engine import stays deferred to
     this call, not to ``ToolDeps()`` construction.
+
+    A run with no active Focus and no legacy ``work_request`` is REFUSED
+    (``next_goal.start_gate``) rather than started: its PM would plan from the
+    North Star alone, which on a project whose charter has gone stale spends
+    real budget re-litigating finished work.
     """
     project_id = _bound_project_id(deps, channel_id)
     ledger_store = deps.ledger_factory(project_id)
@@ -485,6 +490,14 @@ def start_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         # avoids a redundant call and reads the same status project_status
         # already surfaces.
         return {"status": "already_running"}
+    # Slice 4 §3.4: refuse to spend on a run with no operative goal. Shared
+    # with studio_tools.adopt_project via next_goal.start_gate so the two
+    # start paths cannot drift.
+    from errorta_council.coding import next_goal
+
+    refusal = next_goal.start_gate(ledger_store)
+    if refusal:
+        return {"status": "refused", "detail": refusal}
     resume = status == "interrupted"
     continue_ = status == "stopped"
     start_fn = deps.start_run_fn or _default_start_run
