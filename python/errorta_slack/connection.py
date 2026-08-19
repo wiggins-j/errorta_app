@@ -856,14 +856,36 @@ class SlackBridge:
     # either is the precise failure this slice was written to fix, one layer
     # further up: the owner is told the team is building when nothing started
     # and the computed reason has been thrown away.
-    _NON_EXECUTION_STATUSES = ("refused", "error")
+    # Every status meaning the verb did NOT do the thing. "already_running" and
+    # "not_running" are no-ops, not successes: announcing "approved & executed"
+    # for one told an operator their message had started a run when the run had
+    # been going for six minutes and their message did nothing.
+    #
+    # Keep in step with concierge._FAILED_STATUSES -- these are two copies of
+    # one idea, and the last time a status was added it went into only one of
+    # them.
+    _NON_EXECUTION_STATUSES = (
+        "refused", "error", "already_running", "not_running", "empty",
+    )
+
+    # A no-op is not a failure, so "no reason was given" would be its own small
+    # untruth: nothing went wrong and nothing needs explaining. Each carries the
+    # actual reason it did nothing.
+    _NON_EXECUTION_DEFAULTS = {
+        "already_running": "the team is already working on it",
+        "not_running": "no run was in progress",
+        "empty": "there was nothing to do",
+    }
 
     @classmethod
     def _non_execution_reason(cls, result: dict[str, Any] | None) -> str | None:
         status = (result or {}).get("status")
         if status not in cls._NON_EXECUTION_STATUSES:
             return None
-        return str((result or {}).get("detail") or "no reason was given")
+        detail = str((result or {}).get("detail") or "").strip()
+        if detail:
+            return detail
+        return cls._NON_EXECUTION_DEFAULTS.get(str(status), "no reason was given")
 
     async def _post_decision_outcome(
         self, channel_id: Any, thread_ts: str, verb: str, approved: bool,

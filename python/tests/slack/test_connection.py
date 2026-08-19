@@ -2067,3 +2067,31 @@ async def test_create_outcome_north_star_cap_never_severs_an_entity(
 
     assert "&am" not in text.replace("&amp;", "")
     assert not text.rstrip("…").endswith("&")
+
+
+async def test_already_running_is_not_announced_as_executed(tmp_path: Path) -> None:
+    """start_run on a project whose run is already going returns
+    {"status": "already_running"} -- a no-op. It was announced as
+    "Autopilot approved & executed start_run", so the operator believed their
+    message had started something. It had not.
+
+    Same omission as concierge._FAILED_STATUSES: two copies of one list, one
+    of them left behind.
+    """
+    bridge, _sdk, poster = _bridge(tmp_path)
+
+    await bridge._post_autopilot_outcome(
+        "start_run", "C1", "t1", {"status": "already_running"})
+
+    text = poster.messages[0]["text"]
+    assert "executed" not in text.lower()
+    assert "already" in text.lower()
+
+
+async def test_not_running_stop_is_not_announced_as_executed(tmp_path: Path) -> None:
+    bridge, _sdk, poster = _bridge(tmp_path)
+
+    await bridge._post_autopilot_outcome(
+        "stop_run", "C1", "t1", {"status": "not_running"})
+
+    assert "executed" not in poster.messages[0]["text"].lower()

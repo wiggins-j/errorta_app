@@ -165,6 +165,26 @@ def _project_state_block(project_id: str, *, store: Any = None) -> str:
         return ""
 
     lines = ["## THIS PROJECT'S GOAL STATE", ""]
+
+    # Whether a run is in flight. Without this line the block described the
+    # project's GOAL but never whether anyone was working on it, so a PM asked
+    # "status?" answered from context alone and guessed -- live, it told the
+    # operator "No run is currently active" while a run had been going for six
+    # minutes, and they started a redundant one on the strength of it.
+    try:
+        run_status = str(ledger.get_run_state().get("status") or "idle")
+    except Exception:  # noqa: BLE001 - unreadable run state -> omit, don't raise
+        run_status = ""
+    if run_status:
+        if run_status == "running":
+            lines.append(
+                "Run status: RUNNING — the team is working right now. Do NOT "
+                "say the project is idle, and do not offer to start it."
+            )
+        else:
+            lines.append(f"Run status: {run_status} — no team is working right now.")
+        lines.append("")
+
     north_star = str(getattr(project, "north_star", "") or "").strip()
     dod = str(getattr(project, "definition_of_done", "") or "").strip()
     if north_star:
