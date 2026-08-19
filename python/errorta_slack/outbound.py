@@ -241,15 +241,17 @@ def _run_state_items(ledger_store: Any) -> list[_Item]:
     if status not in _TERMINAL_RUN_STATUSES:
         return []
     ended_at = str(state.get("ended_at") or "")
-    reason = str(state.get("stop_reason") or state.get("last_error") or "").strip()
+    # `last_error` is a raw `str(exc)` (runner.py) and `stop_reason` is
+    # engine-authored: neither is operator text, and `render.fyi_message` does
+    # NOT escape what it is given. Unescaped, a "<!channel>" inside an
+    # exception string pings the entire workspace. Escape, then cap -- escaping
+    # EXPANDS, so capping first would bound the wrong string.
+    raw_reason = str(state.get("stop_reason") or state.get("last_error") or "").strip()
+    reason = render.escape_mrkdwn(raw_reason)[:300] if raw_reason else ""
     if status == "stopped":
-        detail = "The team stopped."
-        if reason:
-            detail = f"The team stopped — {reason}"
+        detail = f"The team stopped — {reason}" if reason else "The team stopped."
     else:
-        detail = "The run failed."
-        if reason:
-            detail = f"The run failed — {reason}"
+        detail = f"The run failed — {reason}" if reason else "The run failed."
     return [
         _Item(marker=f"run:{status}:{ended_at}", sort_key=ended_at, kind="fyi",
               title="", detail=detail, mandatory=True)

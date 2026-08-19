@@ -1014,3 +1014,21 @@ async def test_muted_ordinary_item_is_not_marked_posted() -> None:
     posted = outbound.poll_once("C-mute4", "p1", deps=deps, poster=poster)
 
     assert posted == ["log:2026-01-01T00:00:00:pr_merged"]
+
+
+@pytest.mark.asyncio
+async def test_run_failure_reason_is_escaped() -> None:
+    """`last_error` is a raw str(exc) and fyi_message does not escape. An
+    exception carrying "<!channel>" must not ping the whole workspace."""
+    store.advance_cursor("C-esc", "")
+    deps = _run_state_deps({
+        "status": "failed", "ended_at": "2026-01-04T00:00:00",
+        "last_error": "boom <!channel> & <https://evil|click>",
+    })
+    poster = SyncFakePoster()
+
+    outbound.poll_once("C-esc", "p1", deps=deps, poster=poster)
+
+    text = poster.messages[0]["text"]
+    assert "<!channel>" not in text
+    assert "&lt;!channel&gt;" in text
