@@ -155,6 +155,12 @@ class _Item:
     detail: str
     signal_id: str | None = None  # only set for kind == "decision"
     signal_kind: str | None = None  # "problem" | "alert" -- only set alongside signal_id
+    # Ignores a channel's notification mute. The operator's requirement is that
+    # the team stopping, hitting a roadblock, or finishing ALWAYS arrives; a
+    # "stop updating me" must quiet routine progress, not hide the run ending.
+    # A blocking `kind == "decision"` is mandatory by construction (it carries
+    # an Approve/Decline the run is waiting on) and need not set this.
+    mandatory: bool = False
 
 
 def _log_items(deps: "OutboundDeps", ledger_store: Any) -> list[_Item]:
@@ -208,12 +214,55 @@ def _publish_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
     return items
 
 
+# Run statuses that are an EVENT worth announcing. "idle"/"running" are
+# ongoing conditions, not transitions: emitting them would post an item on
+# every tick forever.
+_TERMINAL_RUN_STATUSES = ("stopped", "failed")
+
+
+def _run_state_items(ledger_store: Any) -> list[_Item]:
+    """The team stopped / finished — an event no other source carries.
+
+    team_log, attention and the publish ledger all describe work *within* a
+    run; a run ENDING writes only run_state (``routes/coding.py`` on a clean
+    stop, ``runner.py`` on a failure). Without this source two of the three
+    events the operator requires could never fire.
+
+    The marker pairs the status with ``ended_at`` rather than reading a clock,
+    so it is stable across polls: re-polling an unchanged run state produces
+    the same marker, which the cursor has already seen.
+    """
+    try:
+        state = ledger_store.get_run_state() or {}
+    except Exception:  # noqa: BLE001 - an unreadable ledger must not wedge the loop
+        _LOGGER.warning("outbound: could not read run state", exc_info=True)
+        return []
+    status = str(state.get("status") or "")
+    if status not in _TERMINAL_RUN_STATUSES:
+        return []
+    ended_at = str(state.get("ended_at") or "")
+    reason = str(state.get("stop_reason") or state.get("last_error") or "").strip()
+    if status == "stopped":
+        detail = "The team stopped."
+        if reason:
+            detail = f"The team stopped — {reason}"
+    else:
+        detail = "The run failed."
+        if reason:
+            detail = f"The run failed — {reason}"
+    return [
+        _Item(marker=f"run:{status}:{ended_at}", sort_key=ended_at, kind="fyi",
+              title="", detail=detail, mandatory=True)
+    ]
+
+
 def _current_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
     ledger_store = deps.ledger_factory(project_id)
     items = (
         _log_items(deps, ledger_store)
         + _attention_items(deps, project_id, ledger_store)
         + _publish_items(deps, project_id)
+        + _run_state_items(ledger_store)
     )
     # Stable, deterministic order (roughly chronological); the marker
     # breaks ties so equal-timestamp items always sort the same way.
