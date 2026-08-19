@@ -192,3 +192,72 @@ def test_gather_project_read_never_globs_cwd_when_repo_path_is_unset(
     assert read["files"] == []
     assert read["blob"] == "fake blob"
     assert "CWD LEAK" not in read["blob"]
+
+
+def test_git_log_bounds_its_subprocess_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (branch review #6): the F039 rewrite swapped ``subprocess.run(
+    ..., timeout=10)`` for ``apply_workspace._git_try``, which had no timeout
+    at all — the docstring still promised one. ``_git_log`` runs inside
+    ``propose_next_goal`` -> ``concierge.run_turn`` -> an ``asyncio.to_thread``
+    worker with no cancellation path, so an unbounded ``git log`` against a
+    stale mount or a locked repo wedges that thread for the life of the
+    sidecar. Assert every git call this module makes carries a positive,
+    bounded wait."""
+    from errorta_tools.runner import apply_workspace
+
+    seen: list[dict] = []
+
+    def fake_git_try(repo, *args, **kwargs):
+        seen.append({"args": args, "timeout_s": kwargs.get("timeout_s")})
+        return 0, "", ""
+
+    monkeypatch.setattr(apply_workspace, "_git_try", fake_git_try)
+
+    next_goal._git_log("/nonexistent/repo")
+
+    assert seen, "_git_log made no git call at all"
+    for call in seen:
+        assert isinstance(call["timeout_s"], (int, float)), (
+            f"git {call['args']} ran with no timeout: {call}")
+        assert 0 < call["timeout_s"] <= 60
+
+
+def test_git_log_yields_no_evidence_when_git_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout must degrade to "no evidence", never propagate: a PM turn
+    that cannot read git still has to produce a reply."""
+    import subprocess
+
+    from errorta_tools.runner import apply_workspace
+
+    def hung_git(repo, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=kwargs.get("timeout_s") or 1)
+
+    monkeypatch.setattr(apply_workspace, "_git_try", hung_git)
+
+    assert next_goal._git_log("/nonexistent/repo") == ([], "")
+
+
+def test_git_try_forwards_its_timeout_to_the_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``errorta_council`` may not import ``subprocess``, so the bound has to be
+    enforced in ``errorta_tools``. Prove the kwarg actually reaches the spawn
+    rather than being accepted and dropped."""
+    from errorta_tools.runner import apply_workspace
+
+    calls: list[dict] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(apply_workspace.subprocess, "run", fake_run)
+
+    apply_workspace._git_try(Path("/nonexistent/repo"), "log", timeout_s=3.5)
+
+    assert calls[0]["timeout"] == 3.5

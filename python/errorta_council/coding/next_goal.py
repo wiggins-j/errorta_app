@@ -71,15 +71,24 @@ _MAX_FILES = 40           # repo_reader.py:39
 _PLAN_DOC_COUNT = 5       # newest-first, by ISO date prefix in the filename
 _PLAN_DOC_CAP = 6_000
 _COMMIT_COUNT = 20
+_GIT_TIMEOUT_S = 10.0   # every git call here is a read-only local query
 _PLAN_DIRS = ("docs/superpowers/plans", "docs/plans")
 
 
 def _git_log(repo_path: str) -> tuple[list[str], str]:
     """Last ``_COMMIT_COUNT`` commit subjects and the current branch.
 
-    Best-effort: a non-repo, a missing git, or any git failure yields
-    ``([], "")`` rather than raising — a PM turn must not die because git is
-    unavailable.
+    Best-effort: a non-repo, a missing git, a timeout, or any git failure
+    yields ``([], "")`` rather than raising — a PM turn must not die because
+    git is unavailable.
+
+    The timeout is NOT optional garnish. This runs inside ``propose_next_goal``
+    -> ``concierge.run_turn`` -> an ``asyncio.to_thread`` worker with no
+    cancellation path, so a ``git log`` that never returns (stale network
+    mount, a held ``.git/index.lock``) would permanently consume a thread from
+    the default executor and hang that Slack turn forever. ``errorta_council``
+    may not import ``subprocess``, so the bound is passed to (and enforced by)
+    ``_git_try`` in ``errorta_tools``.
 
     Shells out through ``errorta_tools.runner.apply_workspace._git_try``, NOT
     ``subprocess``. ``errorta_council`` must never import ``subprocess``: the
@@ -98,8 +107,9 @@ def _git_log(repo_path: str) -> tuple[list[str], str]:
 
     def _run(*args: str) -> str:
         try:
-            code, out, _err = _git_try(_Path(repo_path), *args)
-        except Exception:  # noqa: BLE001 — git missing/not a repo -> no evidence
+            code, out, _err = _git_try(
+                _Path(repo_path), *args, timeout_s=_GIT_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 — git missing/not a repo/hung -> no evidence
             return ""
         return out if code == 0 else ""
 
