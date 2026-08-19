@@ -25,6 +25,15 @@ class FakeTask:
         self.task_id = task_id
 
 
+# The team's configured PM, as it is persisted in the project's run config.
+# `propose_next_goal` must resolve its model route from HERE and nowhere else.
+_PM_MEMBER = {
+    "member_id": "m-pm", "role": "answerer", "enabled": True,
+    "gateway_route_id": "local.pm-route", "provider_kind": "cli",
+    "metadata": {"coding_role": "pm"},
+}
+
+
 class FakeLedgerStore:
     """Stub matching the surface build_team_log/attention.list_open touch."""
 
@@ -1359,6 +1368,7 @@ def test_propose_next_goal_returns_a_proposal_and_writes_nothing(tmp_path: Path)
         north_star="Stale.", definition_of_done="d",
         target="existing", repo_path=None, delivery_root=None,
     )
+    ledger.set_run_config(members=[dict(_PM_MEMBER)])
     store.bind_channel("C1", "proj-propose")
     deps = _deps(
         tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
@@ -1390,6 +1400,7 @@ def test_propose_next_goal_reports_a_thin_repo_instead_of_inventing(tmp_path: Pa
         north_star="Stale.", definition_of_done="d",
         target="existing", repo_path=None, delivery_root=None,
     )
+    ledger.set_run_config(members=[dict(_PM_MEMBER)])
     store.bind_channel("C1", "proj-thin")
     deps = _deps(
         tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
@@ -1433,3 +1444,77 @@ def test_propose_next_goal_refuses_without_a_model_caller(tmp_path: Path) -> Non
 
     assert result["status"] == "error"
     assert "model" in result["detail"].lower()
+
+
+def test_propose_next_goal_ignores_a_model_supplied_gateway_route(tmp_path: Path) -> None:
+    """Regression (branch review #5): the member was taken from ``args``, which
+    is whatever the concierge model emitted — i.e. ultimately derived from
+    chat text, including anything a user pasted. ``propose_next_goal`` is
+    R-class, so it runs with no confirmation at all; honouring that member let
+    pasted text pick a paid cloud gateway route and make a billed call, which
+    is precisely the decision the C-class ``spend_cloud`` verb exists to gate.
+
+    The route must come from the project's persisted run config only."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-route")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_config(members=[dict(_PM_MEMBER)])
+    store.bind_channel("C1", "proj-route")
+
+    seen: dict[str, Any] = {}
+
+    def spy_propose(store_: Any, *, member: dict[str, Any], caller: Any) -> dict[str, Any]:
+        seen["member"] = member
+        return {"title": "t", "body": "b", "evidence": [], "stale": False}
+
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=spy_propose,
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal",
+        {"member": {"gateway_route_id": "cloud.expensive-frontier",
+                    "provider_kind": "http",
+                    "turn_limits": {"timeout_seconds": 600}}},
+        channel_id="C1", thread_ts="1.0", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "proposed"
+    assert seen["member"]["gateway_route_id"] == "local.pm-route"
+    assert "cloud.expensive-frontier" not in str(seen["member"])
+    assert "turn_limits" not in seen["member"]
+
+
+def test_propose_next_goal_refuses_when_the_team_has_no_pm_route(tmp_path: Path) -> None:
+    """No PM in the run config means there is no trusted route to call. Refuse
+    rather than fall back to an empty ``gateway_route_id``, which would crash
+    inside the gateway mid-turn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-nopm")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-nopm")
+    propose_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=lambda store_, **kw: (
+            propose_calls.append(kw) or {"title": "t", "body": "", "evidence": []}),
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert propose_calls == [], "reached the model with no configured route"

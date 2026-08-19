@@ -34,6 +34,7 @@ keyword-only parameters; every other name matches the design doc exactly.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Callable
@@ -413,6 +414,17 @@ def run_turn(
         return _unconfigured_result(project_id)
     member = {**pm, "project_id": project_id}
 
+    # `propose_next_goal` needs a model of its own. Nothing else wires one up:
+    # the only production ToolDeps (errorta_app/slack_lifecycle.py) is built
+    # bare, so without this the verb refuses with "no model is wired up" on
+    # every real call and the whole repo-grounded proposal feature is dead in
+    # the shipped bridge. A per-turn SHALLOW COPY, not a mutation: `deps` is
+    # constructed once at bridge start and shared by every concurrent thread,
+    # so assigning onto it would publish this turn's caller process-wide.
+    # The copy shares the same seams/caches; only `goal_caller` differs.
+    turn_deps = copy.copy(deps)
+    turn_deps.goal_caller = caller
+
     system_prompt = build_system_prompt(project_id, autopilot=autopilot)
 
     prompt = _build_prompt(system_prompt, thread_msgs, message)
@@ -437,7 +449,7 @@ def run_turn(
             break
 
         hop_results, ok = _dispatch_calls(
-            calls, channel_id=channel_id, thread_ts=thread_ts, deps=deps,
+            calls, channel_id=channel_id, thread_ts=thread_ts, deps=turn_deps,
         )
         tool_results.extend(hop_results)
         if not ok:

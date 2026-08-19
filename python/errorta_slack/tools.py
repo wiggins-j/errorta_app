@@ -686,6 +686,15 @@ def propose_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     confirmation renders the full title and body so a human reads the exact
     text before it becomes the team's scope. That two-step split is what makes
     reading untrusted repo content safe here.
+
+    The model route is resolved from the project's persisted run config, NEVER
+    from ``args``. ``args`` is whatever the concierge model emitted, which is
+    ultimately derived from chat text including anything a user pasted; since
+    this verb is R-class it runs with no confirmation at all, so honouring an
+    ``args["member"]`` would let pasted text pick a paid cloud gateway route
+    and make a billed call — exactly the decision the C-class ``spend_cloud``
+    verb exists to gate. Every other model call on the bridge resolves its
+    member from the run config; so does this one.
     """
     project_id = _bound_project_id(deps, channel_id)
     ledger_store = deps.ledger_factory(project_id)
@@ -694,10 +703,20 @@ def propose_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         from errorta_council.coding.next_goal import propose_next_goal as _propose
 
         propose_fn = _propose
-    member = dict(args.get("member") or {}) or {"gateway_route_id": "", "role": "pm"}
     caller = deps.goal_caller
     if caller is None:
         return {"status": "error", "detail": "no model is wired up for this bridge yet"}
+    # Lazy: concierge imports this module at module load, so the reverse edge
+    # has to be deferred to call time. One implementation, not a third copy.
+    from errorta_slack.concierge import _resolve_pm_member
+
+    pm = _resolve_pm_member(ledger_store)
+    if pm is None or not str(pm.get("gateway_route_id") or "").strip():
+        return {
+            "status": "error",
+            "detail": "the team's PM model isn't configured yet — set it and try again",
+        }
+    member = {**pm, "project_id": project_id}
     try:
         proposal = propose_fn(ledger_store, member=member, caller=caller)
     except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
