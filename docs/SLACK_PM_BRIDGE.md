@@ -118,14 +118,14 @@ so there is no placeholder to paste by accident and neither token is echoed to
 the terminal or into your shell history:
 
 ```
-python -c "
+python - <<'PY'
 from errorta_slack import secrets
 import getpass
 app = getpass.getpass('xapp- app-level token: ').strip()
 bot = getpass.getpass('xoxb- bot token: ').strip()
 secrets.save_tokens(app, bot)
 print('saved:', secrets.mask())
-"
+PY
 ```
 
 > **Why prompted, not inline.** The previous version of this snippet carried
@@ -238,10 +238,10 @@ Autopilot is **off by default**. Enable it deliberately, from a machine you
 trust, by writing the flag to the bridge config:
 
 ```
-python -c "
+python - <<'PY'
 from errorta_slack import config
 cfg = config.load(); cfg['autopilot'] = True; config.save(cfg)
-"
+PY
 ```
 
 Set it back to `False` to return to button-gated approvals.
