@@ -635,19 +635,80 @@ class SlackBridge:
         "spend_cloud": (
             "Spend on a cloud model call", "Approve to spend on this cloud call."),
         "publish_pr": ("Open a public PR", "Approve to open the pull request."),
+        "set_next_goal": (
+            "Set the team's next goal",
+            "Approve to make this the scope the team plans and builds against."),
+        "set_north_star": (
+            "Rewrite the North Star",
+            "Approve to replace the project's durable charter with this."),
+        "adopt_project": (
+            "Adopt an existing project",
+            "Approve to create a PUBLIC Slack channel for this project and bind it."),
     }
 
+    # Which arg fields each verb must SHOW before it can be approved, in order.
+    # Without these the button renders a verb name and nothing else, and for
+    # `set_next_goal` that is load-bearing rather than cosmetic: the
+    # `propose_next_goal` docstring justifies reading untrusted repo content
+    # on the grounds that "the proposal reaches the ledger only through
+    # set_next_goal, whose confirmation renders the full title and body so a
+    # human reads the exact text before it becomes the team's scope". If the
+    # body is never rendered, that second control does not exist and the chain
+    # "hostile repo file -> proposed body -> approved unseen -> stored Focus"
+    # completes with only the title inspected.
+    _CONFIRMATION_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+        "set_next_goal": (("title", "Goal"), ("body", "Scope")),
+        "set_north_star": (
+            ("north_star", "North Star"), ("definition_of_done", "Definition of done")),
+        "adopt_project": (("project_id", "Project"),),
+        "publish_pr": (("title", "PR title"), ("body", "PR description")),
+        "spend_cloud": (("reason", "Reason"),),
+    }
+
+    # Slack rejects a section over 3000 characters outright, which would mean a
+    # staged C-class action with NO approve button at all -- strictly worse
+    # than a shortened one. Cap each field well under that and say so.
+    _CONFIRMATION_FIELD_CAP = 1200
+    _CONFIRMATION_LABEL_CAP = 120
+
+    @classmethod
+    def _confirmation_field(cls, label: str, value: Any) -> str:
+        text = str(value if value is not None else "").strip()
+        if not text:
+            return ""
+        if len(text) > cls._CONFIRMATION_FIELD_CAP:
+            text = (text[:cls._CONFIRMATION_FIELD_CAP]
+                    + "…\n_(truncated — open the project to read the full text "
+                      "before approving)_")
+        return f"*{label}:*\n{render.escape_mrkdwn(text)}"
+
     def _confirmation_title(self, record: dict[str, Any]) -> tuple[str, str]:
-        """A short (title, detail) for the decision button, from the staged
-        record's verb + args. Only ever surfaces what the owner already
-        typed (a project title/id) -- no secrets."""
+        """A (title, detail) for the decision button, from the staged record's
+        verb + args. The detail renders the actual content being approved --
+        the goal title AND body, the proposed North Star text, the project
+        being adopted -- because "Confirm set_north_star / Approve to run this
+        action" asks a human to verify a durable-charter rewrite while showing
+        them nothing but a verb name.
+
+        Field text is escaped (it can carry model- or repo-derived content;
+        see ``render.escape_mrkdwn``) and length-capped, and only ever
+        contains args the owner or the concierge already put in this channel
+        -- no secrets, no tokens."""
         verb = str(record.get("verb") or "")
         args = record.get("args") or {}
         base_title, detail = self._CONFIRMATION_COPY.get(
             verb, (f"Confirm {verb}", "Approve to run this action."),
         )
-        label = args.get("title") or args.get("project_id")
-        title = f"{base_title} — {label}" if label else base_title
+        label = str(args.get("title") or args.get("project_id") or "").strip()
+        if len(label) > self._CONFIRMATION_LABEL_CAP:
+            label = label[:self._CONFIRMATION_LABEL_CAP] + "…"
+        title = f"{base_title} — {render.escape_mrkdwn(label)}" if label else base_title
+        fields = [
+            rendered for key, field_label in self._CONFIRMATION_FIELDS.get(verb, ())
+            if (rendered := self._confirmation_field(field_label, args.get(key)))
+        ]
+        if fields:
+            detail = "\n\n".join([*fields, detail])
         return title, detail
 
     async def _handle_staged_confirmations(
@@ -714,11 +775,13 @@ class SlackBridge:
             else:
                 detail = f"{verb}: {(effect_result or {}).get('status', 'done')}."
             text = f"🤖 Autopilot approved — {detail}"
-        elif (effect_result or {}).get("status") == "error":
-            # The verb ran but reported failure (e.g. start_run -> a provider
-            # is logged out). Say so plainly rather than claiming success.
-            reason = (effect_result or {}).get("detail") or "check the project directly"
-            text = f"⚠️ Autopilot approved *{verb}*, but it didn't complete — {reason}"
+        elif (reason := self._non_execution_reason(effect_result)) is not None:
+            # The verb reported failure ("error" -- e.g. a logged-out provider)
+            # or was refused outright ("refused" -- start_gate on a project with
+            # no operative goal, the EXPECTED outcome for every freshly adopted
+            # project). Neither started anything, so neither may be announced
+            # as "approved & executed"; say what happened and why.
+            text = f"⚠️ Autopilot approved *{verb}*, but it didn't run — {reason}"
         else:
             text = f"🤖 Autopilot approved & executed *{verb}*."
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
@@ -759,15 +822,34 @@ class SlackBridge:
             channel_id, thread_ts, _STUDIO_NOT_CONFIGURED_TEXT, blocks=None,
         )
 
+    # A verb can be approved and still not run. `start_run` refuses outright
+    # when the project has no operative goal (`next_goal.start_gate`), and
+    # `set_next_goal`/`set_north_star` report a rejected argument the same way
+    # -- by RETURNING a status, not by raising. Announcing "executed" for
+    # either is the precise failure this slice was written to fix, one layer
+    # further up: the owner is told the team is building when nothing started
+    # and the computed reason has been thrown away.
+    _NON_EXECUTION_STATUSES = ("refused", "error")
+
+    @classmethod
+    def _non_execution_reason(cls, result: dict[str, Any] | None) -> str | None:
+        status = (result or {}).get("status")
+        if status not in cls._NON_EXECUTION_STATUSES:
+            return None
+        return str((result or {}).get("detail") or "no reason was given")
+
     async def _post_decision_outcome(
         self, channel_id: Any, thread_ts: str, verb: str, approved: bool,
+        result: dict[str, Any] | None = None,
     ) -> None:
         if self._poster is None:
             return
-        text = (
-            f"Approved — {verb} executed." if approved
-            else f"Declined — {verb} was not executed."
-        )
+        if not approved:
+            text = f"Declined — {verb} was not executed."
+        elif (reason := self._non_execution_reason(result)) is not None:
+            text = f"⚠️ Approved, but *{verb}* did not run — {reason}"
+        else:
+            text = f"Approved — {verb} executed."
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
     async def _post_studio_outcome(
@@ -992,7 +1074,9 @@ class SlackBridge:
                 verb, channel_id, thread_ts, approved, effect_result,
             )
         else:
-            await self._post_decision_outcome(channel_id, thread_ts, verb, approved)
+            await self._post_decision_outcome(
+                channel_id, thread_ts, verb, approved, effect_result,
+            )
 
     # ----------------------------------------------------------------
     # Connection lifecycle
