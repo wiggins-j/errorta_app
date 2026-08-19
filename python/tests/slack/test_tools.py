@@ -1299,6 +1299,67 @@ def test_set_north_star_writes_through_promote_north_star(tmp_path: Path) -> Non
     assert project.revision == before + 1
 
 
+def test_set_north_star_does_not_record_a_new_purpose_as_already_met(
+    tmp_path: Path,
+) -> None:
+    """Regression (branch review #8): `promote_north_star` forward-stamps
+    `north_star_met_at` for `target == "existing"`, and `Project.phase` returns
+    "steering" whenever that field is set. The stamp exists for the F141 import
+    flow, where the North Star was INFERRED FROM the existing codebase and is
+    therefore already true. A human naming a NEW purpose from Slack is the
+    opposite case: "our north star is now: ship a multiplayer mode" on an
+    adopted project was instantly recorded as met, with zero code behind it,
+    and the project flipped to the steering phase."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-ns-unmet")
+    ledger.create_project(
+        north_star="Inferred from the existing code.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    assert ledger.get_project().north_star_met_at == ""
+    store.bind_channel("C1", "proj-ns-unmet")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_north_star", {"north_star": "Ship a multiplayer mode."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "north_star_set"
+    project = LedgerStore("proj-ns-unmet").get_project()
+    assert project.north_star == "Ship a multiplayer mode."
+    assert project.north_star_met_at == "", "an unbuilt north star was recorded as met"
+    assert project.phase == "north_star"
+
+
+def test_set_north_star_leaves_an_already_steering_project_in_steering(
+    tmp_path: Path,
+) -> None:
+    """The stamp is forward-only. Declining to ADD one must not remove one: a
+    project that genuinely crossed into steering stays there when its North
+    Star is later replaced."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-ns-steering")
+    ledger.create_project(
+        north_star="Old.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.mark_north_star_met()
+    store.bind_channel("C1", "proj-ns-steering")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    tools.dispatch(
+        "set_north_star", {"north_star": "Next chapter."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert LedgerStore("proj-ns-steering").get_project().phase == "steering"
+
+
 def test_set_north_star_preserves_dod_when_omitted(tmp_path: Path) -> None:
     """The in-app modal sends only northStar and never definitionOfDone
     (src/features/coding/index.tsx:1177-1183). An omitted DoD must leave the

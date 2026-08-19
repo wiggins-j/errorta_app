@@ -639,11 +639,18 @@ def set_north_star(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     ``dispatch`` saw ``confirmed_via="block_actions"``.
 
     Writes through ``LedgerStore.promote_north_star`` (ledger.py:1878) — the
-    ONLY lock-held authoritative writer, which bumps ``revision`` and
-    forward-stamps ``north_star_met_at`` for ``target == "existing"``.
+    ONLY lock-held authoritative writer, which bumps ``revision``.
     Deliberately NOT the ``PUT /north-star`` route (routes/coding.py:4175),
     whose unlocked read-modify-write against the private ``_project_path`` can
-    lose-update against a concurrent run write and skips that stamp.
+    lose-update against a concurrent run write.
+
+    Passes ``already_met=False``. That writer's forward-only
+    ``north_star_met_at`` stamp exists for the F141 import flow, where the
+    North Star being accepted was *inferred from* an already-built codebase
+    and so is already true by construction. A human naming a NEW purpose from
+    Slack is the opposite case: on an adopted (``target == "existing"``)
+    project the default stamp would record a goal with zero code behind it as
+    met and flip the project straight into the ``"steering"`` phase.
 
     Refuses mid-run, mirroring ``accept_north_star_proposal``'s 409
     (routes/coding.py:4598-4599): rewriting the charter under a live run
@@ -668,7 +675,7 @@ def set_north_star(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         dod = str(args.get("definition_of_done") or "").strip()
         if not dod:
             dod = str(ledger_store.get_project().definition_of_done or "")
-        project = ledger_store.promote_north_star(north_star, dod)
+        project = ledger_store.promote_north_star(north_star, dod, already_met=False)
     except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
         return {
             "status": "error",
