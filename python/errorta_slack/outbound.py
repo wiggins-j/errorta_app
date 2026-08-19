@@ -181,18 +181,29 @@ def _attention_items(
 ) -> list[_Item]:
     items: list[_Item] = []
     for sig in deps.attention_list_open(project_id, store=ledger_store):
+        # ONLY blocking signals are channel messages.
+        #
+        # A non-blocking signal is a reviewer's note, not a milestone: one live
+        # run raised 28 of them against a single spec ("Rounding method not
+        # specified", "Custom tip field initial state unspecified", ...), and
+        # each would have been its own Slack message in a channel designed to
+        # carry 6-12. They are also already summarised -- team_log emits
+        # "reviewed an artifact (N finding(s))" for the same review round -- and
+        # the detail stays in the app, where it can actually be acted on.
+        #
+        # A blocking signal is the opposite: the run is halted waiting on the
+        # button this item carries, so it posts even through a channel mute.
+        if not bool(_get(sig, "blocking", False)):
+            continue
         sig_id = str(_get(sig, "id", ""))
-        sig_kind = str(_get(sig, "kind", ""))
-        created_at = str(_get(sig, "created_at", ""))
         title = str(_get(sig, "title", ""))
         summary = str(_get(sig, "summary", ""))
-        blocking = bool(_get(sig, "blocking", False))
         items.append(
             _Item(
-                marker=f"attn:{sig_id}", sort_key=created_at,
-                kind="decision" if blocking else "fyi",
+                marker=f"attn:{sig_id}", sort_key=str(_get(sig, "created_at", "")),
+                kind="decision",
                 title=title, detail=summary or title,
-                signal_id=sig_id, signal_kind=sig_kind,
+                signal_id=sig_id, signal_kind=str(_get(sig, "kind", "")),
             )
         )
     return items
