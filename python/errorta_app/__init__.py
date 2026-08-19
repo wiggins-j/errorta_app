@@ -10,4 +10,4 @@ See `docs/specs/F006-tauri-shell.md` for the architecture.
 # Never hand-edit — run `scripts/bump-version.sh X.Y.Z`, which rewrites all
 # three declarations. tests/test_version_identity.py locks them byte-equal and
 # scripts/release-cli.sh's preflight refuses to build on drift.
-__version__ = "0.2.0-alpha.1"
+__version__ = "0.2.0-alpha.2"
