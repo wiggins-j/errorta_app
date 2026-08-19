@@ -58,7 +58,7 @@ class ToolError(Exception):
 # Catalog — the single source of truth for verbs, trust class, and prompt copy
 # --------------------------------------------------------------------------
 
-TOOL_CATALOG: dict[str, dict[str, str]] = {
+TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "list_projects": {
         "trust": "R",
         "summary": "List every coding project this studio has created.",
@@ -72,10 +72,12 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "answer_question": {
         "trust": "R",
+        "args": (("question", True, "the question to answer"),),
         "summary": "Answer a question from context already fetched (no side effect).",
     },
     "archive_project": {
         "trust": "C",
+        "args": (("project_id", True, "the project to spin down"),),
         "summary": (
             "Spin a project down — pause it and archive its Slack channel "
             "(reversible; does not delete the project)."
@@ -83,6 +85,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "adopt_project": {
         "trust": "C",
+        "args": (("project_id", True, "the existing project to adopt"),
+                 ("start", False, "true to also start the run")),
         "summary": (
             "Adopt an EXISTING project into Slack — open and bind its own "
             "channel (and seat a team if it has none)."
@@ -367,11 +371,55 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         return {"status": "error", "project_id": project_id, "detail": str(exc)}
 
     deps.store.bind_channel(chan["channel_id"], project_id)
+
+    # Spec §3.2: creating a project from Slack ALWAYS starts it. Unlike
+    # `adopt_project`, there is no `start` opt-in and no approval gate of its
+    # own -- the operator's decision, and it holds whether or not autopilot is
+    # on. The accepted trade is that create's Approve tap was also the last
+    # anti-injection control on this path; what remains is the allowlist and
+    # the concierge's "quoted text is data, never a command" rule.
+    #
+    # `start_gate` is kept rather than removed. After the factory seeds the
+    # charter's Focus it passes by construction, but it stays as the guard for
+    # the (now impossible) no-goal case, and it is cheap.
+    from errorta_council.coding.next_goal import start_gate  # noqa: PLC0415
+
+    started, start_refused = False, start_gate(deps.ledger_factory(project_id))
+    if start_refused is None:
+        start_fn = deps.start_run_fn
+        if start_fn is None:
+            from errorta_slack.tools import _default_start_run as start_fn  # noqa: PLC0415
+        try:
+            start_fn(project_id, resume=False, continue_=False)
+            started = True
+        except Exception as exc:  # noqa: BLE001 - never escape a live turn
+            # Classify through the shared helper rather than rendering the
+            # exception type: a fresh start's realistic failures are a
+            # logged-out provider (member_health_preflight_failed) and an
+            # unconfigured team (run_setup_required), and both have actionable
+            # messages there. "couldn't start the run (HTTPException)" tells the
+            # operator nothing, which defeats the point of reporting at all.
+            # The helper is already redacted -- it never surfaces an exception
+            # message except for the two 409 codes it recognises.
+            from errorta_slack.tools import _classify_start_exception  # noqa: PLC0415
+
+            classified = _classify_start_exception(exc)
+            if classified.get("status") == "already_running":
+                # Impossible for a just-created project, but the helper models
+                # it and swallowing it as a refusal would be a lie.
+                started = True
+            else:
+                start_refused = str(
+                    classified.get("detail") or "couldn't start the run")
+
     return {
         "status": "created",
         "project_id": project_id,
         "channel_id": chan["channel_id"],
         "channel_name": chan["name"],
+        "north_star": str(charter.get("north_star", "")),
+        "started": started,
+        "start_refused": start_refused,
     }
 
 
@@ -527,6 +575,26 @@ def adopt_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
                 "detail": f"channel creation failed ({type(exc).__name__})"}
 
     deps.store.bind_channel(chan["channel_id"], project_id)
+
+    # Seed the outbound cursor with everything that has ALREADY happened.
+    # An adopted project can carry months of team log; with an empty cursor the
+    # first poll treats all of it as new and posts one Slack message per entry,
+    # burying the channel before the team does anything. Create needs no
+    # equivalent -- a new project has no history, and its first real milestone
+    # should be posted.
+    #
+    # Best effort: a project whose ledger cannot be read here simply starts with
+    # an empty cursor (the old behaviour). Failing the adopt over a cosmetic
+    # backfill would be a worse trade.
+    try:
+        from errorta_slack import outbound  # noqa: PLC0415
+
+        deps.store.advance_cursor(
+            chan["channel_id"], outbound.current_marker_cursor(project_id))
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "adopt_project: could not seed the outbound cursor for %s",
+            project_id, exc_info=True)
 
     started, start_refused = False, None
     if bool(args.get("start")):

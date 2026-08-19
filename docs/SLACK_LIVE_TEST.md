@@ -33,14 +33,15 @@ The bridge reads tokens from a `0600` file via `errorta_slack.secrets`. Store th
 by **pasting when prompted** (do not put tokens on the command line):
 
 ```bash
-cd python && .venv/bin/python -c "
+cd python && .venv/bin/python - <<'PY'
 import getpass
 from errorta_slack import secrets
-app = getpass.getpass('xapp- app-level token: ')
-bot = getpass.getpass('xoxb- bot token: ')
+app = getpass.getpass('xapp- app-level token: ').strip()
+bot = getpass.getpass('xoxb- bot token: ').strip()
 secrets.save_tokens(app, bot)
-print('saved 0600 to', secrets.tokens_path() if hasattr(secrets,'tokens_path') else 'slack token store')
-"
+print('saved 0600 to', secrets.path())
+print('masked:', secrets.mask())
+PY
 ```
 
 ## 4. Allowlist yourself + enable the bridge
@@ -48,7 +49,7 @@ Only allowlisted Slack users can drive the PM (empty allowlist = deny-all). Add
 your Slack **team id** and **user id** to the config, then enable:
 
 ```bash
-cd python && .venv/bin/python -c "
+cd python && .venv/bin/python - <<'PY'
 from errorta_slack import config
 cfg = config.load()
 cfg['allowed_team_ids'] = ['T_YOUR_TEAM_ID']
@@ -56,7 +57,7 @@ cfg['allowed_user_ids'] = ['U_YOUR_USER_ID']
 cfg['enabled'] = True
 config.save(cfg)
 print('enabled; allowlist set')
-"
+PY
 ```
 (Find your ids in Slack: profile → *Copy member ID* for the user; the team id is
 in the app's *Basic Information* or any workspace URL.)
@@ -66,12 +67,12 @@ in the app's *Basic Information* or any workspace URL.)
 2. Bind that channel to a coding project (owner-confirmation model):
 
 ```bash
-cd python && .venv/bin/python -c "
+cd python && .venv/bin/python - <<'PY'
 from errorta_slack import linking
 link_id = linking.request_link('C_YOUR_CHANNEL_ID', 'YOUR_PROJECT_ID', 'U_YOUR_USER_ID')
 linking.approve_link(link_id)   # you are the owner approving
 print('linked channel -> project')
-"
+PY
 ```
 
 ## 6. Preflight — verify BEFORE messaging

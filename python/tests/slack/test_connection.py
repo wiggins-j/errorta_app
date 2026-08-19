@@ -1188,9 +1188,17 @@ async def test_handle_interaction_approve_studio_create_project_dispatches_via_s
     assert record is not None
     assert record["state"] == "approved"
 
-    assert len(poster.messages) == 1
-    assert "created" in poster.messages[0]["text"].lower()
-    assert "homeschool-game" in poster.messages[0]["text"] or "C-NEW" in poster.messages[0]["text"]
+    # Slice 5a Task 3: the confirmation goes to the studio channel where the
+    # create was requested AND to the newly bound project channel, which is the
+    # one the operator actually watches.
+    assert len(poster.messages) == 2
+    by_channel = {m["channel_id"]: m["text"] for m in poster.messages}
+    assert set(by_channel) == {"C-studio", "C-NEW"}
+    assert "created" in by_channel["C-studio"].lower()
+    assert "homeschool-game" in by_channel["C-studio"] or "C-NEW" in by_channel["C-studio"]
+    # The project-channel copy is top-level, not threaded -- a fresh channel
+    # has no thread to reply into.
+    assert [m["thread_ts"] for m in poster.messages if m["channel_id"] == "C-NEW"] == [None]
 
 
 class _ArchiveFakeLedger:
@@ -1969,3 +1977,93 @@ async def test_autopilot_reports_a_refused_start_run_as_not_started(
     texts = " ".join(m["text"] for m in poster.messages)
     assert "approved & executed" not in texts.lower()
     assert "no current goal" in texts
+
+
+# --------------------------------------------------------------------------
+# Slice 5a Task 3 — the create confirmation reports what actually happened.
+#
+# The PM's own reply text is model-authored and, on a live run, claimed "Goal
+# set and run started" when neither had happened. These renderers read the real
+# result dict instead, which is what makes them trustworthy.
+# --------------------------------------------------------------------------
+
+
+async def test_create_outcome_reports_started_with_north_star(tmp_path: Path) -> None:
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    text = bridge._create_project_outcome_text({
+        "status": "created", "project_id": "tip-calculator",
+        "channel_id": "C9", "channel_name": "tip-calculator",
+        "north_star": "A single-page tip calculator", "started": True,
+        "start_refused": None,
+    })
+
+    assert "tip-calculator" in text
+    assert "A single-page tip calculator" in text
+    assert "started" in text.lower()
+
+
+async def test_create_outcome_never_claims_success_when_not_started(tmp_path: Path) -> None:
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    text = bridge._create_project_outcome_text({
+        "status": "created", "project_id": "tip-calculator",
+        "channel_id": "C9", "channel_name": "tip-calculator",
+        "north_star": "A single-page tip calculator", "started": False,
+        "start_refused": "couldn't start the run (RuntimeError)",
+    })
+
+    assert "couldn't start the run (RuntimeError)" in text
+    assert "run started" not in text.lower()
+
+
+async def test_create_outcome_posts_into_the_project_channel(tmp_path: Path) -> None:
+    """The confirmation lands in the studio channel AND the new project channel
+    -- the operator reads the latter, and it is where the run's own progress
+    stream will appear."""
+    bridge, _sdk, poster = _bridge(tmp_path)
+
+    await bridge._post_studio_outcome(
+        "create_project", "C_STUDIO", "t1", True,
+        {"status": "created", "project_id": "p1", "channel_id": "C_NEW",
+         "channel_name": "p1", "north_star": "NS", "started": True,
+         "start_refused": None},
+    )
+
+    posted_channels = [m["channel_id"] for m in poster.messages]
+    assert "C_STUDIO" in posted_channels
+    assert "C_NEW" in posted_channels
+
+
+async def test_adopt_outcome_surfaces_start_refused(tmp_path: Path) -> None:
+    """adopt_project had no bespoke renderer, so it fell through to the generic
+    `verb: status.` line and silently dropped start_refused -- the operator was
+    never told the run had not started."""
+    bridge, _sdk, poster = _bridge(tmp_path)
+
+    await bridge._post_studio_outcome(
+        "adopt_project", "C_STUDIO", "t1", True,
+        {"status": "adopted", "project_id": "abovo", "channel_id": "C_A",
+         "channel_name": "abovo", "team_seated": True, "started": False,
+         "start_refused": "no current goal"},
+    )
+
+    text = poster.messages[0]["text"]
+    assert "no current goal" in text
+    assert "run started" not in text.lower()
+
+
+async def test_create_outcome_north_star_cap_never_severs_an_entity(
+    tmp_path: Path,
+) -> None:
+    """Review fix: escaping expands, so a naive 300-char slice of ALREADY
+    escaped text can cut '&amp;' into '&am' and render as literal junk."""
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    text = bridge._create_project_outcome_text({
+        "status": "created", "project_id": "p", "channel_id": "C", "channel_name": "p",
+        "north_star": "x" * 297 + "&" * 20, "started": True, "start_refused": None,
+    })
+
+    assert "&am" not in text.replace("&amp;", "")
+    assert not text.rstrip("…").endswith("&")

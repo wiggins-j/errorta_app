@@ -40,7 +40,7 @@ import re
 from typing import Any, Callable
 
 from errorta_council.coding.pm_reference import build_pm_reference_context
-from errorta_slack import tools
+from errorta_slack import render, tools
 
 MemberCaller = Callable[[dict[str, Any], str], str]
 
@@ -101,6 +101,20 @@ Reply with a SINGLE JSON object and nothing else — no prose outside it (a
 context already in this prompt). Only emit verbs from the TOOLS list — there
 is no other action available to you.
 """
+
+# The results are in hand by this hop, but nothing previously told the model
+# what to DO about a failed one. Live, the PM answered "Goal set and run
+# started" while both of its tool calls had failed -- the results said so and
+# the reply ignored them.
+_RECONCILE_RULE = (
+    "HONESTY RULE — read every result above before writing `reply`. A result "
+    "whose \"status\" is \"error\", \"refused\", \"empty\" or "
+    "\"not_running\" means that action DID NOT HAPPEN. Never claim, imply, "
+    "or hint that it did. Say plainly what failed and, when the result carries "
+    "a reason or detail, relay that reason. Only describe an action as done "
+    "when its own result says it succeeded."
+)
+
 
 _JSON_CORRECTION = """
 Your previous reply did not parse as a single JSON object matching the
@@ -175,6 +189,26 @@ def _project_state_block(project_id: str, *, store: Any = None) -> str:
     return "\n".join(lines)
 
 
+def _catalog_line(verb: str, spec: dict) -> str:
+    """One catalog line, including the verb's ARGUMENT NAMES.
+
+    Without these the model has to invent the keys for `"args": {}`: on a live
+    run it guessed `set_next_goal`'s, omitted the required `title`, and the
+    ledger refused with "focus title is required" -- so the goal was never set
+    and the run never started. A verb taking no arguments renders no `— args:`
+    clause at all, so nothing suggests it wants one.
+    """
+    head = f"- `{verb}` [{spec.get('trust', '?')}]: {spec.get('summary', '')}"
+    declared = spec.get("args") or ()
+    if not declared:
+        return head
+    rendered = ", ".join(
+        f"{name} (required, {desc})" if required else f"{name} ({desc})"
+        for name, required, desc in declared
+    )
+    return f"{head} — args: {rendered}"
+
+
 def build_system_prompt(
     project_id: str,
     *,
@@ -193,8 +227,7 @@ def build_system_prompt(
     """
     pm_context = build_pm_reference_context(project_id, store=store)
     catalog_lines = [
-        f"- `{verb}` [{spec.get('trust', '?')}]: {spec.get('summary', '')}"
-        for verb, spec in sorted(catalog.items())
+        _catalog_line(verb, spec) for verb, spec in sorted(catalog.items())
     ]
     catalog_block = "\n".join(catalog_lines) or "- (no tools available)"
     # The etiquette contract's "what I CAN do" list is derived straight from
@@ -324,6 +357,7 @@ def _build_prompt(
             "Compose the final reply using these results — do not repeat the "
             "same tool_calls unless you genuinely need another one."
         )
+        parts.append(_RECONCILE_RULE)
     if correction:
         parts.append(_JSON_CORRECTION)
     parts.append("\nConcierge (respond with the JSON object now):")
@@ -372,6 +406,54 @@ def _dispatch_calls(
 # --------------------------------------------------------------------------
 # run_turn
 # --------------------------------------------------------------------------
+
+
+# Every status that means "this action did not happen". MUST stay in step with
+# the list named in _RECONCILE_RULE: the rule tells the model that "empty" and
+# "not_running" also mean not-done, and if the code disagreed, a
+# `launch_runtime` -> {"status": "empty"} plus a malformed follow-up would keep
+# the optimistic "here's your link" -- the exact false claim this exists to
+# stop.
+_FAILED_STATUSES = frozenset({"error", "refused", "empty", "not_running"})
+
+
+def _has_failed_result(tool_results: list[dict[str, Any]]) -> bool:
+    """Whether any dispatched call in this turn did not do what it says."""
+    for entry in tool_results:
+        if entry.get("error"):
+            return True
+        result = entry.get("result")
+        if isinstance(result, dict) and result.get("status") in _FAILED_STATUSES:
+            return True
+    return False
+
+
+def _failure_summary(tool_results: list[dict[str, Any]]) -> str:
+    """A truthful reply built from the results themselves, for when the model
+    cannot be asked again.
+
+    Deliberately mechanical: this runs precisely when the follow-up hop failed
+    to parse, so there is no model output to trust. Better a blunt accurate
+    line than the optimistic pre-tool guess.
+    """
+    failures: list[str] = []
+    for entry in tool_results:
+        result = entry.get("result")
+        if entry.get("error"):
+            failures.append(f"`{entry.get('verb', '?')}` ({entry['error']})")
+        elif isinstance(result, dict) and result.get("status") in _FAILED_STATUSES:
+            # Escaped: `detail` is engine text (a classified HTTPException
+            # message, a ledger error) and _post_result renders a reply through
+            # render.fyi_message, which does NOT escape. Unlike an ordinary
+            # model reply there is no model between that text and the message
+            # body -- this concatenation is mechanical.
+            raw_detail = str(result.get("detail") or "").strip()
+            detail = render.escape_mrkdwn(raw_detail)[:300] if raw_detail else ""
+            verb = entry.get("verb", "?")
+            failures.append(f"`{verb}` — {detail}" if detail else f"`{verb}`")
+    if not failures:  # pragma: no cover - guarded by _has_failed_result
+        return "⚠️ that didn't complete — please check the project directly."
+    return "⚠️ that didn't go through: " + "; ".join(failures)
 
 
 def run_turn(
@@ -465,7 +547,13 @@ def run_turn(
         next_envelope = _extract_json(raw)
         if next_envelope is None:
             # Keep the tool results and the last known-good reply rather than
-            # discarding real work over one malformed follow-up.
+            # discarding real work over one malformed follow-up -- UNLESS a
+            # result actually failed. That reply was written before any tool
+            # ran, so on a failure it is the optimistic guess ("Goal set and
+            # run started") that the results just contradicted. Keeping it
+            # there is the single worst outcome available: a confident lie.
+            if _has_failed_result(tool_results):
+                reply = _failure_summary(tool_results)
             break
         envelope = next_envelope
         reply = str(envelope.get("reply") or "").strip() or reply

@@ -155,6 +155,12 @@ class _Item:
     detail: str
     signal_id: str | None = None  # only set for kind == "decision"
     signal_kind: str | None = None  # "problem" | "alert" -- only set alongside signal_id
+    # Ignores a channel's notification mute. The operator's requirement is that
+    # the team stopping, hitting a roadblock, or finishing ALWAYS arrives; a
+    # "stop updating me" must quiet routine progress, not hide the run ending.
+    # A blocking `kind == "decision"` is mandatory by construction (it carries
+    # an Approve/Decline the run is waiting on) and need not set this.
+    mandatory: bool = False
 
 
 def _log_items(deps: "OutboundDeps", ledger_store: Any) -> list[_Item]:
@@ -208,17 +214,73 @@ def _publish_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
     return items
 
 
+# Run statuses that are an EVENT worth announcing. "idle"/"running" are
+# ongoing conditions, not transitions: emitting them would post an item on
+# every tick forever.
+_TERMINAL_RUN_STATUSES = ("stopped", "failed")
+
+
+def _run_state_items(ledger_store: Any) -> list[_Item]:
+    """The team stopped / finished — an event no other source carries.
+
+    team_log, attention and the publish ledger all describe work *within* a
+    run; a run ENDING writes only run_state (``routes/coding.py`` on a clean
+    stop, ``runner.py`` on a failure). Without this source two of the three
+    events the operator requires could never fire.
+
+    The marker pairs the status with ``ended_at`` rather than reading a clock,
+    so it is stable across polls: re-polling an unchanged run state produces
+    the same marker, which the cursor has already seen.
+    """
+    try:
+        state = ledger_store.get_run_state() or {}
+    except Exception:  # noqa: BLE001 - an unreadable ledger must not wedge the loop
+        _LOGGER.warning("outbound: could not read run state", exc_info=True)
+        return []
+    status = str(state.get("status") or "")
+    if status not in _TERMINAL_RUN_STATUSES:
+        return []
+    ended_at = str(state.get("ended_at") or "")
+    # `last_error` is a raw `str(exc)` (runner.py) and `stop_reason` is
+    # engine-authored: neither is operator text, and `render.fyi_message` does
+    # NOT escape what it is given. Unescaped, a "<!channel>" inside an
+    # exception string pings the entire workspace. Escape, then cap -- escaping
+    # EXPANDS, so capping first would bound the wrong string.
+    raw_reason = str(state.get("stop_reason") or state.get("last_error") or "").strip()
+    reason = render.escape_mrkdwn(raw_reason)[:300] if raw_reason else ""
+    if status == "stopped":
+        detail = f"The team stopped — {reason}" if reason else "The team stopped."
+    else:
+        detail = f"The run failed — {reason}" if reason else "The run failed."
+    return [
+        _Item(marker=f"run:{status}:{ended_at}", sort_key=ended_at, kind="fyi",
+              title="", detail=detail, mandatory=True)
+    ]
+
+
 def _current_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
     ledger_store = deps.ledger_factory(project_id)
     items = (
         _log_items(deps, ledger_store)
         + _attention_items(deps, project_id, ledger_store)
         + _publish_items(deps, project_id)
+        + _run_state_items(ledger_store)
     )
     # Stable, deterministic order (roughly chronological); the marker
     # breaks ties so equal-timestamp items always sort the same way.
     items.sort(key=lambda it: (it.sort_key, it.marker))
     return items
+
+
+def current_marker_cursor(project_id: str, *, deps: "OutboundDeps | None" = None) -> str:
+    """An encoded cursor covering everything that has already happened.
+
+    Used at adopt time: seeding this makes the first poll a no-op for existing
+    history, so an adopted project's channel starts from "what happens next"
+    rather than replaying months of team log one message at a time.
+    """
+    real_deps = deps or OutboundDeps()
+    return _encode_posted({it.marker for it in _current_items(real_deps, project_id)})
 
 
 def _decode_posted(cursor: str | None) -> set[str]:
@@ -251,10 +313,22 @@ def poll_once(
     """
     posted = _decode_posted(deps.store.get_cursor(channel_id))
     items = _current_items(deps, project_id)
+    muted = deps.store.updates_muted(channel_id)
 
     newly_posted: list[str] = []
     for item in items:
         if item.marker in posted:
+            continue
+
+        # A muted channel still gets the three the operator requires: the run
+        # stopping/failing (item.mandatory) and a roadblock (kind ==
+        # "decision", which the run is literally blocked on -- hiding it would
+        # deadlock the team behind a button nobody can see).
+        #
+        # `continue` WITHOUT advancing the cursor: the marker must stay unseen
+        # so unmuting delivers the backlog. Marking it posted here would
+        # silently discard everything that happened while muted.
+        if muted and not (item.mandatory or item.kind == "decision"):
             continue
 
         if item.kind == "decision":
@@ -474,6 +548,7 @@ __all__ = [
     "ATTENTION_VERB",
     "attention_decision_action",
     "poll_once",
+    "current_marker_cursor",
     "sweep_timeouts",
     "run_loop",
 ]

@@ -49,6 +49,7 @@ import json
 import re
 from typing import Any, Callable
 
+from errorta_slack import concierge
 from errorta_slack import config as _config
 from errorta_slack import studio_tools
 
@@ -206,8 +207,7 @@ def build_system_prompt(
     ``studio_tools.dispatch`` actually accepts.
     """
     catalog_lines = [
-        f"- `{verb}` [{spec.get('trust', '?')}]: {spec.get('summary', '')}"
-        for verb, spec in sorted(catalog.items())
+        concierge._catalog_line(verb, spec) for verb, spec in sorted(catalog.items())
     ]
     catalog_block = "\n".join(catalog_lines) or "- (no tools available)"
     # The etiquette contract's "what I CAN do" list is derived straight from

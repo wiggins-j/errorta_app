@@ -26,6 +26,7 @@ class FakeStore:
         self.channel_map: dict[str, str] = {}
         self._next_cid = 0
         self._events = events
+        self.cursors: dict[str, str] = {}
 
     def stage_confirmation(self, verb: str, args: dict[str, Any], thread_ts: str, *,
                             channel_id: str = "") -> str:
@@ -40,6 +41,12 @@ class FakeStore:
 
     def bind_channel(self, channel_id: str, project_id: str) -> None:
         self.bound.append((channel_id, project_id))
+
+    def get_cursor(self, channel_id: str) -> str | None:
+        return self.cursors.get(channel_id)
+
+    def advance_cursor(self, channel_id: str, marker: str) -> None:
+        self.cursors[channel_id] = marker
 
     def channel_for_project(self, project_id: str) -> str | None:
         return self.channel_map.get(project_id)
@@ -1005,3 +1012,139 @@ def test_studio_deps_start_run_fn_defaults_to_none() -> None:
     """Must default to None so the lazy `errorta_app.routes.coding` import in
     tools._default_start_run never happens at StudioDeps() construction."""
     assert studio_tools.StudioDeps().start_run_fn is None
+
+
+# --------------------------------------------------------------------------
+# Slice 5a Task 2 — create starts the run.
+#
+# Operator decision (spec §3.2): creating a project from Slack ALWAYS starts
+# it, with no approval gate of its own and regardless of autopilot. The
+# `start=True` opt-in that `adopt_project` carries deliberately has no
+# equivalent here.
+# --------------------------------------------------------------------------
+
+
+def _start_recorder(calls: list[dict[str, Any]]) -> Any:
+    def _start_run_fn(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"project_id": project_id, **kwargs})
+        return {"started": True}
+    return _start_run_fn
+
+
+def test_create_project_starts_the_run() -> None:
+    start_calls: list[dict[str, Any]] = []
+    deps = _deps(start_run_fn=_start_recorder(start_calls))
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert result["started"] is True
+    assert result["start_refused"] is None
+    # Fresh mode is mandatory: a new project is "idle", and continue_ 409s
+    # ("run is not continuable") on anything but "stopped".
+    assert len(start_calls) == 1
+    assert start_calls[0]["resume"] is False
+    assert start_calls[0]["continue_"] is False
+
+
+def test_create_project_start_is_unconditional() -> None:
+    """No `start` arg anywhere -- unlike adopt_project, create needs no opt-in."""
+    start_calls: list[dict[str, Any]] = []
+    charter = _charter()
+    assert "start" not in charter
+    deps = _deps(start_run_fn=_start_recorder(start_calls))
+
+    studio_tools.dispatch(
+        "create_project", charter, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert len(start_calls) == 1
+
+
+def test_create_project_start_failure_is_reported_not_raised() -> None:
+    """A logged-out provider 409s the member-health preflight. The project and
+    its binding must survive, and the result must carry the real reason."""
+    def _boom(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("provider logged out")
+
+    store = FakeStore()
+    deps = _deps(store=store, start_run_fn=_boom)
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert result["started"] is False
+    assert result["start_refused"]
+    # Never leak the exception message -- only its type name.
+    assert "provider logged out" not in result["start_refused"]
+    assert result["project_id"]
+    assert result["channel_id"]
+    assert store.bound, "the channel binding must survive a failed start"
+
+
+def test_create_project_start_failure_is_classified_not_type_named() -> None:
+    """Review fix: a logged-out provider must say so.
+
+    `_classify_start_exception` already turns the two realistic fresh-start 409s
+    into actionable text; rendering `type(exc).__name__` threw that away and
+    told the operator "HTTPException", which they cannot act on.
+    """
+    class _Http409(Exception):
+        status_code = 409
+        detail = {"code": "member_health_preflight_failed",
+                  "message": "claude_cli is not logged in"}
+
+    def _boom(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise _Http409()
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=_deps(start_run_fn=_boom),
+    )
+
+    assert result["started"] is False
+    assert "logged out" in result["start_refused"]
+    assert "HTTPException" not in result["start_refused"]
+    assert "_Http409" not in result["start_refused"]
+
+
+def test_create_project_run_setup_required_is_named() -> None:
+    class _Http409(Exception):
+        status_code = 409
+        detail = {"code": "run_setup_required", "message": "nope"}
+
+    def _boom(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise _Http409()
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=_deps(start_run_fn=_boom),
+    )
+
+    assert result["start_refused"] == "the team isn't configured yet"
+
+
+def test_adopt_seeds_the_cursor_so_history_is_not_replayed() -> None:
+    """An adopted project can carry months of team log. With an empty cursor
+    the first outbound poll would post ALL of it, one Slack message per entry.
+
+    Create needs no such seeding -- a brand-new project has no history, and its
+    first real milestone SHOULD be posted.
+    """
+    store = FakeStore()
+    deps = _deps(store=store)
+
+    studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo"}, channel_id="C1",
+        thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    cursor = store.get_cursor("C-NEW")
+    assert cursor, "adopt must seed the cursor at bind time"

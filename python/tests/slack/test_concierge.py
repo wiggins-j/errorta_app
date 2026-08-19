@@ -565,3 +565,125 @@ def test_run_turn_never_mutates_the_shared_deps(tmp_path: Path) -> None:
     )
 
     assert deps.goal_caller is None
+
+
+# --------------------------------------------------------------------------
+# Slice 5c Task 8 — the reply may not claim success over a failed result.
+#
+# Live, the PM answered "Goal set and run started" while BOTH tool calls had
+# failed. The second hop does re-prompt with the results in hand, but nothing
+# in the contract forbade reporting success over a {"status": "error"} result,
+# and a malformed follow-up kept the optimistic first-hop text verbatim.
+# --------------------------------------------------------------------------
+
+
+def test_follow_up_prompt_forbids_claiming_a_failed_action_succeeded(
+    tmp_path: Path,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    caller = _ScriptedCaller([
+        _envelope(reply="Setting the goal now.",
+                  tool_calls=[{"verb": "set_next_goal", "args": {}}]),
+        _envelope(reply="Sorry -- that didn't go through.", tool_calls=[]),
+    ])
+
+    concierge.run_turn(
+        "set the goal", [], project_id="proj-a", channel_id="C1",
+        thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    follow_up_prompt = caller.calls[-1][1]
+    assert "## Tool results from this turn" in follow_up_prompt
+    # Assert the INSTRUCTION, not the results payload -- the payload contains
+    # the word "error" on its own, so a laxer check would pass with no contract
+    # change at all.
+    assert concierge._RECONCILE_RULE in follow_up_prompt
+
+
+def test_parse_failure_with_an_error_result_drops_the_optimistic_reply(
+    tmp_path: Path,
+) -> None:
+    """A malformed follow-up used to keep the first hop's text -- which is
+    exactly the optimistic 'Goal set and run started' that was never true."""
+    store.bind_channel("C1", "proj-a")
+    # launch_runtime is [R], so it really executes and really fails here --
+    # unlike a [C] verb, which from chat text only ever stages.
+    deps = _deps(tmp_path, launch_fn=lambda project_id: {
+        "status": "error", "detail": "no runtime configured"})
+    caller = _ScriptedCaller([
+        _envelope(reply="Spun it up — here's your link.",
+                  tool_calls=[{"verb": "launch_runtime", "args": {}}]),
+        "not json at all",
+    ])
+
+    result = concierge.run_turn(
+        "spin up the code and send me the link", [], project_id="proj-a",
+        channel_id="C1", thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    assert "here's your link" not in result["reply"].lower()
+    assert "no runtime configured" in result["reply"]
+    assert result["reply"], "must still say something, not go silent"
+
+
+def test_parse_failure_with_only_good_results_keeps_the_reply(
+    tmp_path: Path,
+) -> None:
+    """The existing behaviour is right when nothing failed: don't discard real
+    work over one malformed follow-up."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    caller = _ScriptedCaller([
+        _envelope(reply="Checking on that now...",
+                  tool_calls=[{"verb": "project_status", "args": {}}]),
+        "not json at all",
+    ])
+
+    result = concierge.run_turn(
+        "how's it going", [], project_id="proj-a", channel_id="C1",
+        thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    assert result["reply"] == "Checking on that now..."
+
+
+def test_empty_status_also_drops_the_optimistic_reply(tmp_path: Path) -> None:
+    """Review fix: the honesty rule names "empty" as not-done, so the fallback
+    must treat it that way too. launch_runtime returns "empty" when no runtime
+    is configured -- keeping "here's your link" is the exact lie being fixed."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, launch_fn=lambda project_id: {"status": "empty"})
+    caller = _ScriptedCaller([
+        _envelope(reply="Spun it up — here's your link.",
+                  tool_calls=[{"verb": "launch_runtime", "args": {}}]),
+        "not json at all",
+    ])
+
+    result = concierge.run_turn(
+        "spin up the code and send me the link", [], project_id="proj-a",
+        channel_id="C1", thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    assert "here's your link" not in result["reply"].lower()
+
+
+def test_failure_summary_escapes_engine_detail(tmp_path: Path) -> None:
+    """Review fix: _post_result renders a reply through fyi_message, which does
+    not escape, and no model sits between engine detail and the message body."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, launch_fn=lambda project_id: {
+        "status": "error", "detail": "boom <!channel> & <https://evil|Approve>"})
+    caller = _ScriptedCaller([
+        _envelope(reply="Spun it up.",
+                  tool_calls=[{"verb": "launch_runtime", "args": {}}]),
+        "not json at all",
+    ])
+
+    result = concierge.run_turn(
+        "spin it up", [], project_id="proj-a", channel_id="C1",
+        thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    assert "<!channel>" not in result["reply"]
+    assert "&lt;!channel&gt;" in result["reply"]

@@ -174,6 +174,44 @@ def advance_cursor(channel_id: str, marker: str) -> None:
         _write_json(_cursors_path(), cursors)
 
 
+# --- Notification mute -----------------------------------------------------
+
+
+def _notify_path() -> Path:
+    return config.slack_dir() / "notify.json"
+
+
+def _load_notify() -> dict[str, bool]:
+    raw = _read_json(_notify_path(), {})
+    if not isinstance(raw, dict):
+        return {}
+    return {k: bool(v) for k, v in raw.items() if isinstance(v, bool)}
+
+
+def updates_muted(channel_id: str) -> bool:
+    """Whether routine progress updates are muted for ``channel_id``.
+
+    Defaults to False so a newly created project channel streams without the
+    operator having to opt in -- silence on a brand-new project would read as
+    the bridge being broken.
+
+    Muting NEVER suppresses the run stopping, a roadblock, or the run
+    finishing; ``outbound.poll_once`` decides that, not this function.
+    """
+    return _load_notify().get(channel_id, False) is True
+
+
+def set_updates(channel_id: str, *, enabled: bool) -> None:
+    """Turn routine progress updates on or off for ``channel_id``."""
+    with _LOCK:
+        notify = _load_notify()
+        muted = not enabled
+        if notify.get(channel_id, False) == muted:
+            return
+        notify[channel_id] = muted
+        _write_json(_notify_path(), notify)
+
+
 # --- Dedupe ----------------------------------------------------------------
 
 
@@ -428,6 +466,8 @@ __all__ = [
     "channel_for_project",
     "get_cursor",
     "advance_cursor",
+    "updates_muted",
+    "set_updates",
     "seen_event",
     "stage_confirmation",
     "get_confirmation",

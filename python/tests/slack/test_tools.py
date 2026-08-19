@@ -1622,3 +1622,44 @@ def test_propose_next_goal_refuses_when_the_team_has_no_pm_route(tmp_path: Path)
 
     assert result["status"] == "error"
     assert propose_calls == [], "reached the model with no configured route"
+
+
+# --------------------------------------------------------------------------
+# Slice 5b Task 5 — the set_updates verb.
+# --------------------------------------------------------------------------
+
+
+def test_set_updates_off_then_on(tmp_errorta_home) -> None:
+    from errorta_slack import store as real_store
+
+    deps = tools.ToolDeps(store=real_store)
+
+    off = tools.dispatch("set_updates", {"on": False}, channel_id="C1",
+                         thread_ts="t1", confirmed_via=None, deps=deps)
+    assert off == {"status": "updated", "updates": "off"}
+    assert real_store.updates_muted("C1") is True
+
+    on = tools.dispatch("set_updates", {"on": True}, channel_id="C1",
+                        thread_ts="t1", confirmed_via=None, deps=deps)
+    assert on == {"status": "updated", "updates": "on"}
+    assert real_store.updates_muted("C1") is False
+
+
+def test_set_updates_defaults_to_on_when_the_arg_is_missing(tmp_errorta_home) -> None:
+    """The mute is the surprising state; an ambiguous request must not land
+    there. A model that omits the arg turns updates ON, never off."""
+    from errorta_slack import store as real_store
+
+    deps = tools.ToolDeps(store=real_store)
+    real_store.set_updates("C2", enabled=False)
+
+    result = tools.dispatch("set_updates", {}, channel_id="C2", thread_ts="t1",
+                            confirmed_via=None, deps=deps)
+
+    assert result["updates"] == "on"
+    assert real_store.updates_muted("C2") is False
+
+
+def test_set_updates_is_an_R_verb_and_needs_no_confirmation() -> None:
+    """[R]: it spends nothing and is reversible from the same chat."""
+    assert tools.TOOL_CATALOG["set_updates"]["trust"] == "R"

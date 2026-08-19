@@ -406,3 +406,28 @@ def test_store_module_does_not_import_slack_sdk() -> None:
     assert "slack_sdk" not in vars(store)
     source = inspect.getsource(store)
     assert "import slack_sdk" not in source
+
+
+# --------------------------------------------------------------------------
+# Slice 5b Task 5 — per-channel notification mute.
+# --------------------------------------------------------------------------
+
+
+def test_updates_muted_defaults_to_false(tmp_errorta_home) -> None:
+    """An unconfigured channel streams. Muting is opt-in, so a fresh project
+    never starts life silent."""
+    assert store.updates_muted("C-new") is False
+
+
+def test_set_updates_round_trips(tmp_errorta_home) -> None:
+    store.set_updates("C1", enabled=False)
+    assert store.updates_muted("C1") is True
+
+    store.set_updates("C1", enabled=True)
+    assert store.updates_muted("C1") is False
+
+
+def test_set_updates_is_per_channel(tmp_errorta_home) -> None:
+    store.set_updates("C1", enabled=False)
+    assert store.updates_muted("C1") is True
+    assert store.updates_muted("C2") is False
