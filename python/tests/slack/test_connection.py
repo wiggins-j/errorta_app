@@ -2051,3 +2051,19 @@ async def test_adopt_outcome_surfaces_start_refused(tmp_path: Path) -> None:
     text = poster.messages[0]["text"]
     assert "no current goal" in text
     assert "run started" not in text.lower()
+
+
+async def test_create_outcome_north_star_cap_never_severs_an_entity(
+    tmp_path: Path,
+) -> None:
+    """Review fix: escaping expands, so a naive 300-char slice of ALREADY
+    escaped text can cut '&amp;' into '&am' and render as literal junk."""
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    text = bridge._create_project_outcome_text({
+        "status": "created", "project_id": "p", "channel_id": "C", "channel_name": "p",
+        "north_star": "x" * 297 + "&" * 20, "started": True, "start_refused": None,
+    })
+
+    assert "&am" not in text.replace("&amp;", "")
+    assert not text.rstrip("…").endswith("&")

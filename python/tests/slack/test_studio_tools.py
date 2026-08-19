@@ -1080,3 +1080,45 @@ def test_create_project_start_failure_is_reported_not_raised() -> None:
     assert result["project_id"]
     assert result["channel_id"]
     assert store.bound, "the channel binding must survive a failed start"
+
+
+def test_create_project_start_failure_is_classified_not_type_named() -> None:
+    """Review fix: a logged-out provider must say so.
+
+    `_classify_start_exception` already turns the two realistic fresh-start 409s
+    into actionable text; rendering `type(exc).__name__` threw that away and
+    told the operator "HTTPException", which they cannot act on.
+    """
+    class _Http409(Exception):
+        status_code = 409
+        detail = {"code": "member_health_preflight_failed",
+                  "message": "claude_cli is not logged in"}
+
+    def _boom(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise _Http409()
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=_deps(start_run_fn=_boom),
+    )
+
+    assert result["started"] is False
+    assert "logged out" in result["start_refused"]
+    assert "HTTPException" not in result["start_refused"]
+    assert "_Http409" not in result["start_refused"]
+
+
+def test_create_project_run_setup_required_is_named() -> None:
+    class _Http409(Exception):
+        status_code = 409
+        detail = {"code": "run_setup_required", "message": "nope"}
+
+    def _boom(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise _Http409()
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=_deps(start_run_fn=_boom),
+    )
+
+    assert result["start_refused"] == "the team isn't configured yet"

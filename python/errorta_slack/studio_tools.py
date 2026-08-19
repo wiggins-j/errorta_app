@@ -389,10 +389,24 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
             start_fn(project_id, resume=False, continue_=False)
             started = True
         except Exception as exc:  # noqa: BLE001 - never escape a live turn
-            # Only the type name: the message could carry a path or provider
-            # detail. The member-health preflight 409 (a logged-out provider)
-            # is the expected shape here.
-            start_refused = f"couldn't start the run ({type(exc).__name__})"
+            # Classify through the shared helper rather than rendering the
+            # exception type: a fresh start's realistic failures are a
+            # logged-out provider (member_health_preflight_failed) and an
+            # unconfigured team (run_setup_required), and both have actionable
+            # messages there. "couldn't start the run (HTTPException)" tells the
+            # operator nothing, which defeats the point of reporting at all.
+            # The helper is already redacted -- it never surfaces an exception
+            # message except for the two 409 codes it recognises.
+            from errorta_slack.tools import _classify_start_exception  # noqa: PLC0415
+
+            classified = _classify_start_exception(exc)
+            if classified.get("status") == "already_running":
+                # Impossible for a just-created project, but the helper models
+                # it and swallowing it as a refusal would be a lie.
+                started = True
+            else:
+                start_refused = str(
+                    classified.get("detail") or "couldn't start the run")
 
     return {
         "status": "created",

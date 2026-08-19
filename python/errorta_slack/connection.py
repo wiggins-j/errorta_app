@@ -964,9 +964,11 @@ class SlackBridge:
         if result.get("started"):
             north_star = str(result.get("north_star") or "").strip()
             if north_star:
-                capped = render.escape_mrkdwn(north_star)
-                if len(capped) > 300:
-                    capped = capped[:300].rstrip() + "…"
+                # _cap_escaped, not a hand-rolled slice: escaping EXPANDS, and a
+                # naive cut can land mid-entity ("&amp;" -> "&am"), which renders
+                # as literal junk. That helper already trims a dangling entity.
+                capped = self._cap_escaped(
+                    render.escape_mrkdwn(north_star), 300)
                 return f"\nRun started with north star as: {capped}"
             return "\nRun started."
         refused = str(result.get("start_refused") or "").strip()
