@@ -45,6 +45,16 @@ def create_project_from_charter(
          no team is assignable, the project is left idle without one — this is
          not an error.
 
+    **Deliberately no longer a byte-for-byte mirror of ``wizard_create``.**
+    Between steps 2 and 3 this seeds the project's first ``Focus`` from
+    ``charter["initial_goal"]``, or the north star verbatim when that optional
+    field is absent. ``wizard_create`` does not, because the desktop wizard hands
+    off to a UI where the operator sets the goal before starting; a charter
+    arriving from Slack has no such step, and without a Focus
+    ``next_goal.start_gate`` refuses the project's first run — making a
+    studio-created project impossible to start. Do not "restore the mirror" by
+    deleting the seed; restore parity by teaching the wizard to seed too.
+
     ``available_routes`` is injectable so callers (and tests) can avoid the real
     ``pm_reference.list_available_routes()``, which can shell out to a CLI or
     probe a local model gateway. It defaults to that live catalog only when not
@@ -84,6 +94,28 @@ def create_project_from_charter(
         definition_of_done=charter["definition_of_done"],
         target="new", repo_path=None, delivery_root=delivery_root)
     CodingWorkspace(project_id, store).setup(target="new", repo_path=None)
+
+    # Seed the project's first Focus. Without it `next_goal.start_gate` refuses
+    # the project's very first start -- it requires an active Focus or a legacy
+    # `work_request`, and a charter-created project had neither -- so a project
+    # created from Slack could never be started at all.
+    #
+    # A Focus, not `work_request`: `runner._pm_prompt` scopes planning by
+    # `active_focuses()` and reaches `work_request` only as a documented legacy
+    # fallback. Writing focus.jsonl here also makes `_ensure_focus_migrated` a
+    # permanent no-op for this project, so there is no double-seed.
+    #
+    # The gate is NOT disarmed by this. When the seeded Focus is completed and
+    # archived, `active_focuses()` empties and the gate fires again on the next
+    # fresh start -- on a project that by then has finished work and a possibly
+    # stale charter, which is the case the gate was written for.
+    #
+    # `initial_goal` is optional and operator-supplied; the fallback copies the
+    # north star VERBATIM. A code-level copy is not an invention, whereas a
+    # generated "first increment" would be.
+    goal = str(charter.get("initial_goal") or charter["north_star"]).strip()
+    if goal:
+        store.add_focus(title=goal, body="", origin="studio_charter")
 
     recipe, autonomous = charter["team_recipe"], charter["autonomous"]
 

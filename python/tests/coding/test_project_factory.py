@@ -108,3 +108,56 @@ def test_missing_autonomous_raises_before_any_disk_write(tmp_errorta_home: Path)
 def test_unsafe_project_id_raises(tmp_errorta_home: Path):
     with pytest.raises(LedgerError):
         create_project_from_charter("../x", CHARTER, available_routes=ROUTES)
+
+
+# --------------------------------------------------------------------------
+# Slice 5a Task 1 — the charter seeds the project's first Focus.
+#
+# Before this, a studio-created project had no active Focus and an empty
+# work_request, so `next_goal.start_gate` refused its very first start and the
+# documented create-then-start flow was unreachable from Slack.
+# --------------------------------------------------------------------------
+
+
+def test_create_from_charter_seeds_focus_from_north_star(tmp_errorta_home: Path):
+    create_project_from_charter("seed-ns", CHARTER, available_routes=ROUTES)
+
+    focuses = LedgerStore("seed-ns").active_focuses()
+    assert len(focuses) == 1
+    # Verbatim: a code-level copy is not an invention, whereas a generated
+    # "first increment" would be.
+    assert focuses[0].title == CHARTER["north_star"]
+    assert focuses[0].origin == "studio_charter"
+
+
+def test_create_from_charter_prefers_initial_goal(tmp_errorta_home: Path):
+    charter = {**CHARTER, "initial_goal": "Ship the score submission form first"}
+    create_project_from_charter("seed-goal", charter, available_routes=ROUTES)
+
+    focuses = LedgerStore("seed-goal").active_focuses()
+    assert len(focuses) == 1
+    assert focuses[0].title == "Ship the score submission form first"
+
+
+def test_created_project_is_not_refused_by_start_gate(tmp_errorta_home: Path):
+    """The Gap A regression: this is the exact refusal seen live in Slack."""
+    from errorta_council.coding import next_goal
+
+    create_project_from_charter("seed-gate", CHARTER, available_routes=ROUTES)
+
+    assert next_goal.start_gate(LedgerStore("seed-gate")) is None
+
+
+def test_archived_focus_project_is_still_refused(tmp_errorta_home: Path):
+    """Gate preservation: seeding must not disarm the gate permanently.
+
+    Once the seeded Focus is archived the project HAS finished work and its
+    charter may be stale -- precisely the case the gate exists for.
+    """
+    from errorta_council.coding import next_goal
+
+    create_project_from_charter("seed-arch", CHARTER, available_routes=ROUTES)
+    store = LedgerStore("seed-arch")
+    store.update_focus(store.active_focuses()[0].id, status="archived")
+
+    assert next_goal.start_gate(store) is not None
