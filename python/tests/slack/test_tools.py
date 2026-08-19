@@ -1793,3 +1793,74 @@ def test_unblock_task_refuses_a_task_that_is_not_blocked(tmp_path: Path) -> None
 
     assert out["status"] == "error"
     assert ledger.updates == []
+
+
+def test_list_open_tasks_reports_truncation(tmp_path: Path) -> None:
+    """Review fix: a silent cap makes the PM report 20 of 40 as if it were all,
+    so the operator clears those 20 and hits the completion gate again on tasks
+    they were never shown."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    _seed_tasks(deps, *[FakeTask(f"t-{i}", "todo", f"task {i}") for i in range(40)])
+
+    out = tools.dispatch("list_open_tasks", {}, channel_id="C1", thread_ts="t",
+                         confirmed_via=None, deps=deps)
+
+    assert out["total_open"] == 40
+    assert out["truncated"] is True
+    assert len(out["tasks"]) == 20
+
+
+def test_list_open_tasks_not_truncated_when_it_fits(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    _seed_tasks(deps, FakeTask("t-1", "todo", "only one"))
+
+    out = tools.dispatch("list_open_tasks", {}, channel_id="C1", thread_ts="t",
+                         confirmed_via=None, deps=deps)
+
+    assert out["total_open"] == 1
+    assert out["truncated"] is False
+
+
+def test_task_verbs_never_let_an_engine_failure_escape(tmp_path: Path) -> None:
+    """Review fix: catching only LedgerError let an OSError out of the verb and
+    into the turn, where nothing catches it -- the operator gets the generic
+    "couldn't process that" instead of a reportable result."""
+    class _Exploding(FakeTask):
+        pass
+
+    store.bind_channel("C1", "proj-a")
+
+    for verb, state in (("cancel_task", "todo"), ("unblock_task", "blocked")):
+        deps = _deps(tmp_path)
+        ledger = _seed_tasks(deps, _Exploding("t-1", state, "one"))
+
+        def _boom(task_id: str, **patch: Any) -> Any:
+            raise OSError("disk full")
+
+        ledger.update_task = _boom
+
+        out = tools.dispatch(verb, {"task_id": "t-1"}, channel_id="C1",
+                             thread_ts="t", confirmed_via="block_actions", deps=deps)
+
+        assert out["status"] == "error", verb
+        assert "OSError" in out["detail"], verb
+        assert "disk full" not in out["detail"], f"{verb} leaked the message"
+
+
+def test_list_open_tasks_survives_an_unreadable_backlog(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger = deps.ledger_factory("proj-a")
+
+    def _boom() -> Any:
+        raise OSError("corrupt backlog")
+
+    ledger.list_tasks = _boom
+
+    out = tools.dispatch("list_open_tasks", {}, channel_id="C1", thread_ts="t",
+                         confirmed_via=None, deps=deps)
+
+    assert out["status"] == "error"
+    assert "OSError" in out["detail"]

@@ -460,16 +460,28 @@ def list_open_tasks(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     verb whose arguments were never declared.
     """
     project_id = _bound_project_id(deps, channel_id)
-    tasks = deps.ledger_factory(project_id).list_tasks()
+    try:
+        tasks = deps.ledger_factory(project_id).list_tasks()
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error",
+                "detail": f"couldn't read the backlog ({type(exc).__name__})"}
     open_tasks = [
         t for t in tasks
         if str(getattr(t, "state", "")) not in _TERMINAL_TASK_STATES
     ]
-    return {"tasks": [
-        {"task_id": str(t.task_id), "title": str(getattr(t, "title", "")),
-         "state": str(getattr(t, "state", ""))}
-        for t in open_tasks[:_OPEN_TASK_CAP]
-    ]}
+    shown = open_tasks[:_OPEN_TASK_CAP]
+    # Never a silent cap. A PM that reports 20 of 40 as if it were all of them
+    # leads the operator to cancel that 20, believe the backlog is clear, and
+    # hit the completion gate again on tasks they were never shown.
+    return {
+        "tasks": [
+            {"task_id": str(t.task_id), "title": str(getattr(t, "title", "")),
+             "state": str(getattr(t, "state", ""))}
+            for t in shown
+        ],
+        "total_open": len(open_tasks),
+        "truncated": len(open_tasks) > len(shown),
+    }
 
 
 def cancel_task(args: dict[str, Any], *, channel_id: str, thread_ts: str,
@@ -491,6 +503,9 @@ def cancel_task(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         ledger.update_task(task_id, state="dropped")
     except LedgerError:
         return {"status": "error", "detail": f"unknown task: {task_id}"}
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error",
+                "detail": f"couldn't cancel the task ({type(exc).__name__})"}
     return {"status": "cancelled", "task_id": task_id}
 
 
@@ -521,6 +536,9 @@ def unblock_task(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         ledger.update_task(task_id, state="todo")
     except LedgerError:
         return {"status": "error", "detail": f"unknown task: {task_id}"}
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error",
+                "detail": f"couldn't unblock the task ({type(exc).__name__})"}
     return {"status": "unblocked", "task_id": task_id}
 
 
