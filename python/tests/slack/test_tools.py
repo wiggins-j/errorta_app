@@ -1266,6 +1266,49 @@ def test_start_run_proceeds_once_a_goal_is_set(tmp_path: Path) -> None:
     assert calls == [("proj-goal", False, False)]
 
 
+@pytest.mark.parametrize(
+    ("run_status", "expected_mode"),
+    [("interrupted", (True, False)), ("stopped", (False, True))],
+)
+def test_start_run_does_not_gate_a_resume_or_continue(
+    tmp_path: Path, run_status: str, expected_mode: tuple[bool, bool],
+) -> None:
+    """Regression (branch review #13): the gate was evaluated before the mode
+    was derived, so it applied to all three. A project whose only Focus was
+    archived on completion and whose run was then INTERRUPTED mid-task could
+    not be resumed from Slack at all — the PM had to invent a new goal first,
+    which changes what the resumed run plans against. The gate's own rationale
+    ("the PM would plan from the North Star alone") is a fresh-planning
+    argument; a resume is not fresh planning."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    project_id = f"proj-{run_status}"
+    ledger = LedgerStore(project_id)
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_state(status=run_status)
+    assert ledger.active_focuses() == []  # the gate would refuse a fresh start
+    store.bind_channel("C1", project_id)
+    calls: list[tuple[str, bool, bool]] = []
+
+    def _start_fn(pid: str, *, resume: bool = False, continue_: bool = False) -> dict:
+        calls.append((pid, resume, continue_))
+        return {"status": "started"}
+
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+                 start_run_fn=_start_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [(project_id, *expected_mode)]
+
+
 # --- set_north_star: writes through the lock-held authoritative writer -----
 
 
