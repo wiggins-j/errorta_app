@@ -4,7 +4,7 @@ name = "errorta-app"
 # scripts/release-cli.sh seds this line for the tag / tarball / Homebrew formula;
 # errorta_app.__version__ and errorta_cli.__version__ mirror it. Change it only
 # via `scripts/bump-version.sh X.Y.Z`.
-version = "0.2.0-alpha.0"
+version = "0.2.0-alpha.1"
 description = "Errorta Python sidecar: thin web layer over AIAR."
 requires-python = ">=3.10"
 authors = [{ name = "The Errorta Authors" }]
