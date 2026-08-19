@@ -21,8 +21,10 @@ def _isolated_errorta_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
 
 
 class FakeTask:
-    def __init__(self, task_id: str) -> None:
+    def __init__(self, task_id: str, state: str = "todo", title: str = "") -> None:
         self.task_id = task_id
+        self.state = state
+        self.title = title
 
 
 # The team's configured PM, as it is persisted in the project's run config.
@@ -42,6 +44,9 @@ class FakeLedgerStore:
         self.dir = tmp_path / f"ledger-{project_id}"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.added_tasks: list[dict[str, Any]] = []
+        self.tasks: list[FakeTask] = []
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+        self.raise_on_update = False
         self._next_id = 0
         self.run_state: dict[str, Any] = {
             "status": "idle", "stop_reason": None, "started_at": None,
@@ -50,7 +55,19 @@ class FakeLedgerStore:
         }
 
     def list_tasks(self) -> list[Any]:
-        return []
+        return list(self.tasks)
+
+    def update_task(self, task_id: str, **patch: Any) -> Any:
+        from errorta_council.coding.ledger import LedgerError
+
+        if self.raise_on_update or not any(t.task_id == task_id for t in self.tasks):
+            raise LedgerError(f"unknown task: {task_id}")
+        self.updates.append((task_id, dict(patch)))
+        for t in self.tasks:
+            if t.task_id == task_id:
+                t.state = str(patch.get("state", t.state))
+                return t
+        return None
 
     def list_turns(self) -> list[dict[str, Any]]:
         return []
@@ -1663,3 +1680,116 @@ def test_set_updates_defaults_to_on_when_the_arg_is_missing(tmp_errorta_home) ->
 def test_set_updates_is_an_R_verb_and_needs_no_confirmation() -> None:
     """[R]: it spends nothing and is reversible from the same chat."""
     assert tools.TOOL_CATALOG["set_updates"]["trust"] == "R"
+
+
+# --------------------------------------------------------------------------
+# Slice 6 — closing the control loop from the channel.
+#
+# A completion_blocked run told the operator to "finish or cancel these tasks"
+# and no Slack verb could do either. Designing the fix surfaced a second
+# defect: nothing the PM can see carries a task_id, so a cancel verb taking one
+# would have shipped uncallable.
+# --------------------------------------------------------------------------
+
+
+def _seed_tasks(deps: tools.ToolDeps, *tasks: FakeTask) -> Any:
+    ledger = deps.ledger_factory("proj-a")
+    ledger.tasks = list(tasks)
+    return ledger
+
+
+def test_list_open_tasks_returns_id_title_state(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    _seed_tasks(deps, FakeTask("t-1", "todo", "open one"),
+                FakeTask("t-2", "done", "finished one"))
+
+    out = tools.dispatch("list_open_tasks", {}, channel_id="C1", thread_ts="t",
+                         confirmed_via=None, deps=deps)
+
+    assert out["tasks"] == [{"task_id": "t-1", "title": "open one", "state": "todo"}]
+
+
+def test_list_open_tasks_excludes_terminal_states(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    _seed_tasks(deps, FakeTask("t-1", "done", "a"), FakeTask("t-2", "dropped", "b"),
+                FakeTask("t-3", "merged", "c"), FakeTask("t-4", "blocked", "d"))
+
+    out = tools.dispatch("list_open_tasks", {}, channel_id="C1", thread_ts="t",
+                         confirmed_via=None, deps=deps)
+
+    assert [t["task_id"] for t in out["tasks"]] == ["t-4"]
+
+
+def test_list_open_tasks_caps_at_twenty(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    _seed_tasks(deps, *[FakeTask(f"t-{i}", "todo", f"task {i}") for i in range(40)])
+
+    out = tools.dispatch("list_open_tasks", {}, channel_id="C1", thread_ts="t",
+                         confirmed_via=None, deps=deps)
+
+    assert len(out["tasks"]) == 20
+
+
+def test_cancel_task_drops_it(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger = _seed_tasks(deps, FakeTask("t-1", "todo", "open one"))
+
+    out = tools.dispatch("cancel_task", {"task_id": "t-1"}, channel_id="C1",
+                         thread_ts="t", confirmed_via="block_actions", deps=deps)
+
+    assert out == {"status": "cancelled", "task_id": "t-1"}
+    assert ledger.updates == [("t-1", {"state": "dropped"})]
+
+
+def test_cancel_task_unknown_id_is_an_error_result_not_a_raise(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    _seed_tasks(deps)
+
+    out = tools.dispatch("cancel_task", {"task_id": "nope"}, channel_id="C1",
+                         thread_ts="t", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "error"
+    assert "unknown task" in out["detail"]
+
+
+def test_cancel_task_from_chat_text_only_stages(tmp_path: Path) -> None:
+    """The injection wall: a [C] verb never executes from chat text alone."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger = _seed_tasks(deps, FakeTask("t-1", "todo", "open one"))
+
+    out = tools.dispatch("cancel_task", {"task_id": "t-1"}, channel_id="C1",
+                         thread_ts="t", confirmed_via=None, deps=deps)
+
+    assert out["status"] == "needs_confirmation"
+    assert ledger.updates == []
+
+
+def test_unblock_task_moves_blocked_to_todo(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger = _seed_tasks(deps, FakeTask("t-1", "blocked", "stuck one"))
+
+    out = tools.dispatch("unblock_task", {"task_id": "t-1"}, channel_id="C1",
+                         thread_ts="t", confirmed_via="block_actions", deps=deps)
+
+    assert out == {"status": "unblocked", "task_id": "t-1"}
+    assert ledger.updates == [("t-1", {"state": "todo"})]
+
+
+def test_unblock_task_refuses_a_task_that_is_not_blocked(tmp_path: Path) -> None:
+    """An unblock, not a general state setter -- it must not rewind done work."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+    ledger = _seed_tasks(deps, FakeTask("t-1", "done", "finished"))
+
+    out = tools.dispatch("unblock_task", {"task_id": "t-1"}, channel_id="C1",
+                         thread_ts="t", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "error"
+    assert ledger.updates == []

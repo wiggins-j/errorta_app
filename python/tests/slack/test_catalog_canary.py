@@ -191,3 +191,44 @@ def test_honesty_rule_names_every_not_done_status() -> None:
         assert f'"{status}"' in concierge._RECONCILE_RULE, (
             f"{status!r} is a not-done status but the honesty rule never names it"
         )
+
+
+def test_every_required_arg_is_obtainable_from_some_verb_output() -> None:
+    """Slice 6: a verb whose required argument appears in no other verb's OUTPUT
+    is uncallable -- the model cannot invent a task_id or a change_id.
+
+    This is the generalised form of two live failures: set_next_goal was called
+    without its required `title` because no schema named it, and cancel_task
+    would have shipped uncallable because no verb exposed a task_id at all.
+    list_open_tasks exists solely to close the second. Fails CI rather than
+    failing live in a channel.
+    """
+    from errorta_slack import tools
+
+    # Where a required argument's value can come from. None == the operator
+    # supplies it in prose (a goal, a reason, a dollar amount); a string names
+    # the verb whose result carries it.
+    SUPPLIED_BY = {
+        "task_id": "list_open_tasks",
+        "project_id": "list_projects",
+        "change_id": "project_status",
+        "question": None, "bugs": None, "title": None, "body": None,
+        "north_star": None, "definition_of_done": None, "role_routes": None,
+        "amount": None, "reason": None, "decision": None, "limit": None,
+        "on": None,
+    }
+    for verb, spec in tools.TOOL_CATALOG.items():
+        for name, required, _desc in spec.get("args", ()):
+            if not required:
+                continue
+            assert name in SUPPLIED_BY, (
+                f"{verb} requires {name!r}, and nothing in SUPPLIED_BY says "
+                "where the model gets it. Either add a read verb that returns "
+                "it, or record here that the operator supplies it in prose."
+            )
+            source = SUPPLIED_BY[name]
+            if source is not None:
+                assert source in tools.TOOL_CATALOG, (
+                    f"{verb} requires {name!r}, sourced from {source!r}, which "
+                    "is not in the catalog — the argument is unobtainable"
+                )
