@@ -899,6 +899,8 @@ class SlackBridge:
             text = f"Declined — {verb} was not executed."
         elif verb == "create_project":
             text = self._create_project_outcome_text(result)
+        elif verb == "adopt_project":
+            text = self._adopt_project_outcome_text(result)
         elif verb == "archive_project":
             text = self._archive_project_outcome_text(result)
         else:
@@ -909,14 +911,68 @@ class SlackBridge:
             text = f"{verb}: {status}."
         await self._poster.post_message(channel_id, thread_ts, text, blocks=None)
 
+        # The confirmation above lands in the STUDIO channel, where the create
+        # was requested. Post it into the newly bound project channel too: that
+        # is the channel the operator actually watches, and where this run's
+        # progress stream will appear. Top-level (thread_ts=None) -- the new
+        # channel has no thread to reply into.
+        if approved and verb in ("create_project", "adopt_project"):
+            new_channel = (result or {}).get("channel_id")
+            if new_channel and new_channel != channel_id:
+                try:
+                    await self._poster.post_message(
+                        new_channel, None, text, blocks=None)
+                except Exception:  # noqa: BLE001 - best effort, mirrors _post_effect_error
+                    _LOGGER.warning(
+                        "could not post the %s confirmation into the new channel",
+                        verb, exc_info=True)
+
     def _create_project_outcome_text(self, result: dict[str, Any] | None) -> str:
         if result is not None and result.get("status") == "created":
-            return (
+            head = (
                 f"Created project `{result.get('project_id')}` — "
                 f"channel <#{result.get('channel_id')}|{result.get('channel_name')}>."
             )
+            return head + self._start_outcome_suffix(result)
         detail = (result or {}).get("detail") or "unknown error"
         return f"⚠️ couldn't create the project — {detail}"
+
+    def _adopt_project_outcome_text(self, result: dict[str, Any] | None) -> str:
+        """Adopt had no renderer of its own, so it fell through to the generic
+        ``f"{verb}: {status}."`` line -- which silently dropped
+        ``start_refused``, leaving the operator believing a run had begun."""
+        if result is not None and result.get("status") == "adopted":
+            head = (
+                f"Adopted project `{result.get('project_id')}` — "
+                f"channel <#{result.get('channel_id')}|{result.get('channel_name')}>."
+            )
+            return head + self._start_outcome_suffix(result)
+        detail = (result or {}).get("detail") or "unknown error"
+        return f"⚠️ couldn't adopt the project — {detail}"
+
+    def _start_outcome_suffix(self, result: dict[str, Any]) -> str:
+        """Report the run's ACTUAL start state, shared by create and adopt.
+
+        Read from the result dict, never from the model's own reply text: on a
+        live run the PM claimed "Goal set and run started" when neither had
+        happened. A renderer fed by the real return value cannot do that.
+
+        The north star is escaped -- it is operator-authored, but it reaches
+        here through a model-parsed charter, and an unescaped ``<!channel>``
+        in a message body pings the workspace.
+        """
+        if result.get("started"):
+            north_star = str(result.get("north_star") or "").strip()
+            if north_star:
+                capped = render.escape_mrkdwn(north_star)
+                if len(capped) > 300:
+                    capped = capped[:300].rstrip() + "…"
+                return f"\nRun started with north star as: {capped}"
+            return "\nRun started."
+        refused = str(result.get("start_refused") or "").strip()
+        if refused:
+            return f"\n⚠️ the run did NOT start — {render.escape_mrkdwn(refused)}"
+        return "\n⚠️ the run did NOT start."
 
     def _archive_project_outcome_text(self, result: dict[str, Any] | None) -> str:
         if result is not None and result.get("status") == "archived":
