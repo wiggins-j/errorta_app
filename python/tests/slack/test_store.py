@@ -341,13 +341,13 @@ def test_set_studio_channel_refuses_a_placeholder_and_keeps_the_old_value() -> N
     Validation runs BEFORE the write so a refused call leaves the real
     binding untouched.
     """
-    store.set_studio_channel("C0BQJRYQ003")
+    store.set_studio_channel("C0123456789")
 
     for bad in ("C_YOUR_STUDIO_CHANNEL_ID", "<CHANNEL_ID>", "C...", "", "nope"):
         with pytest.raises(ValueError):
             store.set_studio_channel(bad)
 
-    assert store.studio_channel() == "C0BQJRYQ003"
+    assert store.studio_channel() == "C0123456789"
 
 
 def test_set_studio_channel_overwrites_singleton() -> None:

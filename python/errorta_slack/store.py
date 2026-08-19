@@ -394,7 +394,7 @@ def set_studio_channel(channel_id: str) -> None:
         # Never echo the value — this surfaces through an HTTP route.
         raise ValueError(
             "channel_id is not a Slack conversation id (expected a C/G/D "
-            "prefix followed by alphanumerics, e.g. C0BQJRYQ003) — it looks "
+            "prefix followed by alphanumerics, e.g. C0123456789) — it looks "
             "like an unedited placeholder. Nothing was written."
         )
     with _LOCK:
