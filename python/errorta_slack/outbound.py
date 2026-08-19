@@ -300,10 +300,22 @@ def poll_once(
     """
     posted = _decode_posted(deps.store.get_cursor(channel_id))
     items = _current_items(deps, project_id)
+    muted = deps.store.updates_muted(channel_id)
 
     newly_posted: list[str] = []
     for item in items:
         if item.marker in posted:
+            continue
+
+        # A muted channel still gets the three the operator requires: the run
+        # stopping/failing (item.mandatory) and a roadblock (kind ==
+        # "decision", which the run is literally blocked on -- hiding it would
+        # deadlock the team behind a button nobody can see).
+        #
+        # `continue` WITHOUT advancing the cursor: the marker must stay unseen
+        # so unmuting delivers the backlog. Marking it posted here would
+        # silently discard everything that happened while muted.
+        if muted and not (item.mandatory or item.kind == "decision"):
             continue
 
         if item.kind == "decision":

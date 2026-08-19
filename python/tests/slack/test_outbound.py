@@ -950,3 +950,67 @@ async def test_idle_and_running_states_emit_nothing() -> None:
         poster = SyncFakePoster()
 
         assert outbound.poll_once(channel, "p1", deps=deps, poster=poster) == []
+
+
+# --------------------------------------------------------------------------
+# Slice 5b Task 5 — mute quiets routine progress, never the mandatory three.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mute_suppresses_ordinary_milestones() -> None:
+    store.advance_cursor("C-mute", "")
+    store.set_updates("C-mute", enabled=False)
+    deps = _deps(log_entries=[
+        _log_entry("2026-01-01T00:00:00", "pr_merged", "merged the login fix")])
+    poster = SyncFakePoster()
+
+    assert outbound.poll_once("C-mute", "p1", deps=deps, poster=poster) == []
+    assert poster.messages == []
+
+
+@pytest.mark.asyncio
+async def test_mute_does_not_suppress_run_termination() -> None:
+    store.advance_cursor("C-mute2", "")
+    store.set_updates("C-mute2", enabled=False)
+    deps = _run_state_deps({"status": "stopped", "ended_at": "2026-01-02T00:00:00"})
+    poster = SyncFakePoster()
+
+    posted = outbound.poll_once("C-mute2", "p1", deps=deps, poster=poster)
+
+    assert posted == ["run:stopped:2026-01-02T00:00:00"]
+    assert len(poster.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_mute_does_not_suppress_a_blocking_decision() -> None:
+    """A roadblock is one of the three that always arrive -- and the run is
+    literally waiting on the button, so hiding it would deadlock the team."""
+    store.advance_cursor("C-mute3", "")
+    store.set_updates("C-mute3", enabled=False)
+    deps = _deps(signals=[
+        _signal("s1", created_at="2026-01-01T00:00:00", title="Need a decision",
+                blocking=True)])
+    poster = SyncFakePoster()
+
+    posted = outbound.poll_once("C-mute3", "p1", deps=deps, poster=poster)
+
+    assert posted == ["attn:s1"]
+    assert len(poster.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_muted_ordinary_item_is_not_marked_posted() -> None:
+    """Suppression must not burn the marker: unmuting has to deliver the
+    backlog, not skip it forever."""
+    store.advance_cursor("C-mute4", "")
+    store.set_updates("C-mute4", enabled=False)
+    deps = _deps(log_entries=[
+        _log_entry("2026-01-01T00:00:00", "pr_merged", "merged the login fix")])
+    poster = SyncFakePoster()
+
+    outbound.poll_once("C-mute4", "p1", deps=deps, poster=poster)
+    store.set_updates("C-mute4", enabled=True)
+    posted = outbound.poll_once("C-mute4", "p1", deps=deps, poster=poster)
+
+    assert posted == ["log:2026-01-01T00:00:00:pr_merged"]

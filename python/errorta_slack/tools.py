@@ -79,6 +79,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
         "trust": "R",
         "summary": "Stop the bound project's runtime preview.",
     },
+    "set_updates": {
+        "trust": "R",
+        "summary": (
+            "Turn this channel's progress updates on or off. Muting never "
+            "silences the run stopping, a roadblock, or the run finishing."
+        ),
+    },
     "queue_bugs": {
         "trust": "R",
         "summary": "File one or more bug reports as new dev tasks.",
@@ -364,6 +371,26 @@ def launch_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         "url": f"http://{host}:{port}",
         "note": "local URL only — no public URL in v1",
     }
+
+
+def set_updates(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                 deps: "ToolDeps") -> dict[str, Any]:
+    """Mute or unmute this channel's routine progress updates.
+
+    [R] rather than [C]: it spends nothing and is trivially reversible from the
+    same chat that set it. The three events the operator requires -- the team
+    stopping, a roadblock, the run finishing -- ignore the mute entirely
+    (``outbound.poll_once``), so this can never leave someone unaware that a run
+    has ended or is blocked waiting on them.
+
+    Accepts the argument as ``on`` (updates on/off). Absent or non-bool means
+    "turn them on": the mute is the surprising state, so an ambiguous request
+    must not land there.
+    """
+    raw = args.get("on")
+    enabled = raw if isinstance(raw, bool) else True
+    deps.store.set_updates(channel_id, enabled=enabled)
+    return {"status": "updated", "updates": "on" if enabled else "off"}
 
 
 def stop_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
@@ -763,6 +790,7 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "recent_activity": recent_activity,
     "launch_runtime": launch_runtime,
     "stop_runtime": stop_runtime,
+    "set_updates": set_updates,
     "queue_bugs": queue_bugs,
     "answer_question": answer_question,
     "resolve_decision": resolve_decision,
