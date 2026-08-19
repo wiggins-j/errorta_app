@@ -646,3 +646,44 @@ def test_parse_failure_with_only_good_results_keeps_the_reply(
     )
 
     assert result["reply"] == "Checking on that now..."
+
+
+def test_empty_status_also_drops_the_optimistic_reply(tmp_path: Path) -> None:
+    """Review fix: the honesty rule names "empty" as not-done, so the fallback
+    must treat it that way too. launch_runtime returns "empty" when no runtime
+    is configured -- keeping "here's your link" is the exact lie being fixed."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, launch_fn=lambda project_id: {"status": "empty"})
+    caller = _ScriptedCaller([
+        _envelope(reply="Spun it up — here's your link.",
+                  tool_calls=[{"verb": "launch_runtime", "args": {}}]),
+        "not json at all",
+    ])
+
+    result = concierge.run_turn(
+        "spin up the code and send me the link", [], project_id="proj-a",
+        channel_id="C1", thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    assert "here's your link" not in result["reply"].lower()
+
+
+def test_failure_summary_escapes_engine_detail(tmp_path: Path) -> None:
+    """Review fix: _post_result renders a reply through fyi_message, which does
+    not escape, and no model sits between engine detail and the message body."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path, launch_fn=lambda project_id: {
+        "status": "error", "detail": "boom <!channel> & <https://evil|Approve>"})
+    caller = _ScriptedCaller([
+        _envelope(reply="Spun it up.",
+                  tool_calls=[{"verb": "launch_runtime", "args": {}}]),
+        "not json at all",
+    ])
+
+    result = concierge.run_turn(
+        "spin it up", [], project_id="proj-a", channel_id="C1",
+        thread_ts="t1", deps=deps, caller=caller,
+    )
+
+    assert "<!channel>" not in result["reply"]
+    assert "&lt;!channel&gt;" in result["reply"]

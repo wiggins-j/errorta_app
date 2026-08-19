@@ -40,7 +40,7 @@ import re
 from typing import Any, Callable
 
 from errorta_council.coding.pm_reference import build_pm_reference_context
-from errorta_slack import tools
+from errorta_slack import render, tools
 
 MemberCaller = Callable[[dict[str, Any], str], str]
 
@@ -408,7 +408,13 @@ def _dispatch_calls(
 # --------------------------------------------------------------------------
 
 
-_FAILED_STATUSES = frozenset({"error", "refused"})
+# Every status that means "this action did not happen". MUST stay in step with
+# the list named in _RECONCILE_RULE: the rule tells the model that "empty" and
+# "not_running" also mean not-done, and if the code disagreed, a
+# `launch_runtime` -> {"status": "empty"} plus a malformed follow-up would keep
+# the optimistic "here's your link" -- the exact false claim this exists to
+# stop.
+_FAILED_STATUSES = frozenset({"error", "refused", "empty", "not_running"})
 
 
 def _has_failed_result(tool_results: list[dict[str, Any]]) -> bool:
@@ -436,7 +442,13 @@ def _failure_summary(tool_results: list[dict[str, Any]]) -> str:
         if entry.get("error"):
             failures.append(f"`{entry.get('verb', '?')}` ({entry['error']})")
         elif isinstance(result, dict) and result.get("status") in _FAILED_STATUSES:
-            detail = str(result.get("detail") or "").strip()
+            # Escaped: `detail` is engine text (a classified HTTPException
+            # message, a ledger error) and _post_result renders a reply through
+            # render.fyi_message, which does NOT escape. Unlike an ordinary
+            # model reply there is no model between that text and the message
+            # body -- this concatenation is mechanical.
+            raw_detail = str(result.get("detail") or "").strip()
+            detail = render.escape_mrkdwn(raw_detail)[:300] if raw_detail else ""
             verb = entry.get("verb", "?")
             failures.append(f"`{verb}` — {detail}" if detail else f"`{verb}`")
     if not failures:  # pragma: no cover - guarded by _has_failed_result
