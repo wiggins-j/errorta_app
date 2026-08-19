@@ -58,7 +58,7 @@ class ToolError(Exception):
 # Catalog — the single source of truth for verbs, trust class, and prompt copy
 # --------------------------------------------------------------------------
 
-TOOL_CATALOG: dict[str, dict[str, str]] = {
+TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "list_projects": {
         "trust": "R",
         "summary": "List every coding project this studio has created.",
@@ -72,10 +72,12 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "answer_question": {
         "trust": "R",
+        "args": (("question", True, "the question to answer"),),
         "summary": "Answer a question from context already fetched (no side effect).",
     },
     "archive_project": {
         "trust": "C",
+        "args": (("project_id", True, "the project to spin down"),),
         "summary": (
             "Spin a project down — pause it and archive its Slack channel "
             "(reversible; does not delete the project)."
@@ -83,6 +85,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "adopt_project": {
         "trust": "C",
+        "args": (("project_id", True, "the existing project to adopt"),
+                 ("start", False, "true to also start the run")),
         "summary": (
             "Adopt an EXISTING project into Slack — open and bind its own "
             "channel (and seat a team if it has none)."

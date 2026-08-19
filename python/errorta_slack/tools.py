@@ -54,13 +54,14 @@ class ToolError(Exception):
 # Catalog — the single source of truth for verbs, trust class, and prompt copy
 # --------------------------------------------------------------------------
 
-TOOL_CATALOG: dict[str, dict[str, str]] = {
+TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "list_projects": {
         "trust": "R",
         "summary": "List the coding projects this bridge knows about.",
     },
     "switch_project": {
         "trust": "R",
+        "args": (("project_id", True, "the project to switch this channel to"),),
         "summary": "Rebind this channel to a different coding project.",
     },
     "project_status": {
@@ -69,6 +70,7 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "recent_activity": {
         "trust": "R",
+        "args": (("limit", False, "how many entries (default 10)"),),
         "summary": "Show what the team did recently.",
     },
     "launch_runtime": {
@@ -81,6 +83,7 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "set_updates": {
         "trust": "R",
+        "args": (("on", False, "true to resume updates, false to mute"),),
         "summary": (
             "Turn this channel's progress updates on or off. Muting never "
             "silences the run stopping, a roadblock, or the run finishing."
@@ -88,22 +91,29 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "queue_bugs": {
         "trust": "R",
+        "args": (("bugs", True, "list of bug descriptions, one string each"),),
         "summary": "File one or more bug reports as new dev tasks.",
     },
     "answer_question": {
         "trust": "R",
+        "args": (("question", True, "the question to answer"),),
         "summary": "Answer a question from context already fetched (no side effect).",
     },
     "resolve_decision": {
         "trust": "C",
+        "args": (("change_id", True, "the pending change id"),
+                 ("decision", True, "\"approved\" or \"declined\"")),
         "summary": "Accept or decline an already-surfaced PM change / gate decision.",
     },
     "spend_cloud": {
         "trust": "C",
+        "args": (("amount", True, "spend cap in dollars"),
+                 ("reason", True, "why this spend is needed")),
         "summary": "Authorize an action that spends on cloud model calls.",
     },
     "publish_pr": {
         "trust": "C",
+        "args": (("title", True, "PR title"), ("body", False, "PR description")),
         "summary": "Open or update a public pull request.",
     },
     "start_run": {
@@ -122,6 +132,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "reconfigure_team": {
         "trust": "R",
+        "args": (("role_routes", True, "map of role -> gateway route id, "
+                  "e.g. {\"dev\": \"claude_cli.opus\"}"),),
         "summary": (
             "Change which model a role (pm/dev/reviewer/tester) uses on "
             "this project."
@@ -129,6 +141,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "set_next_goal": {
         "trust": "C",
+        "args": (("title", True, "the goal, one line"),
+                 ("body", False, "any extra scope detail")),
         "summary": (
             "Set the team's next goal — the operative scope they plan "
             "against right now (the North Star stays a reference guardrail)."
@@ -136,6 +150,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "set_north_star": {
         "trust": "C",
+        "args": (("north_star", True, "the durable charter"),
+                 ("definition_of_done", False, "how you will know it is met")),
         "summary": (
             "Rewrite the project's North Star / definition of done (the "
             "durable charter, not the current goal)."

@@ -99,3 +99,66 @@ def test_dispatch_actually_rejects_a_verb_outside_the_catalog() -> None:
         )
 
     assert excinfo.value.code == "tool_not_allowed"
+
+
+# --------------------------------------------------------------------------
+# Slice 5c Task 7 — the model is told each verb's ARGUMENTS.
+#
+# The catalog advertised only "- `verb` [T]: summary". The envelope contract
+# says '"args": {}' and nothing more, so the model had to guess every argument
+# name. On a live run it guessed set_next_goal's and omitted `title`; the ledger
+# refused with "focus title is required" and the goal was never set. This is not
+# specific to one verb -- it blocks every verb with a required argument.
+# --------------------------------------------------------------------------
+
+_ARG_LINE = re.compile(r"^- `([a-zA-Z0-9_]+)` \[[A-Z?]\]:.*— args: (.+)$", re.MULTILINE)
+
+
+def _rendered_args() -> dict[str, str]:
+    prompt = concierge.build_system_prompt("canary-test-project", store=None)
+    return dict(_ARG_LINE.findall(prompt))
+
+
+def test_set_next_goal_advertises_its_required_title() -> None:
+    """The exact live failure: the model omitted `title` because nothing ever
+    told it the argument existed."""
+    args = _rendered_args()
+
+    assert "set_next_goal" in args
+    assert "title" in args["set_next_goal"]
+    assert "required" in args["set_next_goal"]
+
+
+def test_every_verb_with_declared_args_renders_them() -> None:
+    from errorta_slack import tools
+
+    rendered = _rendered_args()
+    for verb, spec in tools.TOOL_CATALOG.items():
+        if spec.get("args"):
+            assert verb in rendered, f"{verb} declares args but renders none"
+
+
+def test_verbs_taking_no_args_render_no_args_clause() -> None:
+    """A no-arg verb must not grow a confusing empty 'args:' tail."""
+    rendered = _rendered_args()
+
+    assert "project_status" not in rendered
+    assert "start_run" not in rendered
+
+
+def test_every_required_arg_is_actually_read_by_its_impl() -> None:
+    """Anti-fiction: a declared argument the implementation never reads would
+    be a documented lie the model then dutifully sends."""
+    import inspect
+
+    from errorta_slack import tools
+
+    for verb, spec in tools.TOOL_CATALOG.items():
+        impl = tools._VERB_IMPLS.get(verb)
+        if not spec.get("args") or impl is None:
+            continue
+        src = inspect.getsource(impl)
+        for name, _required, _desc in spec["args"]:
+            if verb == "publish_pr":
+                continue  # passes args straight through to deps.publish_fn
+            assert f'"{name}"' in src, f"{verb} advertises {name!r} but never reads it"

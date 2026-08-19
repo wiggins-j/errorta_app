@@ -175,6 +175,26 @@ def _project_state_block(project_id: str, *, store: Any = None) -> str:
     return "\n".join(lines)
 
 
+def _catalog_line(verb: str, spec: dict) -> str:
+    """One catalog line, including the verb's ARGUMENT NAMES.
+
+    Without these the model has to invent the keys for `"args": {}`: on a live
+    run it guessed `set_next_goal`'s, omitted the required `title`, and the
+    ledger refused with "focus title is required" -- so the goal was never set
+    and the run never started. A verb taking no arguments renders no `— args:`
+    clause at all, so nothing suggests it wants one.
+    """
+    head = f"- `{verb}` [{spec.get('trust', '?')}]: {spec.get('summary', '')}"
+    declared = spec.get("args") or ()
+    if not declared:
+        return head
+    rendered = ", ".join(
+        f"{name} (required, {desc})" if required else f"{name} ({desc})"
+        for name, required, desc in declared
+    )
+    return f"{head} — args: {rendered}"
+
+
 def build_system_prompt(
     project_id: str,
     *,
@@ -193,8 +213,7 @@ def build_system_prompt(
     """
     pm_context = build_pm_reference_context(project_id, store=store)
     catalog_lines = [
-        f"- `{verb}` [{spec.get('trust', '?')}]: {spec.get('summary', '')}"
-        for verb, spec in sorted(catalog.items())
+        _catalog_line(verb, spec) for verb, spec in sorted(catalog.items())
     ]
     catalog_block = "\n".join(catalog_lines) or "- (no tools available)"
     # The etiquette contract's "what I CAN do" list is derived straight from
