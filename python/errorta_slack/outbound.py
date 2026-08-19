@@ -270,6 +270,17 @@ def _current_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
     return items
 
 
+def current_marker_cursor(project_id: str, *, deps: "OutboundDeps | None" = None) -> str:
+    """An encoded cursor covering everything that has already happened.
+
+    Used at adopt time: seeding this makes the first poll a no-op for existing
+    history, so an adopted project's channel starts from "what happens next"
+    rather than replaying months of team log one message at a time.
+    """
+    real_deps = deps or OutboundDeps()
+    return _encode_posted({it.marker for it in _current_items(real_deps, project_id)})
+
+
 def _decode_posted(cursor: str | None) -> set[str]:
     if not cursor:
         return set()
@@ -535,6 +546,7 @@ __all__ = [
     "ATTENTION_VERB",
     "attention_decision_action",
     "poll_once",
+    "current_marker_cursor",
     "sweep_timeouts",
     "run_loop",
 ]

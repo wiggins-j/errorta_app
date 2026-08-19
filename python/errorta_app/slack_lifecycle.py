@@ -45,10 +45,13 @@ _thread: threading.Thread | None = None
 _loop: "asyncio.AbstractEventLoop | None" = None
 _bridge: Any = None
 _start_future: "asyncio.Future | None" = None
+_outbound_thread: "threading.Thread | None" = None
+_outbound_stop: "threading.Event | None" = None
 
 
 def _stop_locked() -> None:
     global _thread, _loop, _bridge, _start_future
+    _stop_outbound()
     if _start_future is not None and not _start_future.done():
         _start_future.cancel()
     if _bridge is not None and _loop is not None and _loop.is_running():
@@ -68,6 +71,95 @@ def _stop_locked() -> None:
     _loop = None
     _bridge = None
     _start_future = None
+
+
+def _build_sync_poster(bot_token: str) -> Any:
+    """A SYNCHRONOUS poster for the outbound progress loop.
+
+    Deliberately not ``_build_poster``. ``outbound.poll_once`` calls
+    ``poster.post_message(...)`` without awaiting it, so handing it the bridge's
+    async poster would build a coroutine, drop it on the floor, and post
+    nothing at all -- a silent failure whose only symptom is a
+    "coroutine was never awaited" warning. ``slack_sdk``'s ``WebClient`` is
+    itself synchronous, so this is the natural shape; the async poster is the
+    adapted one.
+    """
+    from slack_sdk import WebClient
+
+    web_client = WebClient(token=bot_token)
+
+    class _SyncWebClientPoster:
+        def post_message(
+            self, channel_id: Any, thread_ts: Any, text: str, blocks: Any = None,
+        ) -> dict[str, Any]:
+            kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            if blocks:
+                kwargs["blocks"] = blocks
+            return dict(web_client.chat_postMessage(**kwargs).data)
+
+    return _SyncWebClientPoster()
+
+
+def _start_outbound(poster: Any, *, run_loop_fn: Any = None) -> None:
+    """Run the outbound progress loop on its own thread.
+
+    Its own thread, not the bridge's event loop: ``poll_once`` is fully
+    synchronous and does ledger file I/O plus one blocking HTTP post per item.
+    Running that on the ingress loop would stall Socket Mode acks (Slack wants
+    one within 3s) every tick. ``run_loop``'s only await is its sleep, so a
+    private loop on a private thread costs nothing and isolates the blocking.
+
+    ``stop_event`` is a ``threading.Event``, not an ``asyncio.Event``:
+    ``run_loop`` only ever calls ``.is_set()`` on it, and the setter lives on
+    another thread -- ``asyncio.Event.set()`` is not threadsafe, while
+    ``threading.Event.set()`` is.
+    """
+    global _outbound_thread, _outbound_stop
+
+    _stop_outbound()
+
+    from errorta_slack import outbound as slack_outbound
+    from errorta_slack import store as slack_store
+
+    run_loop = run_loop_fn or slack_outbound.run_loop
+    stop_event = threading.Event()
+
+    def _target() -> None:
+        try:
+            asyncio.run(run_loop(
+                bindings_provider=slack_store.list_bindings,
+                deps=slack_outbound.OutboundDeps(),
+                poster=poster,
+                stop_event=stop_event,
+            ))
+        except Exception:  # pragma: no cover - defensive
+            _LOG.warning("slack outbound loop exited", exc_info=True)
+
+    thread = threading.Thread(
+        target=_target, name="slack-outbound-loop", daemon=True)
+    _outbound_stop = stop_event
+    _outbound_thread = thread
+    thread.start()
+
+
+def _stop_outbound() -> None:
+    """Signal the outbound loop and wait briefly for it to notice.
+
+    It checks the flag at the top of each tick, so a loop mid-sleep exits
+    WITHOUT polling once more -- a restart cannot double-post. The join is
+    short and the thread is a daemon: a slow in-flight HTTP post must not hold
+    up a bridge restart or sidecar shutdown.
+    """
+    global _outbound_thread, _outbound_stop
+
+    if _outbound_stop is not None:
+        _outbound_stop.set()
+    if _outbound_thread is not None:
+        _outbound_thread.join(timeout=5)
+    _outbound_thread = None
+    _outbound_stop = None
 
 
 def _build_poster(bot_token: str) -> Any:
@@ -234,6 +326,11 @@ def _start_locked(cfg: dict[str, Any], app_token: str, bot_token: str) -> dict[s
             _LOG.warning("slack bridge: background connect failed: %s", exc)
 
     start_future.add_done_callback(_on_start_done)
+
+    # The progress stream. Built and shipped long before this line existed:
+    # `outbound.run_loop` had no production caller at all, so nothing was ever
+    # posted into a bound channel unprompted.
+    _start_outbound(_build_sync_poster(bot_token))
 
     _thread = thread
     _loop = loop

@@ -572,6 +572,26 @@ def adopt_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
 
     deps.store.bind_channel(chan["channel_id"], project_id)
 
+    # Seed the outbound cursor with everything that has ALREADY happened.
+    # An adopted project can carry months of team log; with an empty cursor the
+    # first poll treats all of it as new and posts one Slack message per entry,
+    # burying the channel before the team does anything. Create needs no
+    # equivalent -- a new project has no history, and its first real milestone
+    # should be posted.
+    #
+    # Best effort: a project whose ledger cannot be read here simply starts with
+    # an empty cursor (the old behaviour). Failing the adopt over a cosmetic
+    # backfill would be a worse trade.
+    try:
+        from errorta_slack import outbound  # noqa: PLC0415
+
+        deps.store.advance_cursor(
+            chan["channel_id"], outbound.current_marker_cursor(project_id))
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "adopt_project: could not seed the outbound cursor for %s",
+            project_id, exc_info=True)
+
     started, start_refused = False, None
     if bool(args.get("start")):
         start_refused = start_gate(ledger)

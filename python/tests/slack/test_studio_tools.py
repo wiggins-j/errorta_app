@@ -26,6 +26,7 @@ class FakeStore:
         self.channel_map: dict[str, str] = {}
         self._next_cid = 0
         self._events = events
+        self.cursors: dict[str, str] = {}
 
     def stage_confirmation(self, verb: str, args: dict[str, Any], thread_ts: str, *,
                             channel_id: str = "") -> str:
@@ -40,6 +41,12 @@ class FakeStore:
 
     def bind_channel(self, channel_id: str, project_id: str) -> None:
         self.bound.append((channel_id, project_id))
+
+    def get_cursor(self, channel_id: str) -> str | None:
+        return self.cursors.get(channel_id)
+
+    def advance_cursor(self, channel_id: str, marker: str) -> None:
+        self.cursors[channel_id] = marker
 
     def channel_for_project(self, project_id: str) -> str | None:
         return self.channel_map.get(project_id)
@@ -1122,3 +1129,22 @@ def test_create_project_run_setup_required_is_named() -> None:
     )
 
     assert result["start_refused"] == "the team isn't configured yet"
+
+
+def test_adopt_seeds_the_cursor_so_history_is_not_replayed() -> None:
+    """An adopted project can carry months of team log. With an empty cursor
+    the first outbound poll would post ALL of it, one Slack message per entry.
+
+    Create needs no such seeding -- a brand-new project has no history, and its
+    first real milestone SHOULD be posted.
+    """
+    store = FakeStore()
+    deps = _deps(store=store)
+
+    studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo"}, channel_id="C1",
+        thread_ts="t1", confirmed_via="block_actions", deps=deps,
+    )
+
+    cursor = store.get_cursor("C-NEW")
+    assert cursor, "adopt must seed the cursor at bind time"
