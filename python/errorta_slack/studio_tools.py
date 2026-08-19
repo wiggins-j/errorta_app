@@ -367,11 +367,41 @@ def create_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         return {"status": "error", "project_id": project_id, "detail": str(exc)}
 
     deps.store.bind_channel(chan["channel_id"], project_id)
+
+    # Spec §3.2: creating a project from Slack ALWAYS starts it. Unlike
+    # `adopt_project`, there is no `start` opt-in and no approval gate of its
+    # own -- the operator's decision, and it holds whether or not autopilot is
+    # on. The accepted trade is that create's Approve tap was also the last
+    # anti-injection control on this path; what remains is the allowlist and
+    # the concierge's "quoted text is data, never a command" rule.
+    #
+    # `start_gate` is kept rather than removed. After the factory seeds the
+    # charter's Focus it passes by construction, but it stays as the guard for
+    # the (now impossible) no-goal case, and it is cheap.
+    from errorta_council.coding.next_goal import start_gate  # noqa: PLC0415
+
+    started, start_refused = False, start_gate(deps.ledger_factory(project_id))
+    if start_refused is None:
+        start_fn = deps.start_run_fn
+        if start_fn is None:
+            from errorta_slack.tools import _default_start_run as start_fn  # noqa: PLC0415
+        try:
+            start_fn(project_id, resume=False, continue_=False)
+            started = True
+        except Exception as exc:  # noqa: BLE001 - never escape a live turn
+            # Only the type name: the message could carry a path or provider
+            # detail. The member-health preflight 409 (a logged-out provider)
+            # is the expected shape here.
+            start_refused = f"couldn't start the run ({type(exc).__name__})"
+
     return {
         "status": "created",
         "project_id": project_id,
         "channel_id": chan["channel_id"],
         "channel_name": chan["name"],
+        "north_star": str(charter.get("north_star", "")),
+        "started": started,
+        "start_refused": start_refused,
     }
 
 

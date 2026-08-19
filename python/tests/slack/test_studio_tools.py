@@ -1005,3 +1005,78 @@ def test_studio_deps_start_run_fn_defaults_to_none() -> None:
     """Must default to None so the lazy `errorta_app.routes.coding` import in
     tools._default_start_run never happens at StudioDeps() construction."""
     assert studio_tools.StudioDeps().start_run_fn is None
+
+
+# --------------------------------------------------------------------------
+# Slice 5a Task 2 — create starts the run.
+#
+# Operator decision (spec §3.2): creating a project from Slack ALWAYS starts
+# it, with no approval gate of its own and regardless of autopilot. The
+# `start=True` opt-in that `adopt_project` carries deliberately has no
+# equivalent here.
+# --------------------------------------------------------------------------
+
+
+def _start_recorder(calls: list[dict[str, Any]]) -> Any:
+    def _start_run_fn(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"project_id": project_id, **kwargs})
+        return {"started": True}
+    return _start_run_fn
+
+
+def test_create_project_starts_the_run() -> None:
+    start_calls: list[dict[str, Any]] = []
+    deps = _deps(start_run_fn=_start_recorder(start_calls))
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert result["started"] is True
+    assert result["start_refused"] is None
+    # Fresh mode is mandatory: a new project is "idle", and continue_ 409s
+    # ("run is not continuable") on anything but "stopped".
+    assert len(start_calls) == 1
+    assert start_calls[0]["resume"] is False
+    assert start_calls[0]["continue_"] is False
+
+
+def test_create_project_start_is_unconditional() -> None:
+    """No `start` arg anywhere -- unlike adopt_project, create needs no opt-in."""
+    start_calls: list[dict[str, Any]] = []
+    charter = _charter()
+    assert "start" not in charter
+    deps = _deps(start_run_fn=_start_recorder(start_calls))
+
+    studio_tools.dispatch(
+        "create_project", charter, channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert len(start_calls) == 1
+
+
+def test_create_project_start_failure_is_reported_not_raised() -> None:
+    """A logged-out provider 409s the member-health preflight. The project and
+    its binding must survive, and the result must carry the real reason."""
+    def _boom(project_id: str, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("provider logged out")
+
+    store = FakeStore()
+    deps = _deps(store=store, start_run_fn=_boom)
+
+    result = studio_tools.dispatch(
+        "create_project", _charter(), channel_id="C1", thread_ts="t1",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "created"
+    assert result["started"] is False
+    assert result["start_refused"]
+    # Never leak the exception message -- only its type name.
+    assert "provider logged out" not in result["start_refused"]
+    assert result["project_id"]
+    assert result["channel_id"]
+    assert store.bound, "the channel binding must survive a failed start"
