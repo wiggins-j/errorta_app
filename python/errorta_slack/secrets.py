@@ -52,6 +52,40 @@ def path() -> Path:
     return config.slack_dir() / "tokens.json"
 
 
+# Markers that only ever appear in a placeholder, never in a real token.
+_PLACEHOLDER_MARKERS = ("...", "…", "<", ">")
+# Long enough to reject "xapp-" and "xapp-..." while still accepting the short
+# synthetic tokens the test suite uses. Deliberately NOT tuned to the real
+# ~70-char length: this guard is here to catch an unedited paste, not to
+# second-guess whatever Slack issues next.
+_MIN_TOKEN_LEN = 10
+
+
+def _validate_token(name: str, value: str, prefix: str) -> None:
+    """Raise ``ValueError`` if ``value`` cannot possibly be a real token.
+
+    The message names the field and the reason but NEVER echoes the value —
+    it is user-facing and may be pasted into a bug report.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise ValueError(f"{name} is empty — nothing was written")
+    if not text.startswith(prefix):
+        raise ValueError(
+            f"{name} must start with {prefix!r} (are the two arguments swapped?) "
+            "— nothing was written"
+        )
+    if any(marker in text for marker in _PLACEHOLDER_MARKERS):
+        raise ValueError(
+            f"{name} still contains a placeholder — paste the real token from "
+            "the Slack app's settings. Nothing was written."
+        )
+    if len(text) < _MIN_TOKEN_LEN:
+        raise ValueError(
+            f"{name} is too short to be a real token — nothing was written"
+        )
+
+
 def save_tokens(app_token: str, bot_token: str) -> None:
     """Atomically write both tokens to disk with mode 0600.
 
@@ -60,7 +94,16 @@ def save_tokens(app_token: str, bot_token: str) -> None:
     half-written. Mode 0600 is set on the tmpfile BEFORE rename so
     there's no window where a wider mode is visible. Never logs the raw
     token values.
+
+    Both values are validated BEFORE the file is touched, so a refused call
+    leaves any existing tokens intact. This is not hypothetical: the
+    documented setup one-liner carries ``xapp-...`` / ``xoxb-...``, it was
+    run unedited, and the 8-character placeholders overwrote live
+    credentials that could not be recovered from disk.
     """
+    _validate_token("app_token", app_token, "xapp-")
+    _validate_token("bot_token", bot_token, "xoxb-")
+
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(

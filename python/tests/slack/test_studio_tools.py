@@ -77,10 +77,34 @@ class FakeLedger:
         if self._events is not None:
             self._events.append(f"set_project_status:{status}")
 
+    # --- Slice 4: adopt_project reads/writes these -------------------------
+    def get_project(self) -> Any:
+        if getattr(self, "missing", False):
+            from errorta_council.coding.ledger import ProjectNotFound
+
+            raise ProjectNotFound(f"no project: {self.project_id}")
+        return FakeProject(self.project_id)
+
+    def get_run_config(self) -> dict[str, Any]:
+        return {"members": list(getattr(self, "members", []))}
+
+    def set_run_config(self, *, room_id: Any = None,
+                       members: list[dict[str, Any]] | None = None) -> None:
+        self.run_config_calls = getattr(self, "run_config_calls", [])
+        self.run_config_calls.append({"room_id": room_id, "members": members})
+        self.members = list(members or [])
+
+    def active_focuses(self) -> list[Any]:
+        return list(getattr(self, "focuses", []))
+
 
 class FakeProject:
     def __init__(self, project_id: str) -> None:
         self.id = project_id
+        self.north_star = "Teach fractions through a platformer."
+        self.definition_of_done = "A playable level ships."
+        self.work_request = ""
+        self.repo_path = None
 
 
 def _charter(**overrides: Any) -> dict[str, Any]:
@@ -779,3 +803,205 @@ def test_create_project_appends_designer_to_charter_team_for_ui() -> None:
     assert roles.count("designer") == 1
     designer = next(m for m in create_calls[0]["members"] if m["metadata"]["coding_role"] == "designer")
     assert designer["gateway_route_id"] == "claude_cli.opus"
+
+
+# --- Slice 4: adopt_project -------------------------------------------------
+
+
+def test_adopt_project_provisions_binds_and_reports() -> None:
+    """Spec §3.1: the studio could only open a channel for a project it just
+    created (create_project is the only caller of create_project_channel), so
+    an existing project like abovo could never get one."""
+    provision_calls: list[dict[str, Any]] = []
+    ledger = FakeLedger("abovo")
+    ledger.members = [{"id": "pm-1"}]
+    ledger.focuses = [object()]
+    fake_store = FakeStore()
+    deps = studio_tools.StudioDeps(
+        store=fake_store,
+        ledger_factory=lambda pid: ledger,
+        provision_fn=_recording_provision_fn(provision_calls, channel_id="C-ABOVO",
+                                             name="abovo"),
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo"},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "adopted"
+    assert result["channel_id"] == "C-ABOVO"
+    assert result["team_seated"] is False        # abovo already has a team
+    assert fake_store.bound == [("C-ABOVO", "abovo")]
+    assert len(provision_calls) == 1
+
+
+def test_adopt_project_is_idempotent_when_already_bound() -> None:
+    """Re-running must NOT spawn a duplicate channel."""
+    provision_calls: list[dict[str, Any]] = []
+    fake_store = FakeStore()
+    fake_store.channel_map["abovo"] = "C-EXISTING"
+    deps = studio_tools.StudioDeps(
+        store=fake_store,
+        ledger_factory=lambda pid: FakeLedger(pid),
+        provision_fn=_recording_provision_fn(provision_calls),
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo"},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "already_bound"
+    assert result["channel_id"] == "C-EXISTING"
+    assert provision_calls == []
+    assert fake_store.bound == []
+
+
+def test_adopt_project_refuses_an_unknown_project() -> None:
+    provision_calls: list[dict[str, Any]] = []
+    ledger = FakeLedger("nope")
+    ledger.missing = True
+    deps = studio_tools.StudioDeps(
+        store=FakeStore(), ledger_factory=lambda pid: ledger,
+        provision_fn=_recording_provision_fn(provision_calls),
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "nope"},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "nope" in result["detail"]
+    assert provision_calls == []
+
+
+def test_adopt_project_seats_a_team_only_when_there_is_none() -> None:
+    ledger = FakeLedger("teamless")
+    ledger.members = []
+    deps = studio_tools.StudioDeps(
+        store=FakeStore(), ledger_factory=lambda pid: ledger,
+        provision_fn=_recording_provision_fn([]),
+        default_team=[
+            {"coding_role": "pm", "gateway_route_id": "claude_cli.opus"},
+            {"coding_role": "dev", "gateway_route_id": "claude_cli.opus"},
+            {"coding_role": "designer", "gateway_route_id": "claude_cli.opus"},
+        ],
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "teamless"},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["team_seated"] is True
+    seated = ledger.run_config_calls[0]["members"]
+    roles = [m["metadata"]["coding_role"] for m in seated]
+    assert "pm" in roles and "dev" in roles
+    # No stored modality -> non-UI -> the Designer is stripped, so the
+    # design spec stays provably inert (Designer Slice 1 §1).
+    assert "designer" not in roles
+
+
+def test_adopt_project_start_is_refused_without_a_goal_but_still_binds() -> None:
+    """A refused start is not a failed adoption: the channel stays bound and
+    the result reports the refusal (spec §3.1 step 6)."""
+    start_calls: list[str] = []
+    ledger = FakeLedger("abovo")
+    ledger.members = [{"id": "pm-1"}]
+    ledger.focuses = []              # the real abovo: no goal at all
+    fake_store = FakeStore()
+    deps = studio_tools.StudioDeps(
+        store=fake_store, ledger_factory=lambda pid: ledger,
+        provision_fn=_recording_provision_fn([], channel_id="C-ABOVO"),
+        start_run_fn=lambda pid, **kw: start_calls.append(pid),
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo", "start": True},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "adopted"
+    assert result["started"] is False
+    assert "goal" in result["start_refused"].lower()
+    assert start_calls == []
+    assert fake_store.bound == [("C-ABOVO", "abovo")]
+
+
+def test_adopt_project_starts_when_a_goal_exists() -> None:
+    start_calls: list[str] = []
+    ledger = FakeLedger("ready")
+    ledger.members = [{"id": "pm-1"}]
+    ledger.focuses = [object()]
+    deps = studio_tools.StudioDeps(
+        store=FakeStore(), ledger_factory=lambda pid: ledger,
+        provision_fn=_recording_provision_fn([]),
+        start_run_fn=lambda pid, **kw: start_calls.append(pid),
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "ready", "start": True},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["started"] is True
+    assert result["start_refused"] is None
+    assert start_calls == ["ready"]
+
+
+def test_adopt_project_from_chat_text_only_stages() -> None:
+    """The injection wall: pasted Slack text must never create a public
+    channel. Only a verified block_actions click may."""
+    provision_calls: list[dict[str, Any]] = []
+    fake_store = FakeStore()
+    deps = studio_tools.StudioDeps(
+        store=fake_store, ledger_factory=lambda pid: FakeLedger(pid),
+        provision_fn=_recording_provision_fn(provision_calls),
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo"},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+    assert provision_calls == []
+    assert fake_store.bound == []
+
+
+def test_adopt_project_surfaces_a_provisioning_failure_without_binding() -> None:
+    ledger = FakeLedger("abovo")
+    ledger.members = [{"id": "pm-1"}]
+    fake_store = FakeStore()
+
+    def _boom(web_client: Any, **kwargs: Any) -> dict[str, Any]:
+        raise provisioning.ProvisioningError("missing_scope", "needs channels:manage")
+
+    deps = studio_tools.StudioDeps(
+        store=fake_store, ledger_factory=lambda pid: ledger, provision_fn=_boom,
+    )
+
+    result = studio_tools.dispatch(
+        "adopt_project", {"project_id": "abovo"},
+        channel_id="C-STUDIO", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert result["project_id"] == "abovo"
+    assert fake_store.bound == []
+
+
+def test_studio_deps_start_run_fn_defaults_to_none() -> None:
+    """Must default to None so the lazy `errorta_app.routes.coding` import in
+    tools._default_start_run never happens at StudioDeps() construction."""
+    assert studio_tools.StudioDeps().start_run_fn is None

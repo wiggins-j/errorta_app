@@ -34,6 +34,7 @@ keyword-only parameters; every other name matches the design doc exactly.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Callable
@@ -63,16 +64,24 @@ _ETIQUETTE = """
   publish_pr, resolve_decision) NEVER execute from chat text alone.
   {confirm_rule}
 - Grounding rule: you can ONLY do what the TOOLS list above allows. You
-  have NO tool to create, delete, or rename a project, or set a north
-  star — only launch/stop a runtime *preview* of the project already
-  bound to this channel, start/stop the coding run itself, and change
-  which model a role (pm/dev/reviewer/tester) uses via reconfigure_team.
+  have NO tool to create, delete, or rename a project — but you CAN set
+  this project's next goal (set_next_goal, the scope the team plans
+  against), propose one grounded in the actual repo (propose_next_goal),
+  rewrite the North Star / definition of done (set_north_star), launch/stop
+  a runtime *preview*, start/stop the coding run, and change which model a
+  role (pm/dev/reviewer/tester) uses via reconfigure_team.
   NEVER claim, imply, or hint that you have done, started, staged, or
   queued any action outside that list, and never invent an
   approval/confirmation flow beyond the [C] tools above genuinely staging
   one. If asked for something outside your tools, say plainly you can't
   do it from Slack yet, name what you CAN do ({can_do}), and for project
-  creation or configuration point them to the Errorta app itself.
+  creation point them to the Errorta app itself.
+- Goal vs North Star: the North Star is the project's durable purpose and a
+  REFERENCE guardrail; the Current Focus is what the team actually plans
+  against right now. "What should we work on next" is a goal question, not
+  a charter question — reach for propose_next_goal/set_next_goal, not
+  set_north_star. Only rewrite the North Star when the project's whole
+  purpose has genuinely changed.
 - Ambiguity: don't stall on a clarifying question when a reasonable default
   exists — act on your best reading and say what you assumed. Set
   "assumed": true and name the assumption in "reply" when you do.
@@ -117,6 +126,55 @@ _CONFIRM_RULE_AUTOPILOT = (
 )
 
 
+def _project_state_block(project_id: str, *, store: Any = None) -> str:
+    """The project's own goal state, which ``build_pm_reference_context``
+    omits entirely: ``pm_reference.build_live_state`` returns only
+    ``{available_routes, project: {autonomy, governance, guardrail_enabled,
+    runtime, room}}`` (pm_reference.py:194-201). The in-app PM chat injects
+    north star + DoD + Current Focus (routes/coding.py:1789-1799); without
+    this the Slack PM cannot answer "what are we working on".
+
+    Focus is rendered through ``format_focus_lines`` — the canonical F137
+    renderer shared with the governance prompt, the PM planning prompt and
+    the interjection text — so this surface can never drift from those.
+
+    Degrades to "" rather than raising: a Slack turn must survive an
+    unreadable/missing project record, the same way ``runner._pm_prompt``
+    guards its own focus read.
+    """
+    from errorta_council.coding.ledger import LedgerStore, format_focus_lines
+
+    try:
+        ledger = store if store is not None else LedgerStore(project_id)
+        project = ledger.get_project()
+    except Exception:  # noqa: BLE001 - a missing/corrupt project must not kill the turn
+        return ""
+
+    lines = ["## THIS PROJECT'S GOAL STATE", ""]
+    north_star = str(getattr(project, "north_star", "") or "").strip()
+    dod = str(getattr(project, "definition_of_done", "") or "").strip()
+    if north_star:
+        lines.append(f"North Star (reference guardrail, NOT a work list): {north_star}")
+    if dod:
+        lines.append(f"Definition of done: {dod}")
+
+    try:
+        focuses = ledger.active_focuses()
+    except Exception:  # noqa: BLE001 - focus ledger unreadable -> omit, don't raise
+        focuses = []
+    if focuses:
+        lines.append("")
+        lines.append("Current Focus — what the team is scoped to right now:")
+        lines.extend(format_focus_lines(focuses))
+    else:
+        lines.append("")
+        lines.append(
+            "Current Focus: NONE. The team has no operative goal, so a run "
+            "would plan against the North Star alone, which may be stale."
+        )
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     project_id: str,
     *,
@@ -150,8 +208,11 @@ def build_system_prompt(
     ) or "nothing yet"
     confirm_rule = _CONFIRM_RULE_AUTOPILOT if autopilot else _CONFIRM_RULE_BUTTON
     etiquette = _ETIQUETTE.format(can_do=can_do, confirm_rule=confirm_rule)
+    state_block = _project_state_block(project_id, store=store)
+    state_section = f"{state_block}\n\n" if state_block else ""
     return (
         f"{pm_context}\n\n"
+        f"{state_section}"
         "## TOOLS (the ONLY actions you may take)\n\n"
         f"{catalog_block}\n"
         f"{etiquette}\n"
@@ -353,6 +414,17 @@ def run_turn(
         return _unconfigured_result(project_id)
     member = {**pm, "project_id": project_id}
 
+    # `propose_next_goal` needs a model of its own. Nothing else wires one up:
+    # the only production ToolDeps (errorta_app/slack_lifecycle.py) is built
+    # bare, so without this the verb refuses with "no model is wired up" on
+    # every real call and the whole repo-grounded proposal feature is dead in
+    # the shipped bridge. A per-turn SHALLOW COPY, not a mutation: `deps` is
+    # constructed once at bridge start and shared by every concurrent thread,
+    # so assigning onto it would publish this turn's caller process-wide.
+    # The copy shares the same seams/caches; only `goal_caller` differs.
+    turn_deps = copy.copy(deps)
+    turn_deps.goal_caller = caller
+
     system_prompt = build_system_prompt(project_id, autopilot=autopilot)
 
     prompt = _build_prompt(system_prompt, thread_msgs, message)
@@ -377,7 +449,7 @@ def run_turn(
             break
 
         hop_results, ok = _dispatch_calls(
-            calls, channel_id=channel_id, thread_ts=thread_ts, deps=deps,
+            calls, channel_id=channel_id, thread_ts=thread_ts, deps=turn_deps,
         )
         tool_results.extend(hop_results)
         if not ok:

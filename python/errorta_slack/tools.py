@@ -120,6 +120,27 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "this project."
         ),
     },
+    "set_next_goal": {
+        "trust": "C",
+        "summary": (
+            "Set the team's next goal — the operative scope they plan "
+            "against right now (the North Star stays a reference guardrail)."
+        ),
+    },
+    "set_north_star": {
+        "trust": "C",
+        "summary": (
+            "Rewrite the project's North Star / definition of done (the "
+            "durable charter, not the current goal)."
+        ),
+    },
+    "propose_next_goal": {
+        "trust": "R",
+        "summary": (
+            "Read the project's actual repo, docs and recent commits and "
+            "propose the team's next goal (proposal only — writes nothing)."
+        ),
+    },
 }
 
 
@@ -254,6 +275,17 @@ class ToolDeps:
     # verb impl calls `pm_reference.list_available_routes()` lazily on first
     # use, at most once per turn, never at ToolDeps-construction time.
     available_routes: list[dict[str, Any]] | None = None
+    # Slice 4 §3.2: the repo-grounded goal proposer. `None` (not the real
+    # helper) so `next_goal`'s repo_reader import and its `git log` subprocess
+    # stay deferred to first real use, never ToolDeps() construction — the
+    # same reason `start_run_fn` defaults to None. Called as
+    # `propose_goal_fn(ledger_store, member=..., caller=...)`.
+    propose_goal_fn: Callable[..., dict[str, Any]] | None = None
+    # The model seam `propose_goal_fn` calls. `concierge.run_turn` sets this to
+    # the same PM-member caller it uses for its own turn, so the proposal is
+    # routed through the team's configured gateway route. `None` means no model
+    # is wired up — `propose_next_goal` refuses cleanly rather than crashing.
+    goal_caller: Callable[[dict[str, Any], str], str] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -469,6 +501,18 @@ def start_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     ``deps.start_run_fn`` defaults to ``None`` on ``ToolDeps`` (not the lazy
     wrapper itself) precisely so the real engine import stays deferred to
     this call, not to ``ToolDeps()`` construction.
+
+    A FRESH run with no active Focus and no legacy ``work_request`` is REFUSED
+    (``next_goal.start_gate``) rather than started: its PM would plan from the
+    North Star alone, which on a project whose charter has gone stale spends
+    real budget re-litigating finished work.
+
+    The gate applies to fresh starts ONLY. Its whole rationale is about fresh
+    planning; a resume or a continue picks up work the team has already
+    planned and partly done. Gating those would strand a project whose only
+    Focus was archived on completion and whose run was then interrupted
+    mid-task: it could not be resumed from Slack at all until someone set a
+    new goal, which changes what the resumed run is building.
     """
     project_id = _bound_project_id(deps, channel_id)
     ledger_store = deps.ledger_factory(project_id)
@@ -480,6 +524,15 @@ def start_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         return {"status": "already_running"}
     resume = status == "interrupted"
     continue_ = status == "stopped"
+    if not resume and not continue_:
+        # Slice 4 §3.4: refuse to spend on a fresh run with no operative goal.
+        # Shared with studio_tools.adopt_project (also a fresh start) via
+        # next_goal.start_gate so the two start paths cannot drift.
+        from errorta_council.coding import next_goal
+
+        refusal = next_goal.start_gate(ledger_store)
+        if refusal:
+            return {"status": "refused", "detail": refusal}
     start_fn = deps.start_run_fn or _default_start_run
     try:
         start_fn(project_id, resume=resume, continue_=continue_)
@@ -551,6 +604,158 @@ def reconfigure_team(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return {"status": "reconfigured", "changes": dict(role_routes)}
 
 
+def set_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                   deps: "ToolDeps") -> dict[str, Any]:
+    """C-class — writes the team's operative scope, so it directly steers real
+    spend; only ever reached once ``dispatch`` saw
+    ``confirmed_via="block_actions"``.
+
+    Writes a **Focus** (F137), not the north star: ``runner._pm_prompt`` reads
+    ``store.active_focuses()`` and pins "Plan ONLY these, in order" while
+    demoting the north star to "REFERENCE ONLY — not a list of things to build
+    now" (runner.py:3160-3167). A north-star write would be near-inert here.
+
+    Reversibility is Focus's own lifecycle (``update_focus`` -> ``archived``,
+    ledger.py:1763), not a new ``pm_changes`` restore target —
+    ``RESTORE_TARGETS`` (pm_changes.py:26) has no focus slot and widening it is
+    a larger cross-surface change than this earns.
+    """
+    from errorta_council.coding.ledger import LedgerError
+
+    title = str(args.get("title") or "").strip()
+    body = str(args.get("body") or "")
+    project_id = _bound_project_id(deps, channel_id)
+    try:
+        focus = deps.ledger_factory(project_id).add_focus(
+            title=title, body=body, origin="slack_pm")
+    except LedgerError as exc:
+        # The known, safe-to-surface shape: an empty title. Message carries no
+        # secrets (ledger.py:1721).
+        return {"status": "error", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error", "detail": f"couldn't set the goal ({type(exc).__name__})"}
+    return {
+        "status": "goal_set",
+        "focus_id": getattr(focus, "id", ""),
+        "title": getattr(focus, "title", title),
+    }
+
+
+def set_north_star(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                    deps: "ToolDeps") -> dict[str, Any]:
+    """C-class — rewrites the durable charter; only ever reached once
+    ``dispatch`` saw ``confirmed_via="block_actions"``.
+
+    Writes through ``LedgerStore.promote_north_star`` (ledger.py:1878) — the
+    ONLY lock-held authoritative writer, which bumps ``revision``.
+    Deliberately NOT the ``PUT /north-star`` route (routes/coding.py:4175),
+    whose unlocked read-modify-write against the private ``_project_path`` can
+    lose-update against a concurrent run write.
+
+    Passes ``already_met=False``. That writer's forward-only
+    ``north_star_met_at`` stamp exists for the F141 import flow, where the
+    North Star being accepted was *inferred from* an already-built codebase
+    and so is already true by construction. A human naming a NEW purpose from
+    Slack is the opposite case: on an adopted (``target == "existing"``)
+    project the default stamp would record a goal with zero code behind it as
+    met and flip the project straight into the ``"steering"`` phase.
+
+    Refuses mid-run, mirroring ``accept_north_star_proposal``'s 409
+    (routes/coding.py:4598-4599): rewriting the charter under a live run
+    changes what the team is building mid-flight.
+
+    An omitted/empty ``definition_of_done`` PRESERVES the stored one rather
+    than blanking it — the in-app modal only ever sends the north star
+    (src/features/coding/index.tsx:1177-1183), so a blanking default would
+    silently destroy the DoD.
+    """
+    north_star = str(args.get("north_star") or "").strip()
+    if not north_star:
+        return {"status": "error", "detail": "north_star is required"}
+    project_id = _bound_project_id(deps, channel_id)
+    ledger_store = deps.ledger_factory(project_id)
+    try:
+        if (ledger_store.get_run_state().get("status") or "idle") == "running":
+            return {
+                "status": "error",
+                "detail": "can't rewrite the north star mid-run — stop the run first",
+            }
+        dod = str(args.get("definition_of_done") or "").strip()
+        if not dod:
+            dod = str(ledger_store.get_project().definition_of_done or "")
+        project = ledger_store.promote_north_star(north_star, dod, already_met=False)
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {
+            "status": "error",
+            "detail": f"couldn't set the north star ({type(exc).__name__})",
+        }
+    return {"status": "north_star_set", "revision": getattr(project, "revision", 0)}
+
+
+def propose_next_goal(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                       deps: "ToolDeps") -> dict[str, Any]:
+    """R-class — reads the project's real repo and returns a PROPOSED next
+    goal. Writes nothing, which is why it may run straight from chat text.
+
+    The proposal reaches the ledger only through ``set_next_goal``, whose
+    confirmation renders the full title and body so a human reads the exact
+    text before it becomes the team's scope. That two-step split is what makes
+    reading untrusted repo content safe here.
+
+    The model route is resolved from the project's persisted run config, NEVER
+    from ``args``. ``args`` is whatever the concierge model emitted, which is
+    ultimately derived from chat text including anything a user pasted; since
+    this verb is R-class it runs with no confirmation at all, so honouring an
+    ``args["member"]`` would let pasted text pick a paid cloud gateway route
+    and make a billed call — exactly the decision the C-class ``spend_cloud``
+    verb exists to gate. Every other model call on the bridge resolves its
+    member from the run config; so does this one.
+    """
+    project_id = _bound_project_id(deps, channel_id)
+    ledger_store = deps.ledger_factory(project_id)
+    propose_fn = deps.propose_goal_fn
+    if propose_fn is None:
+        from errorta_council.coding.next_goal import propose_next_goal as _propose
+
+        propose_fn = _propose
+    caller = deps.goal_caller
+    if caller is None:
+        return {"status": "error", "detail": "no model is wired up for this bridge yet"}
+    # Lazy: concierge imports this module at module load, so the reverse edge
+    # has to be deferred to call time. One implementation, not a third copy.
+    from errorta_slack.concierge import _resolve_pm_member
+
+    pm = _resolve_pm_member(ledger_store)
+    if pm is None or not str(pm.get("gateway_route_id") or "").strip():
+        return {
+            "status": "error",
+            "detail": "the team's PM model isn't configured yet — set it and try again",
+        }
+    member = {**pm, "project_id": project_id}
+    try:
+        proposal = propose_fn(ledger_store, member=member, caller=caller)
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {
+            "status": "error",
+            "detail": f"couldn't read the project ({type(exc).__name__})",
+        }
+    if not str(proposal.get("title") or "").strip():
+        return {
+            "status": "no_proposal",
+            "detail": (
+                "I couldn't ground a next goal in what's in the repo — "
+                "tell me the goal and I'll set it."
+            ),
+        }
+    return {
+        "status": "proposed",
+        "title": proposal.get("title", ""),
+        "body": proposal.get("body", ""),
+        "evidence": list(proposal.get("evidence") or []),
+        "stale": bool(proposal.get("stale")),
+    }
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects,
     "switch_project": switch_project,
@@ -566,6 +771,9 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "start_run": start_run,
     "stop_run": stop_run,
     "reconfigure_team": reconfigure_team,
+    "set_next_goal": set_next_goal,
+    "set_north_star": set_north_star,
+    "propose_next_goal": propose_next_goal,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"

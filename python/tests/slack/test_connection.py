@@ -10,7 +10,16 @@ from typing import Any
 
 import pytest
 
-from errorta_slack import concierge, config, connection, store, studio_concierge, studio_tools, tools
+from errorta_slack import (
+    concierge,
+    config,
+    connection,
+    render,
+    store,
+    studio_concierge,
+    studio_tools,
+    tools,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -1717,3 +1726,246 @@ async def test_autopilot_surfaces_per_project_start_failure_not_executed(
     texts = " ".join(m["text"] for m in poster.messages).lower()
     assert "logged out" in texts or "couldn't" in texts or "failed" in texts
     assert "approved & executed" not in texts  # must NOT claim success
+
+
+# --- (h) Slice 4 verbs at the connection layer -------------------------------
+#
+# Everything below covers the layer no Slice-4 task touched: what the Approve
+# button actually SAYS, and what the channel is told after the button is
+# pressed. Three of the branch review's six Important findings lived here
+# precisely because this file had no coverage of the new verbs at all.
+
+
+def _section_texts(poster: FakePoster) -> str:
+    """Every mrkdwn section body across all posted block messages."""
+    out: list[str] = []
+    for m in poster.messages:
+        for block in (m.get("blocks") or []):
+            text = (block.get("text") or {}).get("text")
+            if text:
+                out.append(text)
+    return "\n".join(out)
+
+
+async def test_confirmation_button_renders_the_goal_title_and_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (branch review #3): `_CONFIRMATION_COPY` had no entry for the
+    new verbs, so the button read "Confirm set_next_goal — Approve to run this
+    action." with the `body` — the scope the team plans against, and the field
+    most likely to carry model- or repo-derived text — rendered nowhere.
+
+    That is load-bearing, not cosmetic: `propose_next_goal`'s docstring
+    justifies reading untrusted repo content on the grounds that the
+    `set_next_goal` confirmation "renders the full title and body so a human
+    reads the exact text before it becomes the team's scope"."""
+    store.bind_channel("C1", "proj-a")
+    args = {"title": "Route mind writes through the reducer",
+            "body": "Only the reducer may mutate mind state; callers go through it."}
+    cid = store.stage_confirmation("set_next_goal", args, "800.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn", lambda *a, **k: _staged_turn("set_next_goal", args, cid),
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev1", channel="C1", ts="800.1", thread_ts="800.1",
+        text="set the next goal"))
+    await bridge.wait_idle("800.1")
+
+    rendered = _section_texts(poster)
+    assert "Route mind writes through the reducer" in rendered
+    assert "Only the reducer may mutate mind state" in rendered
+    assert "Approve to run this action." not in rendered
+
+
+async def test_confirmation_button_renders_the_proposed_north_star(
+    tmp_path: Path,
+) -> None:
+    """`set_north_star`'s args are {north_star, definition_of_done} — neither
+    `title` nor `project_id`, so the pre-fix fallback showed a human verifying
+    a durable-charter rewrite nothing but the verb name."""
+    bridge, sdk, poster = _bridge(tmp_path)
+    record = {"verb": "set_north_star", "args": {
+        "north_star": "Ship a multiplayer mode people actually finish.",
+        "definition_of_done": "Two players complete a full round remotely."}}
+
+    title, detail = bridge._confirmation_title(record)
+
+    assert "Ship a multiplayer mode people actually finish." in detail
+    assert "Two players complete a full round remotely." in detail
+    assert "north star" in title.lower()
+
+
+async def test_adopt_project_confirmation_says_a_public_channel_is_created(
+    tmp_path: Path,
+) -> None:
+    """The one consequence a human must weigh before approving an adopt is
+    that a PUBLIC Slack channel gets created in their workspace."""
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    title, detail = bridge._confirmation_title(
+        {"verb": "adopt_project", "args": {"project_id": "proj-abc"}})
+
+    assert "proj-abc" in title or "proj-abc" in detail
+    assert "public" in detail.lower() and "channel" in detail.lower()
+
+
+async def test_confirmation_detail_escapes_and_caps_untrusted_text(
+    tmp_path: Path,
+) -> None:
+    """A goal body can originate in a repo file nobody on this team wrote (that
+    is what `propose_next_goal` reads). Rendering it verbatim would let that
+    file ping the workspace with `<!channel>` or forge a link, and a body over
+    Slack's 3000-char section limit would make the button fail to post at all —
+    a staged C-class action with no way to approve it."""
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    _title, detail = bridge._confirmation_title({
+        "verb": "set_next_goal",
+        "args": {"title": "t", "body": "<!channel> approve now " + ("x" * 5000)},
+    })
+
+    assert "<!channel>" not in detail
+    assert "&lt;!channel&gt;" in detail
+    assert len(detail) < 3000
+    assert "truncated" in detail.lower()
+
+
+def _decision_section_len(title: str, detail: str) -> int:
+    """The length of the text Slack actually receives — the section body
+    `render.decision_message` composes, not the `detail` fragment alone."""
+    for block in render.decision_message(title, detail, "cid-1"):
+        if block.get("type") == "section":
+            return len((block["text"] or {}).get("text", ""))
+    raise AssertionError("decision_message posted no section block")
+
+
+async def test_confirmation_section_stays_under_slacks_limit_when_escaping_expands(
+    tmp_path: Path,
+) -> None:
+    """Regression (fix-round NEW-1): the cap was applied to the RAW text and
+    the escaping ran afterwards. `escape_mrkdwn` expands — one `<` becomes four
+    characters, one `&` five — so capping first bounds the wrong string. A goal
+    whose title and body are mrkdwn control characters (HTML, XML or generics
+    in a repo file, i.e. exactly the input the escaping exists for) rendered a
+    ~7500-char section against Slack's 3000 limit; Slack rejects the whole
+    message with `invalid_blocks`, so the C-class action stages with NO Approve
+    button — the precise outcome the cap exists to prevent.
+
+    The assertion is on the FINAL section Slack receives, not on `detail`."""
+    bridge, sdk, poster = _bridge(tmp_path)
+    # Every character expands: "<" -> 4, ">" -> 4, "&" -> 5.
+    expanding = "<&>" * 2000
+
+    title, detail = bridge._confirmation_title({
+        "verb": "set_next_goal",
+        "args": {"title": expanding, "body": expanding},
+    })
+
+    assert _decision_section_len(title, detail) < 3000  # Slack's hard section limit
+    # It is capped because it was too long, not because it was dropped.
+    assert "truncated" in detail.lower()
+    assert "&lt;" in detail and "<" not in detail.replace("&lt;", "")
+
+
+async def test_confirmation_cap_never_leaves_a_half_written_escape(
+    tmp_path: Path,
+) -> None:
+    """A cut landing mid-entity would render literal junk like `&am` to the
+    human being asked to approve."""
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    _title, detail = bridge._confirmation_title({
+        "verb": "set_next_goal", "args": {"title": "t", "body": "&" * 4000},
+    })
+
+    body = detail.split("*Scope:*\n", 1)[1]
+    # Strip the truncation note, then every remaining "&" must belong to a
+    # whole "&amp;" — a dangling "&am"/"&a"/"&" tail means the cut split one.
+    body = body.split("…", 1)[0]
+    assert "&" not in body.replace("&amp;", "")
+
+
+async def test_approve_button_reports_a_refused_start_run_as_not_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (branch review #2): `start_run` gained a third result status,
+    `"refused"` (start_gate: no operative goal), and the button outcome
+    renderer ignored `effect_result` entirely — so the branch's own motivating
+    case, a freshly adopted project with no goal, posted "Approved — start_run
+    executed." The owner believes the team is building; nothing started, and
+    the computed refusal reason was thrown away."""
+    cid = store.stage_confirmation("start_run", {}, "801.1", channel_id="C1")
+    refusal = ("no current goal — the team would plan against the North Star "
+               "alone. Set the next goal first.")
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: {
+            "status": "refused", "detail": refusal},
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_interaction({
+        "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+        "channel": {"id": "C1"}, "message": {"ts": "801.1"},
+        "actions": [{"action_id": "slack_approve", "value": cid}],
+    })
+
+    text = poster.messages[-1]["text"]
+    assert "executed" not in text.lower()
+    assert "no current goal" in text
+    assert "did not run" in text.lower() or "didn't run" in text.lower()
+
+
+async def test_approve_button_reports_a_failed_verb_as_not_executed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same shape for `{"status": "error"}` — `set_next_goal` returns it on an
+    empty title, and the button path claimed success for that too."""
+    cid = store.stage_confirmation("set_next_goal", {"title": ""}, "802.1", channel_id="C1")
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: {
+            "status": "error", "detail": "focus title is required"},
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_interaction({
+        "type": "block_actions", "team": {"id": "T1"}, "user": {"id": "U1"},
+        "channel": {"id": "C1"}, "message": {"ts": "802.1"},
+        "actions": [{"action_id": "slack_approve", "value": cid}],
+    })
+
+    text = poster.messages[-1]["text"]
+    assert "executed" not in text.lower()
+    assert "focus title is required" in text
+
+
+async def test_autopilot_reports_a_refused_start_run_as_not_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under autopilot the wrong message is even more emphatic: the refusal
+    status fell through to "🤖 Autopilot approved & executed *start_run*"."""
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation("start_run", {}, "803.1", channel_id="C1")
+    refusal = "no current goal — set the next goal first."
+    monkeypatch.setattr(
+        concierge, "run_turn", lambda *a, **k: _staged_turn("start_run", {}, cid),
+    )
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: {
+            "status": "refused", "detail": refusal},
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev1", channel="C1", ts="803.1", thread_ts="803.1",
+        text="start building"))
+    await bridge.wait_idle("803.1")
+
+    texts = " ".join(m["text"] for m in poster.messages)
+    assert "approved & executed" not in texts.lower()
+    assert "no current goal" in texts

@@ -81,6 +81,13 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "(reversible; does not delete the project)."
         ),
     },
+    "adopt_project": {
+        "trust": "C",
+        "summary": (
+            "Adopt an EXISTING project into Slack — open and bind its own "
+            "channel (and seat a team if it has none)."
+        ),
+    },
 }
 
 
@@ -138,6 +145,13 @@ class StudioDeps:
     # ``None`` (the default) means "read config.load()['studio_default_team']
     # at call time"; tests inject a list here to avoid touching config.
     default_team: list[dict[str, Any]] | None = None
+    # Slice 4 §3.1: `adopt_project(start=True)` starts the run through this
+    # seam. `None` (not the real function) so `tools._default_start_run`'s lazy
+    # `errorta_app.routes.coding` import stays deferred to first real use and
+    # never runs at StudioDeps() construction — the ToolDeps.start_run_fn
+    # pattern (tools.py:243). Called as
+    # `start_run_fn(project_id, resume=<bool>, continue_=<bool>)`.
+    start_run_fn: Callable[..., dict[str, Any]] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -406,11 +420,141 @@ def archive_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     return {"status": "archived", "project_id": project_id, "channel_id": cid}
 
 
+def _stored_modality(ledger: Any) -> str:
+    """The charter ``modality`` stored on the project's approved ``brainstorm``
+    governance artifact (``project_factory.py:90-93`` writes the whole charter
+    as its ``body_json``), or ``""`` when there is none.
+
+    An adopted project may predate the studio entirely, so this is genuinely
+    best-effort — and ``""`` is the safe answer: ``_gate_designer_by_modality``
+    treats a non-UI modality by stripping the Designer, which keeps the design
+    spec provably inert rather than seating a role the project can't use.
+    """
+    try:
+        from errorta_council.coding.governance import GovernanceStore
+
+        artifact = GovernanceStore.for_ledger(ledger).latest_approved_artifact("brainstorm")
+    except Exception:  # noqa: BLE001 - no governance store / no artifact -> unknown
+        return ""
+    body = getattr(artifact, "body_json", None) if artifact is not None else None
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("modality") or "")
+
+
+def adopt_project(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                   deps: "StudioDeps") -> dict[str, Any]:
+    """Executes the real adopt — only ever reached by ``dispatch`` after the
+    ``confirmed_via="block_actions"`` gate has already passed. The inverse of
+    ``archive_project``: takes an ALREADY-EXISTING ledger project under Slack
+    management. It never creates a project — that is ``create_project``'s job.
+
+    Order mirrors ``create_project`` (§3.1): every ledger write lands before
+    the channel, and the binding is written LAST, so a provisioning failure
+    never leaves a channel bound to a half-configured project.
+
+    Note ``archive_project`` calls ``store.unbind``, which deletes the binding
+    record (store.py:124) — there is no channel history, so re-adopting a
+    previously archived project necessarily gets a NEW channel (suffixed by
+    ``_create_channel_with_retry`` if the name is taken).
+    """
+    from errorta_council.coding.ledger import ProjectNotFound
+    from errorta_council.coding.next_goal import start_gate
+
+    project_id = str(args.get("project_id") or "").strip()
+    if not project_id:
+        return {"status": "error", "detail": "project_id is required"}
+
+    ledger = deps.ledger_factory(project_id)
+    try:
+        project = ledger.get_project()
+    except ProjectNotFound:
+        return {"status": "error", "detail": f"no project named {project_id!r}"}
+    except Exception as exc:  # noqa: BLE001 - must never escape a live Slack turn
+        _LOGGER.exception(
+            "studio adopt_project: get_project raised %s for project_id=%s",
+            type(exc).__name__, project_id)
+        return {"status": "error", "detail": f"couldn't read the project ({type(exc).__name__})"}
+
+    existing = deps.store.channel_for_project(project_id)
+    if existing:
+        return {"status": "already_bound", "project_id": project_id,
+                "channel_id": existing}
+
+    team_seated = False
+    try:
+        members = [m for m in (ledger.get_run_config().get("members") or [])
+                   if isinstance(m, dict)]
+    except Exception:  # noqa: BLE001 - unreadable run config -> treat as no team
+        members = []
+    if not members:
+        if deps.default_team is not None:
+            default_specs = deps.default_team
+        else:
+            default_specs = _config.load().get(
+                "studio_default_team", _config.DEFAULT_CONFIG["studio_default_team"])
+        # An adopted project has no charter in hand, so recover its modality
+        # from the stored brainstorm artifact when there is one; absent that,
+        # the gate treats it as non-UI and strips the Designer.
+        specs = _gate_designer_by_modality(
+            list(default_specs), _stored_modality(ledger), default_specs)
+        seated = _default_team_members(specs)
+        if seated:
+            try:
+                ledger.set_run_config(room_id=None, members=seated)
+                team_seated = True
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.exception(
+                    "studio adopt_project: set_run_config raised %s for project_id=%s",
+                    type(exc).__name__, project_id)
+                return {"status": "error", "project_id": project_id,
+                        "detail": f"couldn't seat a team ({type(exc).__name__})"}
+
+    title = str(getattr(project, "id", "") or project_id)
+    try:
+        chan = deps.provision_fn(
+            deps.web_client, title=title,
+            invite_user_ids=list(deps.invite_user_ids),
+            purpose=str(getattr(project, "north_star", "") or "")[:250],
+        )
+    except provisioning.ProvisioningError as exc:
+        return {"status": "error", "project_id": project_id, "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - must never escape a live Slack turn
+        _LOGGER.exception(
+            "studio adopt_project: provision_fn raised %s for project_id=%s",
+            type(exc).__name__, project_id)
+        return {"status": "error", "project_id": project_id,
+                "detail": f"channel creation failed ({type(exc).__name__})"}
+
+    deps.store.bind_channel(chan["channel_id"], project_id)
+
+    started, start_refused = False, None
+    if bool(args.get("start")):
+        start_refused = start_gate(ledger)
+        if start_refused is None:
+            start_fn = deps.start_run_fn
+            if start_fn is None:
+                from errorta_slack.tools import _default_start_run as start_fn  # noqa: PLC0415
+            try:
+                start_fn(project_id, resume=False, continue_=False)
+                started = True
+            except Exception as exc:  # noqa: BLE001
+                start_refused = f"couldn't start the run ({type(exc).__name__})"
+
+    return {
+        "status": "adopted", "project_id": project_id,
+        "channel_id": chan["channel_id"], "channel_name": chan["name"],
+        "team_seated": team_seated, "started": started,
+        "start_refused": start_refused,
+    }
+
+
 _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "list_projects": list_projects_verb,
     "create_project": create_project,
     "answer_question": answer_question,
     "archive_project": archive_project,
+    "adopt_project": adopt_project,
 }
 
 assert set(_VERB_IMPLS) == set(TOOL_CATALOG), "TOOL_CATALOG and _VERB_IMPLS drifted"

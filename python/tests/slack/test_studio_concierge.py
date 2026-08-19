@@ -447,3 +447,15 @@ def test_studio_prompt_surfaces_configured_routes_and_team_arg() -> None:
     assert "cursor_cli.composer-2.5" in prompt
     assert "claude_cli.sonnet" in prompt
     assert "`team`" in prompt
+
+
+def test_studio_grounding_names_adopt_project() -> None:
+    """Slice 4: the studio gained adopt_project. Its grounding rule listed
+    exactly what it could do and denied everything else, which is why it
+    refused to open a channel for abovo. That prose must now include adopting
+    an existing project."""
+    prompt = studio_concierge.build_system_prompt()
+
+    assert "adopt_project" in prompt
+    lowered = prompt.lower()
+    assert "existing" in lowered

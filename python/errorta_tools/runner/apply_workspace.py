@@ -142,12 +142,25 @@ def _git(repo: Path, *args: str, _stdin: str | None = None,
     return proc.stdout
 
 
-def _git_try(repo: Path, *args: str) -> tuple[int, str, str]:
+def _git_try(repo: Path, *args: str,
+             timeout_s: float | None = None) -> tuple[int, str, str]:
     """Non-raising git for operations whose failure is expected/handled (e.g. a
-    merge conflict). Returns (returncode, stdout, stderr)."""
+    merge conflict). Returns (returncode, stdout, stderr).
+
+    ``timeout_s`` bounds the wait. It exists because ``errorta_council`` may
+    NOT import ``subprocess`` (the F039 egress rule), so a council-side caller
+    cannot pass a timeout of its own — this layer has to own it. Without one,
+    a git that never returns (stale network mount, a held ``.git/index.lock``)
+    wedges the calling thread forever; on the Slack bridge that thread is an
+    ``asyncio.to_thread`` worker with no cancellation path. On expiry
+    ``subprocess.TimeoutExpired`` propagates — callers that must not raise
+    (e.g. ``next_goal._git_log``) already treat any exception as "no output".
+    ``None`` keeps the historical unbounded behaviour for the in-process
+    apply/merge callers, whose git runs against a local worktree they created.
+    """
     proc = subprocess.run(
         ["git", "-C", str(repo), *_GIT_IDENTITY, *args],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=timeout_s,
     )
     return proc.returncode, proc.stdout, proc.stderr
 

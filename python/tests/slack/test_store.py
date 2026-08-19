@@ -331,6 +331,25 @@ def test_set_studio_channel_then_studio_channel_and_is_studio() -> None:
     assert store.is_studio("C2") is False
 
 
+def test_set_studio_channel_refuses_a_placeholder_and_keeps_the_old_value() -> None:
+    """The documented bind snippet carries C_YOUR_STUDIO_CHANNEL_ID, and running
+    it unedited once wrote that literal into studio.json — the studio channel
+    stopped resolving and every studio message fell through to "this channel
+    isn't bound to a project yet". A Slack id is alphanumeric after its
+    C/G/D prefix, so an underscore or a bracket can only be a placeholder.
+
+    Validation runs BEFORE the write so a refused call leaves the real
+    binding untouched.
+    """
+    store.set_studio_channel("C0123456789")
+
+    for bad in ("C_YOUR_STUDIO_CHANNEL_ID", "<CHANNEL_ID>", "C...", "", "nope"):
+        with pytest.raises(ValueError):
+            store.set_studio_channel(bad)
+
+    assert store.studio_channel() == "C0123456789"
+
+
 def test_set_studio_channel_overwrites_singleton() -> None:
     store.set_studio_channel("C1")
     store.set_studio_channel("C2")

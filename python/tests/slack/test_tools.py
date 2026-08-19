@@ -25,6 +25,15 @@ class FakeTask:
         self.task_id = task_id
 
 
+# The team's configured PM, as it is persisted in the project's run config.
+# `propose_next_goal` must resolve its model route from HERE and nowhere else.
+_PM_MEMBER = {
+    "member_id": "m-pm", "role": "answerer", "enabled": True,
+    "gateway_route_id": "local.pm-route", "provider_kind": "cli",
+    "metadata": {"coding_role": "pm"},
+}
+
+
 class FakeLedgerStore:
     """Stub matching the surface build_team_log/attention.list_open touch."""
 
@@ -1113,3 +1122,503 @@ def test_default_start_run_resume_does_not_recover_team(monkeypatch: pytest.Monk
 
     tools._default_start_run("p1", resume=True, continue_=False)
     assert captured["body"] == {}
+
+
+# --- set_next_goal: the anti-inert proof + injection wall -------------------
+
+
+def test_set_next_goal_reaches_the_run_loops_pm_prompt(tmp_path: Path) -> None:
+    """THE anti-inert test (spec §2.1, §4). runner._pm_prompt scopes the
+    team's planning by store.active_focuses() and explicitly demotes the
+    north star to "REFERENCE ONLY — not a list of things to build now"
+    (runner.py:3160-3167). So a goal set from Slack is only real if it lands
+    in a Focus row that _pm_prompt renders.
+
+    Asserting add_focus was called would NOT prove that. This builds the
+    actual PM prompt from a real ledger and greps it."""
+    from errorta_council.coding.ledger import LedgerStore
+    from errorta_council.coding.runner import _pm_prompt
+
+    ledger = LedgerStore("proj-inert")
+    ledger.create_project(
+        north_star="Stale north star nobody should plan from.",
+        definition_of_done="Whatever.",
+        target="new", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-inert")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_next_goal",
+        {"title": "Route mind writes through the reducer", "body": "P2a task 4b"},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "goal_set"
+    assert result["focus_id"]
+
+    prompt = _pm_prompt(LedgerStore("proj-inert"))
+    assert "Route mind writes through the reducer" in prompt
+    assert "P2a task 4b" in prompt
+    assert "CURRENT FOCUS" in prompt
+
+
+def test_set_next_goal_from_chat_text_only_stages(tmp_path: Path) -> None:
+    """C-class injection wall: pasted Slack text must never write a goal the
+    team then executes. Only a verified block_actions click may."""
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "set_next_goal", {"title": "Injected goal"},
+        channel_id="C1", thread_ts="1.0", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+    assert result["confirmation_id"]
+    ledger = deps._ledger_stores.get("proj-a")
+    assert ledger is None or not getattr(ledger, "added_focuses", [])
+
+
+def test_set_next_goal_rejects_an_empty_title(tmp_path: Path) -> None:
+    """add_focus raises LedgerError on an empty title (ledger.py:1721) —
+    that must become a clean result, never an uncaught raise in a live turn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-empty")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="new", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-empty")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_next_goal", {"title": "   "},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "title" in result["detail"].lower()
+
+
+# --- start_run: shared start_gate refuses a run with no operative goal -----
+
+
+def test_start_run_refuses_when_the_project_has_no_goal(tmp_path: Path) -> None:
+    """Spec §3.4: adopting abovo and pressing start today would launch a run
+    whose PM plans against a ten-day-stale north star. Refuse, name the
+    remedy, and — critically — do NOT call start_run_fn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-nogoal")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-nogoal")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def _start_fn(pid: str, *, resume: bool = False, continue_: bool = False) -> dict:
+        calls.append((pid, resume, continue_))
+        return {"status": "started"}
+
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+                 start_run_fn=_start_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "refused"
+    assert "goal" in result["detail"].lower()
+    assert calls == []
+
+
+def test_start_run_proceeds_once_a_goal_is_set(tmp_path: Path) -> None:
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-goal")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.add_focus(title="Build the tick engine", origin="slack_pm")
+    store.bind_channel("C1", "proj-goal")
+    calls: list[tuple[str, bool, bool]] = []
+
+    def _start_fn(pid: str, *, resume: bool = False, continue_: bool = False) -> dict:
+        calls.append((pid, resume, continue_))
+        return {"status": "started"}
+
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+                 start_run_fn=_start_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [("proj-goal", False, False)]
+
+
+@pytest.mark.parametrize(
+    ("run_status", "expected_mode"),
+    [("interrupted", (True, False)), ("stopped", (False, True))],
+)
+def test_start_run_does_not_gate_a_resume_or_continue(
+    tmp_path: Path, run_status: str, expected_mode: tuple[bool, bool],
+) -> None:
+    """Regression (branch review #13): the gate was evaluated before the mode
+    was derived, so it applied to all three. A project whose only Focus was
+    archived on completion and whose run was then INTERRUPTED mid-task could
+    not be resumed from Slack at all — the PM had to invent a new goal first,
+    which changes what the resumed run plans against. The gate's own rationale
+    ("the PM would plan from the North Star alone") is a fresh-planning
+    argument; a resume is not fresh planning."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    project_id = f"proj-{run_status}"
+    ledger = LedgerStore(project_id)
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_state(status=run_status)
+    assert ledger.active_focuses() == []  # the gate would refuse a fresh start
+    store.bind_channel("C1", project_id)
+    calls: list[tuple[str, bool, bool]] = []
+
+    def _start_fn(pid: str, *, resume: bool = False, continue_: bool = False) -> dict:
+        calls.append((pid, resume, continue_))
+        return {"status": "started"}
+
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+                 start_run_fn=_start_fn)
+
+    result = tools.dispatch(
+        "start_run", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "started"
+    assert calls == [(project_id, *expected_mode)]
+
+
+# --- set_north_star: writes through the lock-held authoritative writer -----
+
+
+def test_set_north_star_writes_through_promote_north_star(tmp_path: Path) -> None:
+    """Must use LedgerStore.promote_north_star (ledger.py:1878) — the only
+    lock-held writer, which bumps revision. NOT the PUT /north-star route's
+    unlocked read-modify-write, which can lose-update against a concurrent
+    run write (see spec §2.2)."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-ns")
+    ledger.create_project(
+        north_star="Old star.", definition_of_done="Old done.",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    before = ledger.get_project().revision
+    store.bind_channel("C1", "proj-ns")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_north_star",
+        {"north_star": "New star.", "definition_of_done": "New done."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "north_star_set"
+    project = LedgerStore("proj-ns").get_project()
+    assert project.north_star == "New star."
+    assert project.definition_of_done == "New done."
+    assert project.revision == before + 1
+
+
+def test_set_north_star_does_not_record_a_new_purpose_as_already_met(
+    tmp_path: Path,
+) -> None:
+    """Regression (branch review #8): `promote_north_star` forward-stamps
+    `north_star_met_at` for `target == "existing"`, and `Project.phase` returns
+    "steering" whenever that field is set. The stamp exists for the F141 import
+    flow, where the North Star was INFERRED FROM the existing codebase and is
+    therefore already true. A human naming a NEW purpose from Slack is the
+    opposite case: "our north star is now: ship a multiplayer mode" on an
+    adopted project was instantly recorded as met, with zero code behind it,
+    and the project flipped to the steering phase."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-ns-unmet")
+    ledger.create_project(
+        north_star="Inferred from the existing code.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    assert ledger.get_project().north_star_met_at == ""
+    store.bind_channel("C1", "proj-ns-unmet")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_north_star", {"north_star": "Ship a multiplayer mode."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "north_star_set"
+    project = LedgerStore("proj-ns-unmet").get_project()
+    assert project.north_star == "Ship a multiplayer mode."
+    assert project.north_star_met_at == "", "an unbuilt north star was recorded as met"
+    assert project.phase == "north_star"
+
+
+def test_set_north_star_leaves_an_already_steering_project_in_steering(
+    tmp_path: Path,
+) -> None:
+    """The stamp is forward-only. Declining to ADD one must not remove one: a
+    project that genuinely crossed into steering stays there when its North
+    Star is later replaced."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-ns-steering")
+    ledger.create_project(
+        north_star="Old.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.mark_north_star_met()
+    store.bind_channel("C1", "proj-ns-steering")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    tools.dispatch(
+        "set_north_star", {"north_star": "Next chapter."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert LedgerStore("proj-ns-steering").get_project().phase == "steering"
+
+
+def test_set_north_star_preserves_dod_when_omitted(tmp_path: Path) -> None:
+    """The in-app modal sends only northStar and never definitionOfDone
+    (src/features/coding/index.tsx:1177-1183). An omitted DoD must leave the
+    stored one intact, not blank it."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-dod")
+    ledger.create_project(
+        north_star="Old star.", definition_of_done="Keep me.",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-dod")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    tools.dispatch(
+        "set_north_star", {"north_star": "New star."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert LedgerStore("proj-dod").get_project().definition_of_done == "Keep me."
+
+
+def test_set_north_star_refuses_mid_run(tmp_path: Path) -> None:
+    """Mirrors accept_north_star_proposal's 409 guard
+    (routes/coding.py:4598-4599): rewriting the charter under a live run
+    changes what the team is building mid-flight."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-live")
+    ledger.create_project(
+        north_star="Old star.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_state(status="running")
+    store.bind_channel("C1", "proj-live")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "set_north_star", {"north_star": "New star."},
+        channel_id="C1", thread_ts="1.0",
+        confirmed_via="block_actions", deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "run" in result["detail"].lower()
+    assert LedgerStore("proj-live").get_project().north_star == "Old star."
+
+
+def test_set_north_star_from_chat_text_only_stages(tmp_path: Path) -> None:
+    store.bind_channel("C1", "proj-a")
+    deps = _deps(tmp_path)
+
+    result = tools.dispatch(
+        "set_north_star", {"north_star": "Injected star."},
+        channel_id="C1", thread_ts="1.0", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "needs_confirmation"
+
+
+def test_propose_next_goal_returns_a_proposal_and_writes_nothing(tmp_path: Path) -> None:
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-propose")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_config(members=[dict(_PM_MEMBER)])
+    store.bind_channel("C1", "proj-propose")
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=lambda store_, **kw: {
+            "title": "Route mind writes through the reducer",
+            "body": "P2a task 4b", "evidence": ["abovo/mind.py"], "stale": True},
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    # R-class: runs immediately from chat text, no confirmation needed.
+    assert result["status"] == "proposed"
+    assert result["title"] == "Route mind writes through the reducer"
+    assert result["stale"] is True
+    assert LedgerStore("proj-propose").active_focuses() == []
+
+
+def test_propose_next_goal_reports_a_thin_repo_instead_of_inventing(tmp_path: Path) -> None:
+    """An empty title means the read was too thin to ground a goal. The verb
+    must say so rather than pass an empty goal along as if it were real."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-thin")
+    ledger.create_project(
+        north_star="Stale.", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_config(members=[dict(_PM_MEMBER)])
+    store.bind_channel("C1", "proj-thin")
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=lambda store_, **kw: {
+            "title": "", "body": "", "evidence": [], "stale": False},
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "no_proposal"
+
+
+def test_tool_deps_propose_goal_fn_defaults_to_none(tmp_path: Path) -> None:
+    """Must default to None, not the real helper — the real one imports
+    repo_reader and shells out to git, neither of which may happen at
+    ToolDeps() construction time."""
+    assert tools.ToolDeps().propose_goal_fn is None
+
+
+def test_propose_next_goal_refuses_without_a_model_caller(tmp_path: Path) -> None:
+    """goal_caller defaults to None (no model wired up). The verb must refuse
+    cleanly rather than call None and raise inside a live Slack turn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-nocaller")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-nocaller")
+    deps = _deps(tmp_path, ledger_factory=lambda pid: LedgerStore(pid))
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert "model" in result["detail"].lower()
+
+
+def test_propose_next_goal_ignores_a_model_supplied_gateway_route(tmp_path: Path) -> None:
+    """Regression (branch review #5): the member was taken from ``args``, which
+    is whatever the concierge model emitted — i.e. ultimately derived from
+    chat text, including anything a user pasted. ``propose_next_goal`` is
+    R-class, so it runs with no confirmation at all; honouring that member let
+    pasted text pick a paid cloud gateway route and make a billed call, which
+    is precisely the decision the C-class ``spend_cloud`` verb exists to gate.
+
+    The route must come from the project's persisted run config only."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-route")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    ledger.set_run_config(members=[dict(_PM_MEMBER)])
+    store.bind_channel("C1", "proj-route")
+
+    seen: dict[str, Any] = {}
+
+    def spy_propose(store_: Any, *, member: dict[str, Any], caller: Any) -> dict[str, Any]:
+        seen["member"] = member
+        return {"title": "t", "body": "b", "evidence": [], "stale": False}
+
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=spy_propose,
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal",
+        {"member": {"gateway_route_id": "cloud.expensive-frontier",
+                    "provider_kind": "http",
+                    "turn_limits": {"timeout_seconds": 600}}},
+        channel_id="C1", thread_ts="1.0", confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "proposed"
+    assert seen["member"]["gateway_route_id"] == "local.pm-route"
+    assert "cloud.expensive-frontier" not in str(seen["member"])
+    assert "turn_limits" not in seen["member"]
+
+
+def test_propose_next_goal_refuses_when_the_team_has_no_pm_route(tmp_path: Path) -> None:
+    """No PM in the run config means there is no trusted route to call. Refuse
+    rather than fall back to an empty ``gateway_route_id``, which would crash
+    inside the gateway mid-turn."""
+    from errorta_council.coding.ledger import LedgerStore
+
+    ledger = LedgerStore("proj-nopm")
+    ledger.create_project(
+        north_star="n", definition_of_done="d",
+        target="existing", repo_path=None, delivery_root=None,
+    )
+    store.bind_channel("C1", "proj-nopm")
+    propose_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        tmp_path, ledger_factory=lambda pid: LedgerStore(pid),
+        propose_goal_fn=lambda store_, **kw: (
+            propose_calls.append(kw) or {"title": "t", "body": "", "evidence": []}),
+        goal_caller=lambda member, prompt: "{}",
+    )
+
+    result = tools.dispatch(
+        "propose_next_goal", {}, channel_id="C1", thread_ts="1.0",
+        confirmed_via=None, deps=deps,
+    )
+
+    assert result["status"] == "error"
+    assert propose_calls == [], "reached the model with no configured route"

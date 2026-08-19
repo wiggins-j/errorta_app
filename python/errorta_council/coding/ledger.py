@@ -1875,10 +1875,21 @@ class LedgerStore:
         return "Current Focus updated. The team's operative scope is now:\n" + \
             "\n".join(format_focus_lines(active))
 
-    def promote_north_star(self, north_star: str, definition_of_done: str) -> Project:
+    def promote_north_star(self, north_star: str, definition_of_done: str,
+                           *, already_met: bool = True) -> Project:
         """F135 review #2: lock-held read-modify-write of the authoritative North
         Star + Definition of Done (used by proposal-accept and put-north-star) so a
-        concurrent completion/run-state write can't lose-update project.json."""
+        concurrent completion/run-state write can't lose-update project.json.
+
+        ``already_met`` says whether this North Star describes something the
+        codebase ALREADY satisfies. That is true for the F141 import flow this
+        stamp was written for — accepting the North Star *inferred from* an
+        existing codebase is by construction a description of what is already
+        there — and false when a human replaces it with a new purpose. Pass
+        ``already_met=False`` for the latter: stamping ``north_star_met_at``
+        would record a brand-new, unbuilt goal as met and flip the project into
+        the ``"steering"`` phase the moment it is set.
+        """
         with self.lock:
             raw = self.get_project().to_dict()
             raw["north_star"] = str(north_star)
@@ -1887,8 +1898,10 @@ class LedgerStore:
             raw["updated_at"] = _now()
             # F141 WS-I: an imported project ships a real, already-built
             # foundation — accepting its inferred North Star puts it straight into
-            # the steering phase (Current Focus becomes relevant). Forward-only.
-            if raw.get("target") == "existing" and not raw.get("north_star_met_at"):
+            # the steering phase (Current Focus becomes relevant). Forward-only:
+            # a project already in the steering phase stays there.
+            if (already_met and raw.get("target") == "existing"
+                    and not raw.get("north_star_met_at")):
                 raw["north_star_met_at"] = _now()
             _atomic_write_json(self._project_path, raw)
             return Project.from_dict(raw)

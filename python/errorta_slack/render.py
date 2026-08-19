@@ -62,6 +62,21 @@ def status_card(team_log: list, blockers: list) -> list[dict]:
     return blocks
 
 
+def escape_mrkdwn(text: str) -> str:
+    """Escape the three characters Slack treats as mrkdwn control characters.
+
+    Used on any text that reaches a message body from outside the operator —
+    a model-proposed goal body, for instance, which may itself be grounded in
+    repo files nobody on this team wrote. Unescaped, ``<!channel>`` in such a
+    string pings the whole workspace and ``<https://evil|Approve here>``
+    renders as a plausible link. Slack's own guidance is to replace ``&``,
+    ``<`` and ``>`` (``&`` first, or the escapes get double-escaped)."""
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
 def decision_message(title: str, detail: str, confirmation_id: str) -> list[dict]:
     """A 🔴 DECISION NEEDED header + detail section + Approve/Decline actions.
 

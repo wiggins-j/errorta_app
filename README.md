@@ -256,9 +256,38 @@ config gotchas.
   sidecar, shares the same on-disk store as the desktop app, and has a layered
   verbosity dial plus a `--json` surface for scripting. See
   [`docs/CLI.md`](docs/CLI.md).
-- **Slack PM bridge (optional, off by default).** Chat with the coding-team PM
-  from a Slack channel instead of the terminal. See
-  [`docs/SLACK_PM_BRIDGE.md`](docs/SLACK_PM_BRIDGE.md).
+
+### Slack — run the studio from a chat window
+*Strictly optional and off by default.* Uninstalled, disabled, or unconfigured,
+the desktop app, sidecar, and CLI behave identically to a build that never heard
+of Slack — no import, no connection, no routes.
+
+- **A studio manager for the whole workspace.** One designated "studio" channel
+  hosts an app-level PM. Describe what you want built in plain English; it runs
+  the charter intake conversationally (north star, audience, modality, definition
+  of done, entrypoint, team recipe, autonomy), then creates the project **and its
+  own dedicated Slack channel**, seats a team, and hands you the link. It can also
+  spin a project down — pausing it and archiving its channel, reversibly, without
+  deleting anything. See [`docs/SLACK_STUDIO.md`](docs/SLACK_STUDIO.md).
+- **A PM in each project's channel.** Ask "how's it going?", queue bugs as tasks,
+  start and stop the coding run, launch or stop the runtime preview, resolve a
+  pending decision, or change which model a role (pm/dev/reviewer/tester) uses —
+  all in chat. See [`docs/SLACK_PM_BRIDGE.md`](docs/SLACK_PM_BRIDGE.md).
+- **A hybrid trust model that survives prompt injection.** Reads and reversible
+  actions run straight from your message. Every irreversible one — spending on a
+  cloud model call, opening a public PR, starting a run, creating or archiving a
+  project — only stages a confirmation, and that confirmation can be resolved
+  *exclusively* by a verified in-thread button press. No amount of chat text,
+  including text pasted from elsewhere claiming prior approval, can execute one.
+- **Autopilot (off by default).** Flip it on and the PM self-approves those
+  staged actions through the *same* verified path, posting an audit line for each
+  — the injection wall stays exactly where it was.
+- **A Designer seat, gated by modality.** UI projects (`static` / `server` /
+  `desktop`) automatically get a Designer who authors the design contract; CLI,
+  binary, and container projects stay design-inert.
+- **Socket Mode, so nothing is exposed.** The sidecar dials *out* over a
+  WebSocket — no public webhook, no inbound port, works behind NAT. Only
+  allowlisted Slack team/user ids can drive the PM at all.
 
 ### Platform
 - **Tauri 2 desktop shell** (Rust) with a system tray (Show / Quit / check for
