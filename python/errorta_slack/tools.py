@@ -54,6 +54,24 @@ class ToolError(Exception):
 # Catalog — the single source of truth for verbs, trust class, and prompt copy
 # --------------------------------------------------------------------------
 
+# Every result status meaning the verb did NOT do the thing it names. Read by
+# `concierge` (may the reply claim success?) and by `connection` (may the
+# outcome message say "executed"?).
+#
+# ONE definition, deliberately. This started as two copies -- one in each of
+# those modules -- and when "empty"/"not_running" were added to one, the other
+# kept announcing "Autopilot approved & executed start_run" for a no-op that
+# started nothing. A comment telling the next person to keep them in step is
+# what failed; a single name cannot drift.
+NOT_DONE_STATUSES = frozenset({
+    "error",           # the verb tried and failed
+    "refused",         # a gate declined it before it ran
+    "already_running", # a start on a run that was already going -- a no-op
+    "not_running",     # a stop with nothing to stop -- a no-op
+    "empty",           # nothing to act on (e.g. no runtime configured)
+})
+
+
 TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "list_projects": {
         "trust": "R",
@@ -88,6 +106,23 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
             "Turn this channel's progress updates on or off. Muting never "
             "silences the run stopping, a roadblock, or the run finishing."
         ),
+    },
+    "list_open_tasks": {
+        "trust": "R",
+        "summary": (
+            "List the project's still-open tasks with their ids — the ids "
+            "cancel_task and unblock_task need."
+        ),
+    },
+    "cancel_task": {
+        "trust": "C",
+        "args": (("task_id", True, "id from list_open_tasks"),),
+        "summary": "Cancel (drop) an open task so a blocked run can complete.",
+    },
+    "unblock_task": {
+        "trust": "C",
+        "args": (("task_id", True, "id from list_open_tasks"),),
+        "summary": "Move a blocked task back to todo so the team can pick it up.",
     },
     "queue_bugs": {
         "trust": "R",
@@ -407,6 +442,104 @@ def set_updates(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     enabled = raw if isinstance(raw, bool) else True
     deps.store.set_updates(channel_id, enabled=enabled)
     return {"status": "updated", "updates": "on" if enabled else "off"}
+
+
+# Terminal task states -- a task in one of these is finished work, not open work.
+_TERMINAL_TASK_STATES = frozenset({"done", "dropped", "merged"})
+_OPEN_TASK_CAP = 20
+
+
+def list_open_tasks(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                     deps: "ToolDeps") -> dict[str, Any]:
+    """The project's non-terminal tasks, WITH their ids.
+
+    Exists because `cancel_task`/`unblock_task` take a `task_id` and nothing the
+    PM could see carried one: `project_status`'s "tasks" are team-log entries
+    (`at`/`kind`/`member`/`message`/`role`), not task records. Without this the
+    other two verbs would be advertised and uncallable -- the same defect as a
+    verb whose arguments were never declared.
+    """
+    project_id = _bound_project_id(deps, channel_id)
+    try:
+        tasks = deps.ledger_factory(project_id).list_tasks()
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error",
+                "detail": f"couldn't read the backlog ({type(exc).__name__})"}
+    open_tasks = [
+        t for t in tasks
+        if str(getattr(t, "state", "")) not in _TERMINAL_TASK_STATES
+    ]
+    shown = open_tasks[:_OPEN_TASK_CAP]
+    # Never a silent cap. A PM that reports 20 of 40 as if it were all of them
+    # leads the operator to cancel that 20, believe the backlog is clear, and
+    # hit the completion gate again on tasks they were never shown.
+    return {
+        "tasks": [
+            {"task_id": str(t.task_id), "title": str(getattr(t, "title", "")),
+             "state": str(getattr(t, "state", ""))}
+            for t in shown
+        ],
+        "total_open": len(open_tasks),
+        "truncated": len(open_tasks) > len(shown),
+    }
+
+
+def cancel_task(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                 deps: "ToolDeps") -> dict[str, Any]:
+    """Drop a task so a completion-blocked run can finish.
+
+    [C], not [R]: `queue_bugs` is [R] because it only ADDS work; this SUBTRACTS
+    it and so directly steers what the team spends on. `state="dropped"` is the
+    runner's own cancel semantic (runner.py:1603), so a cancel from Slack and a
+    cancel from the engine leave indistinguishable ledger state.
+    """
+    from errorta_council.coding.ledger import LedgerError  # noqa: PLC0415
+
+    task_id = str(args.get("task_id") or "").strip()
+    if not task_id:
+        return {"status": "error", "detail": "task_id is required"}
+    ledger = deps.ledger_factory(_bound_project_id(deps, channel_id))
+    try:
+        ledger.update_task(task_id, state="dropped")
+    except LedgerError:
+        return {"status": "error", "detail": f"unknown task: {task_id}"}
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error",
+                "detail": f"couldn't cancel the task ({type(exc).__name__})"}
+    return {"status": "cancelled", "task_id": task_id}
+
+
+def unblock_task(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                  deps: "ToolDeps") -> dict[str, Any]:
+    """Move a BLOCKED task back to todo -- the "human-required" half of the
+    completion gate.
+
+    Refuses any other state on purpose. This is an unblock, not a general state
+    setter: allowing it to move a `done` task back into the queue would let a
+    misread instruction resurrect finished work.
+    """
+    from errorta_council.coding.ledger import LedgerError  # noqa: PLC0415
+
+    task_id = str(args.get("task_id") or "").strip()
+    if not task_id:
+        return {"status": "error", "detail": "task_id is required"}
+    ledger = deps.ledger_factory(_bound_project_id(deps, channel_id))
+    current = next(
+        (t for t in ledger.list_tasks() if str(t.task_id) == task_id), None)
+    if current is None:
+        return {"status": "error", "detail": f"unknown task: {task_id}"}
+    state = str(getattr(current, "state", ""))
+    if state != "blocked":
+        return {"status": "error",
+                "detail": f"task {task_id} is {state}, not blocked"}
+    try:
+        ledger.update_task(task_id, state="todo")
+    except LedgerError:
+        return {"status": "error", "detail": f"unknown task: {task_id}"}
+    except Exception as exc:  # noqa: BLE001 - never let an engine failure escape a live turn
+        return {"status": "error",
+                "detail": f"couldn't unblock the task ({type(exc).__name__})"}
+    return {"status": "unblocked", "task_id": task_id}
 
 
 def stop_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
@@ -806,6 +939,9 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "recent_activity": recent_activity,
     "launch_runtime": launch_runtime,
     "stop_runtime": stop_runtime,
+    "list_open_tasks": list_open_tasks,
+    "cancel_task": cancel_task,
+    "unblock_task": unblock_task,
     "set_updates": set_updates,
     "queue_bugs": queue_bugs,
     "answer_question": answer_question,
@@ -849,4 +985,4 @@ def dispatch(verb: str, args: dict[str, Any], *, channel_id: str, thread_ts: str
     return impl(safe_args, channel_id=channel_id, thread_ts=thread_ts, deps=deps)
 
 
-__all__ = ["ToolError", "ToolDeps", "TOOL_CATALOG", "dispatch"]
+__all__ = ["ToolError", "ToolDeps", "TOOL_CATALOG", "NOT_DONE_STATUSES", "dispatch"]

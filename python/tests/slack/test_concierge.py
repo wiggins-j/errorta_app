@@ -687,3 +687,50 @@ def test_failure_summary_escapes_engine_detail(tmp_path: Path) -> None:
 
     assert "<!channel>" not in result["reply"]
     assert "&lt;!channel&gt;" in result["reply"]
+
+
+# --------------------------------------------------------------------------
+# Run-state truthfulness — the PM told the operator "No run is currently
+# active" while a run had been going for six minutes.
+#
+# project_status returns run_status correctly, but the state block injected
+# into the system prompt carried NO run status at all, so a PM answering
+# "status?" from prompt context had nothing to read and guessed.
+# --------------------------------------------------------------------------
+
+
+def test_state_block_reports_a_running_run(tmp_path: Path) -> None:
+    class _Ledger(FakeLedgerStore):
+        def get_project(self) -> Any:
+            class P:
+                north_star = "NS"
+                definition_of_done = "DoD"
+            return P()
+
+        def active_focuses(self) -> list[Any]:
+            return []
+
+    ledger = _Ledger("proj-a", tmp_path)
+    ledger.set_run_state(status="running", started_at="2026-08-19T16:42:41+00:00")
+
+    block = concierge._project_state_block("proj-a", store=ledger)
+
+    assert "running" in block.lower()
+
+
+def test_state_block_reports_an_idle_run(tmp_path: Path) -> None:
+    class _Ledger(FakeLedgerStore):
+        def get_project(self) -> Any:
+            class P:
+                north_star = "NS"
+                definition_of_done = "DoD"
+            return P()
+
+        def active_focuses(self) -> list[Any]:
+            return []
+
+    ledger = _Ledger("proj-a", tmp_path)
+
+    block = concierge._project_state_block("proj-a", store=ledger)
+
+    assert "idle" in block.lower() or "not running" in block.lower()

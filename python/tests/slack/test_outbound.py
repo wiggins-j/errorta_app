@@ -294,7 +294,17 @@ async def test_poll_once_decision_post_failure_rolls_back_the_staged_confirmatio
 
 
 @pytest.mark.asyncio
-async def test_poll_once_non_blocking_attention_signal_is_fyi_only() -> None:
+async def test_poll_once_non_blocking_attention_signal_is_not_posted() -> None:
+    """Slice 6 changed this contract deliberately.
+
+    A non-blocking signal used to post as a buttonless FYI. One live run raised
+    28 of them against a single spec, in a channel designed to carry 6-12
+    milestone messages, and team_log already reports "reviewed an artifact
+    (N finding(s))" for the same review round.
+
+    The original assertion -- that such a signal never grows a button -- still
+    holds, and now holds more strongly: it produces no message at all.
+    """
     signals = [
         _signal("sig-2", created_at="2026-01-01T00:00:00", title="Reviewer note",
                 summary="a save button has no autosave guidance", blocking=False),
@@ -304,11 +314,8 @@ async def test_poll_once_non_blocking_attention_signal_is_fyi_only() -> None:
 
     markers = outbound.poll_once("C1", "proj-a", deps=deps, poster=poster)
 
-    assert markers == ["attn:sig-2"]
-    assert len(poster.messages) == 1
-    blocks = poster.messages[0]["blocks"]
-    # A plain fyi_message has no "actions" block (no buttons).
-    assert all(b.get("type") != "actions" for b in blocks)
+    assert markers == []
+    assert poster.messages == []
 
 
 # --- poll_once: PR-ready publish event -> FYI ---------------------------
@@ -1032,3 +1039,49 @@ async def test_run_failure_reason_is_escaped() -> None:
     text = poster.messages[0]["text"]
     assert "<!channel>" not in text
     assert "&lt;!channel&gt;" in text
+
+
+# --------------------------------------------------------------------------
+# Slice 6 F2 — reviewer nitpicks are not milestones.
+#
+# The live run produced 28 non-blocking `alert` signals on one spec, each
+# queued as its own Slack message, against an approved design of 6-12 milestone
+# messages. team_log already posts "reviewed an artifact (N finding(s))" for the
+# same review round, so the channel loses nothing it did not already have.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_alert_produces_no_message() -> None:
+    store.advance_cursor("C-nb", "")
+    deps = _deps(signals=[
+        _signal("s1", created_at="2026-01-01T00:00:00",
+                title="Rounding method not specified", blocking=False)])
+    poster = SyncFakePoster()
+
+    assert outbound.poll_once("C-nb", "p1", deps=deps, poster=poster) == []
+    assert poster.messages == []
+
+
+@pytest.mark.asyncio
+async def test_blocking_signal_still_posts_as_a_decision() -> None:
+    store.advance_cursor("C-b", "")
+    deps = _deps(signals=[
+        _signal("s2", created_at="2026-01-01T00:00:00",
+                title="Run can't complete", blocking=True)])
+    poster = SyncFakePoster()
+
+    assert outbound.poll_once("C-b", "p1", deps=deps, poster=poster) == ["attn:s2"]
+    assert poster.messages[0]["blocks"]
+
+
+@pytest.mark.asyncio
+async def test_blocking_signal_still_ignores_the_mute() -> None:
+    store.advance_cursor("C-bm", "")
+    store.set_updates("C-bm", enabled=False)
+    deps = _deps(signals=[
+        _signal("s3", created_at="2026-01-01T00:00:00",
+                title="Run can't complete", blocking=True)])
+    poster = SyncFakePoster()
+
+    assert outbound.poll_once("C-bm", "p1", deps=deps, poster=poster) == ["attn:s3"]

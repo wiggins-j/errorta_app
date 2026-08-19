@@ -108,11 +108,12 @@ is no other action available to you.
 # the reply ignored them.
 _RECONCILE_RULE = (
     "HONESTY RULE — read every result above before writing `reply`. A result "
-    "whose \"status\" is \"error\", \"refused\", \"empty\" or "
-    "\"not_running\" means that action DID NOT HAPPEN. Never claim, imply, "
-    "or hint that it did. Say plainly what failed and, when the result carries "
-    "a reason or detail, relay that reason. Only describe an action as done "
-    "when its own result says it succeeded."
+    'whose "status" is one of '
+    + ", ".join(f'"{s}"' for s in sorted(tools.NOT_DONE_STATUSES))
+    + " means that action DID NOT HAPPEN. Never claim, imply, or hint that it "
+    "did. Say plainly what failed and, when the result carries a reason or "
+    "detail, relay that reason. Only describe an action as done when its own "
+    "result says it succeeded."
 )
 
 
@@ -165,6 +166,26 @@ def _project_state_block(project_id: str, *, store: Any = None) -> str:
         return ""
 
     lines = ["## THIS PROJECT'S GOAL STATE", ""]
+
+    # Whether a run is in flight. Without this line the block described the
+    # project's GOAL but never whether anyone was working on it, so a PM asked
+    # "status?" answered from context alone and guessed -- live, it told the
+    # operator "No run is currently active" while a run had been going for six
+    # minutes, and they started a redundant one on the strength of it.
+    try:
+        run_status = str(ledger.get_run_state().get("status") or "idle")
+    except Exception:  # noqa: BLE001 - unreadable run state -> omit, don't raise
+        run_status = ""
+    if run_status:
+        if run_status == "running":
+            lines.append(
+                "Run status: RUNNING — the team is working right now. Do NOT "
+                "say the project is idle, and do not offer to start it."
+            )
+        else:
+            lines.append(f"Run status: {run_status} — no team is working right now.")
+        lines.append("")
+
     north_star = str(getattr(project, "north_star", "") or "").strip()
     dod = str(getattr(project, "definition_of_done", "") or "").strip()
     if north_star:
@@ -414,7 +435,7 @@ def _dispatch_calls(
 # `launch_runtime` -> {"status": "empty"} plus a malformed follow-up would keep
 # the optimistic "here's your link" -- the exact false claim this exists to
 # stop.
-_FAILED_STATUSES = frozenset({"error", "refused", "empty", "not_running"})
+_FAILED_STATUSES = tools.NOT_DONE_STATUSES
 
 
 def _has_failed_result(tool_results: list[dict[str, Any]]) -> bool:

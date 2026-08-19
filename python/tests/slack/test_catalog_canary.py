@@ -162,3 +162,73 @@ def test_every_required_arg_is_actually_read_by_its_impl() -> None:
             if verb == "publish_pr":
                 continue  # passes args straight through to deps.publish_fn
             assert f'"{name}"' in src, f"{verb} advertises {name!r} but never reads it"
+
+
+# --------------------------------------------------------------------------
+# Review fix: the not-done status vocabulary is ONE definition.
+#
+# It began as two literals -- concierge._FAILED_STATUSES and
+# connection._NON_EXECUTION_STATUSES -- plus a third copy written out in the
+# honesty-rule prompt text. When "empty"/"not_running" were added to the first,
+# the second kept announcing "Autopilot approved & executed start_run" for a
+# no-op, and the prompt still named a stale list. A comment saying "keep these
+# in step" is precisely what failed.
+# --------------------------------------------------------------------------
+
+
+def test_not_done_statuses_have_a_single_definition() -> None:
+    from errorta_slack import concierge, connection, tools
+
+    assert concierge._FAILED_STATUSES is tools.NOT_DONE_STATUSES
+    assert connection.SlackBridge._NON_EXECUTION_STATUSES is tools.NOT_DONE_STATUSES
+
+
+def test_honesty_rule_names_every_not_done_status() -> None:
+    """The prompt text is generated, not retyped, so it cannot fall behind."""
+    from errorta_slack import concierge, tools
+
+    for status in tools.NOT_DONE_STATUSES:
+        assert f'"{status}"' in concierge._RECONCILE_RULE, (
+            f"{status!r} is a not-done status but the honesty rule never names it"
+        )
+
+
+def test_every_required_arg_is_obtainable_from_some_verb_output() -> None:
+    """Slice 6: a verb whose required argument appears in no other verb's OUTPUT
+    is uncallable -- the model cannot invent a task_id or a change_id.
+
+    This is the generalised form of two live failures: set_next_goal was called
+    without its required `title` because no schema named it, and cancel_task
+    would have shipped uncallable because no verb exposed a task_id at all.
+    list_open_tasks exists solely to close the second. Fails CI rather than
+    failing live in a channel.
+    """
+    from errorta_slack import tools
+
+    # Where a required argument's value can come from. None == the operator
+    # supplies it in prose (a goal, a reason, a dollar amount); a string names
+    # the verb whose result carries it.
+    SUPPLIED_BY = {
+        "task_id": "list_open_tasks",
+        "project_id": "list_projects",
+        "change_id": "project_status",
+        "question": None, "bugs": None, "title": None, "body": None,
+        "north_star": None, "definition_of_done": None, "role_routes": None,
+        "amount": None, "reason": None, "decision": None, "limit": None,
+        "on": None,
+    }
+    for verb, spec in tools.TOOL_CATALOG.items():
+        for name, required, _desc in spec.get("args", ()):
+            if not required:
+                continue
+            assert name in SUPPLIED_BY, (
+                f"{verb} requires {name!r}, and nothing in SUPPLIED_BY says "
+                "where the model gets it. Either add a read verb that returns "
+                "it, or record here that the operator supplies it in prose."
+            )
+            source = SUPPLIED_BY[name]
+            if source is not None:
+                assert source in tools.TOOL_CATALOG, (
+                    f"{verb} requires {name!r}, sourced from {source!r}, which "
+                    "is not in the catalog — the argument is unobtainable"
+                )

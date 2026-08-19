@@ -856,14 +856,26 @@ class SlackBridge:
     # either is the precise failure this slice was written to fix, one layer
     # further up: the owner is told the team is building when nothing started
     # and the computed reason has been thrown away.
-    _NON_EXECUTION_STATUSES = ("refused", "error")
+    _NON_EXECUTION_STATUSES = tools.NOT_DONE_STATUSES
+
+    # A no-op is not a failure, so "no reason was given" would be its own small
+    # untruth: nothing went wrong and nothing needs explaining. Each carries the
+    # actual reason it did nothing.
+    _NON_EXECUTION_DEFAULTS = {
+        "already_running": "the team is already working on it",
+        "not_running": "no run was in progress",
+        "empty": "there was nothing to do",
+    }
 
     @classmethod
     def _non_execution_reason(cls, result: dict[str, Any] | None) -> str | None:
         status = (result or {}).get("status")
         if status not in cls._NON_EXECUTION_STATUSES:
             return None
-        return str((result or {}).get("detail") or "no reason was given")
+        detail = str((result or {}).get("detail") or "").strip()
+        if detail:
+            return detail
+        return cls._NON_EXECUTION_DEFAULTS.get(str(status), "no reason was given")
 
     async def _post_decision_outcome(
         self, channel_id: Any, thread_ts: str, verb: str, approved: bool,
