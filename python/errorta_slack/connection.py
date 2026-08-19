@@ -75,6 +75,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from typing import Any, Awaitable, Callable
 
 from errorta_slack import (
@@ -667,20 +668,45 @@ class SlackBridge:
 
     # Slack rejects a section over 3000 characters outright, which would mean a
     # staged C-class action with NO approve button at all -- strictly worse
-    # than a shortened one. Cap each field well under that and say so.
-    _CONFIRMATION_FIELD_CAP = 1200
+    # than a shortened one. Budget: the title line (<= ~160 escaped) plus two
+    # capped fields plus their labels plus the base copy stays comfortably
+    # under the limit at 1100 each.
+    _SLACK_SECTION_LIMIT = 3000
+    _CONFIRMATION_FIELD_CAP = 1100
     _CONFIRMATION_LABEL_CAP = 120
+    _TRUNCATION_NOTE = ("…\n_(truncated — open the project to read the full text "
+                        "before approving)_")
+    # A cut can land mid-entity ("&amp;" -> "&am"), which renders as literal
+    # junk. Drop any dangling entity prefix left at the tail.
+    _PARTIAL_ENTITY_RE = re.compile(r"&[A-Za-z]{0,4}$")
+
+    @classmethod
+    def _cap_escaped(cls, text: str, cap: int, note: str = "…") -> str:
+        """Truncate ALREADY-ESCAPED text so the result is at most ``cap``.
+
+        The order matters and is the whole point: ``escape_mrkdwn`` EXPANDS
+        (one ``<`` becomes four characters, one ``&`` five), so capping the raw
+        text and escaping afterwards bounds the wrong string. A body of mrkdwn
+        control characters -- HTML, XML, or generics in a repo file, i.e. the
+        exact input the escaping exists for -- came out ~5x over budget that
+        way and Slack rejected the whole message with ``invalid_blocks``,
+        leaving a staged C-class action with no Approve button. Escape first,
+        then cap what Slack actually receives.
+        """
+        if len(text) <= cap:
+            return text
+        kept = cls._PARTIAL_ENTITY_RE.sub("", text[:max(cap - len(note), 0)])
+        return kept + note
 
     @classmethod
     def _confirmation_field(cls, label: str, value: Any) -> str:
         text = str(value if value is not None else "").strip()
         if not text:
             return ""
-        if len(text) > cls._CONFIRMATION_FIELD_CAP:
-            text = (text[:cls._CONFIRMATION_FIELD_CAP]
-                    + "…\n_(truncated — open the project to read the full text "
-                      "before approving)_")
-        return f"*{label}:*\n{render.escape_mrkdwn(text)}"
+        capped = cls._cap_escaped(
+            render.escape_mrkdwn(text), cls._CONFIRMATION_FIELD_CAP,
+            cls._TRUNCATION_NOTE)
+        return f"*{label}:*\n{capped}"
 
     def _confirmation_title(self, record: dict[str, Any]) -> tuple[str, str]:
         """A (title, detail) for the decision button, from the staged record's
@@ -699,10 +725,11 @@ class SlackBridge:
         base_title, detail = self._CONFIRMATION_COPY.get(
             verb, (f"Confirm {verb}", "Approve to run this action."),
         )
-        label = str(args.get("title") or args.get("project_id") or "").strip()
-        if len(label) > self._CONFIRMATION_LABEL_CAP:
-            label = label[:self._CONFIRMATION_LABEL_CAP] + "…"
-        title = f"{base_title} — {render.escape_mrkdwn(label)}" if label else base_title
+        # Same order here: escape, then cap the escaped result.
+        label = self._cap_escaped(
+            render.escape_mrkdwn(str(args.get("title") or args.get("project_id") or "").strip()),
+            self._CONFIRMATION_LABEL_CAP)
+        title = f"{base_title} — {label}" if label else base_title
         fields = [
             rendered for key, field_label in self._CONFIRMATION_FIELDS.get(verb, ())
             if (rendered := self._confirmation_field(field_label, args.get(key)))

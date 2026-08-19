@@ -10,7 +10,16 @@ from typing import Any
 
 import pytest
 
-from errorta_slack import concierge, config, connection, store, studio_concierge, studio_tools, tools
+from errorta_slack import (
+    concierge,
+    config,
+    connection,
+    render,
+    store,
+    studio_concierge,
+    studio_tools,
+    tools,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -1821,6 +1830,61 @@ async def test_confirmation_detail_escapes_and_caps_untrusted_text(
     assert "&lt;!channel&gt;" in detail
     assert len(detail) < 3000
     assert "truncated" in detail.lower()
+
+
+def _decision_section_len(title: str, detail: str) -> int:
+    """The length of the text Slack actually receives — the section body
+    `render.decision_message` composes, not the `detail` fragment alone."""
+    for block in render.decision_message(title, detail, "cid-1"):
+        if block.get("type") == "section":
+            return len((block["text"] or {}).get("text", ""))
+    raise AssertionError("decision_message posted no section block")
+
+
+async def test_confirmation_section_stays_under_slacks_limit_when_escaping_expands(
+    tmp_path: Path,
+) -> None:
+    """Regression (fix-round NEW-1): the cap was applied to the RAW text and
+    the escaping ran afterwards. `escape_mrkdwn` expands — one `<` becomes four
+    characters, one `&` five — so capping first bounds the wrong string. A goal
+    whose title and body are mrkdwn control characters (HTML, XML or generics
+    in a repo file, i.e. exactly the input the escaping exists for) rendered a
+    ~7500-char section against Slack's 3000 limit; Slack rejects the whole
+    message with `invalid_blocks`, so the C-class action stages with NO Approve
+    button — the precise outcome the cap exists to prevent.
+
+    The assertion is on the FINAL section Slack receives, not on `detail`."""
+    bridge, sdk, poster = _bridge(tmp_path)
+    # Every character expands: "<" -> 4, ">" -> 4, "&" -> 5.
+    expanding = "<&>" * 2000
+
+    title, detail = bridge._confirmation_title({
+        "verb": "set_next_goal",
+        "args": {"title": expanding, "body": expanding},
+    })
+
+    assert _decision_section_len(title, detail) < 3000  # Slack's hard section limit
+    # It is capped because it was too long, not because it was dropped.
+    assert "truncated" in detail.lower()
+    assert "&lt;" in detail and "<" not in detail.replace("&lt;", "")
+
+
+async def test_confirmation_cap_never_leaves_a_half_written_escape(
+    tmp_path: Path,
+) -> None:
+    """A cut landing mid-entity would render literal junk like `&am` to the
+    human being asked to approve."""
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    _title, detail = bridge._confirmation_title({
+        "verb": "set_next_goal", "args": {"title": "t", "body": "&" * 4000},
+    })
+
+    body = detail.split("*Scope:*\n", 1)[1]
+    # Strip the truncation note, then every remaining "&" must belong to a
+    # whole "&amp;" — a dangling "&am"/"&a"/"&" tail means the cut split one.
+    body = body.split("…", 1)[0]
+    assert "&" not in body.replace("&amp;", "")
 
 
 async def test_approve_button_reports_a_refused_start_run_as_not_started(
