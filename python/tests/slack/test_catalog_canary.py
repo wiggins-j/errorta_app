@@ -162,3 +162,32 @@ def test_every_required_arg_is_actually_read_by_its_impl() -> None:
             if verb == "publish_pr":
                 continue  # passes args straight through to deps.publish_fn
             assert f'"{name}"' in src, f"{verb} advertises {name!r} but never reads it"
+
+
+# --------------------------------------------------------------------------
+# Review fix: the not-done status vocabulary is ONE definition.
+#
+# It began as two literals -- concierge._FAILED_STATUSES and
+# connection._NON_EXECUTION_STATUSES -- plus a third copy written out in the
+# honesty-rule prompt text. When "empty"/"not_running" were added to the first,
+# the second kept announcing "Autopilot approved & executed start_run" for a
+# no-op, and the prompt still named a stale list. A comment saying "keep these
+# in step" is precisely what failed.
+# --------------------------------------------------------------------------
+
+
+def test_not_done_statuses_have_a_single_definition() -> None:
+    from errorta_slack import concierge, connection, tools
+
+    assert concierge._FAILED_STATUSES is tools.NOT_DONE_STATUSES
+    assert connection.SlackBridge._NON_EXECUTION_STATUSES is tools.NOT_DONE_STATUSES
+
+
+def test_honesty_rule_names_every_not_done_status() -> None:
+    """The prompt text is generated, not retyped, so it cannot fall behind."""
+    from errorta_slack import concierge, tools
+
+    for status in tools.NOT_DONE_STATUSES:
+        assert f'"{status}"' in concierge._RECONCILE_RULE, (
+            f"{status!r} is a not-done status but the honesty rule never names it"
+        )

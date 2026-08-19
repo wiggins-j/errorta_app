@@ -856,17 +856,7 @@ class SlackBridge:
     # either is the precise failure this slice was written to fix, one layer
     # further up: the owner is told the team is building when nothing started
     # and the computed reason has been thrown away.
-    # Every status meaning the verb did NOT do the thing. "already_running" and
-    # "not_running" are no-ops, not successes: announcing "approved & executed"
-    # for one told an operator their message had started a run when the run had
-    # been going for six minutes and their message did nothing.
-    #
-    # Keep in step with concierge._FAILED_STATUSES -- these are two copies of
-    # one idea, and the last time a status was added it went into only one of
-    # them.
-    _NON_EXECUTION_STATUSES = (
-        "refused", "error", "already_running", "not_running", "empty",
-    )
+    _NON_EXECUTION_STATUSES = tools.NOT_DONE_STATUSES
 
     # A no-op is not a failure, so "no reason was given" would be its own small
     # untruth: nothing went wrong and nothing needs explaining. Each carries the

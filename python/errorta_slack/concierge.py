@@ -108,11 +108,12 @@ is no other action available to you.
 # the reply ignored them.
 _RECONCILE_RULE = (
     "HONESTY RULE — read every result above before writing `reply`. A result "
-    "whose \"status\" is \"error\", \"refused\", \"empty\" or "
-    "\"not_running\" means that action DID NOT HAPPEN. Never claim, imply, "
-    "or hint that it did. Say plainly what failed and, when the result carries "
-    "a reason or detail, relay that reason. Only describe an action as done "
-    "when its own result says it succeeded."
+    'whose "status" is one of '
+    + ", ".join(f'"{s}"' for s in sorted(tools.NOT_DONE_STATUSES))
+    + " means that action DID NOT HAPPEN. Never claim, imply, or hint that it "
+    "did. Say plainly what failed and, when the result carries a reason or "
+    "detail, relay that reason. Only describe an action as done when its own "
+    "result says it succeeded."
 )
 
 
@@ -434,7 +435,7 @@ def _dispatch_calls(
 # `launch_runtime` -> {"status": "empty"} plus a malformed follow-up would keep
 # the optimistic "here's your link" -- the exact false claim this exists to
 # stop.
-_FAILED_STATUSES = frozenset({"error", "refused", "empty", "not_running"})
+_FAILED_STATUSES = tools.NOT_DONE_STATUSES
 
 
 def _has_failed_result(tool_results: list[dict[str, Any]]) -> bool:

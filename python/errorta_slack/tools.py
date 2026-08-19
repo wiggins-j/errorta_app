@@ -54,6 +54,24 @@ class ToolError(Exception):
 # Catalog — the single source of truth for verbs, trust class, and prompt copy
 # --------------------------------------------------------------------------
 
+# Every result status meaning the verb did NOT do the thing it names. Read by
+# `concierge` (may the reply claim success?) and by `connection` (may the
+# outcome message say "executed"?).
+#
+# ONE definition, deliberately. This started as two copies -- one in each of
+# those modules -- and when "empty"/"not_running" were added to one, the other
+# kept announcing "Autopilot approved & executed start_run" for a no-op that
+# started nothing. A comment telling the next person to keep them in step is
+# what failed; a single name cannot drift.
+NOT_DONE_STATUSES = frozenset({
+    "error",           # the verb tried and failed
+    "refused",         # a gate declined it before it ran
+    "already_running", # a start on a run that was already going -- a no-op
+    "not_running",     # a stop with nothing to stop -- a no-op
+    "empty",           # nothing to act on (e.g. no runtime configured)
+})
+
+
 TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "list_projects": {
         "trust": "R",
@@ -849,4 +867,4 @@ def dispatch(verb: str, args: dict[str, Any], *, channel_id: str, thread_ts: str
     return impl(safe_args, channel_id=channel_id, thread_ts=thread_ts, deps=deps)
 
 
-__all__ = ["ToolError", "ToolDeps", "TOOL_CATALOG", "dispatch"]
+__all__ = ["ToolError", "ToolDeps", "TOOL_CATALOG", "NOT_DONE_STATUSES", "dispatch"]
