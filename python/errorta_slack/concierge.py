@@ -102,6 +102,20 @@ context already in this prompt). Only emit verbs from the TOOLS list — there
 is no other action available to you.
 """
 
+# The results are in hand by this hop, but nothing previously told the model
+# what to DO about a failed one. Live, the PM answered "Goal set and run
+# started" while both of its tool calls had failed -- the results said so and
+# the reply ignored them.
+_RECONCILE_RULE = (
+    "HONESTY RULE — read every result above before writing `reply`. A result "
+    "whose \"status\" is \"error\", \"refused\", \"empty\" or "
+    "\"not_running\" means that action DID NOT HAPPEN. Never claim, imply, "
+    "or hint that it did. Say plainly what failed and, when the result carries "
+    "a reason or detail, relay that reason. Only describe an action as done "
+    "when its own result says it succeeded."
+)
+
+
 _JSON_CORRECTION = """
 Your previous reply did not parse as a single JSON object matching the
 required envelope. Reply again with ONLY the JSON object described above —
@@ -343,6 +357,7 @@ def _build_prompt(
             "Compose the final reply using these results — do not repeat the "
             "same tool_calls unless you genuinely need another one."
         )
+        parts.append(_RECONCILE_RULE)
     if correction:
         parts.append(_JSON_CORRECTION)
     parts.append("\nConcierge (respond with the JSON object now):")
@@ -391,6 +406,42 @@ def _dispatch_calls(
 # --------------------------------------------------------------------------
 # run_turn
 # --------------------------------------------------------------------------
+
+
+_FAILED_STATUSES = frozenset({"error", "refused"})
+
+
+def _has_failed_result(tool_results: list[dict[str, Any]]) -> bool:
+    """Whether any dispatched call in this turn did not do what it says."""
+    for entry in tool_results:
+        if entry.get("error"):
+            return True
+        result = entry.get("result")
+        if isinstance(result, dict) and result.get("status") in _FAILED_STATUSES:
+            return True
+    return False
+
+
+def _failure_summary(tool_results: list[dict[str, Any]]) -> str:
+    """A truthful reply built from the results themselves, for when the model
+    cannot be asked again.
+
+    Deliberately mechanical: this runs precisely when the follow-up hop failed
+    to parse, so there is no model output to trust. Better a blunt accurate
+    line than the optimistic pre-tool guess.
+    """
+    failures: list[str] = []
+    for entry in tool_results:
+        result = entry.get("result")
+        if entry.get("error"):
+            failures.append(f"`{entry.get('verb', '?')}` ({entry['error']})")
+        elif isinstance(result, dict) and result.get("status") in _FAILED_STATUSES:
+            detail = str(result.get("detail") or "").strip()
+            verb = entry.get("verb", "?")
+            failures.append(f"`{verb}` — {detail}" if detail else f"`{verb}`")
+    if not failures:  # pragma: no cover - guarded by _has_failed_result
+        return "⚠️ that didn't complete — please check the project directly."
+    return "⚠️ that didn't go through: " + "; ".join(failures)
 
 
 def run_turn(
@@ -484,7 +535,13 @@ def run_turn(
         next_envelope = _extract_json(raw)
         if next_envelope is None:
             # Keep the tool results and the last known-good reply rather than
-            # discarding real work over one malformed follow-up.
+            # discarding real work over one malformed follow-up -- UNLESS a
+            # result actually failed. That reply was written before any tool
+            # ran, so on a failure it is the optimistic guess ("Goal set and
+            # run started") that the results just contradicted. Keeping it
+            # there is the single worst outcome available: a confident lie.
+            if _has_failed_result(tool_results):
+                reply = _failure_summary(tool_results)
             break
         envelope = next_envelope
         reply = str(envelope.get("reply") or "").strip() or reply
