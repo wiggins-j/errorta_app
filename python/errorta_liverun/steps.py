@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,6 +27,7 @@ from errorta_tunnels.manager import TunnelManager, TunnelSpec
 from .profile import Action, Check, Probe, Profile, TunnelDef
 
 _TAIL = 2000
+_LOG = logging.getLogger("errorta.liverun")
 
 
 class ArgvIdentityError(RuntimeError):
@@ -43,6 +45,7 @@ class StepResult:
     evidence_refs: list[str] = field(default_factory=list)
     timed_out: bool = False
     detail: str = ""
+    pgid: int | None = None
 
 
 @dataclass
@@ -62,7 +65,10 @@ class Ctx:
 
 
 def _redact(text: str) -> str:
-    return "\n".join(redact_log_line(line) for line in text[-_TAIL:].splitlines())
+    # Redact the FULL text first, then truncate — truncating first can slice a
+    # secret-shaped token in half, leaving an un-redacted fragment behind.
+    redacted = "\n".join(redact_log_line(line) for line in text.splitlines())
+    return redacted[-_TAIL:]
 
 
 def substitute(argv: tuple[str, ...], ctx: Ctx) -> tuple[str, ...]:
@@ -105,6 +111,23 @@ def _host(ctx: Ctx, host_id: str) -> dict[str, Any]:
             "ssh_key_path": h.ssh_key_path}
 
 
+def _remote_path_expr(path: str) -> str:
+    """Shell-code fragment for a validated pidfile/log path, tilde-aware.
+
+    ``shlex.quote`` single-quotes its argument, which suppresses shell tilde
+    expansion — a literal ``'~/b.pid'`` never becomes the remote HOME. Since
+    the remote HOME differs from wherever this process runs, we can't resolve
+    ``~`` locally either; instead render it as a ``"$HOME"``-expansion for the
+    REMOTE shell to resolve at run time.
+    """
+    if path == "~":
+        return '"$HOME"'
+    if path.startswith("~/"):
+        rest = path[2:]
+        return f'"$HOME"/{shlex.quote(rest)}' if rest else '"$HOME"'
+    return shlex.quote(path)
+
+
 def _remote_request(ctx: Ctx, host_id: str, argv: tuple[str, ...], timeout_s: float) -> ToolRunnerRequest:
     return ToolRunnerRequest(
         request_id=secrets.token_hex(4), run_id=ctx.run_id, tool_call_id="liverun",
@@ -115,13 +138,16 @@ def _remote_request(ctx: Ctx, host_id: str, argv: tuple[str, ...], timeout_s: fl
 def _remote(ctx: Ctx, host_id: str, argv: tuple[str, ...], timeout_s: float = 20,
             *, stdin_path: str | None = None):
     request = _remote_request(ctx, host_id, argv, timeout_s)
-    # Audit-only policy evaluation ahead of every remote egress: this call site
-    # always passes a fixed allow policy (the launch cap / operator-authorship
-    # gates already happened at profile-validation time), so the decision here
-    # exists to produce an auditable record, not to change behaviour. Fail
-    # closed anyway if a future policy configuration ever returns non-ALLOW.
+    # Policy evaluation ahead of every remote egress. The policy passed here
+    # is a fixed allow (launch-cap / operator-authorship gating already
+    # happened at profile-validation time, upstream of this module), so today
+    # this call never changes control flow — but it is a REAL enforcement
+    # point, not a no-op audit trail: a future policy configuration change has
+    # somewhere to bite, and every decision is logged for the record.
     decision = evaluate_runner_launch(request, phase=PolicyPhase.REMOTE_EGRESS,
                                       policy={"action": "allow"})
+    _LOG.info("policy decision for remote egress host=%s action=%s reason=%s",
+             host_id, decision.action, decision.reason_code)
     if decision.action != PolicyAction.ALLOW:
         return _blocked_remote_result(request, decision.reason_code)
     return ctx.remote.run_sync(request, stdin_path=stdin_path)
@@ -133,23 +159,32 @@ def _blocked_remote_result(request: ToolRunnerRequest, reason_code: str | None) 
 
 # --- actions ------------------------------------------------------------- #
 
-def _run_local(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
-    argv = _guard(tuple(params["argv"]), ctx)
-    started_at = now_iso()
-    ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
+@dataclass
+class _SpawnOutcome:
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool
+    pgid: int | None
+    spawn_error: str | None = None
+
+
+def _spawn_tracked(argv: tuple[str, ...], cwd: str | None, timeout_s: float, ctx: Ctx) -> _SpawnOutcome:
+    """Spawn ``argv`` in its own process group and track it in
+    ``ctx.owned_pgids`` for exactly the duration it is alive: appended right
+    after spawn, pruned right after ``communicate()`` returns on EVERY path
+    (normal exit and timeout-kill alike). ``owned_pgids`` must only ever hold
+    LIVE pgids — a stale entry left behind after the child exits is a future
+    ``SIGKILL`` aimed at whatever unrelated process the OS hands that pid out
+    to next (pid reuse), and ``killpg`` does not raise on a reused pgid, so
+    nothing would catch it.
+    """
     try:
         proc = subprocess.Popen(  # noqa: S603 — validated, profile-declared argv
-            list(argv), cwd=params.get("cwd") or None, stdin=subprocess.DEVNULL,
+            list(argv), cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     except OSError as exc:
-        return StepResult(False, started_at, now_iso(), detail=f"spawn failed: {exc}")
-    # Recorded before awaiting the child: a supervisor/teardown reaper walks
-    # this list to guarantee no local process group outlives its Ctx even if
-    # the awaiting caller itself is interrupted. Left in place after a clean
-    # exit too — killpg-ing an already-dead pgid is a harmless no-op (see
-    # `_killpg`), and the alternative (removing it here, synchronously, the
-    # instant `communicate()` returns) would make the accounting useless for
-    # anything that inspects it right after `run_action` returns.
+        return _SpawnOutcome(None, b"", b"", False, None, spawn_error=str(exc))
     ctx.owned_pgids.append(proc.pid)
     timed_out = False
     try:
@@ -158,20 +193,35 @@ def _run_local(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult
         timed_out = True
         _killpg(proc.pid)
         out, err = proc.communicate()
-    return StepResult(ok=(proc.returncode == 0 and not timed_out), started_at=started_at,
-                      ended_at=now_iso(), exit_code=proc.returncode,
-                      stdout_tail=_redact(out.decode("utf-8", "replace")),
-                      stderr_tail=_redact(err.decode("utf-8", "replace")), timed_out=timed_out)
+    finally:
+        if proc.pid in ctx.owned_pgids:
+            ctx.owned_pgids.remove(proc.pid)
+    return _SpawnOutcome(proc.returncode, out, err, timed_out, proc.pid)
+
+
+def _run_local(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
+    argv = _guard(tuple(params["argv"]), ctx)
+    started_at = now_iso()
+    ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
+    outcome = _spawn_tracked(argv, params.get("cwd") or None, timeout_s, ctx)
+    if outcome.spawn_error is not None:
+        return StepResult(False, started_at, now_iso(), detail=f"spawn failed: {outcome.spawn_error}")
+    return StepResult(ok=(outcome.returncode == 0 and not outcome.timed_out), started_at=started_at,
+                      ended_at=now_iso(), exit_code=outcome.returncode, pgid=outcome.pgid,
+                      stdout_tail=_redact(outcome.stdout.decode("utf-8", "replace")),
+                      stderr_tail=_redact(outcome.stderr.decode("utf-8", "replace")), timed_out=outcome.timed_out)
 
 
 def _killpg(pid: int, sig: int = signal.SIGKILL) -> None:
     try:
         os.killpg(pid, sig)
-    except (ProcessLookupError, PermissionError):
-        try:
-            os.kill(pid, sig)
-        except ProcessLookupError:
-            pass
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # EPERM means the pgid EXISTS but isn't ours (classic pid-reuse
+        # signature) — log it and stop. Escalating to `os.kill` here would
+        # aim a signal at a process we never spawned.
+        _LOG.warning("killpg(%s, %s) denied (EPERM): pgid exists but is not ours; not escalating", pid, sig)
 
 
 def _run_remote(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
@@ -182,23 +232,48 @@ def _run_remote(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResul
     if params.get("detach"):
         pidfile = params["pidfile"]
         log = params.get("log") or (pidfile + ".log")
+        pidfile_expr = _remote_path_expr(pidfile)
+        log_expr = _remote_path_expr(log)
+        cmd = shlex.join(argv)
         # Built server-side from the validated argv; never from a string.
-        # Read stdin (the token file, if any) into a remote temp file BEFORE
-        # backgrounding the process, then remove it AFTER the process has
-        # started reading from its own fd — the fd stays open across the
-        # `rm`, and this avoids handing a live ssh-session stdin (which
-        # `eval` under the fake-ssh test harness would keep open) to the
-        # detached child.
+        #
+        # `t=$(mktemp) || exit 90` / `cat > "$t" || exit 91`: fail loudly if
+        # the remote can't even stage the stdin token.
+        #
+        # `exec 3<"$t"; rm -f "$t"`: open the temp file on fd 3 for the
+        # detached child to read, then remove it immediately — the fd stays
+        # open across the `rm` (POSIX guarantee), so the token file never
+        # outlives this wrapper and there's no window where a second reader
+        # could see it on disk.
+        #
         # `setsid` (full session detach) is used when the remote box has it
-        # (typical Linux target); it is util-linux-only and absent on macOS,
+        # (typical Linux target); it's util-linux-only and absent on macOS,
         # so fall back to plain `nohup` there — under a non-interactive ssh
-        # command there is no controlling tty to detach from either way.
-        redirected = f"{shlex.join(argv)} > {shlex.quote(log)} 2>&1 < \"$t\""
-        wrapped = ("sh", "-c",
-                   f"t=$(mktemp); cat > \"$t\"; "
-                   f"if command -v setsid >/dev/null 2>&1; then setsid nohup {redirected} & "
-                   f"else nohup {redirected} & fi; "
-                   f"echo $! > {shlex.quote(pidfile)}; rm -f \"$t\"")
+        # command there's no controlling tty to detach from either way.
+        #
+        # `echo "$pid" > PIDFILE || exit 92`: fail loudly if the pidfile
+        # can't be written (e.g. its directory doesn't exist) — previously
+        # this wrapper's exit status was just `rm -f`'s, so a launch that
+        # never even started could still report `ok=True` and let teardown
+        # emit `logoff_verified` for a process it never signalled.
+        #
+        # `sleep 0.2; kill -0 "$pid" 2>/dev/null || exit 93`: confirm the
+        # backgrounded process is actually alive (catches an immediate exec
+        # failure, e.g. `nohup: exec: no such file`, that would otherwise
+        # leave a dead pid quietly sitting in the pidfile).
+        script = (
+            f't=$(mktemp) || exit 90; '
+            f'cat > "$t" || exit 91; '
+            f'exec 3<"$t"; '
+            f'rm -f "$t"; '
+            f'if command -v setsid >/dev/null 2>&1; then setsid nohup {cmd} <&3 > {log_expr} 2>&1 & '
+            f'else nohup {cmd} <&3 > {log_expr} 2>&1 & fi; '
+            f'pid=$!; '
+            f'echo "$pid" > {pidfile_expr} || exit 92; '
+            f'sleep 0.2; '
+            f'kill -0 "$pid" 2>/dev/null || exit 93'
+        )
+        wrapped = ("sh", "-c", script)
         res = _remote(ctx, host_id, wrapped, timeout_s, stdin_path=stdin_path)
         if res.status == "completed":
             ctx.owned_remote_pidfiles.append({"host": host_id, "pidfile": pidfile})
@@ -210,14 +285,25 @@ def _run_remote(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResul
                       detail=res.reason_code or "")
 
 
+def _pid_guard(var: str = "p") -> str:
+    """Shell fragment: reject anything that isn't a bare positive-integer pid
+    read from a pidfile before it ever reaches a `kill`. Guards against a
+    corrupt or hostile pidfile (e.g. containing `-1`, which `kill -TERM -1`
+    would interpret as "signal every process this user can reach" — a
+    broadcast, not a targeted signal)."""
+    return f'case "${var}" in \'\'|*[!0-9]*) exit {{fail_exit}};; esac'
+
+
 def _run_remote_signal(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
     started_at = now_iso()
     host, pidfile = params["host"], params["pidfile"]
     sig, then, grace = params["signal"], params["then"], float(params["grace_s"])
-    script = (f"p=$(cat {shlex.quote(pidfile)} 2>/dev/null) || exit 0; "
-              f"kill -{sig} $p 2>/dev/null || exit 0; "
-              f"for i in $(seq 1 {int(grace * 10)}); do kill -0 $p 2>/dev/null || exit 0; sleep 0.1; done; "
-              f"kill -{then} $p 2>/dev/null; exit 0")
+    pidfile_expr = _remote_path_expr(pidfile)
+    guard = _pid_guard().format(fail_exit=0)  # no valid pid to signal: a clean no-op, not a failure
+    script = (f'p=$(cat {pidfile_expr} 2>/dev/null); {guard}; '
+              f'kill -{sig} "$p" 2>/dev/null || exit 0; '
+              f'for i in $(seq 1 {int(grace * 10)}); do kill -0 "$p" 2>/dev/null || exit 0; sleep 0.1; done; '
+              f'kill -{then} "$p" 2>/dev/null; exit 0')
     res = _remote(ctx, host, ("sh", "-c", script), timeout_s=grace + timeout_s)
     return StepResult(ok=res.status == "completed", started_at=started_at, ended_at=now_iso(),
                       exit_code=res.exit_code, stderr_tail=_redact(res.stderr_preview))
@@ -248,7 +334,7 @@ def _run_window_shot(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> Step
     started_at = now_iso()
     pids = _pgrep(params["pgrep"])
     ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
-    out = ctx.evidence_dir / f"window-{int(time.time())}.png"
+    out = ctx.evidence_dir / f"window-{time.time_ns()}.png"
     ok = bool(pids) and capture_app_window(pids=set(pids), out_path=out)
     return StepResult(ok, started_at, now_iso(), evidence_refs=[str(out)] if ok else [],
                       detail="" if ok else "no window captured")
@@ -257,10 +343,14 @@ def _run_window_shot(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> Step
 def _run_http_action(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
     started_at = now_iso()
     body = _http_get(params["url"], timeout_s)
-    ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
-    out = ctx.evidence_dir / f"http-{int(time.time())}.txt"
-    out.write_text(_redact(body or ""))
-    return StepResult(body is not None, started_at, now_iso(), evidence_refs=[str(out)])
+    ok = body is not None
+    evidence_refs: list[str] = []
+    if ok:
+        ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
+        out = ctx.evidence_dir / f"http-{time.time_ns()}.txt"
+        out.write_text(_redact(body))
+        evidence_refs = [str(out)]
+    return StepResult(ok, started_at, now_iso(), evidence_refs=evidence_refs)
 
 
 def run_action(action: Action, ctx: Ctx, *, timeout_s: float) -> StepResult:
@@ -284,20 +374,38 @@ def run_action(action: Action, ctx: Ctx, *, timeout_s: float) -> StepResult:
 
 # --- checks -------------------------------------------------------------- #
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every HTTP redirect. Checks/probes validate a loopback URL, but
+    that loopback service could itself be tricked (or misconfigured) into
+    issuing a 3xx to an off-box target; silently following it would turn a
+    "read this local port" primitive into unbounded outbound egress."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http_get(url: str, timeout_s: float = 5) -> str | None:
     try:
-        with urllib.request.urlopen(url, timeout=timeout_s) as r:  # noqa: S310 — loopback only (validator)
+        with _OPENER.open(url, timeout=timeout_s) as r:  # noqa: S310 — loopback only (validator); no-redirect opener
             return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        exc.close()  # HTTPError wraps an open fp; close it or it leaks (ResourceWarning)
+        return None
     except Exception:  # noqa: BLE001
         return None
 
 
 def _http_status(url: str, timeout_s: float = 5) -> int | None:
     try:
-        with urllib.request.urlopen(url, timeout=timeout_s) as r:  # noqa: S310
+        with _OPENER.open(url, timeout=timeout_s) as r:  # noqa: S310
             return r.status
     except urllib.error.HTTPError as exc:
-        return exc.code
+        code = exc.code
+        exc.close()  # HTTPError wraps an open fp; close it or it leaks (ResourceWarning)
+        return code
     except Exception:  # noqa: BLE001
         return None
 
@@ -312,7 +420,10 @@ def _pgrep(pattern: str) -> list[int]:
 
 
 def _remote_pid_alive(ctx: Ctx, host: str, pidfile: str) -> bool:
-    res = _remote(ctx, host, ("sh", "-c", f"kill -0 $(cat {shlex.quote(pidfile)})"), 15)
+    pidfile_expr = _remote_path_expr(pidfile)
+    guard = _pid_guard().format(fail_exit=1)  # no valid pid on file: definitely not "alive"
+    script = f'p=$(cat {pidfile_expr} 2>/dev/null); {guard}; kill -0 "$p"'
+    res = _remote(ctx, host, ("sh", "-c", script), 15)
     return res.status == "completed"
 
 
@@ -322,11 +433,8 @@ def run_check(check: Check, ctx: Ctx, *, step_start: float) -> bool:
         return all(run_check(c, ctx, step_start=step_start) for c in p)
     if k == "exit0":
         argv = _guard(tuple(p["argv"]), ctx)
-        try:
-            return subprocess.run(  # noqa: S603 — validated, profile-declared argv
-                list(argv), stdin=subprocess.DEVNULL, capture_output=True, timeout=30).returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        outcome = _spawn_tracked(argv, None, 30, ctx)
+        return outcome.spawn_error is None and outcome.returncode == 0 and not outcome.timed_out
     if k == "http":
         return _http_status(p["url"]) == int(p.get("expect_status", 200))
     if k == "http_json":
