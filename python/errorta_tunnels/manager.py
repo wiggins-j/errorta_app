@@ -211,6 +211,11 @@ class _Tunnel:
     thread: Optional[threading.Thread] = None
     stop: threading.Event = field(default_factory=threading.Event)
     backoff: float = 1.0
+    # monotonic time of the current child's spawn; reverse-only tunnels need
+    # one full watch interval alive before they're trusted as "up" (there's
+    # no local listener to probe, so a bad -R bind wouldn't show up any
+    # other way before ExitOnForwardFailure kills the child).
+    spawned_at: float = 0.0
 
     def _set_state(self, state: str) -> None:
         if state != self.state:
@@ -346,6 +351,7 @@ class TunnelManager:
             if tun.child is None:
                 try:
                     tun.child = self._spawn(build_ssh_argv(tun.spec, tun.local_port))
+                    tun.spawned_at = time.monotonic()
                 except Exception as exc:  # noqa: BLE001
                     with self._lock:
                         tun.last_error = f"spawn failed: {exc}"
@@ -372,8 +378,20 @@ class TunnelManager:
                 tun.backoff = min(tun.backoff * 2, _BACKOFF_MAX)
                 continue
 
-            # Child alive — is the forward actually accepting yet?
-            if tun.spec.reverse_only or _port_accepts(tun.local_port):
+            # Child alive — is the forward actually accepting yet? A reverse-only
+            # tunnel has no local listener to probe, so it earns STATE_UP only
+            # after surviving one full watch interval since its last spawn.
+            if tun.spec.reverse_only:
+                if time.monotonic() - tun.spawned_at >= self._watch_interval:
+                    with self._lock:
+                        if tun.state != STATE_UP:
+                            tun._set_state(STATE_UP)
+                            tun.last_error = ""
+                        tun.backoff = 1.0
+                elif tun.state not in (STATE_CONNECTING, STATE_RECONNECTING):
+                    with self._lock:
+                        tun._set_state(STATE_CONNECTING)
+            elif _port_accepts(tun.local_port):
                 with self._lock:
                     if tun.state != STATE_UP:
                         tun._set_state(STATE_UP)

@@ -94,24 +94,29 @@ class _FakeListener:
 
 
 class _FakeChild:
-    """Stands in for the ssh subprocess: opens the forward's local listener."""
+    """Stands in for the ssh subprocess: opens the forward's local listener
+    (skipped for a reverse-only spec, which has no -L to parse)."""
 
     def __init__(self, argv: list[str]) -> None:
-        # Parse the -L 127.0.0.1:<local>:... to learn which port to open.
-        i = argv.index("-L")
-        local_port = int(argv[i + 1].split(":")[1])
-        self._listener = _FakeListener(local_port)
+        self._listener = None
+        if "-L" in argv:
+            # Parse the -L 127.0.0.1:<local>:... to learn which port to open.
+            i = argv.index("-L")
+            local_port = int(argv[i + 1].split(":")[1])
+            self._listener = _FakeListener(local_port)
         self._dead = threading.Event()
 
     def poll(self):
         return 1 if self._dead.is_set() else None
 
     def die(self) -> None:
-        self._listener.close()
+        if self._listener is not None:
+            self._listener.close()
         self._dead.set()
 
     def kill(self) -> None:
-        self._listener.close()
+        if self._listener is not None:
+            self._listener.close()
         self._dead.set()
 
     def stderr_tail(self) -> str:
@@ -248,3 +253,19 @@ def test_close_stops_one_tunnel() -> None:
     assert mgr.status_for(b) is not None
     assert mgr.close(a) is False
     mgr.teardown()
+
+
+def test_reverse_only_tunnel_goes_up_after_one_watch_interval() -> None:
+    mgr, children = _fast_manager()
+    spec = TunnelSpec(ssh_host="h", remote_port=0, reverse_forwards=((8081, 8081),))
+    try:
+        mgr.ensure(spec, wait=False)
+        # Not trusted "up" the instant the child is spawned...
+        assert mgr.status_for(spec)["state"] != STATE_UP
+        # ...but is once it has survived one watch interval (0.05s here).
+        assert _wait(lambda: mgr.status_for(spec)["state"] == STATE_UP, timeout=2.0)
+        # Killing the child flips it away from "up" again.
+        children[0].die()
+        assert _wait(lambda: mgr.status_for(spec)["state"] != STATE_UP, timeout=2.0)
+    finally:
+        mgr.teardown()
