@@ -31,6 +31,15 @@ _PATH_RE = re.compile(r"^[A-Za-z0-9~/._-]+$")
 
 CHECK_KINDS = {"exit0", "http", "http_json", "file_exists", "file_mtime_newer", "pgrep",
                "pgrep_absent", "tunnel_up", "remote_pid_alive", "all"}
+# Dict-shaped check kinds: exactly these params, nothing else. Fail closed —
+# an unrecognised key is far more likely a typo'd or half-migrated field the
+# runtime silently ignores (see `than`, below) than an intentional no-op.
+CHECK_ALLOWED_KEYS = {
+    "http": {"url", "expect_status"},
+    "http_json": {"url", "path", "equals", "not_equals"},
+    "file_mtime_newer": {"path", "than"},
+    "remote_pid_alive": {"host", "pidfile"},
+}
 PROBE_KINDS = {"http", "remote_pid_alive", "remote_file_mtime_advancing",
                "remote_stdout_advancing", "remote_stdout_matches", "elapsed_lt_s"}
 ACTION_KINDS = {"local", "remote", "remote_signal", "tunnel", "tunnel_close", "window_shot", "http"}
@@ -268,12 +277,20 @@ def _check(raw: Any, hosts: dict[str, Host], tunnels: dict[str, TunnelDef], *, w
         raise ProfileError("bad_check", f"{where}: {kind}")
     if kind == "all":
         return Check(kind, tuple(_check(c, hosts, tunnels, where=where) for c in params))
+    if kind in CHECK_ALLOWED_KEYS:
+        if not isinstance(params, dict):
+            raise ProfileError("bad_check", where)
+        extra = set(params) - CHECK_ALLOWED_KEYS[kind]
+        if extra:
+            raise ProfileError("unknown_key", f"{where}: {kind} {sorted(extra)}")
     if kind == "exit0":
         params = {"argv": _argv(params, where=where)}
         if not (os.path.isabs(params["argv"][0]) or params["argv"][0] in LOCAL_ARGV0_ALLOWLIST):
             raise ProfileError("argv0_not_absolute", where)
     if kind in ("http", "http_json"):
         _loopback_url(params.get("url") if isinstance(params, dict) else None, where=where)
+    if kind == "file_mtime_newer" and "than" in params and params["than"] != "step_start":
+        raise ProfileError("bad_check", f"{where}: than must be 'step_start'")
     if kind == "tunnel_up" and params not in tunnels:
         raise ProfileError("unknown_tunnel", where)
     if kind == "remote_pid_alive" and params.get("host") not in hosts:
@@ -288,11 +305,28 @@ def _probe(raw: Any, hosts: dict[str, Host], *, where: str) -> Probe:
     if kind not in PROBE_KINDS:
         raise ProfileError("bad_probe", f"{where}: {kind}")
     if kind.startswith("remote_"):
-        if params.get("host") not in hosts:
+        if not isinstance(params, dict) or params.get("host") not in hosts:
             raise ProfileError("unknown_host", where)
-        if "argv" in params:
+        # `remote_stdout_advancing`/`remote_stdout_matches` are meaningless
+        # without a command to run — fail closed rather than silently probing
+        # nothing (or crashing at run time on a missing `argv`).
+        if kind in ("remote_stdout_advancing", "remote_stdout_matches"):
+            if "argv" not in params:
+                raise ProfileError("bad_probe", f"{where}: {kind} requires argv")
             params = dict(params, argv=_argv(params["argv"], where=where))
-        if kind == "remote_file_mtime_advancing" and "path" in params:
+        elif "argv" in params:
+            params = dict(params, argv=_argv(params["argv"], where=where))
+        if kind == "remote_stdout_matches":
+            regex = params.get("regex")
+            if not isinstance(regex, str):
+                raise ProfileError("bad_probe", f"{where}: remote_stdout_matches requires regex")
+            try:
+                re.compile(regex)
+            except re.error:
+                raise ProfileError("bad_probe", f"{where}: bad regex {regex!r}") from None
+        if kind == "remote_file_mtime_advancing":
+            if "path" not in params:
+                raise ProfileError("bad_probe", f"{where}: remote_file_mtime_advancing requires path")
             params = dict(params, path=_path(params["path"], where=where))
     if kind == "http":
         _loopback_url(params.get("url") if isinstance(params, dict) else None, where=where)

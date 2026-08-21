@@ -94,6 +94,12 @@ text, not markup.
 - any `ban_signals` regex matching evidence, launch or teardown output →
   `paused_awaiting_human` plus a marker file that refuses every later start of
   that profile until a human runs `resume_live_run`.
+- probes/checks reject unknown parameters: `http`, `http_json`,
+  `file_mtime_newer` and `remote_pid_alive` checks only accept their
+  documented keys, and `remote_stdout_advancing` / `remote_stdout_matches` /
+  `remote_file_mtime_advancing` probes require the `argv` / `regex` / `path`
+  they depend on — an unrecognised or missing field fails the load rather
+  than being silently ignored at run time.
 
 ## Stopping, and what a literal means
 

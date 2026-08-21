@@ -103,6 +103,23 @@ def test_minimal_profile_loads(tmp_path: Path) -> None:
     # --- fix round 1: uniform numeric guarding ---
     (lambda d: d["launch"][0].update(timeout_s="abc"), "bad_number"),
     (lambda d: d.update(caps={"max_launches_per_hour": "two"}), "bad_number"),
+    # --- fix round 2: fail-closed unknown check-param keys, per kind ---
+    (lambda d: d["launch"][0].update(check={"http": {"url": "http://127.0.0.1:1/x",
+        "expect_status": 200, "bogus": 1}}), "unknown_key"),
+    (lambda d: d["teardown"][0]["check"]["http_json"].update(bogus=1), "unknown_key"),
+    (lambda d: d["launch"][0].update(check={"remote_pid_alive": {
+        "host": "box", "pidfile": "~/x.pid", "bogus": 1}}), "unknown_key"),
+    (lambda d: d["launch"][0].update(check={"file_mtime_newer": {
+        "path": "/tmp/x", "bogus": 1}}), "unknown_key"),
+    (lambda d: d["launch"][0].update(check={"file_mtime_newer": {
+        "path": "/tmp/x", "than": "not_step_start"}}), "bad_check"),
+    # --- fix round 2: fail-closed required fields on remote_* probes ---
+    (lambda d: d["watch"][0].update(probe={"remote_stdout_advancing": {"host": "box"}}), "bad_probe"),
+    (lambda d: d["watch"][0].update(probe={"remote_stdout_matches": {
+        "host": "box", "argv": ["/bin/true"]}}), "bad_probe"),
+    (lambda d: d["watch"][0].update(probe={"remote_stdout_matches": {
+        "host": "box", "argv": ["/bin/true"], "regex": "("}}), "bad_probe"),
+    (lambda d: d["watch"][0].update(probe={"remote_file_mtime_advancing": {"host": "box"}}), "bad_probe"),
 ])
 def test_validator_rejects(tmp_path: Path, mutate, code: str) -> None:
     doc = _minimal(); mutate(doc)
@@ -193,6 +210,34 @@ def test_remote_signal_accepts_valid_fields(tmp_path: Path) -> None:
                            "then": "KILL", "grace_s": 5},
         "timeout_s": 1,
     })
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+# --- fix round 2 coverage --------------------------------------------------- #
+
+def test_remote_stdout_advancing_with_argv_passes(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["watch"][0]["probe"] = {"remote_stdout_advancing": {"host": "box",
+        "argv": ["tail", "-n", "1", "/tmp/x.log"]}}
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_remote_stdout_matches_with_argv_and_regex_passes(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["watch"][0]["probe"] = {"remote_stdout_matches": {"host": "box",
+        "argv": ["tail", "-n", "1", "/tmp/x.log"], "regex": r'"live":\s*true'}}
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_remote_file_mtime_advancing_with_path_passes(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["watch"][0]["probe"] = {"remote_file_mtime_advancing": {"host": "box", "path": "/tmp/x.log"}}
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_file_mtime_newer_check_accepts_than_step_start(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["launch"][0]["check"] = {"file_mtime_newer": {"path": "/tmp/x", "than": "step_start"}}
     P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
 
 
