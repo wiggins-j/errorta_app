@@ -75,6 +75,26 @@ def test_minimal_profile_loads(tmp_path: Path) -> None:
     (lambda d: d["launch"][0].update(remote={"host": "nope", "argv": ["true"]}, local=None), "unknown_host"),
     (lambda d: d["launch"][0].update(remote={"host": "box", "argv": [
         "python", "-m", "senditai_ng.cli", "run", "--execute"]}, local=None), "brain_flags_missing"),
+    # --- fix round 1: SSRF-bypassable loopback check ---
+    (lambda d: d["watch"][0]["probe"]["http"].update(url="http://127.0.0.1.evil.com/x"), "http_not_loopback"),
+    (lambda d: d["watch"][0]["probe"]["http"].update(url="http://127.0.0.1@evil.com/x"), "http_not_loopback"),
+    # --- fix round 1: remote_signal fields never validated ---
+    (lambda d: d["teardown"].append({"name": "kill", "remote_signal": {
+        "host": "box", "pidfile": "~/x.pid", "signal": "TERM; rm -rf /"}, "timeout_s": 1}), "bad_remote_signal"),
+    (lambda d: d["teardown"].append({"name": "kill", "remote_signal": {
+        "host": "box", "pidfile": "~/x.pid; rm -rf /", "signal": "TERM"}, "timeout_s": 1}), "bad_path"),
+    # --- fix round 1: same path regex applies to remote.pidfile / remote.log / remote_file_mtime_advancing.path ---
+    (lambda d: d["launch"][0].update(remote={"host": "box", "argv": ["/bin/true"],
+        "detach": True, "pidfile": "~/x.pid; rm -rf /"}, local=None), "bad_path"),
+    (lambda d: d["launch"][0].update(remote={"host": "box", "argv": ["/bin/true"],
+        "log": "~/x.log; rm -rf /"}, local=None), "bad_path"),
+    (lambda d: d["watch"][0].update(probe={"remote_file_mtime_advancing": {
+        "host": "box", "path": "~/x.log; rm -rf /"}}), "bad_path"),
+    # --- fix round 1: banned-token exact-match-only bypass via "=value" ---
+    (lambda d: d["launch"][0].update(local={"argv": ["/bin/true", "--ignore-risk-budget=1"]}), "banned_token"),
+    # --- fix round 1: uniform numeric guarding ---
+    (lambda d: d["launch"][0].update(timeout_s="abc"), "bad_number"),
+    (lambda d: d.update(caps={"max_launches_per_hour": "two"}), "bad_number"),
 ])
 def test_validator_rejects(tmp_path: Path, mutate, code: str) -> None:
     doc = _minimal(); mutate(doc)
@@ -100,6 +120,16 @@ def test_brain_run_with_required_flags_passes(tmp_path: Path) -> None:
     doc["launch"][0] = {"name": "brain", "remote": {"host": "box", "argv": [
         "python", "-m", "senditai_ng.cli", "run", "--max-session-seconds", "3600",
         "--receipt-id", "r", "--require-live-feed"], "detach": True,
+        "pidfile": "~/x.pid"}, "check": {"remote_pid_alive": {"host": "box", "pidfile": "~/x.pid"}},
+        "timeout_s": 5}
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_brain_run_accepts_equals_form_flags(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["launch"][0] = {"name": "brain", "remote": {"host": "box", "argv": [
+        "python", "-m", "senditai_ng.cli", "run", "--max-session-seconds=3600",
+        "--receipt-id=r", "--require-live-feed"], "detach": True,
         "pidfile": "~/x.pid"}, "check": {"remote_pid_alive": {"host": "box", "pidfile": "~/x.pid"}},
         "timeout_s": 5}
     P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
@@ -137,3 +167,33 @@ def test_list_profiles_reports_validity(tmp_path: Path) -> None:
     rows = {r["name"]: r for r in P.list_profiles(known_hosts_fn=_ok_hosts)}
     assert rows["good"]["valid"] is True
     assert rows["bad"]["valid"] is False and rows["bad"]["error"] == "created_by_not_operator"
+
+
+# --- fix round 1 coverage -------------------------------------------------- #
+
+def test_loopback_url_with_port_accepted(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["watch"][0]["probe"]["http"]["url"] = "http://127.0.0.1:8081/state"
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_remote_signal_accepts_valid_fields(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["teardown"].append({
+        "name": "kill",
+        "remote_signal": {"host": "box", "pidfile": "~/x.pid", "signal": "TERM",
+                           "then": "KILL", "grace_s": 5},
+        "timeout_s": 1,
+    })
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_list_profiles_survives_malformed_yaml(tmp_path: Path) -> None:
+    _write(tmp_path, _minimal(), "good")
+    bad = _minimal()
+    bad["hosts"] = ["not", "a", "dict"]
+    _write(tmp_path, bad, "bad")
+    rows = {r["name"]: r for r in P.list_profiles(known_hosts_fn=_ok_hosts)}
+    assert rows["good"]["valid"] is True
+    assert rows["bad"]["valid"] is False
+    assert rows["bad"]["error"] in ("bad_host", "profile_malformed")
