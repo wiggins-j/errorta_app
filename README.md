@@ -273,6 +273,12 @@ of Slack — no import, no connection, no routes.
   start and stop the coding run, launch or stop the runtime preview, resolve a
   pending decision, or change which model a role (pm/dev/reviewer/tester) uses —
   all in chat. See [`docs/SLACK_PM_BRIDGE.md`](docs/SLACK_PM_BRIDGE.md).
+- **Live-run supervisor** — launch, watch, and safely stop a long-running
+  program (a game client and its brain, a soak test, a training job) from
+  Slack. It runs only what you declared in an operator-authored profile on
+  disk, watches it by wall clock, and always tears it down through evidence →
+  teardown → a `logoff_verified` literal. See
+  [`docs/liverun/README.md`](docs/liverun/README.md).
 - **A hybrid trust model that survives prompt injection.** Reads and reversible
   actions run straight from your message. Every irreversible one — spending on a
   cloud model call, opening a public PR, starting a run, creating or archiving a
