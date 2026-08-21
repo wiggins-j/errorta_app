@@ -2224,3 +2224,25 @@ async def test_bare_stop_still_stops_the_live_run_when_the_runtime_stop_refuses(
     bridge._default_cancel_hook("700.2", {"channel_id": "C1", "project_id": "proj-a"})
 
     assert seen == ["stop_runtime", "stop_live_run"]
+
+
+async def test_the_cancel_hook_survives_a_supervisor_that_explodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hook runs inside the per-thread worker's supervisor loop: anything
+    escaping it kills that thread and the channel stops answering entirely.
+    `stop_live_run` reaches a subsystem that drives real processes, so it can
+    fail in ways this module has no vocabulary for."""
+    store.bind_channel("C1", "proj-a")
+    seen: list[str] = []
+
+    def _dispatch(verb, args, *, channel_id, thread_ts, confirmed_via=None, deps):
+        seen.append(verb)
+        raise RuntimeError("the supervisor blew up")
+
+    monkeypatch.setattr(tools, "dispatch", _dispatch)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    bridge._default_cancel_hook("700.3", {"channel_id": "C1", "project_id": "proj-a"})
+
+    assert seen == ["stop_runtime", "stop_live_run"]

@@ -415,6 +415,17 @@ class SlackBridge:
                 )
             except tools.ToolError:
                 continue
+            except Exception:  # noqa: BLE001
+                # Not just ToolError. This hook runs inside the per-thread
+                # worker's supervisor loop, and anything escaping it kills
+                # that thread -- the channel then answers nothing at all.
+                # `stop_live_run` reaches the live-run supervisor, a
+                # subsystem that drives real processes and can fail in ways
+                # this module has no vocabulary for; the docstring's "never
+                # raises" has to hold against those too.
+                _LOGGER.warning(
+                    "slack bridge: cancel hook's %s failed", verb, exc_info=True)
+                continue
 
     async def wait_idle(self, thread_ts: str, *, timeout: float = 2.0) -> None:
         """Test/ops helper: block until ``thread_ts``'s queue is empty and
