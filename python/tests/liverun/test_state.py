@@ -78,3 +78,101 @@ def test_launch_ledger_is_per_profile(tmp_path: Path) -> None:
     led = LaunchLedger(); caps = Caps()
     led.record("p", "r1", 0.0)
     assert led.check("q", caps, 1.0) is None
+
+
+def test_load_returns_none_on_corrupt_json(tmp_path: Path) -> None:
+    store = RunStore()
+    st = _state(store)
+    store.save(st)
+    (tmp_path / "liverun" / "runs" / st.run_id / "state.json").write_text("{not json")
+    assert store.load(st.run_id) is None
+
+
+def test_load_returns_none_on_json_list(tmp_path: Path) -> None:
+    store = RunStore()
+    st = _state(store)
+    store.save(st)
+    (tmp_path / "liverun" / "runs" / st.run_id / "state.json").write_text("[1, 2, 3]")
+    assert store.load(st.run_id) is None
+
+
+def test_events_skips_garbage_lines(tmp_path: Path) -> None:
+    store = RunStore()
+    st = _state(store)
+    store.save(st)
+    events_path = tmp_path / "liverun" / "runs" / st.run_id / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"seq": 1, "at": "t", "kind": "phase", "detail": {}}),
+        "not json at all",
+        json.dumps([1, 2, 3]),
+        json.dumps({"seq": "x", "at": "t", "kind": "bad-seq", "detail": {}}),
+        json.dumps({"seq": 2, "at": "t", "kind": "step", "detail": {}}),
+    ]
+    events_path.write_text("\n".join(lines) + "\n")
+    evs = store.events(st.run_id)
+    assert [e["seq"] for e in evs] == [1, 2]
+    assert [e["kind"] for e in evs] == ["phase", "step"]
+
+
+def test_launch_ledger_check_survives_garbage_and_missing_at(tmp_path: Path) -> None:
+    led = LaunchLedger(tmp_path / "garbage.jsonl")
+    caps = Caps(max_launches_per_hour=2, min_launch_gap_s=900, max_launches_per_day=3,
+                max_consecutive_failed_cycles=2)
+    led._path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "not json",
+        json.dumps({"kind": "launch", "profile": "p", "run_id": "bad"}),  # missing "at"
+        json.dumps({"kind": "launch", "profile": "p", "run_id": "r1", "at": 1_000_000.0}),
+    ]
+    led._path.write_text("\n".join(lines) + "\n")
+    assert led.check("p", caps, 1_000_000.0 + 10) == "cap_gap"
+    assert led.check("p", caps, 1_000_000.0 + 3700) is None
+
+
+def test_run_state_from_dict_partial_fills_defaults() -> None:
+    st = RunState.from_dict({"run_id": "r", "profile_name": "p", "phase": "idle"})
+    assert st.run_id == "r"
+    assert st.profile_name == "p"
+    assert st.phase == "idle"
+    assert st.project_id is None
+    assert st.reason is None
+    assert st.session_id is None
+    assert st.step_index is None
+    assert st.started_at is None
+    assert st.launched_at is None
+    assert st.ended_at is None
+    assert st.owned_pgids == []
+    assert st.owned_remote_pidfiles == []
+    assert st.owned_tunnels == []
+    assert st.probe_last_ok == {}
+    assert st.probe_last_value == {}
+    assert st.literals == {}
+    assert st.evidence_dir == ""
+
+
+def test_append_event_is_concurrency_safe_across_threads(tmp_path: Path) -> None:
+    import threading
+
+    store = RunStore()
+    st = _state(store)
+    store.save(st)
+
+    n_threads = 8
+    per_thread = 25
+    seqs: list[int] = []
+    seqs_lock = threading.Lock()
+
+    def worker() -> None:
+        for i in range(per_thread):
+            seq = store.append_event(st.run_id, "tick", {"i": i})
+            with seqs_lock:
+                seqs.append(seq)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(seqs) == list(range(1, n_threads * per_thread + 1))

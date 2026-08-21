@@ -2,9 +2,11 @@
 and the launch ledger that enforces caps across restarts (spec §3.6)."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import secrets
+import threading
 from dataclasses import MISSING, asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,31 @@ TERMINAL_PHASES = {"stopped", "failed", "paused_awaiting_human", "lost_on_restar
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL file, tolerantly. Skips blank lines, lines that don't
+    parse as JSON, and lines that parse but aren't a JSON object — callers
+    can then trust every returned row is a dict, though individual fields
+    on it may still be missing or malformed and must be checked."""
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
 
 
 @dataclass
@@ -62,7 +89,7 @@ class RunState:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
     os.replace(tmp, path)
@@ -71,6 +98,11 @@ def _atomic_write(path: Path, text: str) -> None:
 class RunStore:
     def __init__(self, root: Path | None = None) -> None:
         self._root = Path(root) if root else errorta_home() / "liverun" / "runs"
+        # Guards the read-count-then-append in append_event against concurrent
+        # callers *within this process* (e.g. the supervisor thread and a
+        # second caller sharing one RunStore). The fcntl flock below covers
+        # concurrent *processes* touching the same events.jsonl.
+        self._event_lock = threading.Lock()
 
     def new_run_id(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(3)
@@ -90,7 +122,13 @@ class RunStore:
         if not p.is_file():
             return None
         try:
-            return RunState.from_dict(json.loads(p.read_text()))
+            data = json.loads(p.read_text())
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            return RunState.from_dict(data)
         except (ValueError, TypeError):
             return None
 
@@ -106,23 +144,43 @@ class RunStore:
 
     def append_event(self, run_id: str, kind: str, detail: dict[str, Any]) -> int:
         p = self._dir(run_id) / "events.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        seq = len(self.events(run_id)) + 1
-        with p.open("a") as fh:
-            fh.write(json.dumps({"seq": seq, "at": now_iso(), "kind": kind, "detail": detail}) + "\n")
+        _ensure_dir(p.parent)
+        with self._event_lock:
+            with p.open("a+") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    fh.seek(0)
+                    count = 0
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(row, dict):
+                            count += 1
+                    seq = count + 1
+                    # "a+" is opened O_APPEND, so this write lands at EOF
+                    # regardless of the read seek position above.
+                    fh.write(json.dumps({"seq": seq, "at": now_iso(), "kind": kind,
+                                          "detail": detail}) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         return seq
 
     def events(self, run_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
         p = self._dir(run_id) / "events.jsonl"
-        if not p.is_file():
-            return []
         out = []
-        for line in p.read_text().splitlines():
+        for ev in _read_jsonl(p):
             try:
-                ev = json.loads(line)
-            except ValueError:
+                seq = int(ev["seq"])
+            except (KeyError, TypeError, ValueError):
                 continue
-            if int(ev.get("seq", 0)) > after_seq:
+            if seq > after_seq:
                 out.append(ev)
         return out
 
@@ -135,18 +193,10 @@ class LaunchLedger:
         self._path = Path(path) if path else errorta_home() / "liverun" / "launches.jsonl"
 
     def _rows(self) -> list[dict[str, Any]]:
-        if not self._path.is_file():
-            return []
-        rows = []
-        for line in self._path.read_text().splitlines():
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue
-        return rows
+        return _read_jsonl(self._path)
 
     def _append(self, row: dict[str, Any]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_dir(self._path.parent)
         with self._path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
 
@@ -158,20 +208,39 @@ class LaunchLedger:
 
     def check(self, profile_name: str, caps: Caps, now: float) -> str | None:
         rows = self._rows()
-        launches = [r for r in rows if r.get("kind") == "launch" and r.get("profile") == profile_name]
+        launches: list[tuple[float, str]] = []
+        for r in rows:
+            if r.get("kind") != "launch" or r.get("profile") != profile_name:
+                continue
+            try:
+                at = float(r["at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            run_id = r.get("run_id")
+            if not isinstance(run_id, str):
+                continue
+            launches.append((at, run_id))
         if not launches:
             return None
-        last = max(float(r["at"]) for r in launches)
+        last = max(at for at, _ in launches)
         if now - last < caps.min_launch_gap_s:
             return "cap_gap"
-        if sum(1 for r in launches if now - float(r["at"]) < 3600) >= caps.max_launches_per_hour:
+        if sum(1 for at, _ in launches if now - at < 3600) >= caps.max_launches_per_hour:
             return "cap_hourly"
-        if sum(1 for r in launches if now - float(r["at"]) < 86400) >= caps.max_launches_per_day:
+        if sum(1 for at, _ in launches if now - at < 86400) >= caps.max_launches_per_day:
             return "cap_daily"
-        outcomes = {r["run_id"]: bool(r["failed"]) for r in rows if r.get("kind") == "outcome"}
+        outcomes: dict[str, bool] = {}
+        for r in rows:
+            if r.get("kind") != "outcome":
+                continue
+            run_id = r.get("run_id")
+            failed = r.get("failed")
+            if not isinstance(run_id, str) or not isinstance(failed, bool):
+                continue
+            outcomes[run_id] = failed
         streak = 0
-        for r in sorted(launches, key=lambda r: float(r["at"]), reverse=True):
-            failed = outcomes.get(r["run_id"])
+        for _at, run_id in sorted(launches, key=lambda t: t[0], reverse=True):
+            failed = outcomes.get(run_id)
             if failed is None:
                 continue
             if not failed:
