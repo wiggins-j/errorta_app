@@ -34,6 +34,7 @@ callable fields default to real (but lazily-imported) implementations.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -98,6 +99,40 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "stop_runtime": {
         "trust": "R",
         "summary": "Stop the bound project's runtime preview.",
+    },
+    "list_live_profiles": {
+        "trust": "R",
+        "summary": "List the operator-authored live-run profiles and whether each validates.",
+    },
+    "start_live_run": {
+        "trust": "C",
+        "args": (("profile", True, "the live-run profile name, from list_live_profiles"),),
+        "summary": (
+            "Launch the bound project's live run from a profile and supervise "
+            "it by wall-clock."
+        ),
+    },
+    "stop_live_run": {
+        "trust": "R",
+        "summary": (
+            "Stop the live run now: collect evidence, log off, tear down. "
+            "Never waits for approval."
+        ),
+    },
+    "live_status": {
+        "trust": "R",
+        "summary": (
+            "Phase, elapsed time, per-probe health ages, and teardown literals "
+            "of the live run."
+        ),
+    },
+    "resume_live_run": {
+        "trust": "C",
+        "args": (("profile", True, "the paused profile to clear for launching again"),),
+        "summary": (
+            "Clear a paused-awaiting-human hold on a profile (human approval "
+            "only; autopilot never fires this)."
+        ),
     },
     "set_updates": {
         "trust": "R",
@@ -201,6 +236,20 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 
+
+# Verbs autopilot must NEVER auto-approve (spec 2026-08-21 §3.7) -- a human
+# taps these. `resume_live_run` clears a hold the supervisor put on a profile
+# *because* something ban-class or cap-class happened; the hold's entire value
+# is that a person looks before the client launches again. Autopilot clearing
+# its own hold is a loop, not a gate. Enforced in
+# `connection._handle_staged_confirmations`, not in `dispatch` -- the trust
+# class already makes these staged-only; this narrows WHO may confirm.
+HUMAN_ONLY_VERBS: frozenset[str] = frozenset({"resume_live_run"})
+
+# A profile name indexes a file on disk (`~/.errorta/liverun/profiles/<name>.
+# yaml`), so it is a plain name and nothing else -- no separators, no leading
+# dot, no traversal.
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 # --------------------------------------------------------------------------
 # Real (lazily-imported) defaults for the engine-side seams
@@ -344,6 +393,16 @@ class ToolDeps:
     # routed through the team's configured gateway route. `None` means no model
     # is wired up — `propose_next_goal` refuses cleanly rather than crashing.
     goal_caller: Callable[[dict[str, Any], str], str] | None = None
+    # Live-run supervisor seams (spec 2026-08-21 §3.7). `None` (not the real
+    # callable) for the same reason `start_run_fn` is: the default resolves
+    # lazily inside the verb impl, so importing `tools` -- which every bridge
+    # start does -- never imports `errorta_liverun` and its launch/subprocess
+    # machinery.
+    liverun_list_fn: Callable[[], list[dict[str, Any]]] | None = None
+    liverun_start_fn: Callable[[str, str | None], dict[str, Any]] | None = None
+    liverun_stop_fn: Callable[[str | None], dict[str, Any]] | None = None
+    liverun_status_fn: Callable[[str | None], dict[str, Any]] | None = None
+    liverun_resume_fn: Callable[[str], dict[str, Any]] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -562,6 +621,71 @@ def stop_runtime(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     except RuntimeProcessError as exc:
         return {"status": "error", "detail": str(exc)}
     return {"status": "stopped"}
+
+
+# --- Live-run supervisor verbs --------------------------------------------
+
+
+def _profile_arg(value: Any) -> str:
+    name = str(value or "").strip()
+    if not _PROFILE_NAME_RE.match(name):
+        raise ToolError(
+            "bad_profile_name",
+            "profile must be a plain name (letters, digits, . _ -) naming an "
+            "operator-authored profile — see list_live_profiles",
+        )
+    return name
+
+
+def _liverun() -> Any:
+    """The supervisor singleton, imported at CALL time. See ToolDeps."""
+    from errorta_liverun.supervisor import live_run_manager
+
+    return live_run_manager
+
+
+def list_live_profiles(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                       deps: "ToolDeps") -> dict[str, Any]:
+    if deps.liverun_list_fn is not None:
+        rows = deps.liverun_list_fn()
+    else:
+        from errorta_liverun.profile import list_profiles
+
+        rows = list_profiles()
+    return {"status": "ok", "profiles": list(rows)}
+
+
+def start_live_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                   deps: "ToolDeps") -> dict[str, Any]:
+    project_id = _bound_project_id(deps, channel_id)
+    name = _profile_arg(args.get("profile"))
+    fn = deps.liverun_start_fn or (lambda p, pid: _liverun().start(p, project_id=pid))
+    return fn(name, project_id)
+
+
+def stop_live_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                  deps: "ToolDeps") -> dict[str, Any]:
+    project_id = _bound_project_id(deps, channel_id)
+    fn = deps.liverun_stop_fn or (lambda pid: _liverun().stop(project_id=pid))
+    return fn(project_id)
+
+
+def live_status(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                deps: "ToolDeps") -> dict[str, Any]:
+    project_id = _bound_project_id(deps, channel_id)
+    fn = deps.liverun_status_fn or (lambda pid: _liverun().status(project_id=pid))
+    return fn(project_id)
+
+
+def resume_live_run(args: dict[str, Any], *, channel_id: str, thread_ts: str,
+                    deps: "ToolDeps") -> dict[str, Any]:
+    # A resume is scoped to a profile, not a project, but it still only
+    # answers from a bound channel -- an unbound channel has no business
+    # clearing another project's hold.
+    _bound_project_id(deps, channel_id)
+    name = _profile_arg(args.get("profile"))
+    fn = deps.liverun_resume_fn or (lambda p: _liverun().resume(p))
+    return fn(name)
 
 
 def queue_bugs(args: dict[str, Any], *, channel_id: str, thread_ts: str,
@@ -939,6 +1063,11 @@ _VERB_IMPLS: dict[str, Callable[..., dict[str, Any]]] = {
     "recent_activity": recent_activity,
     "launch_runtime": launch_runtime,
     "stop_runtime": stop_runtime,
+    "list_live_profiles": list_live_profiles,
+    "start_live_run": start_live_run,
+    "stop_live_run": stop_live_run,
+    "live_status": live_status,
+    "resume_live_run": resume_live_run,
     "list_open_tasks": list_open_tasks,
     "cancel_task": cancel_task,
     "unblock_task": unblock_task,
@@ -985,4 +1114,5 @@ def dispatch(verb: str, args: dict[str, Any], *, channel_id: str, thread_ts: str
     return impl(safe_args, channel_id=channel_id, thread_ts=thread_ts, deps=deps)
 
 
-__all__ = ["ToolError", "ToolDeps", "TOOL_CATALOG", "NOT_DONE_STATUSES", "dispatch"]
+__all__ = ["ToolError", "ToolDeps", "TOOL_CATALOG", "NOT_DONE_STATUSES",
+           "HUMAN_ONLY_VERBS", "dispatch"]
