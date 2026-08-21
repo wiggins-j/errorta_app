@@ -4,7 +4,7 @@ from __future__ import annotations
 import http.server
 import os
 import stat
-import tempfile
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -177,14 +177,30 @@ def test_remote_detach_records_pidfile(tmp_path: Path, fake_ssh: Path) -> None:
 def test_remote_detach_bad_pidfile_dir_fails(tmp_path: Path, fake_ssh: Path) -> None:
     pidfile = str(tmp_path / "no-such-dir" / "b.pid")
     log = str(tmp_path / "b.log")
-    action = P.Action("remote", {"host": "box", "argv": ("sleep", "5"), "detach": True,
+    # A distinctive, essentially-unique sleep duration doubles as the argv
+    # `pgrep -f` needs to find (or fail to find) the orphaned child below.
+    duration = str(210000 + (os.getpid() % 9000))
+    action = P.Action("remote", {"host": "box", "argv": ("sleep", duration), "detach": True,
                                  "pidfile": pidfile, "stdin_file": None, "log": log})
     prof = _profile_with_step(tmp_path, action)
     ctx = _ctx(tmp_path, prof, fake_ssh)
-    res = S.run_action(action, ctx, timeout_s=5)
-    assert not res.ok
-    assert ctx.owned_remote_pidfiles == []
-    assert not Path(pidfile).exists()
+    try:
+        res = S.run_action(action, ctx, timeout_s=5)
+        assert not res.ok
+        assert ctx.owned_remote_pidfiles == []
+        assert not Path(pidfile).exists()
+        # The pidfile write failed, but the child had already spawned by
+        # then — the wrapper must kill it rather than leave an orphan that
+        # nothing will ever signal again.
+        time.sleep(0.3)
+        survivors = subprocess.run(
+            ["pgrep", "-f", f"sleep {duration}"], capture_output=True, text=True
+        ).stdout.split()
+        assert survivors == [], f"orphaned process(es) still running: {survivors}"
+    finally:
+        # Best-effort cleanup even on assertion failure, so a regression in
+        # this test doesn't leave a real `sleep` process running for hours.
+        subprocess.run(["pkill", "-f", f"sleep {duration}"], capture_output=True)
 
 
 def test_remote_detach_nonexistent_command_fails(tmp_path: Path, fake_ssh: Path) -> None:
@@ -244,7 +260,9 @@ def test_remote_stdin_file_non_detached(tmp_path: Path, fake_ssh: Path) -> None:
     assert "hello-stdin" in res.stdout_tail
 
 
-def test_remote_detach_stdin_file_and_tempfile_cleanup(tmp_path: Path, fake_ssh: Path) -> None:
+def test_remote_detach_stdin_file_and_tempfile_cleanup(
+    tmp_path: Path, fake_ssh: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # `cat` alone would consume the tiny payload and exit almost instantly —
     # too fast for the wrapper's post-spawn `kill -0` liveness check, which
     # this test also wants to exercise. `cat; sleep 2` reads+echoes stdin
@@ -256,13 +274,19 @@ def test_remote_detach_stdin_file_and_tempfile_cleanup(tmp_path: Path, fake_ssh:
     prof = _profile_with_step(tmp_path, action)
     ctx = _ctx(tmp_path, prof, fake_ssh)
 
-    tmp_dir = Path(tempfile.gettempdir())
-    before = {p.name for p in tmp_dir.iterdir()}
+    # Point the (fake) remote's mktemp at a private, empty per-test directory
+    # instead of counting entries in the shared system tmp dir — that count
+    # is flake-prone under a concurrently-running test suite (or anything
+    # else on the machine) creating/removing its own unrelated tmp files in
+    # the same window.
+    remote_tmp = tmp_path / "remote_tmp"
+    remote_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(remote_tmp))
+
     res = S.run_action(action, ctx, timeout_s=5)
-    after = {p.name for p in tmp_dir.iterdir()}
 
     assert res.ok
-    assert after == before  # the mktemp token file left nothing behind
+    assert list(remote_tmp.iterdir()) == []  # the mktemp token file left nothing behind
     pid = int(Path(pidfile).read_text().strip())
     os.kill(pid, 0)  # still alive (sleep 2)
     assert Path(log).read_text().strip() == "payload-xyz"
@@ -412,16 +436,23 @@ def test_tunnel_action_and_check_and_close(tmp_path: Path) -> None:
     assert not S.run_check(P.Check("tunnel_up", "t1"), ctx, step_start=0.0)
 
 
-def test_remote_pid_alive_and_signal_reject_non_numeric_pidfile(tmp_path: Path, fake_ssh: Path) -> None:
-    pidfile = tmp_path / "bad.pid"; pidfile.write_text("-1")
+@pytest.mark.parametrize("bad_pid", ["-1", "0"])
+def test_remote_pid_alive_and_signal_reject_non_numeric_pidfile(
+    tmp_path: Path, fake_ssh: Path, bad_pid: str
+) -> None:
+    # "-1" is the classic "signal every process this user can reach"
+    # broadcast target; "0" means "every process in the caller's own
+    # process group" — both are dangerous to ever pass through unguarded,
+    # neither is a valid single-process pid.
+    pidfile = tmp_path / "bad.pid"; pidfile.write_text(bad_pid)
     ctx = _ctx(tmp_path, _profile(tmp_path), fake_ssh)
     assert not S.run_check(
         P.Check("remote_pid_alive", {"host": "box", "pidfile": str(pidfile)}), ctx, step_start=0.0)
     sig = P.Action("remote_signal", {"host": "box", "pidfile": str(pidfile), "signal": "TERM",
                                      "grace_s": 0.1, "then": "KILL"})
     res = S.run_action(sig, ctx, timeout_s=5)
-    assert res.ok  # the guard makes this a clean no-op, not an actual "kill -TERM -1" broadcast
-    # If the guard had NOT fired, "kill -TERM -1" would signal every process
-    # this user can reach, including this very test process. Confirm it's
-    # still here.
+    assert res.ok  # the guard makes this a clean no-op, not an actual broadcast kill
+    # If the guard had NOT fired, this would have signalled every process
+    # this user can reach (or the whole process group). Confirm this very
+    # test process is still here.
     os.kill(os.getpid(), 0)

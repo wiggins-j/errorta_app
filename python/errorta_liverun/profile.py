@@ -1,4 +1,9 @@
-"""Profile schema + fail-closed validator (spec §3.2)."""
+"""Profile schema + fail-closed validator (spec §3.2).
+
+A `remote` action with `detach: true` requires a long-lived command: the
+launcher (`errorta_liverun.steps`) checks liveness ~0.2s after spawn, so
+anything that exits within that window is reported as a failed launch.
+"""
 from __future__ import annotations
 
 import os

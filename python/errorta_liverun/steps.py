@@ -65,9 +65,15 @@ class Ctx:
 
 
 def _redact(text: str) -> str:
-    # Redact the FULL text first, then truncate — truncating first can slice a
-    # secret-shaped token in half, leaving an un-redacted fragment behind.
-    redacted = "\n".join(redact_log_line(line) for line in text.splitlines())
+    # Redact the FULL (but bounded) text first, then truncate — truncating
+    # before redacting can slice a secret-shaped token in half, leaving an
+    # un-redacted fragment behind. The generous 4x cap on the INPUT keeps a
+    # very chatty local command's redaction pass bounded without risking the
+    # same mid-token slice this comment is warning about (stdout/stderr from
+    # RemoteToolRunner is already capped by DEFAULT_MAX_OUTPUT_BYTES; local
+    # subprocess output isn't, so this is the backstop for that path).
+    capped = text[-(_TAIL * 4):]
+    redacted = "\n".join(redact_log_line(line) for line in capped.splitlines())
     return redacted[-_TAIL:]
 
 
@@ -146,9 +152,12 @@ def _remote(ctx: Ctx, host_id: str, argv: tuple[str, ...], timeout_s: float = 20
     # somewhere to bite, and every decision is logged for the record.
     decision = evaluate_runner_launch(request, phase=PolicyPhase.REMOTE_EGRESS,
                                       policy={"action": "allow"})
-    _LOG.info("policy decision for remote egress host=%s action=%s reason=%s",
-             host_id, decision.action, decision.reason_code)
-    if decision.action != PolicyAction.ALLOW:
+    if decision.action == PolicyAction.ALLOW:
+        _LOG.debug("policy decision for remote egress host=%s action=%s reason=%s",
+                  host_id, decision.action, decision.reason_code)
+    else:
+        _LOG.warning("policy decision for remote egress host=%s action=%s reason=%s",
+                     host_id, decision.action, decision.reason_code)
         return _blocked_remote_result(request, decision.reason_code)
     return ctx.remote.run_sync(request, stdin_path=stdin_path)
 
@@ -251,27 +260,42 @@ def _run_remote(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResul
         # so fall back to plain `nohup` there — under a non-interactive ssh
         # command there's no controlling tty to detach from either way.
         #
-        # `echo "$pid" > PIDFILE || exit 92`: fail loudly if the pidfile
-        # can't be written (e.g. its directory doesn't exist) — previously
-        # this wrapper's exit status was just `rm -f`'s, so a launch that
-        # never even started could still report `ok=True` and let teardown
-        # emit `logoff_verified` for a process it never signalled.
+        # `echo "$pid" > PIDFILE || { kill "$pid"; exit 92; }`: fail loudly
+        # if the pidfile can't be written (e.g. its directory doesn't exist)
+        # — previously this wrapper's exit status was just `rm -f`'s, so a
+        # launch that never even started could still report `ok=True` and
+        # let teardown emit `logoff_verified` for a process it never
+        # signalled. And since the child is ALREADY RUNNING by this point,
+        # a pidfile write failure would otherwise leave it as an untracked
+        # orphan, so this also kills it before giving up.
         #
-        # `sleep 0.2; kill -0 "$pid" 2>/dev/null || exit 93`: confirm the
-        # backgrounded process is actually alive (catches an immediate exec
-        # failure, e.g. `nohup: exec: no such file`, that would otherwise
-        # leave a dead pid quietly sitting in the pidfile).
+        # `sleep 0.2; kill -0 "$pid" 2>/dev/null || { rm -f PIDFILE; exit
+        # 93; }`: confirm the backgrounded process is actually alive
+        # (catches an immediate exec failure, e.g. `nohup: exec: no such
+        # file`, that would otherwise leave a dead pid quietly sitting in
+        # the pidfile) and remove the now-stale pidfile if it isn't.
         script = (
             f't=$(mktemp) || exit 90; '
             f'cat > "$t" || exit 91; '
             f'exec 3<"$t"; '
             f'rm -f "$t"; '
-            f'if command -v setsid >/dev/null 2>&1; then setsid nohup {cmd} <&3 > {log_expr} 2>&1 & '
-            f'else nohup {cmd} <&3 > {log_expr} 2>&1 & fi; '
+            # `<&3 3<&-`: hand fd 3 to the child as its stdin, then close fd 3
+            # itself so the process doesn't inherit an extra open descriptor
+            # it has no reason to hold.
+            f'if command -v setsid >/dev/null 2>&1; then setsid nohup {cmd} <&3 3<&- > {log_expr} 2>&1 & '
+            f'else nohup {cmd} <&3 3<&- > {log_expr} 2>&1 & fi; '
             f'pid=$!; '
-            f'echo "$pid" > {pidfile_expr} || exit 92; '
+            # If the pidfile can't be written, the child is already running
+            # and about to become an untracked orphan (nothing will ever
+            # signal it) — kill it before giving up rather than leaving it
+            # behind for `owned_remote_pidfiles` to lose track of.
+            f'echo "$pid" > {pidfile_expr} || {{ kill "$pid" 2>/dev/null; exit 92; }}; '
             f'sleep 0.2; '
-            f'kill -0 "$pid" 2>/dev/null || exit 93'
+            # And if the liveness check itself fails, remove the pidfile we
+            # just wrote — it now names a dead pid, and leaving it behind
+            # would make a later remote_pid_alive/remote_signal step believe
+            # there is something to check on.
+            f'kill -0 "$pid" 2>/dev/null || {{ rm -f {pidfile_expr}; exit 93; }}'
         )
         wrapped = ("sh", "-c", script)
         res = _remote(ctx, host_id, wrapped, timeout_s, stdin_path=stdin_path)
@@ -288,10 +312,10 @@ def _run_remote(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResul
 def _pid_guard(var: str = "p") -> str:
     """Shell fragment: reject anything that isn't a bare positive-integer pid
     read from a pidfile before it ever reaches a `kill`. Guards against a
-    corrupt or hostile pidfile (e.g. containing `-1`, which `kill -TERM -1`
-    would interpret as "signal every process this user can reach" — a
-    broadcast, not a targeted signal)."""
-    return f'case "${var}" in \'\'|*[!0-9]*) exit {{fail_exit}};; esac'
+    corrupt or hostile pidfile containing `-1` (`kill -TERM -1` broadcasts to
+    every process this user can reach) or `0` (`kill -TERM 0` broadcasts to
+    the caller's own process group) — neither is a targeted signal."""
+    return f'case "${var}" in \'\'|0|*[!0-9]*) exit {{fail_exit}};; esac'
 
 
 def _run_remote_signal(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
