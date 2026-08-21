@@ -329,6 +329,38 @@ async def lifespan(app: FastAPI):
         )
         app.state.f157_reap_thread = None
 
+    # Live-run boot recovery: tear down every non-terminal live run left by a
+    # prior sidecar — never resume one (spec 2026-08-21 live-run-supervisor
+    # §3.6). Same reasoning as the F157 reap above for running it OFF the
+    # startup critical path: a teardown can wait out an SSH grace period per
+    # lost run, and none of that should sit in front of `yield`.
+    try:
+        import threading as _threading
+
+        from errorta_liverun.recovery import recover_on_boot as _liverun_recover
+
+        def _liverun_boot() -> None:
+            try:
+                lost = _liverun_recover()
+                if lost:
+                    logging.getLogger("errorta.liverun").info(
+                        "liverun recovery: %d run(s) torn down as lost_on_restart",
+                        len(lost),
+                    )
+            except Exception as exc:  # pragma: no cover - defensive only
+                logging.getLogger("errorta.liverun").warning(
+                    "liverun recovery failed: %s", exc
+                )
+
+        app.state.liverun_recovery_thread = _threading.Thread(
+            target=_liverun_boot, name="liverun-boot-recovery", daemon=True)
+        app.state.liverun_recovery_thread.start()
+    except Exception as exc:  # pragma: no cover - defensive only
+        logging.getLogger("errorta.liverun").debug(
+            "liverun recovery not started: %s", exc
+        )
+        app.state.liverun_recovery_thread = None
+
     # F065: bring up the mobile LAN listener if the connector is enabled
     # (off by default — no socket otherwise). Best-effort; a failure here must
     # not block the main sidecar.
@@ -479,6 +511,16 @@ async def lifespan(app: FastAPI):
             from errorta_app import slack_lifecycle
 
             slack_lifecycle.stop()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        # Live runs: stop each supervisor and let its FULL teardown (the
+        # profile's own logoff) finish BEFORE the tunnels below go away — a
+        # logoff that has to reach the remote box through a reverse tunnel
+        # can't verify anything once that tunnel is gone.
+        try:
+            from errorta_liverun.supervisor import live_run_manager as _liverun
+
+            _liverun.teardown_all()
         except Exception:  # pragma: no cover - defensive
             pass
         # F089: kill every owned SSH tunnel so none leak across a restart.

@@ -1,0 +1,151 @@
+"""Boot reconcile: any non-terminal live run is torn down, never resumed (spec §3.6, F-H).
+
+A sidecar restart severs every handle the supervisor held — the daemon thread is
+gone, the local children are orphans, the remote brain is still running against a
+tunnel that no longer exists. Nothing about that is recoverable into a healthy
+run, so recovery does the one honest thing: run the profile's own teardown against
+the PERSISTED owned resources, kill whatever is left, report the literals, and
+mark the run ``lost_on_restart``.
+
+Failing closed matters more here than anywhere else in the module: a profile that
+has since become invalid (edited, moved, deleted) must STILL kill the pgids,
+signal the remote pidfiles and close the tunnels the old run wrote down — it just
+can't run teardown steps it can no longer read, so ``logoff_verified`` is reported
+ABSENT rather than assumed.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Callable
+
+from . import profile as _profile
+from . import steps as _steps
+from .state import LaunchLedger, RunState, RunStore, now_iso
+from .supervisor import Supervisor
+
+_LOG = logging.getLogger("errorta.liverun")
+
+# TERM, wait, then KILL: the same escalation a profile's own teardown uses. The
+# remote process is someone else's box — give it a chance to log off cleanly
+# before the hammer.
+_SIGNAL_GRACE_S = 10.0
+_SIGNAL_TIMEOUT_S = 20.0
+
+
+class _NullLedger:
+    """Recovery is not a launch — it must never spend a slot from the caps
+    ledger, or a restart storm would silently exhaust the profile's budget.
+    ``check`` therefore always says "no objection", while the outcome of the
+    lost run is still recorded against the real ledger so the caps arithmetic
+    for the NEXT start sees a complete history."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def record_outcome(self, run_id: str, *, failed: bool) -> None:
+        try:
+            self._real.record_outcome(run_id, failed=failed)
+        except Exception:  # noqa: BLE001 — a ledger write must not abort a teardown
+            _LOG.exception("recovery: could not record outcome for %s", run_id)
+
+    def record(self, *a: Any, **k: Any) -> None:  # pragma: no cover - never called
+        raise AssertionError("recovery must not record a launch")
+
+    def check(self, *a: Any, **k: Any) -> None:
+        return None
+
+
+def _signal_remote_pidfiles(sup: Supervisor, state: RunState) -> None:
+    """TERM-then-KILL every remote pid this run wrote down. The profile's own
+    teardown steps have already had their turn; this is the backstop for a run
+    whose profile no longer parses, or whose teardown never reached the signal
+    step because the sidecar died mid-launch."""
+    for ref in list(state.owned_remote_pidfiles):
+        host, pidfile = ref.get("host"), ref.get("pidfile")
+        if host and pidfile:
+            action = _profile.Action("remote_signal", {
+                "host": host, "pidfile": pidfile, "signal": "TERM",
+                "grace_s": _SIGNAL_GRACE_S, "then": "KILL"})
+            try:
+                sup._run_action(action, sup.ctx, timeout_s=_SIGNAL_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — one unreachable host must not
+                # strand the pgids and tunnels of the same run behind it
+                _LOG.warning("recovery: remote signal failed for %s", ref, exc_info=True)
+        state.owned_remote_pidfiles.remove(ref)
+
+
+def recover_on_boot(*, store: RunStore | None = None, tunnels: Any = None, remote: Any = None,
+                    load_profile: Callable[[Path], _profile.Profile] | None = None,
+                    run_action=_steps.run_action,
+                    run_check=_steps.run_check) -> list[str]:
+    """Tear down every non-terminal run left by a prior sidecar. Returns the
+    run ids marked ``lost_on_restart``."""
+    store = store or RunStore()
+    load = load_profile or _profile.load_profile
+    if tunnels is None:
+        from errorta_tunnels import tunnel_manager
+        tunnels = tunnel_manager
+    if remote is None:
+        from errorta_tools.runner.remote import RemoteToolRunner
+        remote = RemoteToolRunner()
+    lost: list[str] = []
+    for state in store.list_non_terminal():
+        try:
+            _recover_one(state, store=store, load=load, tunnels=tunnels, remote=remote,
+                         run_action=run_action, run_check=run_check)
+        except Exception:  # noqa: BLE001 — one poisoned run must not skip the rest
+            _LOG.exception("recovery: unrecoverable failure for %s", state.run_id)
+        lost.append(state.run_id)
+    return lost
+
+
+def _recover_one(state: RunState, *, store: RunStore, load, tunnels: Any, remote: Any,
+                 run_action, run_check) -> None:
+    store.append_event(state.run_id, "phase", {"to": "recovering", "reason": "sidecar_restart"})
+    prof: _profile.Profile | None = None
+    try:
+        prof = load(_profile.profiles_dir() / f"{state.profile_name}.yaml")
+    except Exception as exc:  # noqa: BLE001 — an unreadable profile is expected, not fatal
+        store.append_event(state.run_id, "recovery",
+                           {"profile": "unavailable", "error": str(exc)[:200]})
+    if prof is None:
+        # No teardown steps to run, but the owned resources below still die and
+        # `logoff_verified` is reported ABSENT — never assumed.
+        prof = _profile.Profile(state.profile_name, {}, {}, (), (), (), (),
+                                _profile.DEFAULT_CAPS, ())
+    sup = Supervisor(prof, store=store, ledger=_NullLedger(LaunchLedger()), tunnels=tunnels,
+                     remote=remote, project_id=state.project_id,
+                     run_action=run_action, run_check=run_check)
+    # Bind the throwaway supervisor to the PERSISTED state so the owned
+    # resources of the LOST run — not the empty ones of this stand-in — are what
+    # teardown reaches. `ctx` has to be rebuilt for the same reason: it aliases
+    # the state's own lists.
+    sup.state = state
+    sup.ctx = _steps.Ctx(
+        profile=prof, run_id=state.run_id, session_id=state.session_id,
+        evidence_dir=Path(state.evidence_dir or store.evidence_dir(state.run_id)),
+        tunnels=tunnels, remote=remote, owned_pgids=state.owned_pgids,
+        owned_remote_pidfiles=state.owned_remote_pidfiles, owned_tunnels=state.owned_tunnels,
+        last_values=state.probe_last_value, launched_monotonic=None)
+    sup._stop_reason = "sidecar_restart"
+    try:
+        sup._do_stopping(final_phase="lost_on_restart")
+    except Exception:  # noqa: BLE001 — a teardown that throws must not stop the kills below
+        _LOG.exception("recovery: teardown failed for %s", state.run_id)
+    _signal_remote_pidfiles(sup, state)
+    sup._kill_owned()
+    if state.phase != "lost_on_restart":
+        # `_do_stopping` didn't get to finish the run (it threw), or it paused
+        # the PROFILE on a ban signal it found in the evidence. Either way the
+        # RUN is lost: the paused marker `_pause` wrote is what keeps the human
+        # gate armed, so overwriting the phase here loses nothing.
+        state.ended_at = state.ended_at or now_iso()
+        state.phase = "lost_on_restart"
+        state.reason = "sidecar_restart"
+        store.append_event(state.run_id, "phase",
+                           {"to": "lost_on_restart", "reason": "sidecar_restart"})
+    store.save(state)
+
+
+__all__ = ["recover_on_boot"]
