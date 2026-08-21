@@ -18,7 +18,10 @@ from __future__ import annotations
 import inspect
 import time
 import threading
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from errorta_app import slack_lifecycle
 
@@ -97,3 +100,53 @@ def test_starting_twice_does_not_leave_two_loops() -> None:
         assert _wait_for_live(1)
     finally:
         slack_lifecycle._stop_outbound()
+
+
+def test_start_outbound_forwards_interval_and_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_start_outbound` built an `OutboundDeps()` and passed neither knob, so
+    `run_loop`'s signature defaults won config entirely: an operator who set
+    `timeout_minutes` got 30 regardless, and there was no interval key at all.
+    """
+    monkeypatch.setenv("ERRORTA_HOME", str(tmp_path))
+    from errorta_slack import config
+
+    config.save({"interval_s": 7, "timeout_minutes": 11})
+    seen: dict[str, Any] = {}
+
+    async def _fake_run_loop(**kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    try:
+        slack_lifecycle._start_outbound(object(), run_loop_fn=_fake_run_loop)
+        assert slack_lifecycle._outbound_thread is not None
+        slack_lifecycle._outbound_thread.join(timeout=5)
+    finally:
+        slack_lifecycle._stop_outbound()
+
+    assert seen["interval_s"] == 7
+    assert seen["timeout_minutes"] == 11
+
+
+def test_start_outbound_explicit_arguments_beat_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ERRORTA_HOME", str(tmp_path))
+    from errorta_slack import config
+
+    config.save({"interval_s": 7, "timeout_minutes": 11})
+    seen: dict[str, Any] = {}
+
+    async def _fake_run_loop(**kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    try:
+        slack_lifecycle._start_outbound(
+            object(), run_loop_fn=_fake_run_loop, interval_s=1, timeout_minutes=2)
+        assert slack_lifecycle._outbound_thread is not None
+        slack_lifecycle._outbound_thread.join(timeout=5)
+    finally:
+        slack_lifecycle._stop_outbound()
+
+    assert (seen["interval_s"], seen["timeout_minutes"]) == (1, 2)

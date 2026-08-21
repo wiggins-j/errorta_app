@@ -166,3 +166,13 @@ def test_empty_allowlists_keep_auth_fail_closed() -> None:
     assert cfg["allowed_team_ids"] == []
     assert cfg["allowed_user_ids"] == []
     assert auth.is_allowed("T123", "U123", cfg) is False
+
+
+def test_interval_s_round_trips_and_rejects_a_busy_loop() -> None:
+    """A zero or negative poll interval is a busy loop, not a configuration —
+    `run_loop` would spin every bound channel's ledger read with no pause."""
+    assert config.normalize({"interval_s": 2.5})["interval_s"] == 2.5
+    assert config.normalize({"interval_s": 0})["interval_s"] == 15
+    assert config.normalize({"interval_s": -1})["interval_s"] == 15
+    assert config.normalize({"interval_s": "nope"})["interval_s"] == 15
+    assert config.normalize({})["interval_s"] == 15
