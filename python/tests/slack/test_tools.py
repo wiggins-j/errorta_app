@@ -1864,3 +1864,127 @@ def test_list_open_tasks_survives_an_unreadable_backlog(tmp_path: Path) -> None:
 
     assert out["status"] == "error"
     assert "OSError" in out["detail"]
+
+
+# --------------------------------------------------------------------------
+# Live-run supervisor verbs (spec 2026-08-21 §3.7).
+#
+# Every seam is injected, so none of these touch `errorta_liverun` at all --
+# which is also the point: importing `tools` must never import the supervisor.
+# --------------------------------------------------------------------------
+
+
+def _liverun_deps(calls: list) -> tools.ToolDeps:
+    store.bind_channel("C9", "proj-lr")
+    return tools.ToolDeps(
+        liverun_list_fn=lambda: [{"name": "osrs", "valid": True, "error": None}],
+        liverun_start_fn=lambda profile, project_id: (
+            calls.append(("start", profile, project_id)) or {"status": "started", "run_id": "r1"}),
+        liverun_stop_fn=lambda project_id: (
+            calls.append(("stop", project_id)) or {"status": "stopping"}),
+        liverun_status_fn=lambda project_id: {"status": "live", "phase": "watching", "probes": {}},
+        liverun_resume_fn=lambda profile: (
+            calls.append(("resume", profile)) or {"status": "resumed"}),
+    )
+
+
+def test_liverun_catalog_trust_classes() -> None:
+    assert tools.TOOL_CATALOG["start_live_run"]["trust"] == "C"
+    assert tools.TOOL_CATALOG["resume_live_run"]["trust"] == "C"
+    for verb in ("stop_live_run", "live_status", "list_live_profiles"):
+        assert tools.TOOL_CATALOG[verb]["trust"] == "R"
+    assert tools.HUMAN_ONLY_VERBS == frozenset({"resume_live_run"})
+
+
+def test_start_live_run_stages_then_fires_with_block_actions() -> None:
+    calls: list = []
+    deps = _liverun_deps(calls)
+
+    staged = tools.dispatch("start_live_run", {"profile": "osrs"},
+                            channel_id="C9", thread_ts="1", deps=deps)
+
+    assert staged["status"] == "needs_confirmation" and calls == []
+
+    fired = tools.dispatch("start_live_run", {"profile": "osrs"}, channel_id="C9",
+                           thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert fired == {"status": "started", "run_id": "r1"}
+    assert calls == [("start", "osrs", "proj-lr")]
+
+
+@pytest.mark.parametrize("args", [{}, {"profile": "../x"}, {"profile": ".hidden"},
+                                  {"profile": "a" * 65}, {"profile": "has space"}])
+def test_start_live_run_rejects_a_bad_profile_name(args: dict[str, Any]) -> None:
+    deps = _liverun_deps([])
+
+    with pytest.raises(tools.ToolError) as excinfo:
+        tools.dispatch("start_live_run", args, channel_id="C9", thread_ts="1",
+                       confirmed_via="block_actions", deps=deps)
+
+    assert excinfo.value.code == "bad_profile_name"
+
+
+def test_stop_live_run_is_R_and_immediate() -> None:
+    calls: list = []
+    deps = _liverun_deps(calls)
+
+    out = tools.dispatch("stop_live_run", {}, channel_id="C9", thread_ts="1", deps=deps)
+
+    assert out == {"status": "stopping"} and calls == [("stop", "proj-lr")]
+
+
+def test_live_status_and_list_live_profiles() -> None:
+    deps = _liverun_deps([])
+
+    status = tools.dispatch("live_status", {}, channel_id="C9", thread_ts="1", deps=deps)
+    listing = tools.dispatch("list_live_profiles", {}, channel_id="C9", thread_ts="1", deps=deps)
+
+    assert status["phase"] == "watching"
+    assert listing == {"status": "ok",
+                       "profiles": [{"name": "osrs", "valid": True, "error": None}]}
+
+
+def test_resume_live_run_is_C() -> None:
+    calls: list = []
+    deps = _liverun_deps(calls)
+
+    staged = tools.dispatch("resume_live_run", {"profile": "osrs"},
+                            channel_id="C9", thread_ts="1", deps=deps)
+
+    assert staged["status"] == "needs_confirmation" and calls == []
+    assert tools.dispatch("resume_live_run", {"profile": "osrs"}, channel_id="C9",
+                          thread_ts="1", confirmed_via="block_actions",
+                          deps=deps) == {"status": "resumed"}
+    assert calls == [("resume", "osrs")]
+
+
+def test_liverun_verbs_need_a_bound_project() -> None:
+    deps = _liverun_deps([])
+
+    for verb in ("start_live_run", "stop_live_run", "live_status", "resume_live_run"):
+        with pytest.raises(tools.ToolError) as excinfo:
+            tools.dispatch(verb, {"profile": "osrs"}, channel_id="C-unbound",
+                           thread_ts="1", confirmed_via="block_actions", deps=deps)
+        assert excinfo.value.code == "no_project_bound", verb
+
+
+def test_tools_does_not_import_the_live_run_supervisor_at_module_load() -> None:
+    """The seams default to `None` and resolve lazily precisely so that
+    `errorta_slack.tools` -- imported on every bridge start -- never drags in
+    `errorta_liverun`, which owns launch/subprocess machinery.
+
+    Order-independent by construction (mirrors `test_outbound_module_does_not_
+    import_slack_sdk`): reads this module's OWN bound names and source text,
+    never process-global `sys.modules`, so a sibling test importing the
+    supervisor earlier in the same session cannot false-fail it.
+    """
+    import inspect
+
+    assert "errorta_liverun" not in vars(tools)
+    for line in inspect.getsource(tools).splitlines():
+        if "errorta_liverun" in line and "import " in line:
+            assert line.startswith(" "), f"module-level supervisor import: {line!r}"
+    # And the seams themselves must not be pre-bound to real callables.
+    fresh = tools.ToolDeps()
+    assert [fresh.liverun_list_fn, fresh.liverun_start_fn, fresh.liverun_stop_fn,
+            fresh.liverun_status_fn, fresh.liverun_resume_fn] == [None] * 5

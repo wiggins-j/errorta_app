@@ -1,0 +1,126 @@
+# Copy to $ERRORTA_HOME/liverun/profiles/osrs.yaml, chmod 600, fill every FILL, run list_live_profiles.
+#
+# This file is INVALID BY CONSTRUCTION: every value only the operator can know
+# has been removed and left as a `# FILL:` line. `list_live_profiles` will name
+# the first rule it breaks until you have authored all of them.
+#
+# Every absolute path below is an EXAMPLE of the shape, not a working path —
+# repoint each one at your own checkout. See README.md (same directory) for the
+# full validator rule list.
+version: 1
+created_by: operator                # literal; anything else rejected
+
+hosts:
+  senditai: {ssh_host: senditai}    # alias resolved via ~/.ssh/config; must already be in known_hosts
+
+tunnels:
+  - id: reverse
+    host: senditai
+    reverse: [{remote_port: 8081, local_port: 8081}, {remote_port: 8082, local_port: 8082}]
+
+launch:                             # ordered; each step must pass its check before the next
+  - name: quit-old-client
+    local: {argv: [/Users/OPERATOR/GitHub/senditai-ng/jagex-quit]}
+    check: {pgrep_absent: "RuneLite.app/Contents/MacOS/RuneLite"}
+    timeout_s: 30
+
+  - name: rebuild-jar
+    # The gradle task names are quoted because a bare `:` opens a mapping in a
+    # YAML flow sequence — the spec's rendering of this line does not parse.
+    local: {argv: [./gradlew, ":client:shadowJar", ":client:microbotLatestJar"], cwd: /Users/OPERATOR/GitHub/osrs-reaper}
+    # `file_mtime_newer` compares against the moment THIS step started; there is
+    # no `than:` key to set.
+    check: {file_mtime_newer: {path: /Users/OPERATOR/GitHub/osrs-reaper/runelite-client/build/libs/microbot-shaded.jar}}
+    timeout_s: 900
+
+  - name: launch-client
+    # Routed through Terminal.app on purpose: Accessibility is per-app, and
+    # osascript from an agent shell has been seen failing with -25211.
+    local: {argv: [osascript, -e, 'tell application "Terminal" to do script "/Users/OPERATOR/GitHub/senditai-ng/jagex-play"']}
+    check: {all: [{file_exists: /Users/OPERATOR/.runelite/.agent-token}, {http: {url: "http://127.0.0.1:8081/state", expect_status: 200}}]}
+    timeout_s: 180
+
+  - name: tunnel
+    tunnel: reverse
+    check: {tunnel_up: reverse}
+    timeout_s: 30
+
+  - name: brain
+    remote:
+      host: senditai
+      # FILL: the brain's full invocation as a list of strings. Because it
+      # contains `senditai_ng.cli` and `run`, the validator requires
+      # --max-session-seconds, --receipt-id and --require-live-feed in it.
+      # It must also stay alive past the launcher's ~0.2 s liveness check.
+      argv: []                      # FILL — an empty argv is rejected at load
+      detach: true
+      pidfile: ~/.senditai_ng/liverun.pid
+      stdin_file: /Users/OPERATOR/.runelite/.agent-token   # the agent token travels by stdin ONLY
+    check: {remote_pid_alive: {host: senditai, pidfile: ~/.senditai_ng/liverun.pid}}
+    timeout_s: 60
+
+watch:                              # polled concurrently; wall-clock, never tick counts
+  - {id: client-state,  every_s: 15, stall_after_s: 60,  on_stall: stop, probe: {http: {url: "http://127.0.0.1:8081/state"}}}
+  - {id: brain-alive,   every_s: 15, stall_after_s: 45,  on_stall: stop, probe: {remote_pid_alive: {host: senditai, pidfile: ~/.senditai_ng/liverun.pid}}}
+  - {id: brain-log,     every_s: 30, stall_after_s: 180, on_stall: stop, probe: {remote_file_mtime_advancing: {host: senditai, path: ~/.senditai_ng/liverun.log}}}
+  - id: journal-seq
+    every_s: 30
+    stall_after_s: 180
+    on_stall: stop
+    probe:
+      remote_stdout_advancing:
+        host: senditai
+        # FILL: the read-only journal query whose output must keep changing,
+        # e.g. [sqlite3, -readonly, <db path>, <select max(seq) ...>]. Verify
+        # its cost at this cadence before committing to it (spec §7.3).
+        argv: []                    # FILL — an empty argv is rejected at load
+  - id: feed-live
+    every_s: 60
+    stall_after_s: 120
+    on_stall: stop
+    probe:
+      remote_stdout_matches:
+        host: senditai
+        # FILL: the command whose stdout carries the live-feed flag.
+        argv: []                    # FILL — an empty argv is rejected at load
+        regex: '"event_feed_live":\s*true'
+  - {id: session-clock, every_s: 60, stall_after_s: 0,   on_stall: stop, probe: {elapsed_lt_s: 3600}}
+
+evidence:                           # run on every stop, before teardown, bounded and redacted
+  - {name: brain-log-tail, remote: {host: senditai, argv: [tail, -n, "200", ~/.senditai_ng/liverun.log]}}
+  - name: watcher
+    remote:
+      host: senditai
+      # FILL: the watcher invocation, e.g. [<abs path>/osrs-watcher, --last, "20"].
+      argv: []                      # FILL — an empty argv is rejected at load
+  - {name: client-window,  window_shot: {pgrep: "RuneLite.app/Contents/MacOS/RuneLite"}}
+  - {name: client-state,   http: {url: "http://127.0.0.1:8081/state"}}
+
+teardown:                           # ordered; always; each sub-step records evidence
+  - name: kill-marker
+    remote:
+      host: senditai
+      # FILL: the session kill, e.g. [<abs path>/senditai_ng.cli, kill,
+      # --session, "$SESSION_ID"]. Confirm it resolves the same --base-dir the
+      # run used (spec §7.4).
+      argv: []                      # FILL — an empty argv is rejected at load
+    timeout_s: 20
+  # The logoff literal rests on a CHECK, never on a command's exit status:
+  # `remote_signal` exits 0 even when there was no pidfile to signal, so a
+  # check-less literal here would be a forged receipt (rule
+  # `literal_without_check`). FILL: confirm `gameState` is the field that
+  # actually proves logged-out on :8081 (spec §7.2).
+  - {name: logoff-wait,   check: {http_json: {url: "http://127.0.0.1:8081/state", path: gameState, not_equals: LOGGED_IN}}, timeout_s: 45, evidence_literal: logoff_verified}
+  - {name: brain-stop,    remote_signal: {host: senditai, pidfile: ~/.senditai_ng/liverun.pid, signal: TERM, grace_s: 15, then: KILL}}
+  - {name: quit-client,   local: {argv: [/Users/OPERATOR/GitHub/senditai-ng/jagex-quit]}, timeout_s: 30}
+  - {name: tunnel-down,   tunnel_close: reverse}
+
+caps:                               # may only be LOWERED below these defaults
+  max_launches_per_hour: 2
+  min_launch_gap_s: 900
+  max_launches_per_day: 8
+  max_consecutive_failed_cycles: 2
+
+ban_signals:                        # regexes over any evidence/log text; match -> paused_awaiting_human
+  - 'Account is banned'
+  - 'Login failed'

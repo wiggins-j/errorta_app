@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import socket
 import subprocess
 import tempfile
@@ -61,11 +62,28 @@ class TunnelSpec:
     ssh_port: Optional[int] = None
     ssh_username: Optional[str] = None
     ssh_key_path: Optional[str] = None
+    # (remote_port, local_port) pairs for `ssh -R`; reverse-only specs set
+    # remote_port=0. Loopback on both ends by construction.
+    reverse_forwards: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def reverse_only(self) -> bool:
+        return bool(self.reverse_forwards) and not self.remote_port
 
     def validated(self) -> "TunnelSpec":
         ssh_host = _validate_token(self.ssh_host, what="ssh_host")
         remote_host = _validate_token(self.remote_host, what="remote_host")
-        remote_port = _validate_port(self.remote_port, what="remote_port")
+        reverse = tuple(
+            (_validate_port(rp, what="reverse_remote_port"),
+             _validate_port(lp, what="reverse_local_port"))
+            for rp, lp in self.reverse_forwards
+        )
+        if self.remote_port:
+            remote_port = _validate_port(self.remote_port, what="remote_port")
+        elif reverse:
+            remote_port = 0
+        else:
+            raise TunnelValidationError("remote_port required unless reverse_forwards set")
         ssh_port = _validate_port(self.ssh_port, what="ssh_port") if self.ssh_port else None
         ssh_username = (
             _validate_token(self.ssh_username, what="ssh_username")
@@ -78,7 +96,8 @@ class TunnelSpec:
                 raise TunnelValidationError(f"ssh_key_path is not a file: {key!r}")
         return TunnelSpec(
             ssh_host=ssh_host, remote_port=remote_port, remote_host=remote_host,
-            ssh_port=ssh_port, ssh_username=ssh_username, ssh_key_path=key)
+            ssh_port=ssh_port, ssh_username=ssh_username, ssh_key_path=key,
+            reverse_forwards=reverse)
 
     def label(self) -> str:
         user = f"{self.ssh_username}@" if self.ssh_username else ""
@@ -88,7 +107,6 @@ class TunnelSpec:
 def build_ssh_argv(spec: TunnelSpec, local_port: int, *, ssh_bin: str = "ssh") -> list[str]:
     """Fixed argv (no shell) for an ``ssh -N -L`` loopback forward. The spec must
     already be ``.validated()``; ports are validated here defensively."""
-    local_port = _validate_port(local_port, what="local_port")
     argv = [
         ssh_bin, "-N",
         "-o", "BatchMode=yes",
@@ -102,8 +120,13 @@ def build_ssh_argv(spec: TunnelSpec, local_port: int, *, ssh_bin: str = "ssh") -
         argv += ["-p", str(spec.ssh_port)]
     if spec.ssh_key_path:
         argv += ["-i", spec.ssh_key_path]
-    # Loopback-only forward — never expose the tunnel to the LAN.
-    argv += ["-L", f"127.0.0.1:{local_port}:{spec.remote_host}:{spec.remote_port}"]
+    # Loopback-only forward(s) — never expose the tunnel to the LAN.
+    if spec.reverse_forwards:
+        for rp, lp in spec.reverse_forwards:
+            argv += ["-R", f"127.0.0.1:{rp}:127.0.0.1:{lp}"]
+    if not spec.reverse_only:
+        local_port = _validate_port(local_port, what="local_port")
+        argv += ["-L", f"127.0.0.1:{local_port}:{spec.remote_host}:{spec.remote_port}"]
     target = f"{spec.ssh_username}@{spec.ssh_host}" if spec.ssh_username else spec.ssh_host
     argv += [target]
     return argv
@@ -125,9 +148,12 @@ class _Child:
 
     def kill(self) -> None:
         try:
-            self._proc.kill()
-        except ProcessLookupError:
-            pass
+            os.killpg(self._proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                self._proc.kill()
+            except ProcessLookupError:
+                pass
         try:
             self._proc.wait(timeout=5)
         except Exception:  # noqa: BLE001
@@ -185,6 +211,11 @@ class _Tunnel:
     thread: Optional[threading.Thread] = None
     stop: threading.Event = field(default_factory=threading.Event)
     backoff: float = 1.0
+    # monotonic time of the current child's spawn; reverse-only tunnels need
+    # one full watch interval alive before they're trusted as "up" (there's
+    # no local listener to probe, so a bad -R bind wouldn't show up any
+    # other way before ExitOnForwardFailure kills the child).
+    spawned_at: float = 0.0
 
     def _set_state(self, state: str) -> None:
         if state != self.state:
@@ -270,6 +301,19 @@ class TunnelManager:
                 "since": tun.since,
             }
 
+    def close(self, spec: TunnelSpec) -> bool:
+        """Stop one tunnel and forget it. Returns False if none existed."""
+        spec = spec.validated()
+        with self._lock:
+            tun = self._tunnels.pop(spec, None)
+        if tun is None:
+            return False
+        tun.stop.set()
+        self._kill_child(tun)
+        if tun.thread is not None:
+            tun.thread.join(timeout=5)
+        return True
+
     def teardown(self) -> None:
         """Stop every watcher + kill every child. Idempotent (sidecar shutdown)."""
         with self._lock:
@@ -307,6 +351,7 @@ class TunnelManager:
             if tun.child is None:
                 try:
                     tun.child = self._spawn(build_ssh_argv(tun.spec, tun.local_port))
+                    tun.spawned_at = time.monotonic()
                 except Exception as exc:  # noqa: BLE001
                     with self._lock:
                         tun.last_error = f"spawn failed: {exc}"
@@ -333,8 +378,20 @@ class TunnelManager:
                 tun.backoff = min(tun.backoff * 2, _BACKOFF_MAX)
                 continue
 
-            # Child alive — is the forward actually accepting yet?
-            if _port_accepts(tun.local_port):
+            # Child alive — is the forward actually accepting yet? A reverse-only
+            # tunnel has no local listener to probe, so it earns STATE_UP only
+            # after surviving one full watch interval since its last spawn.
+            if tun.spec.reverse_only:
+                if time.monotonic() - tun.spawned_at >= self._watch_interval:
+                    with self._lock:
+                        if tun.state != STATE_UP:
+                            tun._set_state(STATE_UP)
+                            tun.last_error = ""
+                        tun.backoff = 1.0
+                elif tun.state not in (STATE_CONNECTING, STATE_RECONNECTING):
+                    with self._lock:
+                        tun._set_state(STATE_CONNECTING)
+            elif _port_accepts(tun.local_port):
                 with self._lock:
                     if tun.state != STATE_UP:
                         tun._set_state(STATE_UP)

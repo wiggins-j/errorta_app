@@ -402,14 +402,30 @@ class SlackBridge:
         project_id = cancel_item.get("project_id")
         if not channel_id or not project_id:
             return
-        try:
-            tools.dispatch(
-                "stop_runtime", {},
-                channel_id=channel_id, thread_ts=thread_ts,
-                confirmed_via=None, deps=self._deps,
-            )
-        except tools.ToolError:
-            pass
+        # Two independent teardowns, each best-effort: a project with no
+        # runtime profile makes the first refuse, and that must not swallow
+        # the second. A live run left launched after the operator typed "stop"
+        # is a real client still playing with nobody watching.
+        for verb in ("stop_runtime", "stop_live_run"):
+            try:
+                tools.dispatch(
+                    verb, {},
+                    channel_id=channel_id, thread_ts=thread_ts,
+                    confirmed_via=None, deps=self._deps,
+                )
+            except tools.ToolError:
+                continue
+            except Exception:  # noqa: BLE001
+                # Not just ToolError. This hook runs inside the per-thread
+                # worker's supervisor loop, and anything escaping it kills
+                # that thread -- the channel then answers nothing at all.
+                # `stop_live_run` reaches the live-run supervisor, a
+                # subsystem that drives real processes and can fail in ways
+                # this module has no vocabulary for; the docstring's "never
+                # raises" has to hold against those too.
+                _LOGGER.warning(
+                    "slack bridge: cancel hook's %s failed", verb, exc_info=True)
+                continue
 
     async def wait_idle(self, thread_ts: str, *, timeout: float = 2.0) -> None:
         """Test/ops helper: block until ``thread_ts``'s queue is empty and
@@ -645,6 +661,12 @@ class SlackBridge:
         "adopt_project": (
             "Adopt an existing project",
             "Approve to create a PUBLIC Slack channel for this project and bind it."),
+        "start_live_run": (
+            "Start live run",
+            "Approve to launch and supervise the live run from this profile."),
+        "resume_live_run": (
+            "Resume live run (human only)",
+            "Approve to clear the paused-awaiting-human hold on this profile."),
     }
 
     # Which arg fields each verb must SHOW before it can be approved, in order.
@@ -727,7 +749,9 @@ class SlackBridge:
         )
         # Same order here: escape, then cap the escaped result.
         label = self._cap_escaped(
-            render.escape_mrkdwn(str(args.get("title") or args.get("project_id") or "").strip()),
+            render.escape_mrkdwn(
+                str(args.get("title") or args.get("profile")
+                    or args.get("project_id") or "").strip()),
             self._CONFIRMATION_LABEL_CAP)
         title = f"{base_title} — {label}" if label else base_title
         fields = [
@@ -749,9 +773,17 @@ class SlackBridge:
         autopilot = bool(config.load().get("autopilot"))
         for item in staged:
             cid = item["cid"]
-            if autopilot:
+            # The verb is read back off the STAGED RECORD, not off the turn
+            # result: the record is what `_autopilot_fire` would actually
+            # execute, so gating on anything else could carve out one verb
+            # while firing another.
+            record = self._deps.store.get_confirmation(cid)
+            verb = str((record or {}).get("verb") or "")
+            if autopilot and verb not in tools.HUMAN_ONLY_VERBS:
                 await self._autopilot_fire(channel_id, thread_ts, cid)
             else:
+                # A human-only verb falls through to the button even under
+                # autopilot -- see tools.HUMAN_ONLY_VERBS.
                 await self._post_decision_button(channel_id, thread_ts, cid)
 
     async def _post_decision_button(self, channel_id: Any, thread_ts: str, cid: str) -> None:

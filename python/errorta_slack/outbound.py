@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -123,6 +124,31 @@ def _default_publish_events_fn(project_id: str) -> list[Any]:
     return PublishLedger(project_id).list_events()
 
 
+def _default_liverun_events_fn(project_id: str) -> list[tuple[Any, list[dict[str, Any]]]]:
+    """Every live run belonging to ``project_id``, with its full event log.
+
+    Every phase, not just the live ones: a run that has already stopped or
+    failed is precisely the run whose ending has not been announced yet, and
+    ``RunStore.list_non_terminal`` would filter exactly those out.
+
+    Imported at CALL time so ``errorta_slack.outbound`` -- a module that must
+    stay importable with only the Slack bridge installed -- never depends on
+    the supervisor package at load.
+    """
+    from errorta_liverun.state import RunStore
+
+    run_store = RunStore()
+    root = run_store._root
+    if not root.is_dir():
+        return []
+    out: list[tuple[Any, list[dict[str, Any]]]] = []
+    for run_dir in sorted(root.iterdir()):
+        state = run_store.load(run_dir.name)
+        if state is not None and state.project_id == project_id:
+            out.append((state, run_store.events(state.run_id)))
+    return out
+
+
 @dataclass
 class OutboundDeps:
     """Every coding-state seam ``poll_once``/``run_loop``/``sweep_timeouts``
@@ -135,6 +161,8 @@ class OutboundDeps:
     attention_list_open: Callable[..., list[Any]] = attention.list_open
     publish_events_fn: Callable[[str], list[Any]] = _default_publish_events_fn
     attention_resolve_fn: Callable[..., Any] = attention.resolve
+    liverun_events_fn: Callable[[str], list[tuple[Any, list[dict[str, Any]]]]] = (
+        _default_liverun_events_fn)
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -161,6 +189,11 @@ class _Item:
     # A blocking `kind == "decision"` is mandatory by construction (it carries
     # an Approve/Decline the run is waiting on) and need not set this.
     mandatory: bool = False
+    # A local file to attach alongside the item's text (a live-run evidence
+    # screenshot); `title` carries the attachment's caption. Optional on BOTH
+    # sides: an item may not have one, and a poster may not implement
+    # `post_file` -- the text posts either way. See `_post_attachment`.
+    file_path: str | None = None
 
 
 def _log_items(deps: "OutboundDeps", ledger_store: Any) -> list[_Item]:
@@ -269,6 +302,157 @@ def _run_state_items(ledger_store: Any) -> list[_Item]:
     ]
 
 
+# --------------------------------------------------------------------------
+# Live-run supervisor items (spec 2026-08-21 §3.7).
+#
+# The supervisor writes its whole narrative to `runs/<id>/events.jsonl` and
+# nothing else reads it, so without this source a live run launches, stalls,
+# gets torn down and pauses awaiting a human entirely off-channel.
+# --------------------------------------------------------------------------
+
+# Kinds that post THROUGH a channel mute. The rule is the same one
+# `_run_state_items` applies to the coding team: "stop updating me" quiets
+# routine progress, it does not hide the run ending, the reason it ended, or a
+# hold that is waiting on a person. `phase` is mandatory only for a TERMINAL
+# destination -- a `phase -> watching` on every launch is exactly the routine
+# noise a mute is for.
+_LIVERUN_MANDATORY_KINDS = frozenset({"stall", "ban_signal", "caps", "literals"})
+# Deliberately a LOCAL copy of `errorta_liverun.state.TERMINAL_PHASES`, not an
+# import of it: importing that module here would make the Slack bridge depend
+# on the supervisor package at load, which `_default_liverun_events_fn` goes
+# out of its way to avoid. `test_terminal_phases_do_not_drift` fails CI if the
+# two ever disagree, which is the part a comment could not do.
+_LIVERUN_TERMINAL_PHASES = frozenset(
+    {"stopped", "failed", "paused_awaiting_human", "lost_on_restart"})
+
+# Nothing in an event detail is operator-typed: profile names come off disk,
+# stderr tails and matched ban patterns come from the game client and the
+# brain. `render.fyi_message` does NOT escape what it is handed, so every
+# field below goes through `_esc` -- and is capped AFTER escaping, because
+# escaping EXPANDS (one `<` becomes four characters) and capping first would
+# bound the wrong string.
+_LIVERUN_FIELD_CAP = 300
+_LIVERUN_DETAIL_CAP = 700
+# A cut can land mid-entity ("&amp;" -> "&am"), which renders as literal junk.
+# (connection.SlackBridge._cap_escaped does the same for approval copy; it
+# also appends an approval-specific truncation note, which would be wrong in a
+# progress line, so the two are deliberately not one function.)
+_PARTIAL_ENTITY_RE = re.compile(r"&[A-Za-z]{0,4}$")
+
+
+def _cap(escaped: str, cap: int) -> str:
+    """Cap ALREADY-escaped text, without leaving a half-written entity."""
+    if len(escaped) <= cap:
+        return escaped
+    return _PARTIAL_ENTITY_RE.sub("", escaped[:cap - 1]) + "…"
+
+
+def _esc(text: Any, cap: int = _LIVERUN_FIELD_CAP) -> str:
+    """Escape ``text`` for mrkdwn, then cap the ESCAPED result at ``cap``."""
+    return _cap(render.escape_mrkdwn(str(text)), cap)
+
+
+def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
+    """One channel-ready line for one supervisor event."""
+    if kind == "phase":
+        to = _esc(detail.get("to") or "")
+        reason = _esc(detail.get("reason") or "")
+        line = f"Live run *{_esc(profile)}* → {to}"
+        return f"{line} — {reason}" if reason else line
+    if kind == "launch_step":
+        name = _esc(detail.get("name") or "")
+        if detail.get("check") is not None:
+            return f"Launch step *{name}*: check {_esc(detail.get('check'))}"
+        if detail.get("ok"):
+            return f"Launch step *{name}*: ok"
+        head = f"Launch step *{name}*: FAILED (rc={_esc(detail.get('exit_code'))})"
+        tail = _esc(detail.get("stderr") or detail.get("stdout") or "")
+        return f"{head}\n```{tail}```" if tail else head
+    if kind == "probe_warn":
+        return (f"⚠️ Probe *{_esc(detail.get('id'))}* quiet for "
+                f"{_esc(detail.get('stalled_s'))}s — still watching")
+    if kind == "stall":
+        return (f"🛑 Stall on *{_esc(detail.get('id'))}* after "
+                f"{_esc(detail.get('stalled_s'))}s — stopping")
+    if kind == "evidence":
+        outcome = "ok" if detail.get("ok") else _esc(detail.get("detail") or "failed")
+        return f"Evidence *{_esc(detail.get('id'))}*: {outcome}"
+    if kind == "teardown_step":
+        outcome = "ok" if detail.get("ok") else "FAILED"
+        line = f"Teardown *{_esc(detail.get('name'))}*: {outcome}"
+        literal = detail.get("literal")
+        if literal:
+            seen = "PRESENT" if detail.get("ok") else "ABSENT"
+            line += f" ({_esc(literal)}={seen})"
+        return line
+    if kind == "literals":
+        parts = ", ".join(f"{_esc(k)}: {_esc(v)}" for k, v in detail.items())
+        return f"Teardown literals — {parts}"
+    if kind == "ban_signal":
+        return (f"🚫 Ban-class signal matched (`{_esc(detail.get('pattern'))}`) — "
+                "paused awaiting human. Look at the evidence before you resume.")
+    if kind == "caps":
+        return f"⛔ Launch cap hit: {_esc(detail.get('code'))} — paused awaiting human"
+    if kind == "refused":
+        return f"Live run refused: {_esc(detail.get('code'))}"
+    # An event kind this renderer has not been taught yet still reaches the
+    # channel rather than vanishing -- a silent drop is how a supervisor's new
+    # failure mode goes unnoticed for a week.
+    return f"{_esc(kind)}: {_esc(json.dumps(detail, sort_keys=True))}"
+
+
+def _liverun_attachment(kind: str, detail: dict[str, Any]) -> tuple[str, str] | None:
+    """The (path, title) of a screenshot to upload alongside this item, if any.
+
+    Only ``evidence`` refs, and only ``.png`` ones: a ref may equally be a log
+    excerpt or a journal path, and handing an arbitrary supervisor-named file
+    to an upload call is a wider door than this feature needs.
+    """
+    if kind != "evidence":
+        return None
+    for ref in detail.get("refs") or []:
+        if str(ref).endswith(".png"):
+            return str(ref), str(detail.get("id") or "evidence")
+    return None
+
+
+def _liverun_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
+    try:
+        runs = deps.liverun_events_fn(project_id)
+    except Exception:  # noqa: BLE001
+        # The run store is written by ANOTHER process. A half-written, absent
+        # or unreadable one must degrade to "no live-run items", not wedge the
+        # loop that also carries the coding team's progress.
+        _LOGGER.warning("outbound: could not read live-run events", exc_info=True)
+        return []
+    items: list[_Item] = []
+    for state, events in runs:
+        profile = str(_get(state, "profile_name", "") or "")
+        run_id = str(_get(state, "run_id", "") or "")
+        for event in events:
+            kind = str(event.get("kind", ""))
+            detail = dict(event.get("detail") or {})
+            seq = int(event.get("seq", 0))
+            attachment = _liverun_attachment(kind, detail)
+            items.append(_Item(
+                marker=f"liverun:{run_id}:{seq}",
+                # The seq is zero-padded into the SORT key (never the marker,
+                # which is the durable cursor entry): same-second events tie on
+                # `at`, and a plain-string tie-break would order seq 10 before
+                # seq 2.
+                sort_key=f"{event.get('at', '')}:{seq:09d}",
+                kind="fyi",
+                title=attachment[1] if attachment else "",
+                detail=_cap(_liverun_detail(kind, detail, profile),
+                            _LIVERUN_DETAIL_CAP),
+                mandatory=(kind in _LIVERUN_MANDATORY_KINDS
+                           or (kind == "phase"
+                               and str(detail.get("to")) in _LIVERUN_TERMINAL_PHASES)),
+                file_path=attachment[0] if attachment else None,
+            ))
+    return items
+
+
 def _current_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
     ledger_store = deps.ledger_factory(project_id)
     items = (
@@ -276,6 +460,7 @@ def _current_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
         + _attention_items(deps, project_id, ledger_store)
         + _publish_items(deps, project_id)
         + _run_state_items(ledger_store)
+        + _liverun_items(deps, project_id)
     )
     # Stable, deterministic order (roughly chronological); the marker
     # breaks ties so equal-timestamp items always sort the same way.
@@ -308,6 +493,23 @@ def _decode_posted(cursor: str | None) -> set[str]:
 
 def _encode_posted(posted: set[str]) -> str:
     return json.dumps(sorted(posted))
+
+
+def _post_attachment(poster: Any, channel_id: str, item: _Item) -> None:
+    """Upload ``item``'s file, if it has one and the poster can take one.
+
+    ``post_file`` is an OPTIONAL part of the poster duck-type: the outbound
+    tests' poster, and any poster built before evidence existed, has only
+    ``post_message``. Both the missing method and a failed upload are
+    non-events -- the item's text has already posted, and an attachment must
+    never cost the operator the rest of the stream.
+    """
+    if not item.file_path or not hasattr(poster, "post_file"):
+        return
+    try:
+        poster.post_file(channel_id, "", item.file_path, item.title or "evidence")
+    except Exception:  # noqa: BLE001 - see the docstring
+        _LOGGER.warning("outbound: evidence upload failed", exc_info=True)
 
 
 def poll_once(
@@ -386,6 +588,7 @@ def poll_once(
         else:
             blocks = render.fyi_message(item.detail)
             poster.post_message(channel_id, "", item.detail, blocks=blocks)
+            _post_attachment(poster, channel_id, item)
 
         # Record the marker as posted BEFORE moving on to the next item —
         # and persist the cursor immediately (not batched) — so a `poster`

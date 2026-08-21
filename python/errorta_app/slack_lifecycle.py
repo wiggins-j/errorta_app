@@ -99,10 +99,25 @@ def _build_sync_poster(bot_token: str) -> Any:
                 kwargs["blocks"] = blocks
             return dict(web_client.chat_postMessage(**kwargs).data)
 
+        def post_file(
+            self, channel_id: Any, thread_ts: Any, path: str, title: str,
+        ) -> dict[str, Any]:
+            """The OPTIONAL half of the poster duck-type (see
+            `outbound._post_attachment`): uploads a live-run evidence
+            screenshot. A poster without this method still posts every item's
+            text."""
+            kwargs: dict[str, Any] = {"channel": channel_id, "file": path, "title": title}
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            return dict(web_client.files_upload_v2(**kwargs).data)
+
     return _SyncWebClientPoster()
 
 
-def _start_outbound(poster: Any, *, run_loop_fn: Any = None) -> None:
+def _start_outbound(
+    poster: Any, *, run_loop_fn: Any = None,
+    interval_s: float | None = None, timeout_minutes: float | None = None,
+) -> None:
     """Run the outbound progress loop on its own thread.
 
     Its own thread, not the bridge's event loop: ``poll_once`` is fully
@@ -120,11 +135,21 @@ def _start_outbound(poster: Any, *, run_loop_fn: Any = None) -> None:
 
     _stop_outbound()
 
+    from errorta_slack import config as slack_config
     from errorta_slack import outbound as slack_outbound
     from errorta_slack import store as slack_store
 
     run_loop = run_loop_fn or slack_outbound.run_loop
     stop_event = threading.Event()
+    # Explicit arguments win; otherwise the operator's config does. Passing
+    # NEITHER (what this did before) meant `run_loop`'s signature defaults won
+    # and both config keys were inert -- a `timeout_minutes` the owner set was
+    # read by the sweep nowhere.
+    cfg = slack_config.load()
+    interval = float(
+        interval_s if interval_s is not None else cfg.get("interval_s", 15))
+    timeout = float(
+        timeout_minutes if timeout_minutes is not None else cfg.get("timeout_minutes", 30))
 
     def _target() -> None:
         try:
@@ -133,6 +158,8 @@ def _start_outbound(poster: Any, *, run_loop_fn: Any = None) -> None:
                 deps=slack_outbound.OutboundDeps(),
                 poster=poster,
                 stop_event=stop_event,
+                interval_s=interval,
+                timeout_minutes=timeout,
             ))
         except Exception:  # pragma: no cover - defensive
             _LOG.warning("slack outbound loop exited", exc_info=True)

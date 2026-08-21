@@ -143,6 +143,8 @@ async def test_local_runner_nonzero_exit_reports_reason_and_log_tail(tmp_path) -
 
 @pytest.mark.asyncio
 async def test_remote_runner_request_is_represented_but_fails_closed(tmp_path) -> None:
+    # No ssh_host metadata supplied: the real RemoteToolRunner still fails
+    # closed, now for a specific (rather than blanket "not implemented") reason.
     request = _request(
         tmp_path,
         argv=("python", "-V"),
@@ -152,7 +154,7 @@ async def test_remote_runner_request_is_represented_but_fails_closed(tmp_path) -
     result = await RemoteToolRunner().run(request)
 
     assert result.status == "blocked"
-    assert result.reason_code == "remote_runner_not_implemented"
+    assert result.reason_code == "remote_host_missing"
 
 
 def test_runner_policy_ask_projection_contains_env_names_not_values(tmp_path) -> None:
