@@ -43,7 +43,7 @@ def build_remote_ssh_argv(
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=3",
     ]
-    if ssh_port:
+    if ssh_port is not None:
         port = int(ssh_port)
         if not 1 <= port <= 65535:
             raise ValueError("invalid ssh_port")
@@ -89,7 +89,13 @@ class RemoteToolRunner:
 
         started_at = now_iso()
         started = time.monotonic()
-        stdin_fh = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
+        if stdin_path:
+            try:
+                stdin_fh: Any = open(stdin_path, "rb")
+            except OSError:
+                return _fail(request, "remote_stdin_unreadable", started_at, started)
+        else:
+            stdin_fh = subprocess.DEVNULL
         try:
             proc = subprocess.Popen(  # noqa: S603 — fixed, validated argv
                 argv, stdin=stdin_fh, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

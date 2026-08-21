@@ -87,3 +87,36 @@ def test_missing_host_is_blocked() -> None:
 async def test_async_run_delegates(fake_ssh: Path) -> None:
     res = await RemoteToolRunner(ssh_bin=str(fake_ssh)).run(_req())
     assert res.status == "completed"
+
+
+def test_nonzero_remote_exit_is_reported(fake_ssh: Path) -> None:
+    runner = RemoteToolRunner(ssh_bin=str(fake_ssh))
+    res = runner.run_sync(_req(argv=("sh", "-c", "echo boom 1>&2; exit 3")))
+    assert res.status == "failed" and res.exit_code == 3
+    assert res.reason_code == "runner_nonzero_exit"
+    assert res.log_tail and "boom" in res.log_tail
+
+
+def test_missing_ssh_binary_is_reported(tmp_path: Path) -> None:
+    runner = RemoteToolRunner(ssh_bin=str(tmp_path / "no-such-ssh-binary"))
+    res = runner.run_sync(_req())
+    assert res.status == "failed" and res.exit_code is None
+    assert res.reason_code == "runner_executable_not_found"
+
+
+def test_invalid_ssh_port_is_blocked() -> None:
+    res = RemoteToolRunner().run_sync(_req(metadata={"ssh_host": "box", "ssh_port": 70000}))
+    assert res.status == "blocked" and res.reason_code == "remote_argv_invalid"
+
+
+def test_flag_injecting_username_is_blocked() -> None:
+    res = RemoteToolRunner().run_sync(
+        _req(metadata={"ssh_host": "box", "ssh_username": "-oProxyCommand=x"}))
+    assert res.status == "blocked" and res.reason_code == "remote_argv_invalid"
+
+
+def test_unreadable_stdin_path_returns_typed_result(tmp_path: Path) -> None:
+    runner = RemoteToolRunner()
+    res = runner.run_sync(_req(), stdin_path=str(tmp_path / "does-not-exist"))
+    assert res.status == "failed" and res.exit_code is None
+    assert res.reason_code == "remote_stdin_unreadable"
