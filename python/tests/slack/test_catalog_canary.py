@@ -212,6 +212,7 @@ def test_every_required_arg_is_obtainable_from_some_verb_output() -> None:
         "task_id": "list_open_tasks",
         "project_id": "list_projects",
         "change_id": "project_status",
+        "profile": "list_live_profiles",
         "question": None, "bugs": None, "title": None, "body": None,
         "north_star": None, "definition_of_done": None, "role_routes": None,
         "amount": None, "reason": None, "decision": None, "limit": None,

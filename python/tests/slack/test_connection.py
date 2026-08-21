@@ -2095,3 +2095,154 @@ async def test_not_running_stop_is_not_announced_as_executed(tmp_path: Path) -> 
         "stop_run", "C1", "t1", {"status": "not_running"})
 
     assert "executed" not in poster.messages[0]["text"].lower()
+
+
+# --------------------------------------------------------------------------
+# Live-run supervisor surface (spec 2026-08-21 §3.7).
+#
+# Autopilot exists to approve staged C-class actions without a human. That is
+# exactly wrong for `resume_live_run`: it clears a hold the supervisor put on
+# a profile BECAUSE something ban-class or cap-class happened, and the whole
+# point of the hold is that a person looks before it launches again. An
+# autopilot that can clear its own hold is a loop, not a gate.
+# --------------------------------------------------------------------------
+
+
+async def test_autopilot_never_auto_fires_a_human_only_verb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation(
+        "resume_live_run", {"profile": "osrs"}, "601.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: _staged_turn("resume_live_run", {"profile": "osrs"}, cid),
+    )
+    dispatch_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: (
+            dispatch_calls.append({"verb": verb}) or {"status": "resumed"}
+        ),
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev9", channel="C1", ts="601.1", thread_ts="601.1",
+        text="resume the live run"))
+    await bridge.wait_idle("601.1")
+
+    assert dispatch_calls == []
+    assert store.get_confirmation(cid)["state"] == "pending"
+    assert _approve_button_values(poster) == [cid]
+
+
+async def test_autopilot_still_auto_fires_a_non_human_only_liverun_verb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The carve-out is one verb, not "anything live-run" -- `start_live_run`
+    stays autopilot-firable, so this test fails if the guard is widened into a
+    blanket opt-out."""
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    cid = store.stage_confirmation(
+        "start_live_run", {"profile": "osrs"}, "602.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn",
+        lambda *a, **k: _staged_turn("start_live_run", {"profile": "osrs"}, cid),
+    )
+    dispatch_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: (
+            dispatch_calls.append({"verb": verb, "confirmed_via": confirmed_via})
+            or {"status": "started", "run_id": "r1"}
+        ),
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev10", channel="C1", ts="602.1", thread_ts="602.1",
+        text="start the live run"))
+    await bridge.wait_idle("602.1")
+
+    assert dispatch_calls == [{"verb": "start_live_run", "confirmed_via": "block_actions"}]
+    assert store.get_confirmation(cid)["state"] == "approved"
+
+
+async def test_live_run_confirmation_button_names_the_profile(tmp_path: Path) -> None:
+    """A button reading "Confirm start_live_run / Approve to run this action"
+    asks a human to authorise launching a real game client without telling
+    them WHICH profile."""
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    title, detail = bridge._confirmation_title(
+        {"verb": "start_live_run", "args": {"profile": "osrs"}})
+
+    assert "osrs" in title
+    assert "start_live_run" not in title  # real copy, not the raw verb name
+
+
+async def test_bare_stop_also_stops_the_live_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"stop" must mean stop -- a live run left launched after the operator
+    typed stop is a client still playing with nobody watching."""
+    store.bind_channel("C1", "proj-a")
+    seen: list[str] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: (
+            seen.append(verb) or {"status": "stopping"}
+        ),
+    )
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    bridge._default_cancel_hook("700.1", {"channel_id": "C1", "project_id": "proj-a"})
+
+    assert seen == ["stop_runtime", "stop_live_run"]
+
+
+async def test_bare_stop_still_stops_the_live_run_when_the_runtime_stop_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two stops are independent: a project with no runtime profile makes
+    `stop_runtime` raise, and that must not swallow the live-run teardown."""
+    store.bind_channel("C1", "proj-a")
+    seen: list[str] = []
+
+    def _dispatch(verb, args, *, channel_id, thread_ts, confirmed_via=None, deps):
+        seen.append(verb)
+        if verb == "stop_runtime":
+            raise tools.ToolError("no_project_bound")
+        return {"status": "stopping"}
+
+    monkeypatch.setattr(tools, "dispatch", _dispatch)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    bridge._default_cancel_hook("700.2", {"channel_id": "C1", "project_id": "proj-a"})
+
+    assert seen == ["stop_runtime", "stop_live_run"]
+
+
+async def test_the_cancel_hook_survives_a_supervisor_that_explodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hook runs inside the per-thread worker's supervisor loop: anything
+    escaping it kills that thread and the channel stops answering entirely.
+    `stop_live_run` reaches a subsystem that drives real processes, so it can
+    fail in ways this module has no vocabulary for."""
+    store.bind_channel("C1", "proj-a")
+    seen: list[str] = []
+
+    def _dispatch(verb, args, *, channel_id, thread_ts, confirmed_via=None, deps):
+        seen.append(verb)
+        raise RuntimeError("the supervisor blew up")
+
+    monkeypatch.setattr(tools, "dispatch", _dispatch)
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    bridge._default_cancel_hook("700.3", {"channel_id": "C1", "project_id": "proj-a"})
+
+    assert seen == ["stop_runtime", "stop_live_run"]

@@ -887,6 +887,19 @@ def test_outbound_module_does_not_import_slack_sdk() -> None:
     assert "import slack_sdk" not in source
 
 
+def test_outbound_module_does_not_import_the_live_run_supervisor() -> None:
+    """Same rule, second package: `errorta_liverun` owns launch/subprocess
+    machinery, and `outbound` must stay importable with only the bridge
+    installed. Order-independent -- reads this module's own bound names and
+    source, never process-global ``sys.modules``."""
+    import inspect
+
+    assert "errorta_liverun" not in vars(outbound)
+    for line in inspect.getsource(outbound).splitlines():
+        if "errorta_liverun" in line and "import " in line:
+            assert line.startswith(" "), f"module-level supervisor import: {line!r}"
+
+
 # --------------------------------------------------------------------------
 # Slice 5b Task 4 — run state as a fourth content source.
 #
@@ -1085,3 +1098,191 @@ async def test_blocking_signal_still_ignores_the_mute() -> None:
     poster = SyncFakePoster()
 
     assert outbound.poll_once("C-bm", "p1", deps=deps, poster=poster) == ["attn:s3"]
+
+
+# --------------------------------------------------------------------------
+# Slice: the live-run supervisor as a fifth content source (spec §3.7).
+#
+# The supervisor writes its whole narrative to `runs/<id>/events.jsonl` and
+# nothing else reads it, so without this source a live run launches, stalls,
+# gets torn down and pauses awaiting a human entirely off-channel.
+# --------------------------------------------------------------------------
+
+
+def _liverun_fixture(project_id: str = "proj-lr"):
+    from errorta_liverun.state import RunState, RunStore
+
+    rs = RunStore()
+    rid = rs.new_run_id()
+    state = RunState(
+        run_id=rid, profile_name="osrs", project_id=project_id, phase="watching",
+        reason=None, session_id="s", step_index=2,
+        started_at="2026-08-21T00:00:00Z", launched_at="t", ended_at=None,
+        evidence_dir=str(rs.evidence_dir(rid)),
+    )
+    rs.save(state)
+    rs.append_event(rid, "phase", {"to": "launching", "reason": None})
+    rs.append_event(rid, "launch_step",
+                    {"name": "rebuild-jar", "ok": True, "exit_code": 0,
+                     "stdout": "", "stderr": ""})
+    rs.append_event(rid, "probe_warn", {"id": "xp", "stalled_s": 900})
+    return rs, state
+
+
+def test_liverun_items_have_stable_markers_and_mandatory_flags() -> None:
+    rs, state = _liverun_fixture()
+    rs.append_event(state.run_id, "stall", {"id": "journal-seq", "stalled_s": 181})
+    rs.append_event(state.run_id, "literals", {"logoff_verified": "ABSENT"})
+    rs.append_event(state.run_id, "phase", {"to": "stopped", "reason": "stall:journal-seq"})
+
+    items = outbound._liverun_items(outbound.OutboundDeps(), "proj-lr")
+
+    assert [it.marker for it in items] == [
+        f"liverun:{state.run_id}:{i}" for i in range(1, 7)]
+    assert all(it.kind == "fyi" for it in items)
+    # phase -> launching / a successful launch step / a probe WARNING are
+    # routine progress: a muted channel is entitled to miss them.
+    assert [it.mandatory for it in items[:3]] == [False, False, False]
+    assert items[3].mandatory is True                              # stall
+    assert items[4].mandatory is True and "ABSENT" in items[4].detail
+    assert items[5].mandatory is True and "stopped" in items[5].detail
+    assert "osrs" in items[5].detail
+    # Another project's runs are not this channel's business.
+    assert outbound._liverun_items(outbound.OutboundDeps(), "other") == []
+
+
+def test_liverun_items_flow_through_poll_once_and_dedupe() -> None:
+    rs, state = _liverun_fixture()
+    store.bind_channel("C-lr", "proj-lr")
+    poster = SyncFakePoster()
+
+    first = outbound.poll_once("C-lr", "proj-lr", deps=outbound.OutboundDeps(), poster=poster)
+
+    assert first == [f"liverun:{state.run_id}:{i}" for i in (1, 2, 3)]
+    assert outbound.poll_once(
+        "C-lr", "proj-lr", deps=outbound.OutboundDeps(), poster=poster) == []
+
+
+def test_muted_channel_still_gets_the_stall() -> None:
+    rs, state = _liverun_fixture()
+    rs.append_event(state.run_id, "stall", {"id": "brain-alive", "stalled_s": 46})
+    store.bind_channel("C-lr", "proj-lr")
+    store.set_updates("C-lr", enabled=False)
+    poster = SyncFakePoster()
+
+    posted = outbound.poll_once(
+        "C-lr", "proj-lr", deps=outbound.OutboundDeps(), poster=poster)
+
+    assert posted == [f"liverun:{state.run_id}:4"]
+
+
+def test_liverun_detail_escapes_engine_authored_text() -> None:
+    """Event details carry profile names, stderr tails and matched ban-signal
+    patterns -- none of it operator-typed, and `render.fyi_message` does NOT
+    escape what it is handed. Unescaped, a "<!channel>" in a stack trace pings
+    the whole workspace."""
+    rs, state = _liverun_fixture()
+    rs.append_event(state.run_id, "ban_signal", {"pattern": "<!channel> banned"})
+
+    items = outbound._liverun_items(outbound.OutboundDeps(), "proj-lr")
+
+    assert "<!channel>" not in items[3].detail
+    assert "&lt;!channel&gt;" in items[3].detail
+
+
+def test_liverun_detail_is_capped() -> None:
+    rs, state = _liverun_fixture()
+    rs.append_event(state.run_id, "launch_step",
+                    {"name": "rebuild-jar", "ok": False, "exit_code": 1,
+                     "stdout": "", "stderr": "boom " * 5000})
+
+    items = outbound._liverun_items(outbound.OutboundDeps(), "proj-lr")
+
+    assert len(items[3].detail) < 1000
+
+
+def test_a_broken_run_store_does_not_wedge_the_poll() -> None:
+    """The supervisor's state directory is written by another process. An
+    unreadable one must degrade to "no live-run items", not kill the loop that
+    also carries the coding team's progress."""
+    def _boom(project_id: str):
+        raise OSError("half-written state.json")
+
+    deps = outbound.OutboundDeps(liverun_events_fn=_boom)
+
+    assert outbound._liverun_items(deps, "proj-lr") == []
+
+
+def test_evidence_png_is_uploaded_when_the_poster_supports_files() -> None:
+    rs, state = _liverun_fixture()
+    evidence = Path(state.evidence_dir)
+    evidence.mkdir(parents=True, exist_ok=True)
+    shot = evidence / "window-1.png"
+    shot.write_bytes(b"\x89PNG")
+    rs.append_event(state.run_id, "evidence",
+                    {"id": "client-window", "ok": True, "refs": [str(shot)], "detail": ""})
+    store.bind_channel("C-lr", "proj-lr")
+
+    class FilePoster(SyncFakePoster):
+        def __init__(self) -> None:
+            super().__init__()
+            self.files: list[tuple[Any, ...]] = []
+
+        def post_file(self, channel_id, thread_ts, path, title) -> dict[str, Any]:
+            self.files.append((channel_id, path, title))
+            return {"ok": True}
+
+    poster = FilePoster()
+    outbound.poll_once("C-lr", "proj-lr", deps=outbound.OutboundDeps(), poster=poster)
+
+    assert poster.files == [("C-lr", str(shot), "client-window")]
+
+
+def test_a_poster_without_post_file_still_posts_the_evidence_text() -> None:
+    rs, state = _liverun_fixture()
+    evidence = Path(state.evidence_dir)
+    evidence.mkdir(parents=True, exist_ok=True)
+    shot = evidence / "window-1.png"
+    shot.write_bytes(b"\x89PNG")
+    rs.append_event(state.run_id, "evidence",
+                    {"id": "client-window", "ok": True, "refs": [str(shot)], "detail": ""})
+    store.bind_channel("C-lr", "proj-lr")
+    poster = SyncFakePoster()
+
+    posted = outbound.poll_once(
+        "C-lr", "proj-lr", deps=outbound.OutboundDeps(), poster=poster)
+
+    assert f"liverun:{state.run_id}:4" in posted
+    assert any("client-window" in m["text"] for m in poster.messages)
+
+
+def test_a_failed_upload_never_blocks_the_stream() -> None:
+    rs, state = _liverun_fixture()
+    evidence = Path(state.evidence_dir)
+    evidence.mkdir(parents=True, exist_ok=True)
+    shot = evidence / "window-1.png"
+    shot.write_bytes(b"\x89PNG")
+    rs.append_event(state.run_id, "evidence",
+                    {"id": "client-window", "ok": True, "refs": [str(shot)], "detail": ""})
+    rs.append_event(state.run_id, "phase", {"to": "stopped", "reason": None})
+    store.bind_channel("C-lr", "proj-lr")
+
+    class BrokenFilePoster(SyncFakePoster):
+        def post_file(self, channel_id, thread_ts, path, title) -> dict[str, Any]:
+            raise RuntimeError("slack said no")
+
+    posted = outbound.poll_once(
+        "C-lr", "proj-lr", deps=outbound.OutboundDeps(), poster=BrokenFilePoster())
+
+    # The upload failed, but its own text AND everything after it still posted.
+    assert posted[-1] == f"liverun:{state.run_id}:5"
+
+
+def test_terminal_phases_do_not_drift_from_the_supervisor() -> None:
+    """`outbound` keeps a local copy of the supervisor's terminal-phase set so
+    that importing the bridge never imports the supervisor. A new terminal
+    phase added there and not here would silently stop posting through a
+    channel mute -- exactly the event a mute is not allowed to hide."""
+    from errorta_liverun.state import TERMINAL_PHASES
+
+    assert outbound._LIVERUN_TERMINAL_PHASES == frozenset(TERMINAL_PHASES)

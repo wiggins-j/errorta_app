@@ -29,6 +29,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bindings": [],
     "window": 20,
     "timeout_minutes": 30,
+    # How often the outbound progress loop polls every bound channel. Read by
+    # `errorta_app.slack_lifecycle._start_outbound`, which forwards it (and
+    # `timeout_minutes`) to `outbound.run_loop`. Before this existed the loop
+    # silently used run_loop's own signature default and the config was inert.
+    "interval_s": 15,
     # Carried from Task 7: `auth.is_allowed` reads these two keys and is
     # fail-closed when either is empty/missing (denies everyone) — that is
     # never overridden here. An empty default list is therefore the safe,
@@ -92,6 +97,15 @@ def _int(value: Any, *, default: int) -> int:
         return default
 
 
+def _float(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    # A zero/negative poll interval is a busy loop, not a configuration.
+    return parsed if parsed > 0 else default
+
+
 def _bindings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -141,6 +155,10 @@ def normalize(raw: dict[str, Any] | None) -> dict[str, Any]:
         "timeout_minutes": _int(
             merged.get("timeout_minutes"),
             default=int(DEFAULT_CONFIG["timeout_minutes"]),
+        ),
+        "interval_s": _float(
+            merged.get("interval_s"),
+            default=float(DEFAULT_CONFIG["interval_s"]),
         ),
         "allowed_team_ids": _str_list(merged.get("allowed_team_ids")),
         "allowed_user_ids": _str_list(merged.get("allowed_user_ids")),
