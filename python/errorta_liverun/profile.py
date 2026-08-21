@@ -315,6 +315,14 @@ def _step(raw: Any, hosts, tunnels, *, where: str) -> Step:
     lit = raw.get("evidence_literal")
     if lit is not None and not _TOKEN_RE.match(str(lit)):
         raise ProfileError("bad_evidence_literal", where)
+    if lit is not None and check is None:
+        # A literal is a CLAIM about the world after the step ran; only a CHECK
+        # can substantiate one. An action alone reports whether the *command*
+        # succeeded, which is a different question — `remote_signal` in
+        # particular exits 0 when there was no pidfile to signal at all, so a
+        # check-less `logoff_verified` would be a forged receipt for a logoff
+        # that never happened. Fail closed at authoring time.
+        raise ProfileError("literal_without_check", where)
     return Step(raw["name"], action, check, timeout, lit)
 
 

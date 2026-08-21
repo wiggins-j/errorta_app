@@ -72,6 +72,14 @@ def test_minimal_profile_loads(tmp_path: Path) -> None:
     (lambda d: d.update(caps={"max_launches_per_hour": 3}), "cap_above_default"),
     (lambda d: d.update(teardown=[{"name": "x", "local": {"argv": ["/bin/true"]}, "timeout_s": 1}]), "missing_logoff_literal"),
     (lambda d: d["watch"][0].update(on_stall="explode"), "bad_on_stall"),
+    # --- fix round 1: a literal is a claim, and only a CHECK can substantiate one.
+    # `remote_signal` exits 0 when there was no pidfile to signal at all, so this
+    # step would have forged `logoff_verified` on every run.
+    (lambda d: d.update(teardown=[{"name": "logoff", "remote_signal": {
+        "host": "box", "pidfile": "~/brain.pid", "signal": "TERM", "then": "KILL"},
+        "timeout_s": 1, "evidence_literal": "logoff_verified"}]), "literal_without_check"),
+    (lambda d: d.update(teardown=[{"name": "logoff", "local": {"argv": ["/bin/true"]},
+        "timeout_s": 1, "evidence_literal": "logoff_verified"}]), "literal_without_check"),
     (lambda d: d["launch"][0].update(remote={"host": "nope", "argv": ["true"]}, local=None), "unknown_host"),
     (lambda d: d["launch"][0].update(remote={"host": "box", "argv": [
         "python", "-m", "senditai_ng.cli", "run", "--execute"]}, local=None), "brain_flags_missing"),

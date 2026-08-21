@@ -35,6 +35,7 @@ from .state import TERMINAL_PHASES, LaunchLedger, RunState, RunStore, now_iso
 _LOG = logging.getLogger("errorta.liverun")
 _CHECK_POLL_S = 2.0
 _TICK_S = 1.0
+_WATCH_SAVE_S = 30.0
 _UNCAPPED = 1 << 30
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -61,6 +62,7 @@ class Supervisor:
                  tunnels: Any, remote: Any, project_id: str | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], Any] | None = None,
+                 teardown_sleep: Callable[[float], Any] | None = None,
                  wall: Callable[[], float] = time.time,
                  run_action=_steps.run_action, run_check=_steps.run_check,
                  run_probe=_steps.run_probe) -> None:
@@ -71,14 +73,22 @@ class Supervisor:
         self._wall = wall            # epoch: the ledger, and check `step_start`
         self._stop = threading.Event()
         self._sleep = sleep or (lambda s: self._stop.wait(s))
+        # Teardown polls must NOT use `_sleep`: its default is `self._stop.wait`,
+        # which returns instantly once `stop()` has been called — and teardown
+        # only ever runs after that. Polling a logoff check on a real interval
+        # is the whole point; a spin loop would hammer ssh/HTTP for the length
+        # of the step timeout and starve the very thing it is waiting for.
+        self._teardown_sleep = teardown_sleep or time.sleep
         self._run_action, self._run_check, self._run_probe = run_action, run_check, run_probe
         self._thread: threading.Thread | None = None
         self._stop_reason: str | None = None
         self._stopping = False
+        self._closed = False
         self._banned = False
         self._warned: set[str] = set()
         self._probe_next: dict[str, float] = {}
         self._probe_last_ok: dict[str, float] = {}
+        self._last_watch_save: float | None = None
         self._step_started: float | None = None       # monotonic
         self._step_started_wall: float = 0.0          # epoch
         rid = store.new_run_id()
@@ -102,8 +112,10 @@ class Supervisor:
         if self.state.phase != "idle":
             # One Supervisor drives one run; a second start would spend another
             # launch from the caps ledger and reset a machine already in flight.
+            self._event("refused", {"code": "already_started", "phase": self.state.phase})
             raise LiveRunRefused("already_started", self.state.phase)
         if paused_marker(self.profile.name).exists():
+            self._event("refused", {"code": "paused_awaiting_human"})
             raise LiveRunRefused("paused_awaiting_human", "resume_live_run required")
         code = self.ledger.check(self.profile.name, self.profile.caps, self._wall())
         if code:
@@ -213,6 +225,7 @@ class Supervisor:
 
     def _tick_watch(self) -> None:
         now = self._clock()
+        dirty = False
         for w in self.profile.watch:
             if now < self._probe_next.get(w.id, 0.0):
                 continue
@@ -225,7 +238,9 @@ class Supervisor:
                                             "detail": str(exc)[:200]})
             if ok:
                 self._probe_last_ok[w.id] = now
-                self.state.probe_last_ok[w.id] = now_iso()
+                stamp = now_iso()
+                dirty = dirty or self.state.probe_last_ok.get(w.id) != stamp
+                self.state.probe_last_ok[w.id] = stamp
                 self._warned.discard(w.id)
                 continue
             stalled_for = now - self._probe_last_ok.get(w.id, now)
@@ -240,19 +255,44 @@ class Supervisor:
             self._stop_reason = f"stall:{w.id}"
             self._do_stopping()
             return
-        self._save()
+        # A watching tick is the hot path — a run can sit here for hours. Only
+        # write `state.json` when the persisted picture actually moved, or once
+        # every `_WATCH_SAVE_S` so a crash can never leave the file stale by
+        # more than that.
+        stale = self._last_watch_save is None or (now - self._last_watch_save) >= _WATCH_SAVE_S
+        if dirty or stale:
+            self._last_watch_save = now
+            self._save()
 
     # -- stopping: evidence, teardown, literals ---------------------------- #
     def _do_stopping(self, *, final_phase: str = "stopped") -> None:
-        if self._stopping or self.state.phase in TERMINAL_PHASES:
-            # Re-entered (a crash inside teardown, or a second stop): never
-            # tear down twice, but never leave the run hanging non-terminal.
-            if self.state.phase not in TERMINAL_PHASES:
-                self._finish("failed", self._stop_reason or "stopping_reentered")
+        """Evidence, then teardown, then the closing sequence — for EVERY exit
+        path. The closing sequence lives in a ``finally`` because it is the part
+        that must not be optional: a step that throws halfway through teardown
+        would otherwise skip the kills, the literals verdict, the ledger outcome
+        and the terminal phase, leaving a run wedged at ``stopping`` that the
+        manager reports as live forever."""
+        if self.state.phase in TERMINAL_PHASES:
+            return                              # already closed out; a no-op
+        reason = self._stop_reason or "unknown"
+        if self._stopping:
+            # Re-entered while a first pass was unwinding — the crash handler in
+            # `run_once_blocking` comes back through here. Never replay evidence
+            # or teardown, but do finish the closing sequence the first pass
+            # dropped (`_close_out` is itself idempotent).
+            self._close_out(final_phase="failed", reason=reason)
             return
         self._stopping = True
-        reason = self._stop_reason or "unknown"
-        self._set_phase("stopping", reason)
+        try:
+            # Inside the try: even the `stopping` state write can fail (a full
+            # or read-only disk), and that must not cost the close-out below.
+            self._set_phase("stopping", reason)
+            self._run_evidence()
+            self._run_teardown()
+        finally:
+            self._close_out(final_phase=final_phase, reason=reason)
+
+    def _run_evidence(self) -> None:
         for step in self.profile.evidence:
             if step.action is None:
                 continue
@@ -264,37 +304,75 @@ class Supervisor:
             self._scan_ban(f"{res.stdout_tail}\n{res.stderr_tail}", where=f"evidence:{step.name}")
             self._event("evidence", {"id": step.name, "ok": res.ok, "refs": res.evidence_refs,
                                      "detail": res.detail})
+
+    def _run_teardown(self) -> None:
         for step in self.profile.teardown:
-            ok, text = self._teardown_step(step)
+            ok, literal_ok, text = self._teardown_step(step)
             self._scan_ban(text, where=f"teardown:{step.name}")
             if step.evidence_literal:
-                self.state.literals[step.evidence_literal] = ok
+                self.state.literals[step.evidence_literal] = literal_ok
             self._event("teardown_step", {"name": step.name, "ok": ok,
-                                          "literal": step.evidence_literal})
-        self._kill_owned()
-        self._save()
+                                          "literal": step.evidence_literal,
+                                          "literal_ok": literal_ok if step.evidence_literal else None})
+
+    def _close_out(self, *, final_phase: str, reason: str) -> None:
+        """Everything that MUST happen once a run is stopping, whatever went
+        wrong while it was stopping. Each stage is independently guarded: one
+        failure must not cost the others, and the run must land terminal even if
+        every one of them fails."""
+        if self._closed:
+            return
+        self._closed = True
+        for stage, fn in (("kill_owned", self._kill_owned),
+                          ("save", self._save),
+                          ("outcome", lambda: self._record_outcome(final_phase, reason)),
+                          ("literals", self._emit_literals)):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                _LOG.exception("liverun %s close-out stage %s failed", self.state.run_id, stage)
+        try:
+            if self._banned:
+                self._pause("ban_signal")
+            elif self._consecutive_failures_hit():
+                self._event("caps", {"code": "cap_consecutive_failures"})
+                self._pause("cap_consecutive_failures")
+            else:
+                self._finish(final_phase, reason)
+        except Exception:  # noqa: BLE001
+            _LOG.exception("liverun %s could not finish", self.state.run_id)
+        if self.state.phase not in TERMINAL_PHASES:
+            # Even the state write failed. Force the IN-MEMORY phase terminal
+            # anyway: `LiveRunManager._active` reads this object, and a run stuck
+            # at `stopping` would make the manager refuse every future start of
+            # the profile with `already_running`, forever.
+            self.state.phase = "failed"
+            self.state.reason = self.state.reason or reason
+            self.state.ended_at = self.state.ended_at or now_iso()
+
+    def _record_outcome(self, final_phase: str, reason: str) -> None:
         failed = (final_phase == "failed" or reason.startswith("stall")
                   or reason.startswith("supervisor_error") or reason == "ban_signal")
         self.ledger.record_outcome(self.state.run_id, failed=failed)
-        # The literals verdict is the last thing said about the run, so it
-        # lands before whichever phase event closes it out.
+
+    def _emit_literals(self) -> None:
+        """The literals verdict is the last thing said about the run, so it
+        lands before whichever phase event closes it out."""
         declared = {s.evidence_literal for s in self.profile.teardown if s.evidence_literal}
         declared.add("logoff_verified")   # spec-mandatory: always reported
         self._event("literals", {k: "PRESENT" if self.state.literals.get(k) else "ABSENT"
                                  for k in sorted(declared)})
-        if self._banned:
-            self._pause("ban_signal")
-        elif self._consecutive_failures_hit():
-            self._event("caps", {"code": "cap_consecutive_failures"})
-            self._pause("cap_consecutive_failures")
-        else:
-            self._finish(final_phase, reason)
 
-    def _teardown_step(self, step: _profile.Step) -> tuple[bool, str]:
-        """Run one teardown sub-step. Its literal rests on the CHECK when the
-        step declares one — a signal action reports ok even when there was no
-        pidfile to signal, which is exactly the case a `logoff_verified` must
-        not claim."""
+    def _teardown_step(self, step: _profile.Step) -> tuple[bool, bool, str]:
+        """Run one teardown sub-step. Returns ``(step_ok, literal_ok, text)``.
+
+        ``literal_ok`` is the ONLY thing an ``evidence_literal`` may rest on,
+        and it is False unless a declared CHECK passed. An action's own exit
+        status is not evidence about the world: `_run_remote_signal` exits 0
+        when there was no pidfile to signal at all, so a check-less step
+        claiming `logoff_verified` would be a forged receipt. `profile.py`
+        rejects such a step at load time; this is the second lock, for a
+        `Profile` built in code (tests, recovery's synthesized stand-in)."""
         ok = True
         text = ""
         started, started_wall = self._clock(), self._wall()
@@ -307,40 +385,70 @@ class Supervisor:
                 _LOG.exception("liverun %s teardown step %s failed", self.state.run_id, step.name)
                 ok = False
                 self._event("teardown_step", {"name": step.name, "error": type(exc).__name__})
-        if step.check is not None:
-            ok = False
-            while True:
-                try:
-                    if self._run_check(step.check, self.ctx, step_start=started_wall):
-                        ok = True
-                        break
-                except Exception:  # noqa: BLE001 — a check that throws is a check that hasn't passed
-                    _LOG.exception("liverun %s teardown check %s failed", self.state.run_id, step.name)
-                if self._clock() - started > step.timeout_s:
+        if step.check is None:
+            return ok, False, text
+        ok = False
+        while True:
+            try:
+                if self._run_check(step.check, self.ctx, step_start=started_wall):
+                    ok = True
                     break
-                self._sleep(_CHECK_POLL_S)
-        return ok, text
+            except Exception:  # noqa: BLE001 — a check that throws is a check that hasn't passed
+                _LOG.exception("liverun %s teardown check %s failed", self.state.run_id, step.name)
+            if self._clock() - started > step.timeout_s:
+                break
+            self._teardown_sleep(_CHECK_POLL_S)
+        return ok, ok, text
 
     def _kill_owned(self) -> None:
-        """Last-resort cleanup of what THIS process owns. `owned_pgids` is
-        live-only (steps prunes a reaped child), so it is normally empty here —
-        a survivor means a crash mid-step, and it still has to die. Remote
-        processes are the profile's own teardown steps to signal; we hold no
-        handle on them beyond their pidfiles."""
+        """Reconcile what this run wrote down as OWNED against reality: kill
+        surviving process groups, close tunnels we opened. Every release is
+        reported (`recovery` events) and a resource is dropped from the state
+        ONLY when it was actually released — an id silently forgotten is a leak
+        nobody can find afterwards.
+
+        In a live run `owned_pgids` is live-only (steps prunes a reaped child),
+        so this is normally a no-op; on the boot-recovery path it is the whole
+        point. Remote processes are the profile's own teardown steps to signal;
+        we hold no handle on them beyond their pidfiles."""
+        started_after = _steps._iso_to_epoch(self.state.started_at)
         for pgid in list(self.state.owned_pgids):
+            if not _steps._pgid_is_ours(pgid, started_after=started_after):
+                # The pid may have been recycled while the sidecar was down.
+                # Leaving an orphan is recoverable; SIGKILLing a stranger is not.
+                self._event("recovery", {"pgid": pgid, "result": "SKIPPED_NOT_OURS"})
+                self.state.owned_pgids.remove(pgid)
+                continue
             try:
                 _steps._killpg(pgid)
-            except Exception:  # noqa: BLE001
+                self._event("recovery", {"pgid": pgid, "result": "KILLED"})
+                self.state.owned_pgids.remove(pgid)
+            except Exception:  # noqa: BLE001 — keep the id so the leak stays visible
                 _LOG.exception("liverun %s killpg %s failed", self.state.run_id, pgid)
-            self.state.owned_pgids.remove(pgid)
+                self._event("recovery", {"pgid": pgid, "result": "FAILED"})
         for tid in list(self.state.owned_tunnels):
             tdef = self.profile.tunnels.get(tid)
-            if self.ctx.tunnels is not None and tdef is not None:
-                try:
-                    self.ctx.tunnels.close(_steps.tunnel_spec_for(tdef, self.ctx))
-                except Exception:  # noqa: BLE001
-                    _LOG.exception("liverun %s tunnel close %s failed", self.state.run_id, tid)
-            self.state.owned_tunnels.remove(tid)
+            if self.ctx.tunnels is None or tdef is None:
+                # No manager, or a profile that no longer declares this tunnel —
+                # the spec can't even be rebuilt, so nothing was closed. Keep the
+                # id: the ssh child (if any) is still out there.
+                self._event("recovery", {"tunnel": tid, "tunnel_close": "ABSENT",
+                                         "reason": "spec_unavailable"})
+                continue
+            try:
+                closed = self.ctx.tunnels.close(_steps.tunnel_spec_for(tdef, self.ctx))
+            except Exception:  # noqa: BLE001
+                _LOG.exception("liverun %s tunnel close %s failed", self.state.run_id, tid)
+                closed = False
+            if closed:
+                self._event("recovery", {"tunnel": tid, "tunnel_close": "PRESENT"})
+                self.state.owned_tunnels.remove(tid)
+            else:
+                # `TunnelManager.close` returns False when its in-memory registry
+                # has no such tunnel — exactly the case after a sidecar restart.
+                # Nothing was closed, so nothing may be forgotten.
+                self._event("recovery", {"tunnel": tid, "tunnel_close": "ABSENT",
+                                         "reason": "not_registered"})
 
     def _consecutive_failures_hit(self) -> bool:
         """Ask the ledger ONLY the consecutive-failure question. The rate caps
@@ -417,7 +525,8 @@ class LiveRunManager:
         self._store, self._ledger = store, ledger
         self._tunnels, self._remote = tunnels, remote
         self._load_profile = load_profile or _profile.load_profile
-        self._lock = threading.Lock()
+        # Re-entrant: `start` holds the lock across its own `_active()` call.
+        self._lock = threading.RLock()
         self._runs: dict[str, Supervisor] = {}  # profile name -> latest supervisor
 
     def _deps(self) -> tuple[RunStore, LaunchLedger, Any, Any]:
@@ -434,7 +543,11 @@ class LiveRunManager:
         return self._store, self._ledger, self._tunnels, self._remote
 
     def _active(self) -> dict[str, Supervisor]:
-        return {k: s for k, s in self._runs.items() if s.state.phase not in TERMINAL_PHASES}
+        # Under the lock: `_runs` is mutated by `start` from whichever thread
+        # asked (Slack, HTTP, the lifespan), and iterating a dict that another
+        # thread is inserting into raises RuntimeError.
+        with self._lock:
+            return {k: s for k, s in self._runs.items() if s.state.phase not in TERMINAL_PHASES}
 
     def _find(self, profile_name: str | None, project_id: str | None) -> Supervisor | None:
         active = self._active()
@@ -483,7 +596,9 @@ class LiveRunManager:
     def status(self, *, profile_name: str | None = None, project_id: str | None = None) -> dict[str, Any]:
         sup = self._find(profile_name, project_id)
         if sup is None:
-            last = max(self._runs.values(), key=lambda s: s.state.started_at) if self._runs else None
+            with self._lock:
+                runs = list(self._runs.values())
+            last = max(runs, key=lambda s: s.state.started_at) if runs else None
             return {"status": "empty", "last": last.state.to_dict() if last else None}
         return sup.snapshot()
 
@@ -501,7 +616,9 @@ class LiveRunManager:
             sup.stop("sidecar_shutdown")
         # Join every supervisor we ever started, not just the ones still
         # active — one that finished between the two loops still owns a thread.
-        for sup in list(self._runs.values()):
+        with self._lock:
+            runs = list(self._runs.values())
+        for sup in runs:
             sup.join(timeout=60)
 
 

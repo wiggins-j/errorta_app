@@ -1,13 +1,14 @@
 # python/tests/liverun/test_supervisor.py
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
 from errorta_liverun import profile as P
-from errorta_liverun.state import LaunchLedger, RunStore
+from errorta_liverun.state import TERMINAL_PHASES, LaunchLedger, RunStore
 from errorta_liverun.steps import StepResult
 from errorta_liverun.supervisor import (
     LiveRunManager,
@@ -47,9 +48,11 @@ def _profile(*, launch_ok=True, warn=False) -> P.Profile:
     return P.Profile("p", {}, {}, launch, watch, evidence, teardown, P.DEFAULT_CAPS, ("Account is banned",))
 
 
-def _sup(prof, clock, *, probe, check=None, action=None, store=None, ledger=None, wall=None) -> Supervisor:
-    return Supervisor(prof, store=store or RunStore(), ledger=ledger or LaunchLedger(), tunnels=None, remote=None,
-                      clock=clock, sleep=clock.sleep, wall=wall or clock,
+def _sup(prof, clock, *, probe, check=None, action=None, store=None, ledger=None, wall=None,
+         tunnels=None) -> Supervisor:
+    return Supervisor(prof, store=store or RunStore(), ledger=ledger or LaunchLedger(),
+                      tunnels=tunnels, remote=None,
+                      clock=clock, sleep=clock.sleep, teardown_sleep=clock.sleep, wall=wall or clock,
                       run_action=action or _ok, run_check=check or (lambda c, ctx, step_start: True),
                       run_probe=probe)
 
@@ -356,3 +359,175 @@ def test_manager_resume_clears_the_paused_marker() -> None:
     marker.write_text("ban_signal\n")
     assert mgr.resume("p") == {"status": "resumed"}
     assert not marker.exists()
+
+
+# --- fix round 1 ----------------------------------------------------------- #
+
+def test_literal_on_a_checkless_teardown_step_is_never_present() -> None:
+    """`profile.py` refuses to load such a step, but a `Profile` built in code
+    must not be able to forge the literal either: an action's exit status says
+    the command ran, not that the world changed. `_run_remote_signal` returns
+    ok even when there was no pidfile to signal."""
+    clock = FakeClock()
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    prof = P.Profile("p", {}, {}, (), (), (),
+                     (P.Step("logoff", act, None, 5, "logoff_verified"),), P.DEFAULT_CAPS, ())
+    sup = _sup(prof, clock, probe=lambda p, ctx: True)   # the action reports ok=True
+    sup.start(blocking=False)
+    sup.stop("operator_stop"); sup._tick()
+    assert sup.state.literals["logoff_verified"] is False
+    lits = [e for e in sup.store.events(sup.state.run_id) if e["kind"] == "literals"][-1]
+    assert lits["detail"]["logoff_verified"] == "ABSENT"
+    td = [e for e in sup.store.events(sup.state.run_id) if e["kind"] == "teardown_step"][-1]
+    assert td["detail"]["ok"] is True and td["detail"]["literal_ok"] is False
+
+
+class _FlakyStore(RunStore):
+    """A store whose `append_event` throws once, on the first event of `kind`."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self._boom_kind = kind
+
+    def append_event(self, run_id: str, kind: str, detail: dict) -> int:
+        if kind == self._boom_kind:
+            self._boom_kind = None
+            raise OSError("disk full")
+        return super().append_event(run_id, kind, detail)
+
+
+def test_a_throwing_teardown_still_kills_records_and_finishes() -> None:
+    """The close-out sequence lives in a `finally`: an exception halfway through
+    teardown must not cost the kills, the literals verdict, the ledger outcome
+    or the terminal phase — a run wedged at `stopping` would make the manager
+    refuse every future start of the profile forever."""
+    clock = FakeClock()
+    store = _FlakyStore("teardown_step")
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True, store=store)
+    sup.start(blocking=False)
+    child = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    sup.state.owned_pgids.append(child.pid)
+    sup.stop("operator_stop")
+    with pytest.raises(OSError):                      # `run_once_blocking` catches this
+        sup._tick()
+    assert child.wait(timeout=5) is not None          # `_kill_owned` still ran
+    assert sup.state.owned_pgids == []
+    assert sup.state.phase == "stopped" and sup.state.ended_at
+    kinds = [e["kind"] for e in store.events(sup.state.run_id)]
+    assert "literals" in kinds and kinds[-1] == "phase"
+    assert [r for r in sup.ledger._rows() if r.get("kind") == "outcome"]
+
+
+def test_a_wedged_close_out_still_leaves_the_run_terminal() -> None:
+    """Belt and braces: if even the state write fails, the in-memory phase is
+    forced terminal so `LiveRunManager._active` stops reporting the run live."""
+    clock = FakeClock()
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True)
+    sup.start(blocking=False)
+    sup.stop("operator_stop")
+
+    def _boom(*a, **k):
+        raise OSError("read-only fs")
+
+    sup._set_phase = _boom  # type: ignore[method-assign]
+    with pytest.raises(OSError):
+        sup._tick()
+    assert sup.state.phase == "failed" and sup.state.phase in TERMINAL_PHASES
+    assert sup.state.ended_at and sup.state.reason == "operator_stop"
+
+
+def test_teardown_polling_does_not_busy_loop_after_stop() -> None:
+    """`_sleep` defaults to `self._stop.wait`, which returns instantly once
+    `stop()` was called — and teardown only ever runs after that. Teardown polls
+    must use their own sleep or they spin, hammering the very ssh/HTTP endpoint
+    they are waiting on."""
+    clock = FakeClock()
+    polls = {"n": 0}
+
+    def check(c, ctx, step_start):
+        polls["n"] += 1
+        return False                      # the logoff never verifies
+
+    def gated_sleep(_s):                  # stands in for `self._stop.wait` post-stop
+        raise AssertionError("teardown must not use the stop-gated sleep")
+
+    prof = _profile()
+    prof = P.Profile(prof.name, prof.hosts, prof.tunnels, (), (), (),
+                     (P.Step("logoff", None, P.Check("file_exists", "/"), 1, "logoff_verified"),),
+                     prof.caps, prof.ban_signals)
+    sup = Supervisor(prof, store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None,
+                     clock=clock, sleep=gated_sleep, teardown_sleep=clock.sleep, wall=clock,
+                     run_action=_ok, run_check=check, run_probe=lambda p, ctx: True)
+    sup.start(blocking=False)
+    sup.stop("operator_stop")
+    sup._tick()
+    assert sup.state.phase == "stopped"
+    assert polls["n"] <= 2                       # 1 s timeout, 2 s poll interval
+    assert clock.t - 1000.0 >= 2.0               # it really waited
+
+
+class _CountingStore(RunStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.saves = 0
+
+    def save(self, state) -> None:
+        self.saves += 1
+        super().save(state)
+
+
+def test_watching_ticks_do_not_rewrite_state_every_second() -> None:
+    clock = FakeClock()
+    store = _CountingStore()
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True, store=store)
+    sup.start(blocking=False)
+    sup._tick(); sup._tick()                      # launch step, then -> watching
+    before = store.saves
+    for _ in range(20):                           # 20 s: two probe rounds, no 30 s mark
+        clock.sleep(1); sup._tick()
+    assert sup.state.phase == "watching"
+    assert store.saves - before <= 4
+
+
+def test_refusals_are_recorded_as_events() -> None:
+    clock = FakeClock()
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True)
+    sup.start(blocking=False)
+    with pytest.raises(LiveRunRefused):
+        sup.start(blocking=False)
+    codes = [e["detail"]["code"] for e in sup.store.events(sup.state.run_id)
+             if e["kind"] == "refused"]
+    assert codes == ["already_started"]
+    sup.stop("operator_stop"); sup._tick()
+
+    marker = paused_marker("p")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("ban_signal\n")
+    blocked = _sup(_profile(), clock, probe=lambda p, ctx: True)
+    with pytest.raises(LiveRunRefused):
+        blocked.start(blocking=False)
+    assert [e["detail"]["code"] for e in blocked.store.events(blocked.state.run_id)
+            if e["kind"] == "refused"] == ["paused_awaiting_human"]
+
+
+def test_unreleased_tunnels_stay_owned_and_are_reported_absent() -> None:
+    """`TunnelManager.close` returns False when its in-memory registry has no
+    such tunnel — the normal case after a restart. Nothing was closed, so the id
+    may not be quietly forgotten."""
+    clock = FakeClock()
+
+    class DeadTunnels:
+        def close(self, spec) -> bool:
+            return False
+
+    prof = P.Profile("p", {"box": P.Host("box")}, {"t1": P.TunnelDef("t1", "box", ((1, 2),))},
+                     (), (), (), (P.Step("logoff", None, P.Check("file_exists", "/"), 1,
+                                         "logoff_verified"),), P.DEFAULT_CAPS, ())
+    sup = _sup(prof, clock, probe=lambda p, ctx: True, tunnels=DeadTunnels())
+    sup.start(blocking=False)
+    sup.state.owned_tunnels.append("t1")
+    sup.stop("operator_stop"); sup._tick()
+    assert sup.state.owned_tunnels == ["t1"]
+    ev = [e["detail"] for e in sup.store.events(sup.state.run_id)
+          if e["kind"] == "recovery" and e["detail"].get("tunnel") == "t1"]
+    assert ev and ev[-1]["tunnel_close"] == "ABSENT"

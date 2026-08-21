@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -219,6 +220,72 @@ def _run_local(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult
                       ended_at=now_iso(), exit_code=outcome.returncode, pgid=outcome.pgid,
                       stdout_tail=_redact(outcome.stdout.decode("utf-8", "replace")),
                       stderr_tail=_redact(outcome.stderr.decode("utf-8", "replace")), timed_out=outcome.timed_out)
+
+
+# Whole seconds of slack when comparing a process's creation time against a
+# run's `started_at`: `now_iso` truncates to the second (always downward, which
+# is already in our favour) and psutil derives create_time from boot time plus
+# kernel ticks, which can drift a little either way.
+_PGID_START_SLACK_S = 2.0
+
+
+def _iso_to_epoch(value: str | None) -> float | None:
+    """Parse a `now_iso()` timestamp back to epoch seconds. Returns None for
+    anything we can't read — callers must treat that as "no time evidence",
+    never as "the time matched"."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _pgid_is_ours(pgid: int, *, started_after: float | None = None) -> bool:
+    """PID-reuse guard: may we SIGKILL this process group?
+
+    A pgid read back from `state.json` names a number, not a process. By the
+    time a restarted sidecar reads it, the original may be long gone and the
+    OS may have handed that pid to something else entirely — and `killpg`
+    does not raise on a reused pgid, so nothing downstream would catch it.
+
+    True ONLY when all of these hold:
+      * the pgid is a plausible target (not 0 — our own group — and not 1),
+      * pid `pgid` is the LEADER of group `pgid` (every `start_new_session`
+        spawn is; this ties the identity check to the exact group `killpg`
+        will signal),
+      * the process runs as US (a stranger's uid is never ours to kill), and
+      * it was created at or after `started_after` when we know that time —
+        a process older than the run cannot be a child the run spawned.
+
+    Fail closed: no psutil, an unreadable or zombie process, or an unparseable
+    creation time all return False. Leaving an orphan behind is recoverable;
+    SIGKILLing a stranger is not.
+    """
+    if pgid is None or not isinstance(pgid, int) or pgid <= 1:
+        return False
+    try:
+        if os.getpgid(pgid) != pgid:
+            return False
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    try:
+        import psutil  # type: ignore
+    except Exception:  # noqa: BLE001
+        _LOG.warning("psutil unavailable: refusing to kill persisted pgid %s unverified", pgid)
+        return False
+    try:
+        proc = psutil.Process(pgid)
+        if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        if proc.uids().real != os.getuid():
+            return False
+        created = float(proc.create_time())
+    except Exception:  # noqa: BLE001
+        return False
+    if started_after is not None and created < started_after - _PGID_START_SLACK_S:
+        return False
+    return True
 
 
 def _killpg(pid: int, sig: int = signal.SIGKILL) -> None:

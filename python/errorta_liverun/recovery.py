@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from . import profile as _profile
 from . import steps as _steps
-from .state import LaunchLedger, RunState, RunStore, now_iso
+from .state import RunState, RunStore, now_iso
 from .supervisor import Supervisor
 
 _LOG = logging.getLogger("errorta.liverun")
@@ -34,20 +34,23 @@ _SIGNAL_TIMEOUT_S = 20.0
 
 
 class _NullLedger:
-    """Recovery is not a launch — it must never spend a slot from the caps
-    ledger, or a restart storm would silently exhaust the profile's budget.
-    ``check`` therefore always says "no objection", while the outcome of the
-    lost run is still recorded against the real ledger so the caps arithmetic
-    for the NEXT start sees a complete history."""
+    """Recovery touches the caps ledger not at all.
 
-    def __init__(self, real: Any) -> None:
-        self._real = real
+    It is not a launch — a restart storm must never silently exhaust the
+    profile's budget — so ``check`` always says "no objection" and ``record``
+    is a programming error.
+
+    It records no OUTCOME either. A run lost to a sidecar restart is a run we
+    know nothing about: it may have been perfectly healthy a millisecond
+    earlier. Writing `failed=False` would reset a genuine consecutive-failure
+    streak (a restart would launder two bad cycles into a clean slate), and
+    writing `failed=True` would blame the profile for our own restart.
+    `LaunchLedger.check` skips launches that have no outcome row when it counts
+    the streak, so saying nothing is the honest answer — and the only one that
+    leaves the streak exactly as it was."""
 
     def record_outcome(self, run_id: str, *, failed: bool) -> None:
-        try:
-            self._real.record_outcome(run_id, failed=failed)
-        except Exception:  # noqa: BLE001 — a ledger write must not abort a teardown
-            _LOG.exception("recovery: could not record outcome for %s", run_id)
+        _LOG.debug("recovery: not recording an outcome for lost run %s", run_id)
 
     def record(self, *a: Any, **k: Any) -> None:  # pragma: no cover - never called
         raise AssertionError("recovery must not record a launch")
@@ -60,19 +63,33 @@ def _signal_remote_pidfiles(sup: Supervisor, state: RunState) -> None:
     """TERM-then-KILL every remote pid this run wrote down. The profile's own
     teardown steps have already had their turn; this is the backstop for a run
     whose profile no longer parses, or whose teardown never reached the signal
-    step because the sidecar died mid-launch."""
+    step because the sidecar died mid-launch.
+
+    A ref is dropped from the state ONLY when the signal actually went through.
+    An unreachable host is a remote process still running against a tunnel that
+    no longer exists — forgetting its pidfile would erase the only record of
+    it, so it stays in the (now terminal) state where a human can find it."""
     for ref in list(state.owned_remote_pidfiles):
         host, pidfile = ref.get("host"), ref.get("pidfile")
-        if host and pidfile:
-            action = _profile.Action("remote_signal", {
-                "host": host, "pidfile": pidfile, "signal": "TERM",
-                "grace_s": _SIGNAL_GRACE_S, "then": "KILL"})
-            try:
-                sup._run_action(action, sup.ctx, timeout_s=_SIGNAL_TIMEOUT_S)
-            except Exception:  # noqa: BLE001 — one unreachable host must not
-                # strand the pgids and tunnels of the same run behind it
-                _LOG.warning("recovery: remote signal failed for %s", ref, exc_info=True)
-        state.owned_remote_pidfiles.remove(ref)
+        if not host or not pidfile:
+            sup._event("recovery", {"remote_pidfile": ref, "result": "SKIPPED_MALFORMED"})
+            state.owned_remote_pidfiles.remove(ref)
+            continue
+        action = _profile.Action("remote_signal", {
+            "host": host, "pidfile": pidfile, "signal": "TERM",
+            "grace_s": _SIGNAL_GRACE_S, "then": "KILL"})
+        try:
+            res = sup._run_action(action, sup.ctx, timeout_s=_SIGNAL_TIMEOUT_S)
+            ok = bool(res.ok)
+            detail = res.detail
+        except Exception as exc:  # noqa: BLE001 — one unreachable host must not
+            # strand the pgids and tunnels of the same run behind it
+            _LOG.warning("recovery: remote signal failed for %s", ref, exc_info=True)
+            ok, detail = False, type(exc).__name__
+        sup._event("recovery", {"remote_pidfile": ref, "ok": ok,
+                                "result": "SIGNALLED" if ok else "FAILED", "detail": detail})
+        if ok:
+            state.owned_remote_pidfiles.remove(ref)
 
 
 def recover_on_boot(*, store: RunStore | None = None, tunnels: Any = None, remote: Any = None,
@@ -114,7 +131,7 @@ def _recover_one(state: RunState, *, store: RunStore, load, tunnels: Any, remote
         # `logoff_verified` is reported ABSENT — never assumed.
         prof = _profile.Profile(state.profile_name, {}, {}, (), (), (), (),
                                 _profile.DEFAULT_CAPS, ())
-    sup = Supervisor(prof, store=store, ledger=_NullLedger(LaunchLedger()), tunnels=tunnels,
+    sup = Supervisor(prof, store=store, ledger=_NullLedger(), tunnels=tunnels,
                      remote=remote, project_id=state.project_id,
                      run_action=run_action, run_check=run_check)
     # Bind the throwaway supervisor to the PERSISTED state so the owned
@@ -133,8 +150,12 @@ def _recover_one(state: RunState, *, store: RunStore, load, tunnels: Any, remote
         sup._do_stopping(final_phase="lost_on_restart")
     except Exception:  # noqa: BLE001 — a teardown that throws must not stop the kills below
         _LOG.exception("recovery: teardown failed for %s", state.run_id)
+    # `_do_stopping`'s own `finally` has already killed the pgids and closed the
+    # tunnels. The remote pidfiles are the backstop that has to come AFTER the
+    # profile's graceful logoff steps had their turn — it goes over its own ssh
+    # connection, not through any reverse tunnel, so the closed tunnels above
+    # don't matter to it.
     _signal_remote_pidfiles(sup, state)
-    sup._kill_owned()
     if state.phase != "lost_on_restart":
         # `_do_stopping` didn't get to finish the run (it threw), or it paused
         # the PROFILE on a ban signal it found in the evidence. Either way the

@@ -335,8 +335,7 @@ async def lifespan(app: FastAPI):
     # startup critical path: a teardown can wait out an SSH grace period per
     # lost run, and none of that should sit in front of `yield`.
     try:
-        import threading as _threading
-
+        # `_threading` is already bound by the F157 block above (same function).
         from errorta_liverun.recovery import recover_on_boot as _liverun_recover
 
         def _liverun_boot() -> None:
