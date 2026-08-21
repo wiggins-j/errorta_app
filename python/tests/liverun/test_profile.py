@@ -1,0 +1,139 @@
+# python/tests/liverun/test_profile.py
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+import yaml
+
+from errorta_liverun import profile as P
+
+
+@pytest.fixture(autouse=True)
+def _home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("ERRORTA_HOME", str(tmp_path))
+    return tmp_path
+
+
+def _ok_hosts(host: str) -> bool:
+    return True
+
+
+def _minimal(**over) -> dict:
+    doc = {
+        "version": 1,
+        "created_by": "operator",
+        "hosts": {"box": {"ssh_host": "box"}},
+        "tunnels": {},
+        "launch": [
+            {"name": "start", "local": {"argv": ["/bin/true"]},
+             "check": {"exit0": ["/bin/true"]}, "timeout_s": 5},
+        ],
+        "watch": [
+            {"id": "alive", "every_s": 1, "stall_after_s": 5, "on_stall": "stop",
+             "probe": {"http": {"url": "http://127.0.0.1:1/state"}}},
+        ],
+        "evidence": [],
+        "teardown": [
+            {"name": "logoff", "check": {"http_json": {"url": "http://127.0.0.1:1/state",
+             "path": "gameState", "not_equals": "LOGGED_IN"}}, "timeout_s": 5,
+             "evidence_literal": "logoff_verified"},
+        ],
+        "caps": {},
+        "ban_signals": ["Account is banned"],
+    }
+    doc.update(over)
+    return doc
+
+
+def _write(tmp_path: Path, doc: dict, name: str = "p") -> Path:
+    d = P.profiles_dir(); d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{name}.yaml"
+    f.write_text(yaml.safe_dump(doc)); f.chmod(0o600)
+    return f
+
+
+def test_minimal_profile_loads(tmp_path: Path) -> None:
+    prof = P.load_profile(_write(tmp_path, _minimal()), known_hosts_fn=_ok_hosts)
+    assert prof.name == "p"
+    assert prof.launch[0].action.kind == "local"
+    assert prof.caps == P.DEFAULT_CAPS
+    assert prof.teardown[0].evidence_literal == "logoff_verified"
+
+
+@pytest.mark.parametrize("mutate,code", [
+    (lambda d: d.update(created_by="slack"), "created_by_not_operator"),
+    (lambda d: d.update(version=2), "unsupported_version"),
+    (lambda d: d.update(bogus=1), "unknown_key"),
+    (lambda d: d["launch"][0].update(local={"argv": ["./jagex-play"]}), "argv0_not_absolute"),
+    (lambda d: d["launch"][0].update(local={"argv": ["/bin/sh", "-c", "echo $HOME"]}), "shell_token_in_argv"),
+    (lambda d: d["launch"][0].update(local={"argv": ["/bin/true", "--ignore-risk-budget"]}), "banned_token"),
+    (lambda d: d.update(caps={"max_launches_per_hour": 3}), "cap_above_default"),
+    (lambda d: d.update(teardown=[{"name": "x", "local": {"argv": ["/bin/true"]}, "timeout_s": 1}]), "missing_logoff_literal"),
+    (lambda d: d["watch"][0].update(on_stall="explode"), "bad_on_stall"),
+    (lambda d: d["launch"][0].update(remote={"host": "nope", "argv": ["true"]}, local=None), "unknown_host"),
+    (lambda d: d["launch"][0].update(remote={"host": "box", "argv": [
+        "python", "-m", "senditai_ng.cli", "run", "--execute"]}, local=None), "brain_flags_missing"),
+])
+def test_validator_rejects(tmp_path: Path, mutate, code: str) -> None:
+    doc = _minimal(); mutate(doc)
+    if doc["launch"][0].get("local") is None:
+        doc["launch"][0].pop("local", None)
+    with pytest.raises(P.ProfileError) as ei:
+        P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+    assert ei.value.code == code
+
+
+def test_gradlew_needs_absolute_cwd(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["launch"][0]["local"] = {"argv": ["./gradlew", "build"]}
+    with pytest.raises(P.ProfileError) as ei:
+        P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+    assert ei.value.code == "argv0_not_absolute"
+    doc["launch"][0]["local"] = {"argv": ["./gradlew", "build"], "cwd": "/abs/repo"}
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_brain_run_with_required_flags_passes(tmp_path: Path) -> None:
+    doc = _minimal()
+    doc["launch"][0] = {"name": "brain", "remote": {"host": "box", "argv": [
+        "python", "-m", "senditai_ng.cli", "run", "--max-session-seconds", "3600",
+        "--receipt-id", "r", "--require-live-feed"], "detach": True,
+        "pidfile": "~/x.pid"}, "check": {"remote_pid_alive": {"host": "box", "pidfile": "~/x.pid"}},
+        "timeout_s": 5}
+    P.load_profile(_write(tmp_path, doc), known_hosts_fn=_ok_hosts)
+
+
+def test_unknown_known_hosts_rejected(tmp_path: Path) -> None:
+    with pytest.raises(P.ProfileError) as ei:
+        P.load_profile(_write(tmp_path, _minimal()), known_hosts_fn=lambda h: False)
+    assert ei.value.code == "host_unknown"
+
+
+def test_symlink_and_wrong_mode_rejected(tmp_path: Path) -> None:
+    f = _write(tmp_path, _minimal())
+    f.chmod(0o666)
+    with pytest.raises(P.ProfileError) as ei:
+        P.load_profile(f, known_hosts_fn=_ok_hosts)
+    assert ei.value.code == "profile_mode_insecure"
+    f.chmod(0o600)
+    link = f.parent / "link.yaml"; link.symlink_to(f)
+    with pytest.raises(P.ProfileError) as ei:
+        P.load_profile(link, known_hosts_fn=_ok_hosts)
+    assert ei.value.code == "profile_is_symlink"
+
+
+def test_outside_profiles_dir_rejected(tmp_path: Path) -> None:
+    f = tmp_path / "elsewhere.yaml"; f.write_text(yaml.safe_dump(_minimal())); f.chmod(0o600)
+    with pytest.raises(P.ProfileError) as ei:
+        P.load_profile(f, known_hosts_fn=_ok_hosts)
+    assert ei.value.code == "profile_outside_dir"
+
+
+def test_list_profiles_reports_validity(tmp_path: Path) -> None:
+    _write(tmp_path, _minimal(), "good")
+    _write(tmp_path, _minimal(created_by="slack"), "bad")
+    rows = {r["name"]: r for r in P.list_profiles(known_hosts_fn=_ok_hosts)}
+    assert rows["good"]["valid"] is True
+    assert rows["bad"]["valid"] is False and rows["bad"]["error"] == "created_by_not_operator"
