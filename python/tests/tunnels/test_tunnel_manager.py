@@ -201,3 +201,50 @@ def test_teardown_kills_children_and_clears() -> None:
     # The local port is free again after teardown.
     p = _alloc_local_port()
     assert 1 <= p <= 65535
+
+
+def test_reverse_forwards_emit_R_and_no_L() -> None:
+    spec = TunnelSpec(ssh_host="box", remote_port=0,
+                      reverse_forwards=((8081, 8081), (8082, 18082))).validated()
+    argv = build_ssh_argv(spec, 0)
+    assert "-L" not in argv
+    assert argv[argv.index("-R") + 1] == "127.0.0.1:8081:127.0.0.1:8081"
+    assert argv.count("-R") == 2
+    assert "127.0.0.1:8082:127.0.0.1:18082" in argv
+
+
+def test_reverse_only_spec_requires_forwards() -> None:
+    with pytest.raises(TunnelValidationError):
+        TunnelSpec(ssh_host="box", remote_port=0).validated()
+    with pytest.raises(TunnelValidationError):
+        TunnelSpec(ssh_host="box", remote_port=0, reverse_forwards=((0, 80),)).validated()
+
+
+def test_child_kill_kills_process_group(tmp_path) -> None:
+    # A shell that forks a sleeping grandchild; killing the leader alone
+    # leaves the grandchild alive. killpg must take both.
+    import os, signal, subprocess, time
+    from errorta_tunnels.manager import _Child
+    marker = tmp_path / "pid"
+    child = _Child(["/bin/sh", "-c", f"sleep 30 & echo $! > {marker}; wait"])
+    for _ in range(50):
+        if marker.exists() and marker.read_text().strip():
+            break
+        time.sleep(0.05)
+    grandchild = int(marker.read_text().strip())
+    child.kill()
+    time.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(grandchild, 0)
+
+
+def test_close_stops_one_tunnel() -> None:
+    mgr, children = _fast_manager()
+    a = TunnelSpec(ssh_host="a", remote_port=1)
+    b = TunnelSpec(ssh_host="b", remote_port=2)
+    mgr.ensure(a, wait=False); mgr.ensure(b, wait=False)
+    assert mgr.close(a) is True
+    assert mgr.status_for(a) is None
+    assert mgr.status_for(b) is not None
+    assert mgr.close(a) is False
+    mgr.teardown()
