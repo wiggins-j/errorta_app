@@ -103,6 +103,8 @@ class Fake:
         self.triage_replies: list[str] = []
         self.start_raises: Exception | None = None
         self.run_end_status = "stopped"
+        self.start_result: dict = {"status": "started"}
+        self.start_sets_running = True
 
     # -- seams ---------------------------------------------------------- #
     def deps(self) -> FixDeps:
@@ -124,8 +126,9 @@ class Fake:
         if self.start_raises is not None:
             raise self.start_raises
         self.started.append((project_id, {"resume": resume, "continue_": continue_}))
-        self.store.state["status"] = "running"
-        return {"status": "started"}
+        if self.start_sets_running and self.start_result.get("status") == "started":
+            self.store.state["status"] = "running"
+        return dict(self.start_result)
 
     def _stage(self, verb: str, args: dict, thread_ts: str, *, channel_id: str = "") -> str:
         cid = f"cid{len(self.staged)}"
@@ -579,3 +582,55 @@ def test_every_pause_code_the_driver_can_emit_is_declared() -> None:
     assert {"fix_no_gate", "fix_project_busy", "fix_no_delivery", "fix_declined",
             "fix_gate_blocked", "fix_idle", "fix_run_failed", "triage_ambiguous",
             "repo_not_fixable", "fix_unsafe_paths"} <= set(PAUSE_CODES)
+
+
+# -- the start race -------------------------------------------------------- #
+
+def test_a_continue_start_is_not_mistaken_for_a_finished_run() -> None:
+    """`continue_` starts FROM "stopped": until the run state has actually said
+    "running", a terminal status is the status the project already had."""
+    fake = Fake()
+    fake.store.state = {"status": "stopped"}
+    cyc = _cycle(fake)
+    cyc.step(); cyc.step(); cyc.step()
+    assert fake.started == [("senditai-ng", {"resume": False, "continue_": True})]
+    fake.store.state["status"] = "stopped"       # the engine has not picked it up yet
+    fake.clock.advance(31)
+    assert cyc.step().kind == "pending"
+    assert fake.ws.calls == []                   # nothing read: no diff exists yet
+    fake.store.state["status"] = "running"
+    fake.clock.advance(31); cyc.step()
+    fake.store.state["status"] = "stopped"
+    fake.clock.advance(31); cyc.step()
+    assert fake.ws.calls == [("master", "h0")]
+
+
+def test_a_run_nothing_ever_picks_up_fails_the_cycle() -> None:
+    fake = Fake()
+    fake.start_sets_running = False
+    cyc = _cycle(fake)
+    cyc.step(); cyc.step(); cyc.step()
+    fake.store.state["status"] = "idle"          # never became `running`
+    out = None
+    for _ in range(6):
+        fake.clock.advance(31)
+        out = cyc.step()
+        if out.kind == "paused":
+            break
+    assert out.code == "fix_run_failed" and out.failed is True
+    assert out.detail == "never_started:idle"
+
+
+def test_a_refused_start_ends_the_cycle_instead_of_watching_nothing() -> None:
+    fake = Fake()
+    fake.start_result = {"status": "refused", "detail": "no active focus"}
+    out = _drive(_cycle(fake), fake)
+    assert out.code == "fix_run_failed" and out.detail == "refused"
+    assert [k for k, _ in out.events][-1] == "fix_run"
+
+
+def test_an_already_running_project_reported_by_the_engine_is_not_fought() -> None:
+    fake = Fake()
+    fake.start_result = {"status": "already_running"}
+    out = _drive(_cycle(fake), fake)
+    assert out.code == "fix_project_busy" and out.failed is False

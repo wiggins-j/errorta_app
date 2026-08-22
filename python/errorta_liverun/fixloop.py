@@ -43,6 +43,10 @@ POLL_S = 30.0
 # After `cancel_requested`, how long we wait for the run to actually go terminal
 # before giving up and pausing anyway (spec §3.5 step 6).
 CANCEL_WAIT_S = 120.0
+# How long the just-started run has to actually show up as running. Until it
+# does, a TERMINAL status is the status it already had before we started it (a
+# `continue_` start begins from "stopped"), not a run that finished.
+RUN_START_GRACE_S = 120.0
 TERMINAL_RUN_STATUSES = frozenset({"stopped", "failed"})
 DEFAULT_IDLE_TIMEOUT_S = 1200.0
 DEFAULT_ACCEPT_TIMEOUT_S = 1800.0
@@ -296,6 +300,8 @@ class FixCycle:
         self.task_id: str | None = None
         self.cid: str = ""
         self._run_status = ""
+        self._run_started_at = 0.0
+        self._saw_running = False
         self._fingerprint: tuple | None = None
         self._last_progress = 0.0
         self._next_poll = 0.0
@@ -426,15 +432,25 @@ class FixCycle:
         except Exception as exc:  # noqa: BLE001 - the engine's failure is this cycle's failure
             _LOG.exception("liverun %s could not start the fix run", self.run_id)
             return self._pause("fix_run_failed", failed=True, detail=type(exc).__name__)
+        # The app's own `_start_run` answers `{"started": True, ...}` with no
+        # status key; anything that DOES carry one and does not say "started" is
+        # a refusal (a start gate, a health preflight) and ends the cycle here
+        # rather than leaving it watching a run that was never started.
         out_status = str((result or {}).get("status") or "started") if isinstance(result, dict) \
             else "started"
         self._event("fix_run", {"project_id": project_id, "mode": mode, "status": out_status})
         if out_status == "already_running":
             return self._pause("fix_project_busy", failed=False, detail=out_status)
+        if out_status != "started":
+            return self._pause("fix_run_failed", failed=True, detail=out_status)
         now = self._clock()
+        self._run_started_at = now
         self._last_progress = now
         self._next_poll = now + POLL_S
         self._fingerprint = self._sample()
+        # A start that flipped the run state to `running` before returning has
+        # already answered the "did it actually start?" question.
+        self._saw_running = self._fingerprint[0] == "running"
         self._state = "watch"
         return self._pending("fix_run")
 
@@ -449,10 +465,17 @@ class FixCycle:
             self._fingerprint = fingerprint
             self._last_progress = now
         status = str(fingerprint[0] or "")
-        if status in TERMINAL_RUN_STATUSES:
+        if status == "running":
+            self._saw_running = True
+        started_long_ago = now - self._run_started_at > RUN_START_GRACE_S
+        if status in TERMINAL_RUN_STATUSES and (self._saw_running or started_long_ago):
             self._run_status = status
             self._state = "stage"
             return self._pending("fix_run_terminal")
+        if not self._saw_running and started_long_ago and status not in TERMINAL_RUN_STATUSES:
+            # Two minutes in and the project's run state has never once said
+            # `running`: nothing picked the task up.
+            return self._pause("fix_run_failed", failed=True, detail=f"never_started:{status}")
         idle = now - self._last_progress
         if idle > self._idle_timeout_s:
             self._event("fix_idle_cancel", {"idle_s": int(idle),
