@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from dataclasses import MISSING, asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,10 @@ from errorta_app.paths import errorta_home
 from .profile import Caps
 
 PHASES = ("idle", "launching", "watching", "stopping", "stopped", "failed",
-          "paused_awaiting_human", "lost_on_restart")
+          "paused_awaiting_human", "lost_on_restart",
+          # Slice 2 fix loop. Non-terminal by design: a run in one of these is
+          # still owned by a live supervisor and must be recovered on restart.
+          "fixing", "accepting", "deploying")
 TERMINAL_PHASES = {"stopped", "failed", "paused_awaiting_human", "lost_on_restart"}
 
 
@@ -69,6 +73,10 @@ class RunState:
     probe_last_value: dict[str, str] = field(default_factory=dict)   # probe id -> last observed
     literals: dict[str, bool] = field(default_factory=dict)          # e.g. logoff_verified
     evidence_dir: str = ""
+    fix_of: str | None = None          # the run id this run is a relaunch of
+    fix_cycle: int = 0                 # how many fix cycles deep this chain is
+    fix_repo_id: str | None = None     # the repo triage attributed the failure to
+    fix_task_id: str | None = None     # the dev task filed for it
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -195,10 +203,41 @@ class LaunchLedger:
     def _rows(self) -> list[dict[str, Any]]:
         return _read_jsonl(self._path)
 
-    def _append(self, row: dict[str, Any]) -> None:
-        _ensure_dir(self._path.parent)
-        with self._path.open("a") as fh:
+    @property
+    def _fix_path(self) -> Path:
+        # A fix cycle is not a launch: keeping it in its own file means the
+        # launch-cap arithmetic in check() cannot be perturbed by fix rows, and
+        # a fix row can never be miscounted as a launch.
+        return self._path.with_name("fixcycles.jsonl")
+
+    def _append_to(self, path: Path, row: dict[str, Any]) -> None:
+        _ensure_dir(path.parent)
+        with path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
+
+    def _append(self, row: dict[str, Any]) -> None:
+        self._append_to(self._path, row)
+
+    def record_fix_cycle(self, profile_name: str, run_id: str, repo_id: str, *,
+                         failed: bool, at: float | None = None) -> None:
+        self._append_to(self._fix_path, {"profile": profile_name, "run_id": run_id,
+                                         "repo_id": repo_id, "failed": bool(failed),
+                                         "at": at if at is not None else time.time()})
+
+    def fix_cycles_today(self, profile_name: str, now: float) -> int:
+        """Fix cycles for this profile in the rolling last 24h. A row with a
+        missing or non-numeric `at` is skipped, never counted as now."""
+        n = 0
+        for r in _read_jsonl(self._fix_path):
+            if r.get("profile") != profile_name:
+                continue
+            try:
+                at = float(r["at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if now - at < 86_400.0:
+                n += 1
+        return n
 
     def record(self, profile_name: str, run_id: str, at: float) -> None:
         self._append({"kind": "launch", "profile": profile_name, "run_id": run_id, "at": at})

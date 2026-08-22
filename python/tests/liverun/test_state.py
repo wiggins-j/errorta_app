@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from errorta_liverun.profile import Caps
-from errorta_liverun.state import LaunchLedger, RunState, RunStore
+from errorta_liverun.state import (LaunchLedger, PHASES, TERMINAL_PHASES,
+                                    RunState, RunStore)
 
 
 @pytest.fixture(autouse=True)
@@ -176,3 +177,56 @@ def test_append_event_is_concurrency_safe_across_threads(tmp_path: Path) -> None
         t.join()
 
     assert sorted(seqs) == list(range(1, n_threads * per_thread + 1))
+
+
+# --- Slice 2: fix-cycle ledger + new phases -------------------------------- #
+
+def test_fix_cycles_today_counts_a_rolling_24h(tmp_path: Path) -> None:
+    led = LaunchLedger(tmp_path / "launches.jsonl")
+    now = 1_700_000_000.0
+    led.record_fix_cycle("osrs", "r1", "brain", failed=False, at=now - 90_000)  # >24h
+    led.record_fix_cycle("osrs", "r2", "brain", failed=True, at=now - 100)
+    led.record_fix_cycle("osrs", "r3", "brain", failed=False, at=now - 50)
+    assert led.fix_cycles_today("osrs", now) == 2
+    assert LaunchLedger(tmp_path / "launches.jsonl").fix_cycles_today("osrs", now) == 2
+    assert led.fix_cycles_today("other", now) == 0
+
+
+def test_fix_cycles_live_in_their_own_file_and_never_move_launch_caps(tmp_path: Path) -> None:
+    led = LaunchLedger(tmp_path / "launches.jsonl")
+    led.record_fix_cycle("osrs", "r1", "brain", failed=True, at=1.0)
+    assert (tmp_path / "fixcycles.jsonl").is_file()
+    assert not (tmp_path / "launches.jsonl").exists()
+    # a fix cycle is not a launch and must not trip a launch cap
+    assert led.check("osrs", Caps(), 100.0) is None
+
+
+def test_fix_cycles_today_survives_a_malformed_row(tmp_path: Path) -> None:
+    led = LaunchLedger(tmp_path / "launches.jsonl")
+    led.record_fix_cycle("osrs", "r1", "brain", failed=False, at=10.0)
+    with (tmp_path / "fixcycles.jsonl").open("a") as fh:
+        fh.write("not json\n")
+        fh.write(json.dumps({"profile": "osrs", "at": "soon"}) + "\n")
+    assert led.fix_cycles_today("osrs", 20.0) == 1
+
+
+def test_new_phases_are_not_terminal() -> None:
+    for phase in ("fixing", "accepting", "deploying"):
+        assert phase in PHASES and phase not in TERMINAL_PHASES
+
+
+def test_runstate_from_dict_defaults_new_fields() -> None:
+    st = RunState.from_dict({"run_id": "r", "profile_name": "p", "project_id": None,
+                             "phase": "stopped", "reason": None, "session_id": "s",
+                             "step_index": 0, "started_at": "x", "launched_at": None,
+                             "ended_at": None})
+    assert (st.fix_of, st.fix_cycle, st.fix_repo_id, st.fix_task_id) == (None, 0, None, None)
+
+
+def test_fix_fields_roundtrip_through_the_store(tmp_path: Path) -> None:
+    store = RunStore()
+    st = _state(store, "fixing")
+    st.fix_of, st.fix_cycle, st.fix_repo_id, st.fix_task_id = ("old", 2, "brain", "t-1")
+    store.save(st)
+    assert store.load(st.run_id) == st
+    assert [s.run_id for s in store.list_non_terminal()] == [st.run_id]
