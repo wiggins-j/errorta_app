@@ -73,6 +73,9 @@ from .routes import (
     judge as judge_routes,
 )
 from .routes import (
+    liverun as liverun_routes,
+)
+from .routes import (
     mobile as mobile_routes,
 )
 from .routes import (
@@ -683,6 +686,7 @@ app.include_router(gateway_routes.router)
 app.include_router(tools_routes.router)
 app.include_router(agent_context_routes.router)
 app.include_router(mobile_routes.router)
+app.include_router(liverun_routes.router)
 app.include_router(aiar_connection_routes.router)
 app.include_router(alpha_routes.router)
 

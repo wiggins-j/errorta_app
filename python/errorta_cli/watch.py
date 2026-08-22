@@ -127,7 +127,15 @@ def run_watch(
             code="watch_on_mutation",
         )
     stream = out or sys.stdout
-    tick = interval if interval is not None else (ctx.poll_interval or DEFAULT_INTERVAL)
+    # Precedence: an explicit call argument, then the operator's --poll-interval,
+    # then the command's own preferred cadence, then the global default. The
+    # `or` chain (rather than `is None`) is deliberate for the last three: a 0
+    # here has always meant "unset", and honouring it literally would spin.
+    if interval is not None:
+        tick = interval
+    else:
+        preferred = command.watch_interval if command is not None else None
+        tick = ctx.poll_interval or preferred or DEFAULT_INTERVAL
     # F158: resolve the watch mode per-invocation so a command with mixed sub-verbs
     # (e.g. `pm chat` streams, `pm changes` snapshots) picks the right one.
     mode = "snapshot"
@@ -154,6 +162,12 @@ def run_watch(
             text = f"error: {exc.message}"
         _draw(stream, text, clear)
         count += 1
+        if isinstance(_payload, dict) and _payload.get("_watch_done"):
+            # The command says the thing being watched has reached a terminal
+            # state (a live run stopped/failed/paused). Watching a finished thing
+            # forever is a hang the operator has to notice and Ctrl-C out of, so
+            # the loop ends on the frame that showed the terminal state.
+            return
         if iterations is not None and count >= iterations:
             return
         try:

@@ -73,6 +73,68 @@ fix cycle exists, teardown has already completed.
 A bare "stop", "cancel" or "abort" in the channel calls `stop_live_run` in
 addition to the existing `stop_runtime` behaviour.
 
+## Driving it from the terminal
+
+Slack is one door onto the supervisor, not the only one. The sidecar exposes the
+same manager over `/liverun/*`, and the CLI drives it:
+
+| Command | Route | Gate |
+|---|---|---|
+| `errorta liverun profiles` | `GET /liverun/profiles` | none |
+| `errorta liverun status [<profile>] [--watch]` | `GET /liverun/status` | none |
+| `errorta liverun start <profile> [--project P]` | `POST /liverun/start` | `--yes` |
+| `errorta liverun stop [<profile>] [--reason R]` | `POST /liverun/stop` | none |
+| `errorta liverun resume <profile>` | `POST /liverun/resume` | `--yes` |
+| `errorta liverun fix pause <profile>` | `POST /liverun/fix/pause` | none |
+| `errorta liverun fix resume <profile>` | `POST /liverun/fix/resume` | `--yes` |
+
+Start a run from the terminal:
+
+```
+errorta liverun start osrs --project senditai-ng --yes
+```
+
+Watch it:
+
+```
+errorta liverun status --watch
+```
+
+`--watch` repaints every 5 s — phase, elapsed, each probe's last-ok age against
+its own `stall_after_s`, cap headroom, the literals — and **ends by itself** when
+the run reaches a terminal phase, so the terminal is free again the moment the
+run stops rather than after you notice and Ctrl-C. `--json` on any of these
+prints the raw route payload for scripting.
+
+The run belongs to the **sidecar**, not to the terminal that asked for it: this
+is the same `live_run_manager` the Slack verbs drive, so a run started here shows
+up in `live_status`, can be stopped from the channel, and survives the CLI
+process exiting. Closing the terminal does not stop the run — `errorta liverun
+stop` does.
+
+The gate column mirrors the Slack trust classes exactly. Turning autonomy **on**
+is gated: `start` launches real commands on a real host, `resume` clears a hold
+something ban-class or cap-class put there, and `fix resume` re-arms autonomous
+merging — each needs an interactive yes or `--yes`, and each re-checks the
+sole-owner invariant first. Turning it **off** is not gated at all: `stop` and
+`fix pause` fire immediately, and deliberately skip the sole-owner check too. A
+stop you have to confirm — or that a second Errorta app on the host can refuse —
+is a stop that arrives too late.
+
+An operator note on a stop is recorded *inside* the reason, never as the reason:
+`--reason "swapping the build"` is stored as `operator_stop:swapping the build`.
+The fix loop decides whether a stop is a bug worth a cycle by matching
+`^(stall|launch_step_failed):`, and a free-text note must not be able to talk it
+into fixing a stop a human ordered.
+
+A refused start is a normal `200` carrying the manager's own reason
+(`already_running`, `project_has_live_run`, `profile_invalid:<rule>`, a caps
+verdict) — printed as `start osrs: refused — already_running`. Profile names are
+validated at the route (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, `422` otherwise)
+because the name reaches the filesystem. All seven routes require a trusted
+loopback origin plus the sidecar bearer token, and all seven fail closed under
+remote data residency: a live run is a local-disk data plane end to end.
+
 ## What you will see in Slack
 
 Progress is read from the run's own `events.jsonl`, one channel line per event,
