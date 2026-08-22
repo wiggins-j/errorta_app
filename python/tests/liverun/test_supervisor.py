@@ -1397,3 +1397,16 @@ def test_snapshot_survives_a_ledger_that_cannot_be_read() -> None:
     sup.ledger.fix_cycles_today = lambda *a, **k: (_ for _ in ()).throw(OSError("gone"))
     assert sup.snapshot()["fix_cycles_today"] == -1
     sup.stop("operator_stop"); sup._tick()
+
+
+def test_resume_records_a_streak_reset_so_the_next_start_is_not_refused(tmp_path: Path) -> None:
+    from errorta_liverun.supervisor import LiveRunManager, paused_marker
+    from errorta_liverun.state import LaunchLedger
+    led = LaunchLedger()
+    led.record("p", "a", 1.0); led.record_outcome("a", failed=True)
+    led.record("p", "b", 2.0); led.record_outcome("b", failed=True)
+    assert led.check("p", P.DEFAULT_CAPS, 100_000.0) == "cap_consecutive_failures"
+    marker = paused_marker("p"); marker.parent.mkdir(parents=True, exist_ok=True); marker.write_text("x")
+    mgr = LiveRunManager(ledger=led)
+    assert mgr.resume("p") == {"status": "resumed"}
+    assert led.check("p", P.DEFAULT_CAPS, 10**9) is None

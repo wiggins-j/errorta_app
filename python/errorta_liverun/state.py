@@ -247,6 +247,12 @@ class LaunchLedger:
     def record(self, profile_name: str, run_id: str, at: float) -> None:
         self._append({"kind": "launch", "profile": profile_name, "run_id": run_id, "at": at})
 
+    def record_reset(self, profile_name: str, at: float) -> None:
+        """A human cleared the profile's pause: the consecutive-failure streak
+        restarts from here. Launch-rate caps are untouched on purpose -- a
+        human may forgive a streak, never a burst."""
+        self._append({"kind": "reset", "profile": profile_name, "at": at})
+
     def record_outcome(self, run_id: str, *, failed: bool) -> None:
         self._append({"kind": "outcome", "run_id": run_id, "failed": bool(failed)})
 
@@ -282,8 +288,14 @@ class LaunchLedger:
             if not isinstance(run_id, str) or not isinstance(failed, bool):
                 continue
             outcomes[run_id] = failed
+        resets = [float(r["at"]) for r in rows
+                  if r.get("kind") == "reset" and r.get("profile") == profile_name
+                  and isinstance(r.get("at"), (int, float))]
+        last_reset = max(resets) if resets else None
         streak = 0
-        for _at, run_id in sorted(launches, key=lambda t: t[0], reverse=True):
+        for at, run_id in sorted(launches, key=lambda t: t[0], reverse=True):
+            if last_reset is not None and at <= last_reset:
+                break
             failed = outcomes.get(run_id)
             if failed is None:
                 continue

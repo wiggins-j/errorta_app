@@ -943,6 +943,12 @@ class LiveRunManager:
         if not marker.exists():
             return {"status": "empty"}
         marker.unlink()
+        # A human resumed: forgive the consecutive-failure streak, or the next
+        # start is refused `cap_consecutive_failures` forever (live 2026-08-22).
+        try:
+            self._deps()[1].record_reset(profile_name, time.time())
+        except Exception:  # noqa: BLE001
+            _LOG.warning("resume: could not record the streak reset", exc_info=True)
         return {"status": "resumed"}
 
     def pause_fix(self, profile_name: str) -> dict[str, Any]:

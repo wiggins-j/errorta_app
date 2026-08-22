@@ -230,3 +230,21 @@ def test_fix_fields_roundtrip_through_the_store(tmp_path: Path) -> None:
     store.save(st)
     assert store.load(st.run_id) == st
     assert [s.run_id for s in store.list_non_terminal()] == [st.run_id]
+
+
+def test_a_human_reset_forgives_the_failure_streak_but_not_the_rate_caps(tmp_path: Path) -> None:
+    led = LaunchLedger(tmp_path / "l.jsonl")
+    caps = Caps(max_launches_per_hour=2, min_launch_gap_s=10, max_launches_per_day=8,
+                max_consecutive_failed_cycles=2)
+    t0 = 1_000_000.0
+    led.record("p", "a", t0); led.record_outcome("a", failed=True)
+    led.record("p", "b", t0 + 4000); led.record_outcome("b", failed=True)
+    assert led.check("p", caps, t0 + 8000) == "cap_consecutive_failures"
+    led.record_reset("p", t0 + 8001)
+    assert led.check("p", caps, t0 + 8002) is None
+    # the reset does not launder a burst
+    led.record("p", "c", t0 + 8010); led.record("p", "d", t0 + 8030)
+    assert led.check("p", caps, t0 + 8050) == "cap_hourly"
+    # and a NEW streak after the reset still trips
+    led.record_outcome("c", failed=True); led.record_outcome("d", failed=True)
+    assert led.check("p", caps, t0 + 20000) == "cap_consecutive_failures"
