@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 import time
 from pathlib import Path
@@ -96,7 +97,20 @@ _DEV_REPO_READ_TOOLS = _REPO_READ_TOOLS  # Spec 14: back-compat alias
 # fallback in ``ClaudeCliHandler.call`` is the second line of defence — raising
 # this value reduces how often that fallback (which throws away the retrieval)
 # has to fire.
-_REPO_READ_MAX_TURNS = 16
+# Live 2026-08-22 (senditai-ng fix cycle): 16 was exhausted by a sonnet dev
+# exploring a real 657-file repo, and the lossy plain fallback then reported
+# "the source is not present" from its empty temp cwd. 48 by default;
+# ``ERRORTA_REPO_READ_MAX_TURNS`` overrides (operators tune, the model never).
+def _repo_read_max_turns() -> int:
+    raw = os.environ.get("ERRORTA_REPO_READ_MAX_TURNS", "").strip()
+    try:
+        v = int(raw) if raw else 48
+    except ValueError:
+        v = 48
+    return max(2, min(v, 200))
+
+
+_REPO_READ_MAX_TURNS = _repo_read_max_turns()
 _DEV_REPO_READ_MAX_TURNS = _REPO_READ_MAX_TURNS  # Spec 14: back-compat alias
 
 # A GUI .app launched from Finder/Dock inherits a minimal PATH (/usr/bin:/bin:…)

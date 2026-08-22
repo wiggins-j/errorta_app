@@ -345,7 +345,7 @@ def test_dev_repo_read_turn_budget_is_raised():
     """The budget must cover several tool-use turns PLUS the final envelope
     turn. 6 was too low in production (empty-result member failures)."""
     import errorta_model_gateway.providers.async_claude_cli as mod
-    assert mod._DEV_REPO_READ_MAX_TURNS == 16
+    assert mod._DEV_REPO_READ_MAX_TURNS == 48
 
 
 @pytest.mark.asyncio
@@ -354,7 +354,7 @@ async def test_retrieval_argv_carries_the_raised_budget(monkeypatch, tmp_path):
     calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=_ok_json())])
     await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
     argv = calls[0]["argv"]
-    assert argv[argv.index("--max-turns") + 1] == str(mod._DEV_REPO_READ_MAX_TURNS) == "16"
+    assert argv[argv.index("--max-turns") + 1] == str(mod._DEV_REPO_READ_MAX_TURNS) == "48"
 
 
 @pytest.mark.asyncio
@@ -374,7 +374,7 @@ async def test_empty_retrieval_result_falls_back_to_plain_invocation(monkeypatch
     # Attempt 1 = retrieval: read-only tools, raised budget, cwd = worktree.
     first = calls[0]["argv"]
     assert _tools_value(first) == "Read,Grep,Glob"
-    assert first[first.index("--max-turns") + 1] == "16"
+    assert first[first.index("--max-turns") + 1] == "48"
     assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
 
     # Attempt 2 = the plain non-retrieval invocation, byte-for-byte the legacy
@@ -640,3 +640,14 @@ def test_clean_subprocess_env_strips_pyinstaller_loader_vars(monkeypatch):
     # PATH augmented with the common toolchain dirs.
     assert "/opt/homebrew/bin" in env["PATH"]
     assert "/usr/local/bin" in env["PATH"]
+
+
+
+def test_repo_read_budget_is_operator_tunable(monkeypatch):
+    from errorta_model_gateway.providers import async_claude_cli as mod
+    monkeypatch.setenv("ERRORTA_REPO_READ_MAX_TURNS", "64")
+    assert mod._repo_read_max_turns() == 64
+    monkeypatch.setenv("ERRORTA_REPO_READ_MAX_TURNS", "garbage")
+    assert mod._repo_read_max_turns() == 48
+    monkeypatch.setenv("ERRORTA_REPO_READ_MAX_TURNS", "100000")
+    assert mod._repo_read_max_turns() == 200
