@@ -967,9 +967,8 @@ def test_manager_pause_and_resume_fix_toggle_the_fix_marker() -> None:
     mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None)
 
     assert mgr.resume_fix("p") == {"status": "empty"}
-    # `aborted` is False with no supervisor running for the profile: there was
-    # no in-flight cycle to stop, only a hold to write.
-    assert mgr.pause_fix("p") == {"status": "paused", "profile": "p", "aborted": False}
+    # "paused", not "pausing": no live run to ask, only a hold to write.
+    assert mgr.pause_fix("p") == {"status": "paused", "profile": "p"}
     assert fix_paused_marker("p").exists()
     assert not paused_marker("p").exists()
     assert mgr.pause_fix("p")["status"] == "paused"        # idempotent
@@ -1046,30 +1045,41 @@ def test_stop_while_awaiting_acceptance_leaves_no_run_and_no_button() -> None:
 # minutes later. `pause_fix_loop` has to reach the cycle, not just the marker.
 
 
-def _paused_via_manager(sup, fake: FixFake) -> dict:
+def _request_pause_via_manager(sup) -> dict:
     """`pause_fix_loop` as Slack calls it: through the manager that holds the
-    supervisor, not by touching the supervisor directly."""
+    supervisor, not by touching the supervisor directly. It only REQUESTS —
+    the supervisor's own thread does the aborting on its next tick."""
     mgr = LiveRunManager(store=sup.store, ledger=sup.ledger, tunnels=None, remote=None)
     mgr._runs[sup.profile.name] = sup
     return mgr.pause_fix(sup.profile.name)
+
+
+def _awaiting_acceptance(clock, fake: FixFake):
+    """A supervisor parked in the fix cycle's `await` state, its acceptance
+    staged. `fake.confirm_state` decides what the poll will find there."""
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()                                         # stage -> await
+    assert fake.staged
+    return sup
 
 
 def test_pausing_the_fix_loop_aborts_the_cycle_awaiting_acceptance() -> None:
     clock = FakeClock()
     fake = FixFake()
     fake.confirm_state = "pending"
-    sup = _fix_sup(clock, fake)
-    _to_terminal(sup, clock)
-    _to_phase(sup, clock, fake, "accepting")
-    sup._tick()                                         # stage -> await
+    sup = _awaiting_acceptance(clock, fake)
     assert _pending_cids(fake)
     fake.store.state["status"] = "running"              # a dev turn is still going
 
-    out = _paused_via_manager(sup, fake)
+    out = _request_pause_via_manager(sup)
 
-    assert out["status"] == "paused" and out["aborted"] is True
+    assert out["status"] == "pausing"                   # asked, not yet done
     assert out["run_id"] == sup.state.run_id
-    assert fix_paused_marker("p").exists()              # the hold, as before
+    assert fix_paused_marker("p").exists()              # the hold, immediately
+    sup._tick()                                         # the supervisor honours it
+
     assert fake.store.state["cancel_requested"] is True     # the dev run, told
     assert _pending_cids(fake) == []                        # the button, withdrawn
     assert fake.resolved == [(list(fake.confirmations)[0], "declined")]
@@ -1080,18 +1090,33 @@ def test_pausing_the_fix_loop_aborts_the_cycle_awaiting_acceptance() -> None:
     assert sup.store.load(sup.state.run_id).fix_confirmation_id is None
 
 
+def test_the_request_is_honoured_before_the_cycle_takes_another_step() -> None:
+    """`_tick` reads the request ABOVE the phase dispatch. A cycle that got one
+    more step could take the step that reads an approval and deploys."""
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "approved"                     # the merge is ready to go
+    sup = _awaiting_acceptance(clock, fake)
+
+    _request_pause_via_manager(sup)
+    clock.sleep(31)                                     # the await poll is due
+    sup._tick()
+
+    assert sup.state.phase == "stopped"
+    assert "/usr/bin/rsync" not in fake.actions         # never deployed
+
+
 def test_pausing_the_fix_loop_is_idempotent_and_ticks_no_further() -> None:
     clock = FakeClock()
     fake = FixFake()
     fake.confirm_state = "pending"
-    sup = _fix_sup(clock, fake)
-    _to_terminal(sup, clock)
-    _to_phase(sup, clock, fake, "accepting")
-    sup._tick()
+    sup = _awaiting_acceptance(clock, fake)
+    assert _pending_cids(fake)
 
-    assert _paused_via_manager(sup, fake)["aborted"] is True
-    # Terminal now, so a second ask finds nothing live to abort...
-    assert _paused_via_manager(sup, fake)["aborted"] is False
+    assert _request_pause_via_manager(sup)["status"] == "pausing"
+    sup._tick()
+    # Terminal now, so a second ask finds no live run to address at all...
+    assert _request_pause_via_manager(sup) == {"status": "paused", "profile": "p"}
     # ...and the tick loop does not resurrect the cycle or deploy anything.
     for _ in range(3):
         clock.sleep(31)
@@ -1103,7 +1128,9 @@ def test_pausing_the_fix_loop_is_idempotent_and_ticks_no_further() -> None:
 
 def test_pausing_the_fix_loop_leaves_a_watching_run_alone() -> None:
     """Subtracting autonomous MERGING is not stopping the live run: a profile
-    still launching or watching has no cycle to abort and must keep going."""
+    still launching or watching has no cycle to abort and must keep going. The
+    request is still set — it is simply never honoured, because `_tick` only
+    reads it while a fix phase is live."""
     clock = FakeClock()
     fake = FixFake()
     sup = _fix_sup(clock, fake)
@@ -1111,9 +1138,10 @@ def test_pausing_the_fix_loop_leaves_a_watching_run_alone() -> None:
     sup._tick(); sup._tick()
     assert sup.state.phase in ("launching", "watching")
 
-    out = _paused_via_manager(sup, fake)
+    out = _request_pause_via_manager(sup)
+    sup._tick()
 
-    assert out["aborted"] is False and "run_id" not in out
+    assert out["status"] == "pausing"
     assert sup.state.phase in ("launching", "watching")
     assert fake.store.state.get("cancel_requested") is not True
 
@@ -1124,17 +1152,72 @@ def test_an_aborted_cycle_still_counts_against_the_day_cap() -> None:
     clock = FakeClock()
     fake = FixFake()
     fake.confirm_state = "pending"
-    sup = _fix_sup(clock, fake)
-    _to_terminal(sup, clock)
-    _to_phase(sup, clock, fake, "accepting")
-    sup._tick()
+    sup = _awaiting_acceptance(clock, fake)
 
-    _paused_via_manager(sup, fake)
+    _request_pause_via_manager(sup)
+    sup._tick()
 
     assert sup.ledger.fix_cycles_today("p", clock()) == 1
 
 
-# --- the accept effect asks the manager, and the manager answers off state -- #
+def test_a_storm_of_pause_requests_against_a_running_thread_aborts_exactly_once() -> None:
+    """The race the request pattern exists to remove.
+
+    `_abort_fix` and `_close_out` are check-then-set on plain attributes
+    (`_fix_aborted`, `_closed`). Doing that work on Slack's thread while the
+    daemon thread is inside `_tick_fix` is not merely a theoretical interleave:
+    the caller lands the run terminal and records a fix-cycle row, then
+    `_tick_fix` resumes, translates the outcome it was already computing, and
+    records a SECOND row — landing the profile in `paused_awaiting_human` after
+    we told the operator it was stopped.
+
+    The window is forced open rather than hoped for: the cycle's confirmation
+    poll blocks inside `_do_await` (a real engine seam, doing exactly what a
+    slow disk read does) until twenty concurrent pause requests have landed.
+    """
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _awaiting_acceptance(clock, fake)
+    assert _pending_cids(fake)
+    fake.store.state["status"] = "running"
+    mgr = LiveRunManager(store=sup.store, ledger=sup.ledger, tunnels=None, remote=None)
+    mgr._runs["p"] = sup
+
+    inside_await = threading.Event()
+    may_return = threading.Event()
+
+    def _slow_get_confirmation(cid: str):
+        inside_await.set()
+        assert may_return.wait(10.0)
+        return dict(fake.confirmations[cid]) if cid in fake.confirmations else None
+
+    sup._fix.deps.get_confirmation_fn = _slow_get_confirmation
+
+    def _drive() -> None:
+        # `run_once_blocking`'s loop, on a real thread, at its real cadence.
+        deadline = time.monotonic() + 15.0
+        while sup.state.phase not in _TERMINAL and time.monotonic() < deadline:
+            sup._tick()
+            clock.sleep(31)             # the await poll is due every tick
+            time.sleep(0.001)
+
+    thread = threading.Thread(target=_drive, daemon=True)
+    thread.start()
+    assert inside_await.wait(10.0)      # the daemon thread is INSIDE _tick_fix
+    for _ in range(20):
+        mgr.pause_fix("p")
+    may_return.set()
+    thread.join(timeout=20.0)
+
+    assert not thread.is_alive()
+    assert sup.state.phase == "stopped" and sup.state.reason == "fix_loop_paused"
+    assert not paused_marker("p").exists()      # no spurious human-hold
+    assert len([e for e in _events(sup) if e["kind"] == "fix_aborted"]) == 1
+    fix_rows = [r for r in sup.ledger._fix_path.read_text().splitlines() if r.strip()]
+    assert len(fix_rows) == 1                   # one cycle, not one per caller
+    assert sup.ledger.fix_cycles_today("p", clock()) == 1
+    assert _pending_cids(fake) == []
 
 
 def test_accept_is_staged_answers_only_for_the_live_run_and_its_own_cid() -> None:

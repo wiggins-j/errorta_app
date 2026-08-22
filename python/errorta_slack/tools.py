@@ -159,9 +159,9 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "trust": "R",
         "args": (("profile", True, "the live-run profile to stop fixing"),),
         "summary": (
-            "Stop this profile fixing: no new fix cycle starts, and one already "
-            "in flight is aborted now — its dev run cancelled and its staged "
-            "merge withdrawn. Live runs in progress keep running."
+            "Stop this profile fixing: no new fix cycle starts, and a cycle "
+            "already in flight is aborted — its dev run cancelled and its "
+            "staged merge withdrawn. Live runs in progress keep running."
         ),
     },
     "resume_fix_loop": {

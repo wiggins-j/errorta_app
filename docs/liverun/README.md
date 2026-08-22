@@ -25,7 +25,7 @@ is invalid by construction until you author it.
 | `stop_live_run` | R | none, immediate — never waits on approval | evidence → teardown → logoff literals |
 | `live_status` | R | none | phase, elapsed, per-probe last-ok age, cap headroom, literals |
 | `resume_live_run <profile>` | C | **human tap only** | clears a `paused_awaiting_human` hold |
-| `pause_fix_loop <profile>` | R | none, immediate | no new fix cycle starts, **and** one in flight is aborted now (dev run cancelled, staged merge withdrawn); live runs keep running |
+| `pause_fix_loop <profile>` | R | none, immediate | no new fix cycle starts, and a live run is asked to abort one in flight (dev run cancelled, staged merge withdrawn); live runs keep running |
 | `resume_fix_loop <profile>` | C | **human tap only** | re-arms the fix loop |
 | `accept_live_fix` | C | staged **by the supervisor** | merges + delivers one fix; not advertised to the concierge, and refuses any confirmation a live run is not waiting on |
 
@@ -57,9 +57,18 @@ left a pending confirmation behind that the autopilot sweep would press minutes
 later. So `pause_fix_loop` also aborts an in-flight cycle for that profile — it
 cancels the dev run through the same `cancel_requested` signal `stop_live_run`
 uses, withdraws the staged acceptance as `declined`, and lands that run
-`stopped` with reason `fix_loop_paused`. It reports `aborted: true` when there
-was a cycle to stop. A live run still *launching* or *watching* is untouched:
-by the time a fix cycle exists, teardown has already completed.
+`stopped` with reason `fix_loop_paused`.
+
+The abort is a **request**, honoured by the supervisor's own thread on its next
+tick, exactly like `stop_live_run`: `_abort_fix` and `_close_out` are
+check-then-set, so doing that work on the caller's thread while the daemon
+thread sits in `_tick_fix` can duplicate the event and the fix-cycle ledger row.
+The marker is written before the request, so the hold itself is instant; the
+verb returns `pausing` when a live run was asked and `paused` when there was
+none. `_tick` reads the request *above* the phase dispatch, so the cycle never
+gets one more step — which could be the step that reads an approval and
+deploys. A live run still *launching* or *watching* keeps going: by the time a
+fix cycle exists, teardown has already completed.
 
 A bare "stop", "cancel" or "abort" in the channel calls `stop_live_run` in
 addition to the existing `stop_runtime` behaviour.

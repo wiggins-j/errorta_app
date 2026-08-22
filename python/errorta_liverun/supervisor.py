@@ -104,6 +104,10 @@ class Supervisor:
         self._clock = clock          # monotonic: timeouts, stalls, elapsed
         self._wall = wall            # epoch: the ledger, and check `step_start`
         self._stop = threading.Event()
+        # Same shape as `_stop`, one level in: `pause_fix` is a REQUEST, and the
+        # supervisor's own thread is what honours it. See `pause_fix`.
+        self._pause_fix = threading.Event()
+        self._pause_fix_reason: str | None = None
         self._sleep = sleep or (lambda s: self._stop.wait(s))
         # Teardown polls must NOT use `_sleep`: its default is `self._stop.wait`,
         # which returns instantly once `stop()` has been called — and teardown
@@ -217,6 +221,12 @@ class Supervisor:
     def _tick(self) -> None:
         ph = self.state.phase
         if ph in TERMINAL_PHASES:
+            return
+        if self._pause_fix.is_set() and self._fix is not None and ph in _FIX_PHASES:
+            # BEFORE the phase dispatch, so the cycle does not take one more
+            # step (which could be the step that approves the merge) after the
+            # operator asked for it to stop.
+            self._do_pause_fix()
             return
         if self._stop.is_set() or ph == "stopping":
             self._do_stopping()
@@ -581,28 +591,33 @@ class Supervisor:
         # run should still count against the day cap.
         self._record_fix_cycle(failed=False)
 
-    def pause_fix(self, reason: str = "fix_loop_paused") -> bool:
-        """Abort an in-flight fix cycle NOW and land this run terminal.
+    def pause_fix(self, reason: str = "fix_loop_paused") -> None:
+        """Ask this run to abort its fix cycle. Never gated, never blocking.
 
-        ``True`` iff there was a cycle to abort. Writing the fix-pause marker
-        only stops the NEXT cycle; a cycle already awaiting acceptance owns a
-        dev run and a staged confirmation that the autopilot sweep will happily
-        press minutes later, so "the fix loop is off" would be a lie until it
-        did. `_abort_fix` is the same path an operator stop takes: it cancels
-        the dev run and withdraws the accept.
+        Writing the fix-pause marker only stops the NEXT cycle; one already
+        awaiting acceptance owns a dev run and a staged confirmation that the
+        autopilot sweep will happily press minutes later, so "the fix loop is
+        off" would be a lie until that cycle is told.
 
-        Called from whichever thread asked (Slack's, the sidecar's), not the
-        supervisor's own. That is deliberate: turning autonomy OFF must take
-        effect the moment it is asked for, not one tick later. Both `_abort_fix`
-        and `_close_out` are idempotent, so a tick racing this is a no-op, and
-        the run is only landed terminal from the fix phases — where the live
-        session is already torn down and no game client is attached.
+        A REQUEST, exactly like `stop()`, and for the same reason: this is
+        called from whichever thread asked (Slack's, the sidecar's), while the
+        daemon thread may be inside `_tick_fix`. `_abort_fix` and `_close_out`
+        are both check-then-set on plain attributes (`_fix_aborted`, `_closed`),
+        so driving them from two threads can duplicate an event and a fix-cycle
+        ledger row. Setting an Event costs nothing and the next tick — on the
+        one thread that owns the machine — does the work.
         """
-        if self._fix is None or self.state.phase not in _FIX_PHASES:
-            return False
+        self._pause_fix_reason = self._pause_fix_reason or reason
+        self._pause_fix.set()
+
+    def _do_pause_fix(self) -> None:
+        """The request, honoured on the supervisor's own thread. Only ever
+        reached from `_tick` with a live cycle in a fix phase — where teardown
+        has already completed, so nothing is landed terminal out from under a
+        live game session."""
+        reason = self._pause_fix_reason or "fix_loop_paused"
         self._abort_fix(reason)
         self._close_out(final_phase="stopped", reason=reason)
-        return True
 
     def _record_fix_cycle(self, *, failed: bool) -> None:
         try:
@@ -931,20 +946,29 @@ class LiveRunManager:
         return {"status": "resumed"}
 
     def pause_fix(self, profile_name: str) -> dict[str, Any]:
-        """Stop this profile fixing: the marker keeps future cycles out, AND an
-        in-flight cycle is aborted right now (its dev run cancelled, its staged
-        acceptance withdrawn).
+        """Stop this profile fixing: the marker keeps future cycles out, and a
+        live run is ASKED to abort a cycle already in flight (cancelling its dev
+        run, withdrawing its staged acceptance).
 
         The marker alone was not enough. It is read by `_enter_fix_loop`, which
         a cycle already past has already passed — so a profile "paused" while
         one was awaiting acceptance would still have merged and deployed it,
         because the autopilot sweep fires on the PENDING confirmation the cycle
-        left behind. `aborted` reports whether there was one.
+        left behind.
 
-        Live runs in `launching`/`watching` are untouched: this is a hold on
+        ``"pausing"`` when a live run was asked, ``"paused"`` when there was no
+        run to ask. The distinction is honest rather than cosmetic: the hold is
+        in place either way, but the abort is done by the supervisor's own
+        thread on its next tick (see `Supervisor.pause_fix`), so this call
+        cannot truthfully say it has already happened. Nothing is check-then-act
+        here for the same reason — whether a cycle is in flight is the
+        supervisor thread's to decide, and a request it does not need is a
+        no-op.
+
+        Live runs in `launching`/`watching` keep running: this is a hold on
         autonomous MERGING, not on the supervisor. Idempotent — pausing an
-        already-paused profile is still "paused", because the operator's
-        question was "is it off?", not "did I change something?"."""
+        already-paused profile is still paused, because the operator's question
+        was "is it off?", not "did I change something?"."""
         if not _PROFILE_NAME_RE.match(profile_name or ""):
             return {"status": "refused", "reason": "bad_profile_name"}
         marker = fix_paused_marker(profile_name)
@@ -954,20 +978,14 @@ class LiveRunManager:
         except OSError as exc:
             _LOG.exception("liverun could not write the fix-pause marker")
             return {"status": "error", "detail": type(exc).__name__}
-        # Marker FIRST: if the abort below lands the run terminal and something
+        # Marker FIRST: if the abort lands the run terminal and something
         # relaunches, the relaunch must already see the profile paused.
-        out: dict[str, Any] = {"status": "paused", "profile": profile_name,
-                               "aborted": False}
         sup = self._active().get(profile_name)
-        if sup is not None:
-            try:
-                out["aborted"] = bool(sup.pause_fix("fix_loop_paused"))
-            except Exception:  # noqa: BLE001 - the hold still stands
-                _LOG.exception("liverun could not abort the in-flight fix cycle for %s",
-                               profile_name)
-            if out["aborted"]:
-                out["run_id"] = sup.state.run_id
-        return out
+        if sup is None:
+            return {"status": "paused", "profile": profile_name}
+        sup.pause_fix("fix_loop_paused")
+        return {"status": "pausing", "profile": profile_name,
+                "run_id": sup.state.run_id}
 
     def accept_is_staged(self, run_id: str, confirmation_id: str) -> bool:
         """Did a LIVE supervisor stage exactly this acceptance?
