@@ -952,3 +952,43 @@ def test_a_fix_cycle_runs_on_the_daemon_thread_and_leaks_nothing() -> None:
     assert sup.state.phase == "paused_awaiting_human"
     assert sup.state.reason in ("fix_no_gate", "triage_ambiguous", "fix_run_failed")
     assert _wait_for(lambda: threading.active_count() <= before, timeout=10.0)
+
+
+def test_manager_pause_and_resume_fix_toggle_the_fix_marker() -> None:
+    """`pause_fix_loop` is R-class and instant; `resume_fix_loop` is C-class and
+    human-only. Both address the FIX marker, never the run marker — pausing
+    autonomous merging must not stop live runs, and clearing it must not clear
+    a ban-class hold."""
+    mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None)
+
+    assert mgr.resume_fix("p") == {"status": "empty"}
+    assert mgr.pause_fix("p") == {"status": "paused", "profile": "p"}
+    assert fix_paused_marker("p").exists()
+    assert not paused_marker("p").exists()
+    assert mgr.pause_fix("p")["status"] == "paused"        # idempotent
+    assert mgr.resume_fix("p") == {"status": "resumed", "profile": "p"}
+    assert not fix_paused_marker("p").exists()
+
+
+def test_the_fix_pause_verbs_refuse_a_bad_profile_name() -> None:
+    mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None)
+
+    for name in ("../../etc/passwd", "", ".hidden"):
+        assert mgr.pause_fix(name)["reason"] == "bad_profile_name", name
+        assert mgr.resume_fix(name)["reason"] == "bad_profile_name", name
+
+
+def test_a_fix_paused_profile_still_runs_but_files_nothing() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    marker = fix_paused_marker(sup.profile.name)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("operator\n")
+
+    _to_terminal(sup, clock)
+
+    assert sup.state.phase == "stopped"
+    assert fake.store.tasks == []
+    assert [e["detail"]["code"] for e in sup.store.events(sup.state.run_id)
+            if e["kind"] == "fix_skipped"] == ["fix_loop_paused"]

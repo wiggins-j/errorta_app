@@ -61,6 +61,7 @@ from errorta_council.coding import attention, team_log
 from errorta_council.coding.ledger import LedgerStore
 from errorta_slack import render
 from errorta_slack import store as _slack_store
+from errorta_slack import tools
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,6 +78,12 @@ ATTENTION_VERB = "attention_signal"
 # ("don't act") choice on timeout, regardless of any declared on_timeout tag
 # — spec §5.9's named example of cloud-spend / public-PR.
 _CONSERVATIVE_VERBS = frozenset({"spend_cloud", "publish_pr"})
+
+# The ONLY verbs `sweep_autopilot` may fire. `accept_live_fix` is here because
+# the live-run fix cycle stages it from the supervisor's thread, where no chat
+# turn exists to carry it to `connection._handle_staged_confirmations`. Every
+# other C-class verb reaches that path and was already decided there.
+AUTOPILOT_SWEEP_VERBS: frozenset[str] = frozenset({"accept_live_fix"})
 
 # Per-class default when a staged confirmation's args carry no explicit
 # "on_timeout" tag. Only consulted for verbs NOT in _CONSERVATIVE_VERBS
@@ -163,6 +170,34 @@ class OutboundDeps:
     attention_resolve_fn: Callable[..., Any] = attention.resolve
     liverun_events_fn: Callable[[str], list[tuple[Any, list[dict[str, Any]]]]] = (
         _default_liverun_events_fn)
+    # How `sweep_autopilot` runs the effect a claimed confirmation authorizes.
+    # Production wires this to `connection.SlackBridge._fire_confirmed_effect`
+    # -- the SAME method a button tap goes through -- rather than calling
+    # `tools.dispatch(confirmed_via="block_actions")` here, because that marker
+    # is set in exactly ONE place in this bridge and a second call site would
+    # be a second thing to keep honest. `None` means no verified effect path is
+    # wired up (no bridge running); the sweep then claims nothing at all,
+    # because a claim with nothing to run it would tell the fix cycle its merge
+    # was approved when nothing merged.
+    fire_effect_fn: Callable[..., Any] | None = None
+
+
+def _load_config(config_fn: Callable[[], dict[str, Any]] | None) -> dict[str, Any]:
+    """This tick's bridge config. Imported at CALL time only when no explicit
+    reader was injected, so a test drives the loop with a plain dict."""
+    if config_fn is not None:
+        try:
+            return dict(config_fn() or {})
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("outbound: could not read the bridge config", exc_info=True)
+            return {}
+    from errorta_slack import config as slack_config
+
+    try:
+        return dict(slack_config.load() or {})
+    except Exception:  # noqa: BLE001 - an unreadable config means autopilot OFF
+        _LOGGER.warning("outbound: could not read the bridge config", exc_info=True)
+        return {}
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -194,6 +229,10 @@ class _Item:
     # sides: an item may not have one, and a poster may not implement
     # `post_file` -- the text posts either way. See `_post_attachment`.
     file_path: str | None = None
+    # A confirmation ALREADY staged by someone else (the live-run fix cycle,
+    # from the supervisor's own thread) that this item must render a button
+    # for. Set means "do not stage a second one" -- see `poll_once`.
+    confirmation_id: str = ""
 
 
 def _log_items(deps: "OutboundDeps", ledger_store: Any) -> list[_Item]:
@@ -316,7 +355,17 @@ def _run_state_items(ledger_store: Any) -> list[_Item]:
 # hold that is waiting on a person. `phase` is mandatory only for a TERMINAL
 # destination -- a `phase -> watching` on every launch is exactly the routine
 # noise a mute is for.
-_LIVERUN_MANDATORY_KINDS = frozenset({"stall", "ban_signal", "caps", "literals"})
+_LIVERUN_MANDATORY_KINDS = frozenset({
+    "stall", "ban_signal", "caps", "literals",
+    # Slice 2 (the fix loop). Each of these is either an autonomous change to
+    # the operator's real files, the loop giving up, or the client not coming
+    # back -- none of them is the routine progress a mute is for.
+    "fix_idle_cancel",      # a dev run was cancelled mid-flight
+    "fix_accept_staged",    # a merge is waiting on a decision RIGHT NOW
+    "fix_accepted",         # code landed in the operator's files
+    "fix_cycle_cap",        # the day's autonomy is spent; a human is needed
+    "relaunch_refused",     # the fix shipped but the client did not come back
+})
 # Deliberately a LOCAL copy of `errorta_liverun.state.TERMINAL_PHASES`, not an
 # import of it: importing that module here would make the Slack bridge depend
 # on the supervisor package at load, which `_default_liverun_events_fn` goes
@@ -395,10 +444,59 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
         return f"⛔ Launch cap hit: {_esc(detail.get('code'))} — paused awaiting human"
     if kind == "refused":
         return f"Live run refused: {_esc(detail.get('code'))}"
+    # -- the fix loop (spec 2026-08-22 §3.5) ------------------------------- #
+    if kind == "fix_skipped":
+        return f"No fix cycle: {_esc(detail.get('code'))}"
+    if kind == "fix_triage":
+        return (f"🔎 Triage: *{_esc(detail.get('repo_id'))}* "
+                f"({_esc(detail.get('confidence'))}) — {_esc(detail.get('rationale'))}")
+    if kind == "fix_task":
+        return (f"📋 Filed a dev task for *{_esc(detail.get('repo_id'))}* "
+                f"in project `{_esc(detail.get('project_id'))}` "
+                f"(gate: {_esc(detail.get('gate'))})")
+    if kind == "fix_run":
+        return (f"Fix run {_esc(detail.get('status'))} "
+                f"({_esc(detail.get('mode'))}) on `{_esc(detail.get('project_id'))}`")
+    if kind == "fix_idle_cancel":
+        return (f"⏹️ The fix run went quiet for {_esc(detail.get('idle_s'))}s — "
+                "cancelling it. Nothing will be merged.")
+    if kind == "fix_accept_staged":
+        who = ("A human has to approve this one"
+               if detail.get("human_only") else "Waiting for approval")
+        return (f"🔀 Fix ready to merge into *{_esc(detail.get('repo_id'))}* "
+                f"({_esc(detail.get('n_paths'))} file(s)). {who}.")
+    if kind == "fix_accepted":
+        return (f"✅ Fix merged into *{_esc(detail.get('repo_id'))}* → "
+                f"{_esc(detail.get('delivered_to'))} (head {_esc(detail.get('head'))})")
+    if kind == "deploy_step":
+        name = _esc(detail.get("name") or "")
+        if detail.get("check") is not None:
+            return f"Deploy step *{name}*: check {_esc(detail.get('check'))}"
+        if detail.get("ok"):
+            return f"Deploy step *{name}*: ok"
+        head = f"Deploy step *{name}*: FAILED (rc={_esc(detail.get('exit_code'))})"
+        tail = _esc(detail.get("tail") or "")
+        return f"{head}\n```{tail}```" if tail else head
+    if kind == "fix_cycle_cap":
+        return (f"⛔ Fix cycles for today: {_esc(detail.get('cycles_today'))}/"
+                f"{_esc(detail.get('cap'))} — paused awaiting human")
+    if kind == "relaunch_refused":
+        return (f"↩️ The fix shipped, but the relaunch was refused: "
+                f"{_esc(detail.get('code'))}")
     # An event kind this renderer has not been taught yet still reaches the
     # channel rather than vanishing -- a silent drop is how a supervisor's new
     # failure mode goes unnoticed for a week.
     return f"{_esc(kind)}: {_esc(json.dumps(detail, sort_keys=True))}"
+
+
+def _accept_title(detail: dict[str, Any]) -> str:
+    """The notification line for a staged acceptance. The human-only half is in
+    the TITLE, not just the body: on a phone the title is often all that is
+    read, and "a human has to do this" is the one thing that must not be the
+    part that got collapsed."""
+    repo = _esc(detail.get("repo_id") or "the repo", 60)
+    suffix = " — human approval required" if detail.get("human_only") else ""
+    return f"Merge the live-run fix into {repo}{suffix}"
 
 
 def _liverun_attachment(kind: str, detail: dict[str, Any]) -> tuple[str, str] | None:
@@ -434,6 +532,13 @@ def _liverun_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
             detail = dict(event.get("detail") or {})
             seq = int(event.get("seq", 0))
             attachment = _liverun_attachment(kind, detail)
+            # The fix cycle stages its OWN confirmation, from the supervisor's
+            # thread, and then polls that id. There is no chat turn to carry
+            # it, so `connection._handle_staged_confirmations` never sees it
+            # and nothing else would ever post the button. Reuse the id it
+            # staged: a second confirmation would be a button whose approval
+            # the cycle is not waiting on.
+            cid = str(detail.get("cid") or "") if kind == "fix_accept_staged" else ""
             items.append(_Item(
                 marker=f"liverun:{run_id}:{seq}",
                 # The seq is zero-padded into the SORT key (never the marker,
@@ -441,8 +546,10 @@ def _liverun_items(deps: "OutboundDeps", project_id: str) -> list[_Item]:
                 # `at`, and a plain-string tie-break would order seq 10 before
                 # seq 2.
                 sort_key=f"{event.get('at', '')}:{seq:09d}",
-                kind="fyi",
-                title=attachment[1] if attachment else "",
+                kind="decision" if cid else "fyi",
+                confirmation_id=cid,
+                title=(_accept_title(detail) if cid
+                       else (attachment[1] if attachment else "")),
                 detail=_cap(_liverun_detail(kind, detail, profile),
                             _LIVERUN_DETAIL_CAP),
                 mandatory=(kind in _LIVERUN_MANDATORY_KINDS
@@ -545,7 +652,13 @@ def poll_once(
             continue
 
         if item.kind == "decision":
-            cid = deps.store.stage_confirmation(
+            # An item may arrive with a confirmation SOMEONE ELSE already
+            # staged (the live-run fix cycle, which polls the very id it
+            # staged). Staging a second one here would post a button whose
+            # approval nothing is waiting on -- and the rollback below would
+            # then be resolving a record this module does not own.
+            staged_here = not item.confirmation_id
+            cid = item.confirmation_id or deps.store.stage_confirmation(
                 ATTENTION_VERB,
                 {
                     "signal_id": item.signal_id,
@@ -577,8 +690,15 @@ def poll_once(
                 # Do NOT advance the cursor either -- a re-run must re-stage
                 # (a fresh confirmation id) and try posting again from
                 # scratch, not skip this item as "already handled".
+                #
+                # Only for a confirmation THIS call staged. A supervisor-staged
+                # one belongs to a fix cycle that is still polling it: killing
+                # it here would end that cycle over a transient Slack failure,
+                # where leaving it pending lets the next poll (the cursor is
+                # not advanced) post the button again.
                 try:
-                    deps.store.resolve_confirmation(cid, "undelivered")
+                    if staged_here:
+                        deps.store.resolve_confirmation(cid, "undelivered")
                 except Exception:
                     _LOGGER.exception(
                         "outbound: failed to roll back orphaned confirmation "
@@ -707,6 +827,100 @@ def sweep_timeouts(
     return handled
 
 
+def sweep_autopilot(
+    channel_id: str, project_id: str, *, deps: "OutboundDeps", poster: Any,
+    config: dict[str, Any] | None = None,
+) -> list[str]:
+    """Fire the confirmations autopilot would have fired on the inbound path,
+    for the ones that never take an inbound path at all. Returns the ids
+    claimed by THIS call.
+
+    The live-run fix cycle stages its acceptance from the supervisor's own
+    thread. `connection._handle_staged_confirmations` only ever sees
+    confirmations that came back inside a *chat turn's* tool results, so with
+    autopilot on and no human watching, the one loop autopilot exists for would
+    still sit at a button until it timed out.
+
+    Three narrowings, each load-bearing:
+
+    * ``AUTOPILOT_SWEEP_VERBS`` — never a blanket "approve what's pending".
+      Every other C-class verb DOES reach the inbound path and was already
+      decided there; sweeping them would approve, from a background timer,
+      actions a person declined to answer.
+    * ``tools.is_human_only`` — the same predicate the inbound path uses, on
+      the same staged record, so a guarded diff needs a human tap whether the
+      confirmation came from a chat turn or from the supervisor.
+    * ``resolve_confirmation`` IS the claim. A human tap or the timeout sweep
+      racing us wins cleanly and this call does nothing.
+
+    The effect runs through ``deps.fire_effect_fn`` — production wires that to
+    the bridge's ``_fire_confirmed_effect``, the exact method a button tap goes
+    through. With no fire path wired up nothing is claimed at all: a claimed
+    confirmation says "approved" to the fix cycle, and saying that about a
+    merge nothing ran would send it on to deploy an unmerged tree.
+    """
+    if not bool((config or {}).get("autopilot")):
+        return []
+    fire = deps.fire_effect_fn
+    if fire is None:
+        _LOGGER.debug("outbound: autopilot sweep has no verified effect path; skipping")
+        return []
+    fired: list[str] = []
+    try:
+        pending = dict(deps.store.list_pending())
+    except Exception:  # noqa: BLE001 - an unreadable store must not wedge the tick
+        _LOGGER.warning("outbound: could not read pending confirmations", exc_info=True)
+        return []
+    for cid, record in pending.items():
+        verb = str(record.get("verb") or "")
+        args = dict(record.get("args") or {})
+        if verb not in AUTOPILOT_SWEEP_VERBS or tools.is_human_only(verb, args):
+            continue
+        # One tick sweeps every bound channel in turn; only this channel's own
+        # confirmations are this channel's business.
+        if str(record.get("channel_id") or "") != str(channel_id):
+            continue
+        try:
+            claimed_record, claimed = deps.store.resolve_confirmation(cid, "approved")
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("outbound: could not claim confirmation %s", cid)
+            continue
+        if not claimed:            # a human tap or the timeout sweep won the race
+            continue
+        fired.append(cid)
+        thread_ts = str(claimed_record.get("thread_ts") or "")
+        try:
+            result = fire(claimed_record, channel_id=str(channel_id),
+                          thread_ts=thread_ts, verb=verb, decision="approved",
+                          approved=True)
+            text = _autopilot_outcome_text(verb, result)
+        except Exception:  # noqa: BLE001 - the claim is spent; say so and move on
+            _LOGGER.exception(
+                "outbound: autopilot sweep failed to execute %s (confirmation %s)",
+                verb, cid)
+            text = (f"⚠️ Autopilot approved *{verb}* and it failed — "
+                    "check the project before trusting the run.")
+        try:
+            poster.post_message(channel_id, thread_ts, text,
+                                blocks=render.fyi_message(text))
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("outbound: could not post the autopilot outcome for %s", cid)
+    return fired
+
+
+def _autopilot_outcome_text(verb: str, result: Any) -> str:
+    """One honest audit line. A verb that "ran" but reported a not-done status
+    (a blocked merge gate is the whole point of this one) must never be
+    announced as executed — the vocabulary comes from
+    ``tools.NOT_DONE_STATUSES``, not from a second list here."""
+    status = str((result or {}).get("status") or "") if isinstance(result, dict) else ""
+    if status in tools.NOT_DONE_STATUSES:
+        return f"🤖 Autopilot approved *{verb}* — it did NOT happen: {status}."
+    where = str((result or {}).get("delivered_to") or "") if isinstance(result, dict) else ""
+    tail = f" → {render.escape_mrkdwn(where)[:200]}" if where else ""
+    return f"🤖 Autopilot approved & executed *{verb}*{tail}."
+
+
 async def run_loop(
     *,
     bindings_provider: Callable[[], Any],
@@ -717,6 +931,7 @@ async def run_loop(
     sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now_fn: Callable[[], float] = time.time,
     stop_event: "asyncio.Event | None" = None,
+    config_fn: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """A timer loop: each tick, poll every active binding and run the
     timeout sweep, then sleep ``interval_s`` before the next tick.
@@ -732,6 +947,7 @@ async def run_loop(
     """
     while stop_event is None or not stop_event.is_set():
         try:
+            cfg = _load_config(config_fn)
             bindings = bindings_provider()
             if asyncio.iscoroutine(bindings):
                 bindings = await bindings
@@ -741,6 +957,14 @@ async def run_loop(
                 if not channel_id or not project_id:
                     continue
                 poll_once(channel_id, project_id, deps=deps, poster=poster)
+                # AFTER the poll, so the button for a just-staged acceptance is
+                # in the channel before autopilot answers it -- the audit line
+                # then reads as a decision on something visible, not a merge
+                # nobody was shown. Read the config every tick (not once at
+                # start) so turning autopilot off takes effect on the next
+                # tick, like it does on the inbound path.
+                sweep_autopilot(channel_id, project_id, deps=deps, poster=poster,
+                                config=cfg)
 
             sweep_timeouts(
                 deps=deps, poster=poster, timeout_minutes=timeout_minutes,
@@ -760,9 +984,11 @@ async def run_loop(
 __all__ = [
     "OutboundDeps",
     "ATTENTION_VERB",
+    "AUTOPILOT_SWEEP_VERBS",
     "attention_decision_action",
     "poll_once",
     "current_marker_cursor",
     "sweep_timeouts",
+    "sweep_autopilot",
     "run_loop",
 ]

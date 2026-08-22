@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1286,3 +1287,240 @@ def test_terminal_phases_do_not_drift_from_the_supervisor() -> None:
     from errorta_liverun.state import TERMINAL_PHASES
 
     assert outbound._LIVERUN_TERMINAL_PHASES == frozenset(TERMINAL_PHASES)
+
+
+# --------------------------------------------------------------------------
+# Slice 2 (fix loop): the acceptance button the SUPERVISOR staged, the fix
+# events a mute may not hide, and the autopilot sweep.
+#
+# The fix cycle stages its own confirmation from the supervisor's thread —
+# there is no chat turn to carry it, so `connection._handle_staged_
+# confirmations` never sees it. Without a poller branch the button is never
+# posted and the cycle times out; without the sweep, autopilot silently does
+# not apply to the one loop it was built for.
+# --------------------------------------------------------------------------
+
+
+def _fix_event_deps(kind: str, detail: dict[str, Any], **kw: Any) -> outbound.OutboundDeps:
+    state = SimpleNamespace(profile_name="osrs", run_id="r-1", project_id="p1")
+    deps = _deps()
+    deps.liverun_events_fn = lambda project_id: [
+        (state, [{"seq": 1, "at": "2026-08-22T00:00:00", "kind": kind, "detail": detail}])]
+    for key, value in kw.items():
+        setattr(deps, key, value)
+    return deps
+
+
+def test_fix_accept_staged_reuses_the_staged_confirmation() -> None:
+    """Staging a SECOND confirmation here would post a button whose approval
+    the fix cycle is not waiting on: it polls the id it staged, so the tap
+    would resolve a record nobody reads and the cycle would still time out."""
+    store.advance_cursor("C-fix", "")
+    deps = _fix_event_deps("fix_accept_staged",
+                           {"cid": "abc123", "repo_id": "brain",
+                            "human_only": False, "n_paths": 2})
+    poster = SyncFakePoster()
+
+    outbound.poll_once("C-fix", "p1", deps=deps, poster=poster)
+
+    assert "abc123" in json.dumps(poster.messages[0]["blocks"])
+    # ...and nothing new was staged: the only record is the supervisor's own.
+    assert store._load_confirmations() == {}
+
+
+def test_a_human_only_accept_says_so_on_the_button() -> None:
+    store.advance_cursor("C-fix2", "")
+    deps = _fix_event_deps("fix_accept_staged",
+                           {"cid": "abc123", "repo_id": "brain",
+                            "human_only": True, "n_paths": 1})
+    poster = SyncFakePoster()
+
+    outbound.poll_once("C-fix2", "p1", deps=deps, poster=poster)
+
+    assert "human" in poster.messages[0]["text"].lower()
+
+
+@pytest.mark.parametrize("kind,detail", [
+    ("fix_idle_cancel", {"idle_s": 1300, "project_id": "p1"}),
+    ("fix_accept_staged", {"cid": "abc123", "repo_id": "brain",
+                           "human_only": False, "n_paths": 2}),
+    ("fix_accepted", {"repo_id": "brain", "delivered_to": "/repo", "head": "abc"}),
+    ("fix_cycle_cap", {"cycles_today": 3, "cap": 3}),
+    ("relaunch_refused", {"code": "cap_gap"}),
+])
+def test_new_fix_kinds_post_even_when_muted(kind: str, detail: dict[str, Any]) -> None:
+    """"Stop updating me" quiets routine progress. It does not get to hide an
+    autonomous merge, the loop giving up, or the client not coming back."""
+    channel = f"C-mute-{kind}"
+    store.advance_cursor(channel, "")
+    store.set_updates(channel, enabled=False)
+    deps = _fix_event_deps(kind, detail)
+    poster = SyncFakePoster()
+
+    posted = outbound.poll_once(channel, "p1", deps=deps, poster=poster)
+
+    assert posted == ["liverun:r-1:1"], f"{kind} must be mandatory"
+    assert poster.messages
+
+
+def test_every_fix_detail_is_escaped_and_capped() -> None:
+    """Repo ids and pause codes come off disk and out of the engine, and
+    `fyi_message` escapes nothing it is handed."""
+    deps = _fix_event_deps("fix_triage",
+                           {"repo_id": "<!channel>", "confidence": "deterministic",
+                            "rationale": "x" * 5000, "classes": ["brain_log_stall"]})
+
+    items = outbound._liverun_items(deps, "p1")
+
+    assert "<!channel>" not in items[0].detail
+    assert len(items[0].detail) <= outbound._LIVERUN_DETAIL_CAP
+
+
+# --- the autopilot sweep ---------------------------------------------------
+
+
+class _FireSpy:
+    def __init__(self, result: dict[str, Any] | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._result = result or {"status": "accepted", "delivered_to": "/repo"}
+
+    def __call__(self, record, *, channel_id, thread_ts, verb, decision, approved):
+        self.calls.append({"verb": verb, "cid": record.get("id"), "approved": approved,
+                           "channel_id": channel_id, "decision": decision})
+        return self._result
+
+
+def test_sweep_autopilot_claims_once_and_fires_through_the_bridge() -> None:
+    spy = _FireSpy()
+    deps = _deps()
+    deps.fire_effect_fn = spy
+    cid = store.stage_confirmation(
+        "accept_live_fix", {"project_id": "p1", "run_id": "r-1", "human_only": False,
+                            "changed_paths": ["app.py"]}, "", channel_id="C1")
+    poster = SyncFakePoster()
+
+    first = outbound.sweep_autopilot("C1", "p1", deps=deps, poster=poster,
+                                     config={"autopilot": True})
+    second = outbound.sweep_autopilot("C1", "p1", deps=deps, poster=poster,
+                                      config={"autopilot": True})
+
+    assert first == [cid] and second == []
+    assert len(spy.calls) == 1
+    assert spy.calls[0] == {"verb": "accept_live_fix", "cid": cid, "approved": True,
+                            "channel_id": "C1", "decision": "approved"}
+    assert store.get_confirmation(cid)["state"] == "approved"
+    assert poster.messages, "the channel must be told what autopilot did"
+
+
+def test_sweep_autopilot_is_inert_when_autopilot_is_off() -> None:
+    spy = _FireSpy()
+    deps = _deps()
+    deps.fire_effect_fn = spy
+    cid = store.stage_confirmation("accept_live_fix", {"human_only": False}, "",
+                                   channel_id="C1")
+
+    assert outbound.sweep_autopilot("C1", "p1", deps=deps, poster=SyncFakePoster(),
+                                    config={"autopilot": False}) == []
+    assert store.get_confirmation(cid)["state"] == "pending"
+    assert spy.calls == []
+
+
+def test_sweep_autopilot_never_fires_a_human_only_accept() -> None:
+    spy = _FireSpy()
+    deps = _deps()
+    deps.fire_effect_fn = spy
+    cid = store.stage_confirmation(
+        "accept_live_fix",
+        {"project_id": "p1", "run_id": "r-1", "human_only": False,
+         "changed_paths": ["senditai_ng/safety/limits.py"]}, "", channel_id="C1")
+
+    assert outbound.sweep_autopilot("C1", "p1", deps=deps, poster=SyncFakePoster(),
+                                    config={"autopilot": True}) == []
+    assert store.get_confirmation(cid)["state"] == "pending"
+    assert spy.calls == []
+
+
+def test_sweep_autopilot_ignores_every_other_staged_verb() -> None:
+    """The sweep exists because the fix cycle has no chat turn to carry its
+    confirmation. Every other C-class verb DOES, and was already decided on
+    the inbound path — sweeping them here would approve, from a background
+    timer, actions a human declined to answer."""
+    spy = _FireSpy()
+    deps = _deps()
+    deps.fire_effect_fn = spy
+    for verb in ("start_run", "publish_pr", "spend_cloud", "resume_live_run",
+                 "resume_fix_loop", "start_live_run"):
+        store.stage_confirmation(verb, {}, "", channel_id="C1")
+
+    assert outbound.sweep_autopilot("C1", "p1", deps=deps, poster=SyncFakePoster(),
+                                    config={"autopilot": True}) == []
+    assert spy.calls == []
+    assert outbound.AUTOPILOT_SWEEP_VERBS == frozenset({"accept_live_fix"})
+
+
+def test_sweep_autopilot_only_sweeps_its_own_channel() -> None:
+    """One tick sweeps every bound channel in turn; a confirmation staged for
+    another project's channel must not be fired into this one."""
+    spy = _FireSpy()
+    deps = _deps()
+    deps.fire_effect_fn = spy
+    cid = store.stage_confirmation(
+        "accept_live_fix", {"project_id": "p2", "run_id": "r-9", "human_only": False},
+        "", channel_id="C-other")
+
+    assert outbound.sweep_autopilot("C1", "p1", deps=deps, poster=SyncFakePoster(),
+                                    config={"autopilot": True}) == []
+    assert store.get_confirmation(cid)["state"] == "pending"
+
+
+def test_sweep_autopilot_without_a_fire_path_stages_nothing() -> None:
+    """No bridge, no verified effect path — and a claim with nothing to run it
+    would leave the cycle reading `approved` for a merge that never happened."""
+    deps = _deps()
+    cid = store.stage_confirmation(
+        "accept_live_fix", {"project_id": "p1", "run_id": "r-1", "human_only": False},
+        "", channel_id="C1")
+
+    assert outbound.sweep_autopilot("C1", "p1", deps=deps, poster=SyncFakePoster(),
+                                    config={"autopilot": True}) == []
+    assert store.get_confirmation(cid)["state"] == "pending"
+
+
+def test_a_failing_effect_still_leaves_the_claim_resolved_and_says_so() -> None:
+    def _boom(record, **kw):
+        raise RuntimeError("the merge blew up")
+
+    deps = _deps()
+    deps.fire_effect_fn = _boom
+    cid = store.stage_confirmation(
+        "accept_live_fix", {"project_id": "p1", "run_id": "r-1", "human_only": False},
+        "", channel_id="C1")
+    poster = SyncFakePoster()
+
+    assert outbound.sweep_autopilot("C1", "p1", deps=deps, poster=poster,
+                                    config={"autopilot": True}) == [cid]
+    assert store.get_confirmation(cid)["state"] == "approved"
+    assert any("fail" in m["text"].lower() or "error" in m["text"].lower()
+               for m in poster.messages)
+
+
+@pytest.mark.asyncio
+async def test_run_loop_sweeps_autopilot_on_every_tick() -> None:
+    spy = _FireSpy()
+    deps = _deps()
+    deps.fire_effect_fn = spy
+    store.bind_channel("C-loop", "p1")
+    cid = store.stage_confirmation(
+        "accept_live_fix", {"project_id": "p1", "run_id": "r-1", "human_only": False},
+        "", channel_id="C-loop")
+    stop = asyncio.Event()
+
+    async def _sleep(_s: float) -> None:
+        stop.set()
+
+    await outbound.run_loop(
+        bindings_provider=lambda: [{"channel_id": "C-loop", "project_id": "p1"}],
+        deps=deps, poster=SyncFakePoster(), sleep_fn=_sleep, stop_event=stop,
+        config_fn=lambda: {"autopilot": True})
+
+    assert [c["cid"] for c in spy.calls] == [cid]

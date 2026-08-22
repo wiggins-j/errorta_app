@@ -838,6 +838,38 @@ class LiveRunManager:
         marker.unlink()
         return {"status": "resumed"}
 
+    def pause_fix(self, profile_name: str) -> dict[str, Any]:
+        """Stop this profile entering the fix loop. Live runs are untouched:
+        this is a hold on autonomous MERGING, not on the supervisor. Idempotent
+        — pausing an already-paused profile is still "paused", because the
+        operator's question was "is it off?", not "did I change something?"."""
+        if not _PROFILE_NAME_RE.match(profile_name or ""):
+            return {"status": "refused", "reason": "bad_profile_name"}
+        marker = fix_paused_marker(profile_name)
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(now_iso(), encoding="utf-8")
+        except OSError as exc:
+            _LOG.exception("liverun could not write the fix-pause marker")
+            return {"status": "error", "detail": type(exc).__name__}
+        return {"status": "paused", "profile": profile_name}
+
+    def resume_fix(self, profile_name: str) -> dict[str, Any]:
+        """Re-arm the fix loop. Human-only at the Slack layer
+        (`tools.HUMAN_ONLY_VERBS`): re-arming autonomous merging is exactly the
+        decision the loop must not make for itself."""
+        if not _PROFILE_NAME_RE.match(profile_name or ""):
+            return {"status": "refused", "reason": "bad_profile_name"}
+        marker = fix_paused_marker(profile_name)
+        if not marker.exists():
+            return {"status": "empty"}
+        try:
+            marker.unlink()
+        except OSError as exc:
+            _LOG.exception("liverun could not clear the fix-pause marker")
+            return {"status": "error", "detail": type(exc).__name__}
+        return {"status": "resumed", "profile": profile_name}
+
     def teardown_all(self) -> None:
         for sup in list(self._active().values()):
             sup.stop("sidecar_shutdown")
