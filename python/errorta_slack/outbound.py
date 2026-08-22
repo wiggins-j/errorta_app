@@ -365,6 +365,8 @@ _LIVERUN_MANDATORY_KINDS = frozenset({
     "fix_accepted",         # code landed in the operator's files
     "fix_cycle_cap",        # the day's autonomy is spent; a human is needed
     "relaunch_refused",     # the fix shipped but the client did not come back
+    "fix_aborted",          # a stop landed mid-cycle: what was left half-done?
+    "fix_accept_withdrawn",  # a merge button that was posted has been taken back
 })
 # Deliberately a LOCAL copy of `errorta_liverun.state.TERMINAL_PHASES`, not an
 # import of it: importing that module here would make the Slack bridge depend
@@ -483,6 +485,26 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
     if kind == "relaunch_refused":
         return (f"↩️ The fix shipped, but the relaunch was refused: "
                 f"{_esc(detail.get('code'))}")
+    if kind == "fix_accept_withdrawn":
+        # `claimed: False` means somebody else answered the button first, so
+        # the merge may well have happened -- saying "withdrawn" flatly there
+        # would be the one thing this line must not get wrong.
+        cid = _esc(detail.get("cid"), 64)
+        if detail.get("claimed"):
+            return f"↩️ Took back the pending merge approval (`{cid}`) — nothing merged."
+        return (f"↩️ Tried to take back the merge approval (`{cid}`) — it was "
+                "already answered; check whether it merged.")
+    if kind == "fix_aborted":
+        repo = _esc(detail.get("repo_id") or "the repo", 60)
+        bits = []
+        if detail.get("run_cancelled"):
+            bits.append("the dev run was cancelled")
+        if detail.get("accept_withdrawn"):
+            bits.append("the merge approval was withdrawn")
+        tail = f" — {', '.join(bits)}" if bits else " — nothing was in flight"
+        return (f"⏹️ Fix cycle for *{repo}* abandoned at "
+                f"`{_esc(detail.get('at'), 32)}` ({_esc(detail.get('reason'), 64)})"
+                f"{tail}.")
     # An event kind this renderer has not been taught yet still reaches the
     # channel rather than vanishing -- a silent drop is how a supervisor's new
     # failure mode goes unnoticed for a week.

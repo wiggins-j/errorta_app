@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -2003,12 +2004,24 @@ def test_tools_does_not_import_the_live_run_supervisor_at_module_load() -> None:
 
 
 class _FakeWorkspace:
-    def __init__(self) -> None:
+    def __init__(self, delivers: "list[str] | None" = None,
+                 preview_error: BaseException | None = None) -> None:
         self.accept_calls: list[dict[str, Any]] = []
         self.head_value = "abc1234"
+        # What `merge_back` would actually write into the operator's tree —
+        # the workspace's own answer, which is what the effect must read.
+        self.delivers = ["app.py"] if delivers is None else list(delivers)
+        self.preview_error = preview_error
 
     def head(self) -> str:
         return self.head_value
+
+    def preview(self) -> dict[str, Any]:
+        if self.preview_error is not None:
+            raise self.preview_error
+        return {"has_changes": bool(self.delivers), "conflicts": [],
+                "changed_files": [{"path": p, "status": "modified"}
+                                  for p in self.delivers]}
 
     def accept(self, **kw: Any) -> dict[str, Any]:
         self.accept_calls.append(kw)
@@ -2144,6 +2157,96 @@ def test_accept_live_fix_refuses_args_the_supervisor_did_not_stage(tmp_path: Pat
 
     assert out["status"] == "refused"
     assert ws.accept_calls == []
+
+
+# --- the effect re-derives the diff; it does not trust what was staged ----- #
+#
+# `is_human_only` answers from the confirmation RECORD, and the record is a
+# JSON file on disk written minutes earlier. Between staging and firing it can
+# be stale (the worktree moved), truncated (`MAX_STAGED_PATHS` caps
+# `changed_paths` at 50) or simply wrong. So the last thing before the merge
+# asks the workspace itself what it is about to deliver, and refuses when that
+# answer is guarded but the record never said so. Refusal is not a dead end:
+# the supervisor reads the recorded outcome and pauses the cycle for a human.
+
+
+def test_a_guarded_delivered_path_refuses_even_when_the_record_says_otherwise(
+        tmp_path: Path) -> None:
+    ws = _FakeWorkspace(delivers=["app.py", "senditai_ng/safety/killswitch.py"])
+    delivered: list = []
+    ledger = _FixLedger("p", tmp_path)
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered, ledger=ledger)
+
+    out = tools.dispatch("accept_live_fix",
+                         _staged_fix_args(human_only=False, changed_paths=["app.py"]),
+                         channel_id="C1", thread_ts="1",
+                         confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "refused" and out["reason"] == "guarded_path_mismatch"
+    assert ws.accept_calls == [] and delivered == []
+    assert ledger.decisions[0]["extra"]["status"] == "refused"
+
+
+def test_a_guarded_path_the_record_declared_still_merges_on_a_tap(tmp_path: Path) -> None:
+    """`human_only: True` means the button was posted for a person, and a
+    person is who reached this call. The guard is against a MISMATCH, not
+    against guarded diffs — those are exactly what the button is for."""
+    ws = _FakeWorkspace(delivers=["errorta_liverun/fixloop.py"])
+    deps = _fix_deps(tmp_path, ws=ws)
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(human_only=True),
+                         channel_id="C1", thread_ts="1",
+                         confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "accepted"
+    assert ws.accept_calls == [{"confirm": True}]
+
+
+def test_staged_changed_paths_alone_never_decide_the_merge(tmp_path: Path) -> None:
+    """The other direction, and the reason this is a re-derivation rather than
+    a second read of the same field: the record claims a guarded path, the
+    workspace will deliver none, and what the workspace says is what counts."""
+    ws = _FakeWorkspace(delivers=["app.py"])
+    deps = _fix_deps(tmp_path, ws=ws)
+
+    out = tools.dispatch(
+        "accept_live_fix",
+        _staged_fix_args(human_only=False,
+                         changed_paths=["senditai_ng/safety/killswitch.py"]),
+        channel_id="C1", thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "accepted"
+
+
+def test_a_workspace_that_cannot_say_what_it_delivers_merges_nothing(
+        tmp_path: Path) -> None:
+    ws = _FakeWorkspace(preview_error=RuntimeError("apply_source_missing"))
+    delivered: list = []
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered)
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "refused" and out["reason"] == "diff_unreadable"
+    assert ws.accept_calls == [] and delivered == []
+
+
+def test_the_re_derivation_happens_before_the_gate_is_even_asked(
+        tmp_path: Path) -> None:
+    """Cheapest strongest guard first: a tampered record must not get as far as
+    a merge review against the operator's project."""
+    ws = _FakeWorkspace(delivers=["senditai_ng/safety/x.py"])
+    reviews: list = []
+    deps = _fix_deps(tmp_path, ws=ws)
+    real_review = deps.merge_review_fn
+    deps = replace(deps, merge_review_fn=lambda s, w: (
+        reviews.append(1) or real_review(s, w)))
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "refused"
+    assert reviews == []
 
 
 def test_accept_live_fix_stages_before_it_ever_merges(tmp_path: Path) -> None:

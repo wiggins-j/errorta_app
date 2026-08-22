@@ -820,6 +820,32 @@ def _default_deliver(project_id: str, workspace: Any, **kw: Any) -> dict[str, An
     return deliver(project_id, workspace, **kw)
 
 
+#: What the workspace says it is about to write into the operator's tree, or
+#: ``None`` when it cannot say. Read from the merge-back preview — the same
+#: file list `deliver` acts on — never from the confirmation record.
+def _delivered_paths(workspace: Any) -> list[str] | None:
+    try:
+        preview = workspace.preview() or {}
+        entries = preview.get("changed_files") or []
+        return [str((e.get("path") if isinstance(e, dict) else e) or "")
+                for e in entries]
+    except Exception:  # noqa: BLE001 - a diff we cannot read is not one we merge
+        _LOGGER.exception("slack: could not re-derive the live-run fix diff")
+        return None
+
+
+def _diff_is_guarded(paths: list[str]) -> bool:
+    """Fail-closed: no supervisor package, or a predicate that raises, means
+    the answer is "a human decides"."""
+    try:
+        from errorta_liverun.fixloop import is_human_only_diff
+        from errorta_liverun.profile import profiles_dir
+
+        return bool(is_human_only_diff(paths, profiles_dir=profiles_dir()))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def accept_live_fix(args: dict[str, Any], *, channel_id: str, thread_ts: str,
                     deps: "ToolDeps") -> dict[str, Any]:
     """C-class. Only ever reached via ``connection._fire_confirmed_effect`` (a
@@ -852,6 +878,23 @@ def accept_live_fix(args: dict[str, Any], *, channel_id: str, thread_ts: str,
             "status": "refused", "reason": "not_supervisor_staged",
             "repo_id": repo_id, "run_id": ""})
     workspace = (deps.workspace_factory or _default_workspace)(project_id)
+    # Re-derive the diff from the WORKSPACE before anything else touches the
+    # operator's files. `is_human_only` answered from the staged record, which
+    # is a JSON file written minutes ago: it can be stale, truncated
+    # (`fixloop.MAX_STAGED_PATHS`) or hand-edited. This asks the tree itself
+    # what the merge is about to deliver, and a guarded answer the record did
+    # not declare is a mismatch, not a merge -- the button that was posted said
+    # something else. `human_only: True` records ARE merged: that flag means a
+    # person was asked, and a person is who got here.
+    delivered = _delivered_paths(workspace)
+    if delivered is None:
+        return _record_fix_accept(ledger_store, {
+            "status": "refused", "reason": "diff_unreadable",
+            "repo_id": repo_id, "run_id": run_id})
+    if _diff_is_guarded(delivered) and not bool(args.get("human_only")):
+        return _record_fix_accept(ledger_store, {
+            "status": "refused", "reason": "guarded_path_mismatch",
+            "repo_id": repo_id, "run_id": run_id})
     review = (deps.merge_review_fn or _default_merge_review)(ledger_store, workspace)
     if not review["_gate"].allowed:
         return _record_fix_accept(ledger_store, {

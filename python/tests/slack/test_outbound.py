@@ -1347,6 +1347,12 @@ def test_a_human_only_accept_says_so_on_the_button() -> None:
     ("fix_accepted", {"repo_id": "brain", "delivered_to": "/repo", "head": "abc"}),
     ("fix_cycle_cap", {"cycles_today": 3, "cap": 3}),
     ("relaunch_refused", {"code": "cap_gap"}),
+    # A cycle abandoned mid-flight and the merge button that was taken back
+    # with it: the operator asked for a stop and is owed the answer to "did
+    # anything land?", mute or no mute.
+    ("fix_aborted", {"reason": "operator_stop", "repo_id": "brain", "at": "await",
+                     "run_cancelled": True, "accept_withdrawn": True, "task_id": "t-1"}),
+    ("fix_accept_withdrawn", {"cid": "abc123", "claimed": True, "decision": "declined"}),
 ])
 def test_new_fix_kinds_post_even_when_muted(kind: str, detail: dict[str, Any]) -> None:
     """"Stop updating me" quiets routine progress. It does not get to hide an
@@ -1361,6 +1367,25 @@ def test_new_fix_kinds_post_even_when_muted(kind: str, detail: dict[str, Any]) -
 
     assert posted == ["liverun:r-1:1"], f"{kind} must be mandatory"
     assert poster.messages
+
+
+@pytest.mark.parametrize("kind,detail,wanted", [
+    ("fix_aborted", {"reason": "operator_stop", "repo_id": "brain", "at": "await",
+                     "run_cancelled": True, "accept_withdrawn": True, "task_id": "t-1"},
+     ["operator_stop", "brain"]),
+    ("fix_accept_withdrawn", {"cid": "abc123", "claimed": True, "decision": "declined"},
+     ["abc123"]),
+])
+def test_every_fix_kind_the_driver_emits_has_a_written_line(
+        kind: str, detail: dict[str, Any], wanted: list[str]) -> None:
+    """The fallback renderer dumps raw JSON into the channel. That is a floor
+    for a kind nobody has taught it yet — it is not what a kind the driver
+    emits on the operator's own stop path should look like."""
+    line = outbound._liverun_detail(kind, detail, "fake")
+
+    assert "{" not in line, f"{kind} fell through to the JSON fallback"
+    for token in wanted:
+        assert token in line
 
 
 def test_every_fix_detail_is_escaped_and_capped() -> None:
