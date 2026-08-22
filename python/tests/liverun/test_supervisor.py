@@ -967,7 +967,9 @@ def test_manager_pause_and_resume_fix_toggle_the_fix_marker() -> None:
     mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None)
 
     assert mgr.resume_fix("p") == {"status": "empty"}
-    assert mgr.pause_fix("p") == {"status": "paused", "profile": "p"}
+    # `aborted` is False with no supervisor running for the profile: there was
+    # no in-flight cycle to stop, only a hold to write.
+    assert mgr.pause_fix("p") == {"status": "paused", "profile": "p", "aborted": False}
     assert fix_paused_marker("p").exists()
     assert not paused_marker("p").exists()
     assert mgr.pause_fix("p")["status"] == "paused"        # idempotent
@@ -1033,6 +1035,154 @@ def test_stop_while_awaiting_acceptance_leaves_no_run_and_no_button() -> None:
     assert sup.ledger.fix_cycles_today("p", clock()) == 1
     rows = [r for r in sup.ledger._rows() if r.get("kind") == "outcome"]
     assert len(rows) == 1                               # the live session's, once
+
+
+# --- pausing the fix loop stops the cycle already in flight ---------------- #
+#
+# The fix-pause marker is read by `_enter_fix_loop`, which a cycle already past
+# has already passed. So "pause the fix loop" left an in-flight cycle's dev run
+# burning tokens AND its staged acceptance pending -- and the autopilot sweep
+# fires on pending records, so the merge the operator just turned off would land
+# minutes later. `pause_fix_loop` has to reach the cycle, not just the marker.
+
+
+def _paused_via_manager(sup, fake: FixFake) -> dict:
+    """`pause_fix_loop` as Slack calls it: through the manager that holds the
+    supervisor, not by touching the supervisor directly."""
+    mgr = LiveRunManager(store=sup.store, ledger=sup.ledger, tunnels=None, remote=None)
+    mgr._runs[sup.profile.name] = sup
+    return mgr.pause_fix(sup.profile.name)
+
+
+def test_pausing_the_fix_loop_aborts_the_cycle_awaiting_acceptance() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()                                         # stage -> await
+    assert _pending_cids(fake)
+    fake.store.state["status"] = "running"              # a dev turn is still going
+
+    out = _paused_via_manager(sup, fake)
+
+    assert out["status"] == "paused" and out["aborted"] is True
+    assert out["run_id"] == sup.state.run_id
+    assert fix_paused_marker("p").exists()              # the hold, as before
+    assert fake.store.state["cancel_requested"] is True     # the dev run, told
+    assert _pending_cids(fake) == []                        # the button, withdrawn
+    assert fake.resolved == [(list(fake.confirmations)[0], "declined")]
+    aborted = [e for e in _events(sup) if e["kind"] == "fix_aborted"]
+    assert len(aborted) == 1
+    assert aborted[0]["detail"]["reason"] == "fix_loop_paused"
+    assert sup.state.phase == "stopped" and sup.state.reason == "fix_loop_paused"
+    assert sup.store.load(sup.state.run_id).fix_confirmation_id is None
+
+
+def test_pausing_the_fix_loop_is_idempotent_and_ticks_no_further() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+
+    assert _paused_via_manager(sup, fake)["aborted"] is True
+    # Terminal now, so a second ask finds nothing live to abort...
+    assert _paused_via_manager(sup, fake)["aborted"] is False
+    # ...and the tick loop does not resurrect the cycle or deploy anything.
+    for _ in range(3):
+        clock.sleep(31)
+        sup._tick()
+    assert sup.state.phase == "stopped"
+    assert len([e for e in _events(sup) if e["kind"] == "fix_aborted"]) == 1
+    assert "/usr/bin/rsync" not in fake.actions         # the deploy never ran
+
+
+def test_pausing_the_fix_loop_leaves_a_watching_run_alone() -> None:
+    """Subtracting autonomous MERGING is not stopping the live run: a profile
+    still launching or watching has no cycle to abort and must keep going."""
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    sup.start(blocking=False)
+    sup._tick(); sup._tick()
+    assert sup.state.phase in ("launching", "watching")
+
+    out = _paused_via_manager(sup, fake)
+
+    assert out["aborted"] is False and "run_id" not in out
+    assert sup.state.phase in ("launching", "watching")
+    assert fake.store.state.get("cancel_requested") is not True
+
+
+def test_an_aborted_cycle_still_counts_against_the_day_cap() -> None:
+    """It spent a dev run. It is not counted as a FAILURE, though — the
+    operator turning autonomy off is not the repository's fault."""
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+
+    _paused_via_manager(sup, fake)
+
+    assert sup.ledger.fix_cycles_today("p", clock()) == 1
+
+
+# --- the accept effect asks the manager, and the manager answers off state -- #
+
+
+def test_accept_is_staged_answers_only_for_the_live_run_and_its_own_cid() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+    cid = list(fake.confirmations)[0]
+    mgr = LiveRunManager(store=sup.store, ledger=sup.ledger, tunnels=None, remote=None)
+    mgr._runs["p"] = sup
+
+    assert mgr.accept_is_staged(sup.state.run_id, cid) is True
+    # A model composing this verb can guess a run id; it cannot guess the id
+    # `stage_confirmation` minted, and it cannot make the run wait on another.
+    assert mgr.accept_is_staged(sup.state.run_id, "cid-invented") is False
+    assert mgr.accept_is_staged("some-other-run", cid) is False
+    assert mgr.accept_is_staged("", "") is False
+
+
+def test_accept_is_staged_is_false_once_the_run_is_terminal() -> None:
+    """A withdrawn or answered acceptance must not stay merge-able: `_active`
+    filters terminal runs, and an aborted cycle clears the id outright."""
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+    cid = list(fake.confirmations)[0]
+    mgr = LiveRunManager(store=sup.store, ledger=sup.ledger, tunnels=None, remote=None)
+    mgr._runs["p"] = sup
+    assert mgr.accept_is_staged(sup.state.run_id, cid) is True
+
+    sup.stop("operator_stop")
+    sup._tick()
+
+    assert sup.state.phase in _TERMINAL
+    assert mgr.accept_is_staged(sup.state.run_id, cid) is False
+
+
+def test_accept_is_staged_on_an_empty_manager_is_false() -> None:
+    mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None)
+
+    assert mgr.accept_is_staged("lr-1", "cid-1") is False
 
 
 def test_stop_while_the_dev_run_is_still_working_cancels_it() -> None:

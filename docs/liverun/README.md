@@ -25,9 +25,18 @@ is invalid by construction until you author it.
 | `stop_live_run` | R | none, immediate — never waits on approval | evidence → teardown → logoff literals |
 | `live_status` | R | none | phase, elapsed, per-probe last-ok age, cap headroom, literals |
 | `resume_live_run <profile>` | C | **human tap only** | clears a `paused_awaiting_human` hold |
-| `pause_fix_loop <profile>` | R | none, immediate | stops this profile entering the fix loop; live runs keep running |
+| `pause_fix_loop <profile>` | R | none, immediate | no new fix cycle starts, **and** one in flight is aborted now (dev run cancelled, staged merge withdrawn); live runs keep running |
 | `resume_fix_loop <profile>` | C | **human tap only** | re-arms the fix loop |
-| `accept_live_fix` | C | staged **by the supervisor** | merges + delivers one fix; refuses anything it did not stage |
+| `accept_live_fix` | C | staged **by the supervisor** | merges + delivers one fix; not advertised to the concierge, and refuses any confirmation a live run is not waiting on |
+
+`accept_live_fix` is dispatchable but **not** listed in the concierge's tool
+catalog: the fix cycle stages it, and the effect refuses unless a non-terminal
+live run reports that exact confirmation id as the one it is waiting on
+(`LiveRunManager.accept_is_staged`). A chat turn can compose the verb name and
+a run id; it cannot compose the id `stage_confirmation` minted. And "accepted"
+is said only about a merge that actually applied — a conflicting merge-back
+returns `applied: False` rather than raising, and that is reported as `error`,
+never delivered and never deployed.
 
 `resume_live_run` and `resume_fix_loop` are the verbs autopilot will not
 auto-approve (`errorta_slack.tools.HUMAN_ONLY_VERBS`): the hold exists
@@ -41,6 +50,16 @@ Pausing is deliberately asymmetric: `pause_fix_loop` is R-class and takes
 effect the moment it is asked for, because turning autonomy *off* should never
 wait on an approval; `resume_fix_loop` is C-class **and** human-only, because
 turning it back on is exactly the decision a loop must not make for itself.
+
+"The moment it is asked for" is literal, and it has to be: the fix-pause marker
+alone only stops the *next* cycle, and a cycle already awaiting acceptance has
+left a pending confirmation behind that the autopilot sweep would press minutes
+later. So `pause_fix_loop` also aborts an in-flight cycle for that profile — it
+cancels the dev run through the same `cancel_requested` signal `stop_live_run`
+uses, withdraws the staged acceptance as `declined`, and lands that run
+`stopped` with reason `fix_loop_paused`. It reports `aborted: true` when there
+was a cycle to stop. A live run still *launching* or *watching* is untouched:
+by the time a fix cycle exists, teardown has already completed.
 
 A bare "stop", "cancel" or "abort" in the channel calls `stop_live_run` in
 addition to the existing `stop_runtime` behaviour.
@@ -190,13 +209,14 @@ person clears — the loop never retries its way past one:
 | `triage_ambiguous` | no repo owned the evidence, or two did |
 | `repo_not_fixable` | triage named a repo marked `fixable: false` |
 | `fix_no_gate` | the project has no registrable acceptance gate |
+| `fix_project_not_existing` | the project's target is not `existing` — there is no repository to merge into |
 | `fix_project_busy` | something else owns that project's run |
 | `fix_run_failed` | the dev run could not start, or failed empty |
 | `fix_idle` | the dev run went quiet and was cancelled |
 | `fix_no_delivery` | a clean stop that delivered nothing is not a fix |
 | `fix_unsafe_paths` | a delivered path left the repository |
 | `fix_gate_blocked` | the merge gate said no; nothing was merged |
-| `fix_accept_unverified` | approved, but the merge cannot be confirmed |
+| `fix_accept_unverified` | approved, but the merge cannot be confirmed — including a merge-back that refused to apply, or a delivery that threw |
 | `fix_declined` | the acceptance was declined, or never answered |
 | `ban_signal` | a ban-class string surfaced during deploy |
 | `fix_cycle_cap` | the day's fix cycles are spent |

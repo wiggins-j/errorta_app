@@ -1123,13 +1123,22 @@ class SlackBridge:
                 confirmed_via="block_actions", deps=self._build_studio_deps(),
             )
         if approved:
+            args = dict(record.get("args") or {})
+            if verb == tools.ACCEPT_LIVE_FIX:
+                # The one verb whose effect is bound to LIVE supervisor state:
+                # it must be able to ask "is a running supervisor waiting on
+                # THIS confirmation?". The id is not in the staged args (it is
+                # minted by stage_confirmation, after them), so it is threaded
+                # in here — overwriting, never merging, so a chat turn that put
+                # a `_confirmation_id` in its own args cannot forge one.
+                args["_confirmation_id"] = str(record.get("id") or "")
             # Return the dispatch result (rather than discarding it) so an
             # autopilot audit line can be honest about a verb that "ran" but
             # reported a failure status (e.g. start_run -> provider logged
             # out). handle_interaction's per-project outcome ignores this
             # return, so surfacing it changes nothing on the button path.
             return tools.dispatch(
-                verb, dict(record.get("args") or {}),
+                verb, args,
                 channel_id=channel_id, thread_ts=thread_ts,
                 confirmed_via="block_actions", deps=self._deps,
             )

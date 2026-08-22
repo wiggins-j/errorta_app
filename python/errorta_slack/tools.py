@@ -74,6 +74,7 @@ NOT_DONE_STATUSES = frozenset({
     "not_running",     # a stop with nothing to stop -- a no-op
     "empty",           # nothing to act on (e.g. no runtime configured)
     "gate_blocked",    # the evidence gate refused the merge -- NOTHING landed
+    "delivery_error",  # the merge landed but delivery threw -- nothing shipped
 })
 
 
@@ -140,6 +141,12 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     },
     "accept_live_fix": {
         "trust": "C",
+        # Dispatchable but NOT advertised: the live-run fix cycle stages this
+        # verb itself, and it refuses any confirmation a live supervisor is not
+        # currently waiting on. Rendering it in the concierge's catalog only
+        # ever taught a model to compose a call that must then be refused --
+        # see `concierge.build_system_prompt` and the catalog canary.
+        "hidden": True,
         "args": (("project_id", True, "the coding project whose fix is being accepted"),
                  ("repo_id", False, "the profile repo the fix belongs to")),
         "summary": (
@@ -152,8 +159,9 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "trust": "R",
         "args": (("profile", True, "the live-run profile to stop fixing"),),
         "summary": (
-            "Stop this profile entering the autonomous fix loop. Live runs "
-            "keep running; nothing gets merged without a human."
+            "Stop this profile fixing: no new fix cycle starts, and one already "
+            "in flight is aborted now — its dev run cancelled and its staged "
+            "merge withdrawn. Live runs in progress keep running."
         ),
     },
     "resume_fix_loop": {
@@ -493,6 +501,12 @@ class ToolDeps:
     workspace_factory: Callable[[str], Any] | None = None
     merge_review_fn: Callable[[Any, Any], dict[str, Any]] | None = None
     deliver_fn: Callable[..., dict[str, Any]] | None = None
+    # "Is a LIVE supervisor waiting on exactly this acceptance?" -- called as
+    # `fn(run_id, confirmation_id)`. Same `None` rule: the default reaches into
+    # `errorta_liverun.supervisor` lazily, at call time. This is the seam that
+    # makes `accept_live_fix` an effect bound to supervisor state rather than a
+    # verb a chat turn can compose (see the verb's docstring).
+    liverun_accept_binding_fn: Callable[[str, str], bool] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -821,17 +835,30 @@ def _default_deliver(project_id: str, workspace: Any, **kw: Any) -> dict[str, An
 
 
 #: What the workspace says it is about to write into the operator's tree, or
-#: ``None`` when it cannot say. Read from the merge-back preview — the same
-#: file list `deliver` acts on — never from the confirmation record.
-def _delivered_paths(workspace: Any) -> list[str] | None:
+#: ``None`` when it cannot say. The merge-back preview — the same answer
+#: `merge_back` itself computes — never the confirmation record.
+def _merge_preview(workspace: Any) -> dict[str, Any] | None:
     try:
-        preview = workspace.preview() or {}
-        entries = preview.get("changed_files") or []
-        return [str((e.get("path") if isinstance(e, dict) else e) or "")
-                for e in entries]
+        return dict(workspace.preview() or {})
     except Exception:  # noqa: BLE001 - a diff we cannot read is not one we merge
         _LOGGER.exception("slack: could not re-derive the live-run fix diff")
         return None
+
+
+def _delivered_paths(preview: dict[str, Any]) -> list[str]:
+    entries = preview.get("changed_files") or []
+    return [str((e.get("path") if isinstance(e, dict) else e) or "") for e in entries]
+
+
+def _default_accept_binding(run_id: str, confirmation_id: str) -> bool:
+    """Whether a non-terminal live run ``run_id`` is waiting on exactly this
+    confirmation. Lazy, like every other supervisor touch here, and fail-closed:
+    no supervisor package (or a manager that raises) means "not staged"."""
+    try:
+        return bool(_liverun().accept_is_staged(run_id, confirmation_id))
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("slack: could not ask the live-run manager about %s", run_id)
+        return False
 
 
 def _diff_is_guarded(paths: list[str]) -> bool:
@@ -858,9 +885,19 @@ def accept_live_fix(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     a human at a desk, and handing it to a loop is the whole thing this slice
     must not do. (There is a grep test.)
 
+    Bound to LIVE supervisor state, not merely to well-formed arguments: a
+    non-terminal run must be waiting on THIS confirmation id
+    (``deps.liverun_accept_binding_fn``). Without that, a chat turn could emit
+    ``accept_live_fix`` with any ``run_id``, and — carrying no ``changed_paths``
+    for ``is_human_only`` to judge — autopilot would fire it.
+
     The outcome is written to the project's decision log under a stable
     ``choice`` so the supervisor has a durable record of what actually
     happened: the confirmation only ever tells it the effect was *claimed*.
+    Every way this can fail to land work in the operator's tree — a conflicting
+    merge-back, a blocked gate, a delivery that threw — reports a status in
+    ``NOT_DONE_STATUSES``. "accepted" is said only about a merge that applied
+    AND a delivery that returned.
     """
     project_id = str(args.get("project_id") or "")
     if not project_id:
@@ -877,6 +914,27 @@ def accept_live_fix(args: dict[str, Any], *, channel_id: str, thread_ts: str,
         return _record_fix_accept(ledger_store, {
             "status": "refused", "reason": "not_supervisor_staged",
             "repo_id": repo_id, "run_id": ""})
+    # ...and a run id alone is a string a model can also emit. Bind the effect
+    # to LIVE supervisor state: a non-terminal run with this id must be waiting
+    # on THIS confirmation. The id is minted by `stage_confirmation` after the
+    # cycle built the args and is threaded in here by
+    # `connection._fire_confirmed_effect`, so it is the one part of this call a
+    # chat turn cannot supply.
+    if not (deps.liverun_accept_binding_fn or _default_accept_binding)(
+            run_id, str(args.get("_confirmation_id") or "")):
+        return _record_fix_accept(ledger_store, {
+            "status": "refused", "reason": "not_staged_by_supervisor",
+            "repo_id": repo_id, "run_id": run_id})
+    # `existing` is the only target with a repository to merge back INTO: a
+    # `new`-target project's accept hands back the worktree root and delivery
+    # exports a folder, so the operator's tree never changes and the fix cycle
+    # would deploy work that never landed. (`fixloop._do_triage` refuses these
+    # projects too -- this is the same question asked at the merge itself.)
+    proj = ledger_store.get_project()
+    if str(getattr(proj, "target", "") or "") != "existing":
+        return _record_fix_accept(ledger_store, {
+            "status": "refused", "reason": "project_not_existing",
+            "repo_id": repo_id, "run_id": run_id})
     workspace = (deps.workspace_factory or _default_workspace)(project_id)
     # Re-derive the diff from the WORKSPACE before anything else touches the
     # operator's files. `is_human_only` answered from the staged record, which
@@ -886,11 +944,21 @@ def accept_live_fix(args: dict[str, Any], *, channel_id: str, thread_ts: str,
     # not declare is a mismatch, not a merge -- the button that was posted said
     # something else. `human_only: True` records ARE merged: that flag means a
     # person was asked, and a person is who got here.
-    delivered = _delivered_paths(workspace)
-    if delivered is None:
+    preview = _merge_preview(workspace)
+    if preview is None:
         return _record_fix_accept(ledger_store, {
             "status": "refused", "reason": "diff_unreadable",
             "repo_id": repo_id, "run_id": run_id})
+    conflicts = [str(p) for p in (preview.get("conflicts") or [])]
+    if conflicts:
+        # `merge_back` is fail-closed on conflicts, and it says so by RETURNING
+        # `applied: False` -- it does not raise. Asking here as well means the
+        # cycle is told "error" before the merge is even attempted, instead of
+        # after a no-op the caller could mistake for a merge.
+        return _record_fix_accept(ledger_store, {
+            "status": "error", "reason": "conflicts", "conflicts": conflicts[:50],
+            "repo_id": repo_id, "run_id": run_id})
+    delivered = _delivered_paths(preview)
     if _diff_is_guarded(delivered) and not bool(args.get("human_only")):
         return _record_fix_accept(ledger_store, {
             "status": "refused", "reason": "guarded_path_mismatch",
@@ -901,11 +969,35 @@ def accept_live_fix(args: dict[str, Any], *, channel_id: str, thread_ts: str,
             "status": "gate_blocked", "gate": review.get("gate"),
             "repo_id": repo_id, "run_id": run_id})
     result = dict(workspace.accept(confirm=True) or {})
-    proj = ledger_store.get_project()
-    delivery = dict((deps.deliver_fn or _default_deliver)(
-        project_id, workspace,
-        target=proj.target, repo_path=proj.repo_path,
-        delivery_root=proj.delivery_root if proj.target != "existing" else None) or {})
+    if result.get("applied") is False:
+        # THE failure this whole verb exists to report honestly.
+        # `CodingWorkspace.accept` -> `merge_back` returns `{"applied": False,
+        # "reason": "conflicts" | "unsafe_path"}` on a refusal; it raises
+        # nothing. Falling through to `deliver` and recording "accepted" would
+        # tell the supervisor a merge landed that never touched a byte -- and it
+        # would then deploy and relaunch on a fix that does not exist. `is
+        # False`, not falsy: a `new`-target accept returns no `applied` key at
+        # all, and that is not a failure.
+        return _record_fix_accept(ledger_store, {
+            "status": "error", "reason": str(result.get("reason") or "conflicts"),
+            "conflicts": [str(p) for p in (result.get("conflicts") or [])][:50],
+            "repo_id": repo_id, "run_id": run_id})
+    try:
+        delivery = dict((deps.deliver_fn or _default_deliver)(
+            project_id, workspace,
+            target=proj.target, repo_path=proj.repo_path,
+            delivery_root=proj.delivery_root if proj.target != "existing" else None) or {})
+    except Exception as exc:  # noqa: BLE001 - the merge already happened
+        # Same shape as `routes/coding.accept_worktree`: delivery is downstream
+        # of a merge that has already landed, so it cannot be retried by
+        # raising. It is still NOT a done accept -- `delivery_error` is in
+        # `NOT_DONE_STATUSES`, so the cycle pauses and the channel says so
+        # rather than announcing a fix that shipped nowhere.
+        _LOGGER.exception("slack: live-run fix merged but delivery failed")
+        return _record_fix_accept(ledger_store, {
+            "status": "delivery_error", "reason": type(exc).__name__,
+            "detail": str(exc)[:200], "repo_id": repo_id, "run_id": run_id,
+            **result})
     return _record_fix_accept(ledger_store, {
         "status": "accepted", "repo_id": repo_id, "run_id": run_id,
         **result, **delivery})

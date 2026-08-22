@@ -74,15 +74,43 @@ def _verbs_dispatch_accepts() -> set[str]:
     return set(tools._VERB_IMPLS)
 
 
+def _hidden_verbs() -> set[str]:
+    """Verbs `dispatch` routes but the prompt deliberately does NOT advertise.
+
+    One split, declared in the catalog as `"hidden": True`, not a list here.
+    `accept_live_fix` is the case it exists for: the live-run supervisor stages
+    that verb itself and the effect refuses any confirmation a live run is not
+    waiting on, so teaching a model to compose one could only ever produce a
+    refusal. Hiding it is not a second definition of what is dispatchable —
+    the two assertions below pin exactly that.
+    """
+    return {verb for verb, spec in tools.TOOL_CATALOG.items() if spec.get("hidden")}
+
+
 def test_advertised_verbs_exactly_match_dispatch_accepted_verbs() -> None:
     advertised = _verbs_advertised_in_system_prompt()
     dispatchable = _verbs_dispatch_accepts()
+    hidden = _hidden_verbs()
 
-    assert advertised == dispatchable, (
+    assert advertised == dispatchable - hidden, (
         "concierge system prompt drifted from tools.dispatch's accepted "
         f"verbs — advertised but not dispatchable: {advertised - dispatchable!r}; "
-        f"dispatchable but not advertised: {dispatchable - advertised!r}"
+        f"dispatchable, not hidden, and not advertised: "
+        f"{dispatchable - hidden - advertised!r}"
     )
+
+
+def test_a_hidden_verb_is_unadvertised_but_still_dispatchable() -> None:
+    """Hidden means "do not TEACH it", never "do not route it": the effect
+    layer calls `accept_live_fix` by name through the same `dispatch`. A hidden
+    verb that stopped dispatching would break the fix loop silently."""
+    hidden = _hidden_verbs()
+
+    assert "accept_live_fix" in hidden
+    assert hidden <= _verbs_dispatch_accepts()
+    assert not (hidden & _verbs_advertised_in_system_prompt())
+    # ...and the fallback "here's what I can do" listing hides them too.
+    assert "accept_live_fix" not in concierge._fallback_reply()
 
 
 def test_dispatch_actually_rejects_a_verb_outside_the_catalog() -> None:
@@ -134,7 +162,7 @@ def test_every_verb_with_declared_args_renders_them() -> None:
 
     rendered = _rendered_args()
     for verb, spec in tools.TOOL_CATALOG.items():
-        if spec.get("args"):
+        if spec.get("args") and not spec.get("hidden"):
             assert verb in rendered, f"{verb} declares args but renders none"
 
 

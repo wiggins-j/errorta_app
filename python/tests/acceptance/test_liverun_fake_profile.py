@@ -646,8 +646,15 @@ def _autopilot(env: _Env) -> list[str]:
     from errorta_slack import outbound as slack_outbound
     from errorta_slack import tools as slack_tools
 
+    # The ONE seam this env has to wire: `accept_live_fix` refuses any
+    # confirmation a live supervisor is not currently waiting on, and its
+    # production default asks the `errorta_liverun.supervisor` module
+    # singleton. This test owns its own `LiveRunManager` (`env.mgr`), so it
+    # answers the identical question against the manager that actually holds
+    # the run. Everything else is the real default.
+    deps_ = slack_tools.ToolDeps(liverun_accept_binding_fn=env.mgr.accept_is_staged)
     bridge = slack_connection.SlackBridge(
-        object(), env.poster, slack_tools.ToolDeps(), lambda member, prompt: "{}",
+        object(), env.poster, deps_, lambda member, prompt: "{}",
         config={"allowed_team_ids": ["T1"], "allowed_user_ids": ["U1"]})
     deps = slack_outbound.OutboundDeps(fire_effect_fn=bridge._fire_confirmed_effect)
     return slack_outbound.sweep_autopilot(

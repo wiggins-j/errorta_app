@@ -53,6 +53,13 @@ class FakeStore:
         self.log: list[dict] = []
         self.commands = {"pytest-unit": {"argv": ["python3", "-m", "pytest", "-q"],
                                          "label": "unit"}}
+        # Only an `existing`-target project has a repository to merge back
+        # into; the cycle refuses the rest before it files a task.
+        self.target = "existing"
+
+    def get_project(self):
+        return SimpleNamespace(target=self.target, repo_path="/r/senditai-ng",
+                               delivery_root=None)
 
     def add_task(self, **kw):
         self.tasks.append(kw)
@@ -609,7 +616,8 @@ def test_every_pause_code_the_driver_can_emit_is_declared() -> None:
 
     assert {"fix_no_gate", "fix_project_busy", "fix_no_delivery", "fix_declined",
             "fix_gate_blocked", "fix_idle", "fix_run_failed", "triage_ambiguous",
-            "repo_not_fixable", "fix_unsafe_paths"} <= set(PAUSE_CODES)
+            "repo_not_fixable", "fix_unsafe_paths",
+            "fix_project_not_existing"} <= set(PAUSE_CODES)
 
 
 # -- the start race -------------------------------------------------------- #
@@ -816,6 +824,77 @@ def test_an_unknown_recorded_outcome_pauses_rather_than_deploying() -> None:
     fake.accept_outcome = {"status": "refused", "detail": "no worktree"}
     out = _drive(_cycle(fake), fake)
     assert out.code == "fix_accept_unverified" and out.detail == "refused"
+
+
+@pytest.mark.parametrize("reason", ["conflicts", "unsafe_path"])
+def test_a_merge_that_refused_to_apply_never_deploys(reason: str) -> None:
+    """The `applied: False` row `accept_live_fix` now writes down. `merge_back`
+    is fail-closed on a conflicting or traversing path and RETURNS that fact
+    rather than raising, so before this row existed the effect delivered, said
+    "accepted", and the cycle deployed and relaunched a fix that never landed.
+    The head DID move here (the dev run committed) — only the recorded outcome
+    can tell the cycle the operator's tree is untouched."""
+    fake = Fake()
+    fake.accept_outcome = {"status": "error", "reason": reason}
+
+    out = _drive(_cycle(fake), fake)
+
+    assert out.kind == "paused"
+    assert out.code == "fix_accept_unverified" and out.detail == "error"
+    assert out.failed is True
+    assert fake.actions == []                   # nothing deployed, nothing relaunched
+
+
+def test_a_delivery_error_pauses_the_cycle_too() -> None:
+    """The merge landed but nothing reached the operator. Deploying would ship
+    a tree the delivery never wrote."""
+    fake = Fake()
+    fake.accept_outcome = {"status": "delivery_error", "reason": "OSError"}
+
+    out = _drive(_cycle(fake), fake)
+
+    assert out.code == "fix_accept_unverified" and out.detail == "delivery_error"
+    assert fake.actions == []
+
+
+# -- a project with no repository to merge into ----------------------------- #
+
+
+@pytest.mark.parametrize("target", ["new", ""])
+def test_a_project_that_is_not_an_existing_repo_never_files_a_task(target: str) -> None:
+    """A `new`-target project's accept returns the worktree root and delivery
+    exports a folder: `repo.path` never changes, so the deploy steps would rsync
+    a tree the fix never touched. Refused before a dev run is ever spent — and
+    an unreadable target (`""`) is refused the same way, fail-closed."""
+    fake = Fake()
+    fake.store.target = target
+
+    out = _cycle(fake).step()
+
+    assert out.kind == "paused" and out.code == "fix_project_not_existing"
+    assert out.failed is False                  # it never started; nothing was spent
+    assert fake.store.tasks == [] and fake.started == []
+    assert target or "unreadable" in out.detail
+
+
+def test_a_ledger_that_cannot_answer_the_target_question_is_refused() -> None:
+    fake = Fake()
+
+    def _boom():
+        raise RuntimeError("project row is gone")
+
+    fake.store.get_project = _boom
+
+    out = _cycle(fake).step()
+
+    assert out.code == "fix_project_not_existing" and fake.store.tasks == []
+
+
+def test_an_existing_target_project_proceeds_as_before() -> None:
+    fake = Fake()
+    assert fake.store.target == "existing"
+
+    assert _drive(_cycle(fake), fake).kind == "deployed"
 
 
 # --- the production default behind `accept_outcome_fn` --------------------- #

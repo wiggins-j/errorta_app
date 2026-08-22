@@ -68,6 +68,7 @@ PAUSE_CODES = (
     "triage_ambiguous",     # no repo, or two, and no PM turn resolved it
     "repo_not_fixable",     # triage named a repo with no registrable gate
     "fix_no_gate",          # the project cannot produce a gate signal at all
+    "fix_project_not_existing",  # the project has no real repo to merge back into
     "fix_project_busy",     # something else owns that project's run
     "fix_run_failed",       # the dev run could not start, or failed empty
     "fix_idle",             # the dev run went quiet and was cancelled
@@ -494,6 +495,19 @@ class FixCycle:
         except Exception as exc:  # noqa: BLE001 - an unreachable ledger is a pause, not a crash
             _LOG.exception("liverun %s could not open ledger for %s", self.run_id, project_id)
             return self._pause("fix_no_gate", failed=False, detail=type(exc).__name__)
+        # A `new`-target project has no source tree to merge back into: its
+        # `accept` returns the worktree root as a deliverable and `deliver`
+        # exports a folder. Nothing lands in `repo.path`, so the deploy steps
+        # would rsync a tree the fix never touched -- and the whole cycle would
+        # report a fix that does not exist. Fail-closed: a target this cannot
+        # read at all is not one it merges into either.
+        target = self._safe(
+            lambda: str(getattr(self._store.get_project(), "target", "") or ""), default="")
+        if target != "existing":
+            return self._pause(
+                "fix_project_not_existing", failed=False,
+                detail=f"project `{project_id}` target is `{target or 'unreadable'}`, "
+                       "not `existing` — there is no repository to merge into")
         if not self._safe(self.deps.gate_available, self._store, default=False):
             # Before ANY task is filed: work no gate can accept is work that
             # cannot be merged, and filing it would spend a dev run to prove it.

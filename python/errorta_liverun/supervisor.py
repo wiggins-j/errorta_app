@@ -581,6 +581,29 @@ class Supervisor:
         # run should still count against the day cap.
         self._record_fix_cycle(failed=False)
 
+    def pause_fix(self, reason: str = "fix_loop_paused") -> bool:
+        """Abort an in-flight fix cycle NOW and land this run terminal.
+
+        ``True`` iff there was a cycle to abort. Writing the fix-pause marker
+        only stops the NEXT cycle; a cycle already awaiting acceptance owns a
+        dev run and a staged confirmation that the autopilot sweep will happily
+        press minutes later, so "the fix loop is off" would be a lie until it
+        did. `_abort_fix` is the same path an operator stop takes: it cancels
+        the dev run and withdraws the accept.
+
+        Called from whichever thread asked (Slack's, the sidecar's), not the
+        supervisor's own. That is deliberate: turning autonomy OFF must take
+        effect the moment it is asked for, not one tick later. Both `_abort_fix`
+        and `_close_out` are idempotent, so a tick racing this is a no-op, and
+        the run is only landed terminal from the fix phases — where the live
+        session is already torn down and no game client is attached.
+        """
+        if self._fix is None or self.state.phase not in _FIX_PHASES:
+            return False
+        self._abort_fix(reason)
+        self._close_out(final_phase="stopped", reason=reason)
+        return True
+
     def _record_fix_cycle(self, *, failed: bool) -> None:
         try:
             self.ledger.record_fix_cycle(self.profile.name, self.state.run_id,
@@ -908,10 +931,20 @@ class LiveRunManager:
         return {"status": "resumed"}
 
     def pause_fix(self, profile_name: str) -> dict[str, Any]:
-        """Stop this profile entering the fix loop. Live runs are untouched:
-        this is a hold on autonomous MERGING, not on the supervisor. Idempotent
-        — pausing an already-paused profile is still "paused", because the
-        operator's question was "is it off?", not "did I change something?"."""
+        """Stop this profile fixing: the marker keeps future cycles out, AND an
+        in-flight cycle is aborted right now (its dev run cancelled, its staged
+        acceptance withdrawn).
+
+        The marker alone was not enough. It is read by `_enter_fix_loop`, which
+        a cycle already past has already passed — so a profile "paused" while
+        one was awaiting acceptance would still have merged and deployed it,
+        because the autopilot sweep fires on the PENDING confirmation the cycle
+        left behind. `aborted` reports whether there was one.
+
+        Live runs in `launching`/`watching` are untouched: this is a hold on
+        autonomous MERGING, not on the supervisor. Idempotent — pausing an
+        already-paused profile is still "paused", because the operator's
+        question was "is it off?", not "did I change something?"."""
         if not _PROFILE_NAME_RE.match(profile_name or ""):
             return {"status": "refused", "reason": "bad_profile_name"}
         marker = fix_paused_marker(profile_name)
@@ -921,7 +954,40 @@ class LiveRunManager:
         except OSError as exc:
             _LOG.exception("liverun could not write the fix-pause marker")
             return {"status": "error", "detail": type(exc).__name__}
-        return {"status": "paused", "profile": profile_name}
+        # Marker FIRST: if the abort below lands the run terminal and something
+        # relaunches, the relaunch must already see the profile paused.
+        out: dict[str, Any] = {"status": "paused", "profile": profile_name,
+                               "aborted": False}
+        sup = self._active().get(profile_name)
+        if sup is not None:
+            try:
+                out["aborted"] = bool(sup.pause_fix("fix_loop_paused"))
+            except Exception:  # noqa: BLE001 - the hold still stands
+                _LOG.exception("liverun could not abort the in-flight fix cycle for %s",
+                               profile_name)
+            if out["aborted"]:
+                out["run_id"] = sup.state.run_id
+        return out
+
+    def accept_is_staged(self, run_id: str, confirmation_id: str) -> bool:
+        """Did a LIVE supervisor stage exactly this acceptance?
+
+        The binding `errorta_slack.tools.accept_live_fix` refuses without. That
+        verb is in the concierge's dispatch table, so a model can compose a call
+        to it with any `run_id` it likes; `is_human_only` sees no `changed_paths`
+        on such a call, answers False, and autopilot fires it. Requiring the
+        confirmation id to be the one a non-terminal run is *currently waiting
+        on* is what a chat turn cannot forge: the id is minted by
+        `stage_confirmation` after the cycle built the args, and this manager is
+        the only place that remembers it."""
+        run_id, confirmation_id = str(run_id or ""), str(confirmation_id or "")
+        if not run_id or not confirmation_id:
+            return False
+        for sup in self._active().values():
+            if str(sup.state.run_id) != run_id:
+                continue
+            return str(sup.state.fix_confirmation_id or "") == confirmation_id
+        return False
 
     def resume_fix(self, profile_name: str) -> dict[str, Any]:
         """Re-arm the fix loop. Human-only at the Slack layer

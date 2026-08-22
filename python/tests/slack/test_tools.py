@@ -2048,27 +2048,40 @@ class _FixLedger(FakeLedgerStore):
 def _fix_deps(tmp_path: Path, *, gate_allowed: bool = True,
               ws: "_FakeWorkspace | None" = None,
               deliver_calls: list | None = None,
-              ledger: "_FixLedger | None" = None) -> tools.ToolDeps:
+              ledger: "_FixLedger | None" = None,
+              deliver_raises: BaseException | None = None,
+              bound: bool = True) -> tools.ToolDeps:
     store.bind_channel("C1", "p")
     workspace = ws if ws is not None else _FakeWorkspace()
     led = ledger if ledger is not None else _FixLedger("p", tmp_path)
     gate = type("_Gate", (), {"allowed": gate_allowed,
                               "blockers": ()})()
+
+    def _deliver(project_id: str, w: Any, **kw: Any) -> dict[str, Any]:
+        (deliver_calls if deliver_calls is not None else []).append(
+            {"project_id": project_id, **kw})
+        if deliver_raises is not None:
+            raise deliver_raises
+        return {"delivered_to": "/repo", "open_url": "", "run_hint": ""}
+
     return _deps(
         tmp_path,
         ledger_factory=lambda project_id: led,
         workspace_factory=lambda project_id: workspace,
         merge_review_fn=lambda s, w: {"_gate": gate, "gate": {"allowed": gate_allowed}},
-        deliver_fn=lambda project_id, w, **kw: (
-            (deliver_calls if deliver_calls is not None else []).append(
-                {"project_id": project_id, **kw})
-            or {"delivered_to": "/repo", "open_url": "", "run_hint": ""}),
+        deliver_fn=_deliver,
+        # "a live supervisor is waiting on this confirmation". Default True so
+        # every test below exercises the merge path it is actually about; the
+        # binding itself has its own tests.
+        liverun_accept_binding_fn=lambda run_id, cid: bound,
     )
 
 
 def _staged_fix_args(**over: Any) -> dict[str, Any]:
     args = {"project_id": "p", "repo_id": "brain", "run_id": "r-1", "task_id": "t-1",
-            "cycle": 1, "human_only": False, "changed_paths": ["app.py"]}
+            "cycle": 1, "human_only": False, "changed_paths": ["app.py"],
+            # Threaded in by `connection._fire_confirmed_effect`, never staged.
+            "_confirmation_id": "cid-1"}
     args.update(over)
     return args
 
@@ -2264,6 +2277,222 @@ def test_gate_blocked_is_a_not_done_status() -> None:
     """`connection` and `concierge` both read this set to decide whether a
     reply may claim the action happened. A blocked gate merged nothing."""
     assert "gate_blocked" in tools.NOT_DONE_STATUSES
+
+
+# --- a merge that did not apply is never an "accepted" fix ----------------- #
+#
+# `CodingWorkspace.accept` -> `ApplyWorkspace.merge_back` is fail-closed on a
+# conflicting or traversing path, and it says so by RETURNING
+# `{"applied": False, "reason": ...}`. It raises nothing. So the accept path
+# read past it, delivered, and recorded `status: "accepted"` for a merge that
+# never wrote a byte -- after which the supervisor verified the "approval",
+# deployed and relaunched a fix that did not exist. These pin the honest read.
+
+
+class _UnappliedWorkspace(_FakeWorkspace):
+    """`merge_back`'s real refusal shape."""
+
+    def __init__(self, reason: str = "conflicts", conflicts: "list[str] | None" = None,
+                 **kw: Any) -> None:
+        super().__init__(**kw)
+        self.reason, self.conflicts = reason, list(conflicts or ["app.py"])
+
+    def accept(self, **kw: Any) -> dict[str, Any]:
+        self.accept_calls.append(kw)
+        return {"applied": False, "reason": self.reason, "conflicts": self.conflicts,
+                "changed_files": []}
+
+
+def test_a_merge_back_that_applied_nothing_is_never_reported_as_accepted(
+        tmp_path: Path) -> None:
+    ws = _UnappliedWorkspace()
+    delivered: list = []
+    ledger = _FixLedger("p", tmp_path)
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered, ledger=ledger)
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert ws.accept_calls == [{"confirm": True}]      # it really did try
+    assert out["status"] == "error" and out["reason"] == "conflicts"
+    assert out["conflicts"] == ["app.py"]
+    assert delivered == []                             # ...and shipped nothing
+    assert ledger.decisions[0]["extra"]["status"] == "error"
+    assert out["status"] in tools.NOT_DONE_STATUSES
+
+
+def test_an_unsafe_path_refusal_from_merge_back_is_reported_too(tmp_path: Path) -> None:
+    """The other `applied: False` reason: a delivered path that escapes the
+    source tree. Same read, same honest status."""
+    ws = _UnappliedWorkspace(reason="unsafe_path", conflicts=[])
+    delivered: list = []
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered)
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "error" and out["reason"] == "unsafe_path"
+    assert delivered == []
+
+
+def test_a_new_target_accept_has_no_applied_key_and_is_not_an_error() -> None:
+    """`is False`, not falsy. `CodingWorkspace.accept` on a `new` target returns
+    `{"mode": "new_project", ...}` with no `applied` at all -- reading that as a
+    failed merge would turn every non-`existing` project's accept into an error
+    instead of the refusal it now gets earlier."""
+    import inspect
+
+    src = inspect.getsource(tools.accept_live_fix)
+    assert 'result.get("applied") is False' in src
+
+
+class _ConflictedPreviewWorkspace(_FakeWorkspace):
+    def preview(self) -> dict[str, Any]:
+        out = super().preview()
+        out["conflicts"] = ["app.py"]
+        return out
+
+
+def test_a_preview_reporting_conflicts_never_reaches_the_merge(tmp_path: Path) -> None:
+    """Cheaper and earlier than reading `applied: False` back: the same preview
+    `merge_back` computes already says the merge will refuse."""
+    ws = _ConflictedPreviewWorkspace()
+    delivered: list = []
+    ledger = _FixLedger("p", tmp_path)
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered, ledger=ledger)
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "error" and out["reason"] == "conflicts"
+    assert ws.accept_calls == [] and delivered == []
+    assert ledger.decisions[0]["extra"]["status"] == "error"
+
+
+# --- delivery is downstream of a merge that already landed ----------------- #
+
+
+def test_a_delivery_that_raises_is_reported_not_propagated(tmp_path: Path) -> None:
+    """`routes/coding.accept_worktree` wraps `deliver` for exactly this reason:
+    the merge has already happened, so raising cannot undo it. But the fix loop
+    must not hear "accepted" either -- nothing reached the operator."""
+    ws = _FakeWorkspace()
+    ledger = _FixLedger("p", tmp_path)
+    deps = _fix_deps(tmp_path, ws=ws, ledger=ledger,
+                     deliver_raises=RuntimeError("delivery root vanished"))
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "delivery_error"
+    assert out["reason"] == "RuntimeError" and "vanished" in out["detail"]
+    assert ws.accept_calls == [{"confirm": True}]      # the merge DID land
+    assert ledger.decisions[0]["extra"]["status"] == "delivery_error"
+
+
+def test_delivery_error_is_a_not_done_status() -> None:
+    assert "delivery_error" in tools.NOT_DONE_STATUSES
+
+
+# --- the accept is bound to LIVE supervisor state, not to good arguments --- #
+#
+# `accept_live_fix` is dispatchable, so a concierge turn can compose one. Such a
+# call carries no `changed_paths`, so `is_human_only` answers False and
+# autopilot fires it -- a model-chosen merge into the operator's real files.
+# What a chat turn cannot supply is the confirmation id a running supervisor is
+# waiting on.
+
+
+def test_a_chat_composed_accept_is_refused_even_with_a_plausible_run_id(
+        tmp_path: Path) -> None:
+    ws = _FakeWorkspace()
+    delivered: list = []
+    ledger = _FixLedger("p", tmp_path)
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered, ledger=ledger,
+                     bound=False)
+
+    out = tools.dispatch("accept_live_fix",
+                         _staged_fix_args(_confirmation_id="cid-the-model-never-saw"),
+                         channel_id="C1", thread_ts="1",
+                         confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "refused" and out["reason"] == "not_staged_by_supervisor"
+    assert ws.accept_calls == [] and delivered == []
+    assert ledger.decisions[0]["extra"]["status"] == "refused"
+
+
+def test_a_supervisor_staged_accept_proceeds(tmp_path: Path) -> None:
+    seen: list = []
+    deps = _fix_deps(tmp_path)
+    deps = replace(deps, liverun_accept_binding_fn=lambda run_id, cid: (
+        seen.append((run_id, cid)) or True))
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "accepted"
+    assert seen == [("r-1", "cid-1")]      # asked with the run AND the cid
+
+
+def test_the_binding_is_asked_before_the_workspace_is_even_opened(
+        tmp_path: Path) -> None:
+    opened: list = []
+    deps = _fix_deps(tmp_path, bound=False)
+    real_ws = deps.workspace_factory
+    deps = replace(deps, workspace_factory=lambda pid: (
+        opened.append(pid) or real_ws(pid)))
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "refused" and opened == []
+
+
+def test_the_binding_seam_has_a_lazy_production_default() -> None:
+    """Same rule as every other supervisor touch in this module: constructing
+    ToolDeps must not import `errorta_liverun`."""
+    assert tools.ToolDeps().liverun_accept_binding_fn is None
+    # ...and it fails closed when no live run is holding anything.
+    assert tools._default_accept_binding("no-such-run", "no-such-cid") is False
+
+
+def test_a_manager_that_raises_answers_not_staged(monkeypatch) -> None:
+    class _Boom:
+        def accept_is_staged(self, run_id, cid):
+            raise RuntimeError("manager is wedged")
+
+    monkeypatch.setattr(tools, "_liverun", lambda: _Boom())
+
+    assert tools._default_accept_binding("r-1", "cid-1") is False
+
+
+# --- a project with no repository to merge into ---------------------------- #
+
+
+class _NewTargetLedger(_FixLedger):
+    def get_project(self) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(target="new", repo_path="", delivery_root="/out")
+
+
+def test_accept_live_fix_refuses_a_project_that_is_not_an_existing_repo(
+        tmp_path: Path) -> None:
+    """A `new`-target accept hands back the worktree root and delivery exports a
+    folder: the operator's repository never changes, so the deploy steps would
+    ship a tree the fix never touched. `fixloop._do_triage` refuses these
+    projects up front; this is the same question asked at the merge."""
+    ws = _FakeWorkspace()
+    delivered: list = []
+    ledger = _NewTargetLedger("p", tmp_path)
+    deps = _fix_deps(tmp_path, ws=ws, deliver_calls=delivered, ledger=ledger)
+
+    out = tools.dispatch("accept_live_fix", _staged_fix_args(), channel_id="C1",
+                         thread_ts="1", confirmed_via="block_actions", deps=deps)
+
+    assert out["status"] == "refused" and out["reason"] == "project_not_existing"
+    assert ws.accept_calls == [] and delivered == []
+    assert ledger.decisions[0]["extra"]["status"] == "refused"
 
 
 @pytest.mark.parametrize("verb,args,expected", [

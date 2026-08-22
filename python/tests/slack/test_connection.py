@@ -2332,6 +2332,75 @@ async def test_autopilot_reads_the_guarded_paths_off_the_record_not_the_flag(
     assert store.get_confirmation(cid)["state"] == "pending"
 
 
+# --------------------------------------------------------------------------
+# Review fix: the accept effect must be able to ask "is a live supervisor
+# waiting on THIS confirmation?", and only the firing path knows the id.
+# --------------------------------------------------------------------------
+
+
+async def test_the_confirmation_id_is_threaded_into_the_accept_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stage_confirmation` mints the id AFTER the cycle built the args, so the
+    id is in no staged record's args -- it has to be added at fire time."""
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": False,
+            "changed_paths": ["app.py"]}
+    cid = store.stage_confirmation("accept_live_fix", args, "613.1", channel_id="C1")
+    record = store.get_confirmation(cid)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, **kw: fired.append(dict(args)) or {"status": "accepted"})
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    bridge._fire_confirmed_effect(record, channel_id="C1", thread_ts="613.1",
+                                  verb="accept_live_fix", decision="approved",
+                                  approved=True)
+
+    assert fired[0]["_confirmation_id"] == cid
+
+
+async def test_a_forged_confirmation_id_in_the_staged_args_is_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat turn composes its own args. If it could put a `_confirmation_id`
+    in them and have that survive, the whole binding would be forgeable."""
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": False,
+            "_confirmation_id": "cid-i-made-up"}
+    cid = store.stage_confirmation("accept_live_fix", args, "614.1", channel_id="C1")
+    record = store.get_confirmation(cid)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, **kw: fired.append(dict(args)) or {"status": "refused"})
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    bridge._fire_confirmed_effect(record, channel_id="C1", thread_ts="614.1",
+                                  verb="accept_live_fix", decision="approved",
+                                  approved=True)
+
+    assert fired[0]["_confirmation_id"] == cid != "cid-i-made-up"
+
+
+async def test_no_other_verb_grows_a_confirmation_id_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scoped to the one verb that reads it: `_confirmation_id` is not a general
+    argument every C-class verb suddenly receives."""
+    cid = store.stage_confirmation("spend_cloud", {"amount": 5}, "615.1", channel_id="C1")
+    record = store.get_confirmation(cid)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, **kw: fired.append(dict(args)) or {"status": "ok"})
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    bridge._fire_confirmed_effect(record, channel_id="C1", thread_ts="615.1",
+                                  verb="spend_cloud", decision="approved", approved=True)
+
+    assert fired == [{"amount": 5}]
+
+
 async def test_the_accept_button_names_the_repo_and_the_paths(tmp_path: Path) -> None:
     """A human tapping this is authorising a merge into their real files. A
     button reading "Confirm accept_live_fix" tells them nothing about what."""

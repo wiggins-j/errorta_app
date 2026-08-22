@@ -121,8 +121,10 @@ def _envelope(**fields: Any) -> str:
 def test_build_system_prompt_includes_catalog_and_etiquette() -> None:
     prompt = concierge.build_system_prompt("proj-a")
 
-    for verb in tools.TOOL_CATALOG:
-        assert verb in prompt
+    # Every ADVERTISED verb. A `hidden` verb (accept_live_fix) is dispatchable
+    # but deliberately absent -- see tests/slack/test_catalog_canary.py.
+    for verb, spec in tools.TOOL_CATALOG.items():
+        assert (verb in prompt) is not bool(spec.get("hidden")), verb
     assert "SLACK ETIQUETTE CONTRACT" in prompt
     assert "REPLY FORMAT" in prompt
     assert "confirmation button" in prompt or "Approve" in prompt
@@ -241,8 +243,8 @@ def test_malformed_json_on_both_attempts_falls_back_without_raising(tmp_path: Pa
         deps=deps, caller=caller,
     )
 
-    for verb in tools.TOOL_CATALOG:
-        assert verb in result["reply"]
+    for verb, spec in tools.TOOL_CATALOG.items():
+        assert (verb in result["reply"]) is not bool(spec.get("hidden")), verb
     assert result["tool_results"] == []
     assert result["reactions"] == []
     assert len(caller.calls) == 2  # exactly one corrective retry, not unbounded
@@ -264,8 +266,8 @@ def test_unknown_verb_falls_back_to_catalog_listing_no_exception(tmp_path: Path)
         deps=deps, caller=caller,
     )
 
-    for verb in tools.TOOL_CATALOG:
-        assert verb in result["reply"]
+    for verb, spec in tools.TOOL_CATALOG.items():
+        assert (verb in result["reply"]) is not bool(spec.get("hidden")), verb
     assert result["reactions"] == []
     assert len(result["tool_results"]) == 1
     assert result["tool_results"][0]["error"] == "tool_not_allowed"
