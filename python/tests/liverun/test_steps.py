@@ -456,3 +456,35 @@ def test_remote_pid_alive_and_signal_reject_non_numeric_pidfile(
     # this user can reach (or the whole process group). Confirm this very
     # test process is still here.
     os.kill(os.getpid(), 0)
+
+
+def _profile_with_deploy(action: P.Action, check: P.Check | None = None) -> P.Profile:
+    repo = P.RepoDef("brain", "/r/brain", "brain-proj", True, (),
+                     (P.Step("rsync", action, check, 30),))
+    return P.Profile("p", {"box": P.Host("localhost")}, {}, (), (), (), (), P.DEFAULT_CAPS,
+                     (), (repo,), P.FixLoop(enabled=True))
+
+
+def test_a_declared_deploy_argv_is_accepted_by_the_identity_guard(tmp_path: Path) -> None:
+    """A repo's `deploy:` steps are validated at load time exactly like launch
+    steps, so their argvs are declared argvs — without this the fix loop's
+    deploy phase could not run its own profile's step at all."""
+    action = P.Action("local", {"argv": ("/bin/echo", "deployed"), "cwd": None})
+    ctx = _ctx(tmp_path, _profile_with_deploy(action))
+    res = S.run_action(action, ctx, timeout_s=5)
+    assert res.ok and "deployed" in res.stdout_tail
+
+
+def test_a_deploy_steps_check_argv_is_declared_too(tmp_path: Path) -> None:
+    action = P.Action("local", {"argv": ("/bin/echo", "deployed"), "cwd": None})
+    check = P.Check("exit0", {"argv": ("/bin/echo", "checked")})
+    ctx = _ctx(tmp_path, _profile_with_deploy(action, check))
+    assert S.run_check(check, ctx, step_start=0.0)
+
+
+def test_an_undeclared_argv_is_still_refused_when_deploy_steps_exist(tmp_path: Path) -> None:
+    action = P.Action("local", {"argv": ("/bin/echo", "deployed"), "cwd": None})
+    ctx = _ctx(tmp_path, _profile_with_deploy(action))
+    with pytest.raises(S.ArgvIdentityError):
+        S.run_action(P.Action("local", {"argv": ("/bin/echo", "pwned"), "cwd": None}),
+                     ctx, timeout_s=5)
