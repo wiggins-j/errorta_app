@@ -924,6 +924,10 @@ def test_a_recovered_run_never_resumes_a_fix_cycle() -> None:
     reloaded = store.load(sup.state.run_id)
     assert reloaded.phase == "lost_on_restart"
     assert fake.store.tasks == []
+    # ... and says nothing about the fix loop: a run lost to a restart is not a
+    # failure anyone can attribute to a repository.
+    assert [e for e in store.events(sup.state.run_id)
+            if e["kind"] == "fix_skipped" and e["seq"] > 1] == []
 
 
 def test_a_fix_cycle_runs_on_the_daemon_thread_and_leaks_nothing() -> None:

@@ -54,7 +54,12 @@ _FIXABLE_REASON_RE = re.compile(r"^(stall|launch_step_failed):")
 _REFUSAL_TAIL_RE = re.compile(r"^REFUSED:", re.MULTILINE)
 # Skip codes that are NOT worth an event: nothing was expected to happen, or the
 # more specific event (`fix_cycle_cap`) has already said it.
-_SILENT_SKIPS = frozenset({"not_configured", "fix_in_flight", "fix_cycle_cap"})
+_SILENT_SKIPS = frozenset({
+    "not_configured",   # a Slice 1 profile: it never asked for a fix loop
+    "run_lost",         # boot recovery: a run lost to a restart is not a bug to fix
+    "fix_in_flight",    # this run already had its cycle
+    "fix_cycle_cap",    # the more specific `fix_cycle_cap` event already said it
+})
 
 
 class LiveRunRefused(RuntimeError):
@@ -403,7 +408,8 @@ class Supervisor:
                 # Slice 2: the ONE behavioural change to the closing sequence.
                 # Teardown has already completed here — the fix cycle never runs
                 # against a live game session.
-                skip = self._enter_fix_loop(reason)
+                skip = ("run_lost" if final_phase == "lost_on_restart"
+                        else self._enter_fix_loop(reason))
                 if skip is None:
                     return                  # phase is now `fixing`; the tick loop drives on
                 if skip == "fix_cycle_cap":
