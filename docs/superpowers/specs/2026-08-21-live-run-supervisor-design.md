@@ -19,8 +19,7 @@ kicked off the launch steps it waits on nothing, so stalls go unnoticed for ~20
 minutes. The owner wants the whole launch → watch → stop-safely → fix → redeploy
 → relaunch loop to be driven from Slack chat with no human in the loop.
 
-Slice 1 delivers the part that is useful alone and the only part that can be
-exercised soon (§2 F-A): a **wall-clock supervisor** that launches a declared
+Slice 1 delivers the part that is useful alone (§2 F-A explains the caps): a **wall-clock supervisor** that launches a declared
 profile, watches declared signals, detects stalls, tears down safely with
 logoff evidence, and narrates all of it to Slack. It does **no** fixing.
 
@@ -29,15 +28,16 @@ logoff evidence, and narrates all of it to Slack. It does **no** fixing.
 These were read from the code and docs on 2026-08-21; several overturn the
 first draft of this design.
 
-- **F-A. The target account is banned as of 2026-08-20** (`senditai-ng/docs/
+- **F-A. The previous account was banned on 2026-08-20** (a replacement account is now in use) (`senditai-ng/docs/
   superpowers/specs/2026-08-20-session-risk-budget-design.md` §1 — six login
   cycles in 33 minutes). The brain now carries a persisted **session risk
   budget** (3 live sessions/hour, 600 s minimum gap, 12/day, 2 consecutive
   failed receipts) and *refuses* to start above it; `--ignore-risk-budget`
   overrides it (`senditai_ng/cli.py:356`). An autonomous launch→fail→relaunch
-  loop is exactly the behaviour that caused the ban. Errorta's caps must sit
+  loop is exactly the behaviour that caused that ban. Errorta's caps must sit
   strictly inside the brain's budget, a brain-side refusal is terminal, and
-  Slice 1 is acceptance-tested against a **fake profile**, never the account.
+  Slice 1 is acceptance-tested against a **fake profile** before any run on
+  the replacement account.
 - **F-B. `RuntimeProcessManager` cannot launch this client.** It is bound to the
   Errorta-owned worktree (`runtime_process.py:391-411`) and wraps children in the
   seatbelt sandbox with a synthetic HOME (`:266-293`, `preview.py:87-126`). The
