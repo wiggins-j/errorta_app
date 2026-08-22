@@ -375,6 +375,7 @@ class FixCycle:
         self._ws: Any = None
         self._head_before = ""
         self.task_id: str | None = None
+        self.focus_id: str = ""
         self.cid: str = ""          # cleared the moment it is resolved either way
         self.accept_cid: str = ""   # what was staged, for the record
         self._run_started = False
@@ -549,6 +550,20 @@ class FixCycle:
         gate = _gate_label(self._store)
         title, detail = _brief.build_fix_brief(self.bundle, self._repo, gate_label=gate)
         project_id = str(self._repo.errorta_project)
+        # The fix is the team's OPERATIVE GOAL, not just one task in the backlog:
+        # without an active Focus the PM plans against the North Star and, on an
+        # existing repo, scaffolds it from scratch (live 2026-08-22, run b8370d).
+        # Same seam Slack's `set_next_goal` uses; the body points at the task.
+        try:
+            focus = self._store.add_focus(
+                title=title, origin="liverun",
+                body=("Live-run fix cycle: the ONLY goal is this one fix. The repository "
+                      "already exists and works; do not scaffold, re-architect, or plan "
+                      "beyond the filed task. The task carries the evidence and the gate."))
+            self.focus_id = str(getattr(focus, "id", "") or "")
+        except Exception as exc:  # noqa: BLE001
+            _LOG.exception("liverun %s could not set the fix focus", self.run_id)
+            return self._pause("fix_run_failed", failed=False, detail=type(exc).__name__)
         try:
             task = self._store.add_task(title=title, role="dev", detail=detail,
                                         task_type="implementation")
@@ -557,7 +572,8 @@ class FixCycle:
             return self._pause("fix_run_failed", failed=False, detail=type(exc).__name__)
         self.task_id = str(getattr(task, "task_id", "") or "")
         self._event("fix_task", {"task_id": self.task_id, "repo_id": self.repo_id,
-                                 "project_id": project_id, "gate": gate})
+                                 "project_id": project_id, "gate": gate,
+                                 "focus_id": self.focus_id})
         self._state = "run"
         return self._pending("fix_task")
 

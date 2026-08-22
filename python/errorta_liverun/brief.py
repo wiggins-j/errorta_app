@@ -187,6 +187,17 @@ def _header(bundle: EvidenceBundle, repo, gate_label: str) -> list[str]:
     lines.append(f"Repository: {_one_line(repo.path)} "
                  f"(Errorta project `{_one_line(repo.errorta_project)}`)")
     lines.append(f"Acceptance gate: `{_one_line(gate_label)}`")
+    # How to work (live 2026-08-22, run b8370d: the dev asked to reproduce the
+    # failure, got blocked, and the PM fell back to planning the North Star).
+    lines.append(
+        "How to work: this is an EXISTING, working repository and a single targeted "
+        "fix. Nobody on the team can run the program, the live client, or the "
+        "acceptance gate by hand -- the gate runs automatically after the change. "
+        "Diagnose from the evidence below and from READING the repository (the "
+        "dev has Read/Grep/Glob over the worktree); do not ask to reproduce, do "
+        "not scaffold, do not re-plan the project. If the evidence is genuinely "
+        "insufficient to locate the defect, say exactly what is missing in the "
+        "task outcome instead of guessing.")
 
     refs: list[str] = []
     for item in bundle.evidence:

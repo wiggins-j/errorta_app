@@ -65,6 +65,11 @@ class FakeStore:
         self.tasks.append(kw)
         return SimpleNamespace(task_id=f"t{len(self.tasks)}")
 
+    def add_focus(self, **kw):
+        self.focuses = getattr(self, "focuses", [])
+        self.focuses.append(kw)
+        return SimpleNamespace(id=f"f{len(self.focuses)}")
+
     def get_run_state(self) -> dict:
         return dict(self.state)
 
@@ -984,3 +989,19 @@ def test_a_deploy_check_is_told_when_its_step_started_not_when_it_polled() -> No
     assert len(fake.check_starts) >= 3
     assert set(fake.check_starts) == {started_at}          # one stamp, not one per poll
     assert started_at <= fake.clock.t - 60                 # ... and it is the STEP's start
+
+
+
+def test_the_fix_is_filed_as_the_operative_focus_before_the_task() -> None:
+    """Live 2026-08-22 (run b8370d): a task with no Focus let the PM plan the
+    North Star and scaffold an existing repo from scratch. The fix cycle must
+    set the fix as the team's one active goal, pointing at the task."""
+    fake = Fake()
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    store = fake.store
+    assert store.focuses and store.focuses[0]["origin"] == "liverun"
+    assert store.focuses[0]["title"] == store.tasks[0]["title"]
+    assert "do not scaffold" in store.focuses[0]["body"]
+    assert dict(out.events)["fix_task"]["focus_id"] == "f1"
