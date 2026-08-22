@@ -1,7 +1,7 @@
 # Live-Run Fix Loop — Design (Slice 2 of 3)
 
 **Date:** 2026-08-22
-**Status:** Implemented on `feat/live-run-fix-loop` (`29133bb..HEAD`), Tasks 1-7. The shipped example profile is `docs/liverun/example-profile.yaml`; the operator runbook is `docs/liverun/README.md` (the fix loop's own section is "The autonomous fix loop").
+**Status:** Merged to `main` (`3ae9a9a`, 2026-08-22), Tasks 1-7 plus live fixes (`d463c12` operative Focus, `9d2155c` repo-read budget). Live-verified mechanically 2026-08-22; a converging fix cycle is not yet demonstrated — see `docs/liverun/README.md` "Status". The shipped example profile is `docs/liverun/example-profile.yaml`; the operator runbook is `docs/liverun/README.md` (the fix loop's own section is "The autonomous fix loop").
 **Depends on:** Slice 1 (`docs/superpowers/specs/2026-08-21-live-run-supervisor-design.md`), merged — profile schema, step primitives, `RemoteToolRunner`, the persisted state machine, boot recovery, and the five Slack live-run verbs.
 **New modules:** `python/errorta_liverun/triage.py`, `python/errorta_liverun/brief.py`, `python/errorta_liverun/fixloop.py`.
 **Touched:** `errorta_liverun/{profile,state,supervisor}.py`, `errorta_slack/{tools,connection,outbound}.py`, `errorta_app/slack_lifecycle.py`.

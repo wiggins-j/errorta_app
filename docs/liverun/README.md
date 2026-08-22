@@ -385,17 +385,69 @@ withdrawn and the dev run is cancelled, so nothing merges minutes after you
 asked for a stop. If a human tapped Approve first, that race is reported
 rather than fought — the line says the approval was already answered.
 
-## Authoring the OSRS profile — verify these first
+## Authoring the OSRS profile — what the first live runs settled
 
-These are the spec's open questions (§7). Resolve them while authoring the
-profile, not in code — the validator reports, it never assumes.
+The spec's open questions (§7) were resolved by running the real thing on
+2026-08-22 (five runs). Copy these into your profile rather than rediscovering
+them:
 
-1. `osascript` / `cliclick` from the sidecar: Accessibility permission is
-   per-app, and agent shells have been seen failing with `-25211`. The example
-   routes `jagex-play` through Terminal.app by absolute path for that reason.
-2. The exact `/state` field on `:8081` that proves logged-out (the example
-   assumes `gameState`).
-3. Cost of the journal `seq` probe at a 30 s cadence: a direct read-only
-   `sqlite3` query versus `osrs-watcher --json`.
-4. Whether `senditai_ng.cli kill --session` resolves the same `--base-dir` the
-   run itself used.
+1. **`osascript` / `cliclick` from the sidecar works** when `jagex-play` is
+   routed through Terminal.app by absolute path (the example does this).
+2. **Logout proof is `/healthz`, not `/state`.** `/state` requires the
+   `X-Agent-Token` header, which probes cannot send; `/healthz` is token-exempt
+   and carries `loggedIn`. The logoff check is
+   `http_json: {url: http://127.0.0.1:8081/healthz, path: loggedIn, equals: false}`.
+3. **Logoff must not depend on the brain.** If the brain has already exited,
+   the kill marker logs nothing out and the literal is honestly `ABSENT`. Add a
+   `client-logout` teardown step before `logoff-wait` that POSTs
+   `/agent/logout` with the token read from `~/.runelite/.agent-token` into a
+   header file (never argv). Keep that script outside the repo.
+4. **Journal probe**: the box has no `sqlite3` CLI; `osrs-watcher --session
+   $SESSION_ID --json --last 1` as a `remote_stdout_advancing` probe is fine
+   at a 30 s cadence.
+5. **`kill --session` resolves the default `--base-dir`**, the same one a bare
+   `run` uses.
+6. **Rebuild check**: Gradle leaves an up-to-date jar's mtime alone, so
+   `file_mtime_newer` never passes; use `file_exists` and trust the exit code.
+7. **Tunnels**: if an `autossh` already reverse-forwards 8081, forward only
+   what it does not (8082), or `ExitOnForwardFailure` kills yours.
+8. **Probe ids are part of triage.** The fix loop's deterministic classifier
+   keys on the stall reason, which carries the probe id: name the probes
+   `client-state`, `brain-alive`, `brain-log`, `journal-seq`, `feed-live`
+   exactly, or triage reports "no evidence class matched" and pauses.
+9. **Caps are real.** 2 launches/hour and a 900 s gap means a shakedown with
+   profile fixes takes hours; plan relaunch times instead of loosening caps.
+10. **Seed the project's worktree before the first fix cycle.** `adopt_project`
+    does not; the first `errorta run` (or `errorta setup --confirm` followed by
+    a run) does. Until then the cycle pauses `fix_run_failed`.
+
+## Status (2026-08-22)
+
+Live-verified on the real client and brain, from the terminal and from the
+sidecar: the full launch chain, wall-clock stall detection, teardown with
+`logoff_verified: PRESENT`, caps, pauses, recovery after a killed sidecar,
+triage, operative Focus + fix task, a coding run that opened a PR, and the
+Slack narration of all of it.
+
+Not yet demonstrated: a fix cycle that **converges** on its own. On the real
+defect of the day (the brain's `tutorialProgress` never reaching its preflight)
+the sonnet dev exhausted its repository-read budget on a 657-file repo twice
+and misread the symptom; the defect was found and fixed by hand
+(senditai-ng `9373014`). Treat the loop as mechanically complete and
+model-limited until the items below land.
+
+### Follow-ups, in priority order
+
+- Fix-loop dev capacity: an opus dev for existing-repo projects, a larger
+  `ERRORTA_REPO_READ_MAX_TURNS`, and a longer CLI turn timeout for repo-read
+  turns; measure the fix rate on real stalls before widening anything.
+- Triage should classify by probe **kind**, not probe id (see item 8).
+- The fix cycle should seed a missing project worktree itself (item 10).
+- `window_shot` never captured RuneLite: the `pgrep` pattern does not match the
+  launcher-spawned process name; fix the pattern.
+- osrs-reaper has no usable acceptance gate: Gradle cannot run inside the
+  sandboxed gate executor (network off, synthetic HOME, no `JAVA_HOME`). A
+  trusted, unsandboxed gate tier is its own slice; until then `fixable: false`.
+- The `errorta_tunnels` registry is in-memory, so boot recovery reports a prior
+  sidecar's tunnel `ABSENT` rather than closing it.
+- `_PATH_RE`/`_TOKEN_RE` use `.match()` + `$`; switch to `fullmatch`.

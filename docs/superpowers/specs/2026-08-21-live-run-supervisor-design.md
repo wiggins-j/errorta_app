@@ -1,7 +1,7 @@
 # Live-Run Supervisor — Design (Slice 1 of 3)
 
 **Date:** 2026-08-21
-**Status:** Design, approved in brainstorm (architect re-analysis accepted in full). Not yet implemented.
+**Status:** Implemented and merged to `main` (`39f2063`, 2026-08-21) with the `errorta liverun` CLI/routes (`b898f0e`) and live fixes (`05644ee`, `d463c12`, `9d2155c`). Live-verified on the real client 2026-08-22 — see `docs/liverun/README.md` "Status".
 **Depends on:** Slack bridge slices 1–6 (studio, run control, autopilot, close-the-loop), merged.
 **New module:** `python/errorta_liverun/` (sibling of `errorta_slack`, outside `errorta_council`).
 **Touched:** `errorta_tools/runner/remote.py`, `errorta_tunnels/manager.py`, `errorta_slack/{tools,outbound,connection}.py`, `errorta_app/{server,slack_lifecycle}.py`.
