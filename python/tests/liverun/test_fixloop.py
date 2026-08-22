@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import errorta_liverun
+from errorta_liverun import fixloop as F
 from errorta_liverun import profile as P
 from errorta_liverun.brief import EvidenceBundle, EvidenceItem
 from errorta_liverun.fixloop import (
@@ -815,6 +816,67 @@ def test_an_unknown_recorded_outcome_pauses_rather_than_deploying() -> None:
     fake.accept_outcome = {"status": "refused", "detail": "no worktree"}
     out = _drive(_cycle(fake), fake)
     assert out.code == "fix_accept_unverified" and out.detail == "refused"
+
+
+# --- the production default behind `accept_outcome_fn` --------------------- #
+#
+# `ws.head()` does not move when `deliver` copies the merged tree out, so the
+# head check in `_verify_accepted` is a floor, not proof that the operator's
+# files changed. The decision row `accept_live_fix` writes IS that proof --
+# which is worth nothing while the seam behind it defaults to `None` and the
+# cycle never reads it. These pin the wiring, not the shape.
+
+
+def test_the_accept_outcome_seam_has_a_production_default() -> None:
+    assert F.FixDeps().accept_outcome_fn is None      # still injectable
+    assert F.FixDeps().accept_outcome("nope") is None  # and safe with nothing on disk
+
+
+def test_the_default_reads_the_row_the_effect_recorded(monkeypatch) -> None:
+    class _Store:
+        def list_decisions(self) -> list[dict]:
+            return [
+                {"choice": "accept_live_fix", "run_id": "r-0", "status": "gate_blocked"},
+                {"choice": "something_else", "run_id": "r-1", "status": "accepted"},
+                {"choice": "accept_live_fix", "run_id": "r-1", "status": "accepted",
+                 "repo_id": "brain", "delivered_to": "/r/senditai-ng"},
+            ]
+
+    monkeypatch.setattr(F, "_default_get_confirmation", lambda cid: {
+        "id": cid, "verb": "accept_live_fix", "state": "approved",
+        "args": {"project_id": "p1", "run_id": "r-1"}})
+    monkeypatch.setattr(F, "_default_ledger_factory", lambda pid: _Store())
+
+    out = F.FixDeps().accept_outcome("c-1")
+
+    assert out["status"] == "accepted" and out["delivered_to"] == "/r/senditai-ng"
+
+
+def test_the_default_ignores_a_row_from_another_run(monkeypatch) -> None:
+    """A project fixed twice in a day has two rows. Reading the wrong one would
+    deploy this cycle on the strength of the previous cycle's merge."""
+    class _Store:
+        def list_decisions(self) -> list[dict]:
+            return [{"choice": "accept_live_fix", "run_id": "r-0", "status": "accepted"}]
+
+    monkeypatch.setattr(F, "_default_get_confirmation", lambda cid: {
+        "args": {"project_id": "p1", "run_id": "r-1"}})
+    monkeypatch.setattr(F, "_default_ledger_factory", lambda pid: _Store())
+
+    assert F.FixDeps().accept_outcome("c-1") is None
+
+
+def test_the_default_survives_a_ledger_it_cannot_read(monkeypatch) -> None:
+    def _boom(pid):
+        raise RuntimeError("no such project")
+
+    monkeypatch.setattr(F, "_default_get_confirmation", lambda cid: {
+        "args": {"project_id": "p1", "run_id": "r-1"}})
+    monkeypatch.setattr(F, "_default_ledger_factory", _boom)
+
+    # None means "nobody recorded it", which falls back to the workspace checks
+    # -- the same place the cycle was before this seam had a default at all.
+    assert F.FixDeps().accept_outcome("c-1") is None
 
 
 def test_a_deploy_check_is_told_when_its_step_started_not_when_it_polled() -> None:

@@ -207,6 +207,45 @@ def _default_resolve_confirmation(cid: str, decision: str) -> tuple[dict[str, An
     return slack_store.resolve_confirmation(cid, decision)
 
 
+def _default_accept_outcome(cid: str) -> dict[str, Any] | None:
+    """What the accept effect recorded, read back off the project's own
+    decision log — the durable half of the answer.
+
+    Keyed *through* the confirmation record rather than off the cid directly: a
+    decision row carries no cid, because `errorta_slack.tools.accept_live_fix`
+    never learns the id of the confirmation that authorized it (the id is
+    minted by `stage_confirmation` after the args are built). The record does
+    know the project and the run, and `(choice, run_id)` identifies the row.
+
+    ``None`` means "nothing recorded" — the caller then falls back to
+    re-reading the workspace, never to assuming the merge happened.
+    """
+    try:
+        record = _default_get_confirmation(cid)
+        args = dict((record or {}).get("args") or {}) if isinstance(record, dict) else {}
+        project_id = str(args.get("project_id") or "")
+        run_id = str(args.get("run_id") or "")
+        if not project_id or not run_id:
+            return None
+        store = _default_ledger_factory(project_id)
+        # Newest first: a project fixed twice in one day has one row per cycle,
+        # and this cycle's is the last one written for this run id.
+        for row in reversed(list(store.list_decisions() or ())):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("choice") or "") != ACCEPT_VERB:
+                continue
+            if str(row.get("run_id") or "") != run_id:
+                continue
+            return {"status": str(row.get("status") or ""),
+                    "repo_id": str(row.get("repo_id") or ""),
+                    "run_id": run_id,
+                    "delivered_to": str(row.get("delivered_to") or "")}
+    except Exception:  # noqa: BLE001 - an unreadable log is silence, not a verdict
+        _LOG.exception("liverun could not read the accept outcome for %s", cid)
+    return None
+
+
 def _default_bound_channel(project_id: str) -> str:
     from errorta_slack import store as slack_store
     return slack_store.channel_for_project(project_id) or ""
@@ -231,10 +270,12 @@ class FixDeps:
     stage_confirmation_fn: Callable[..., str] | None = None
     get_confirmation_fn: Callable[[str], Any] | None = None
     resolve_confirmation_fn: Callable[[str, str], Any] | None = None
-    #: What the accept effect actually did, once something records it
-    #: (spec §7's open question; Task 5 writes it through `record_decision`).
-    #: ``None`` means "nobody records it yet" and the cycle falls back to
-    #: re-reading the workspace.
+    #: What the accept effect actually did. `errorta_slack.tools.
+    #: accept_live_fix` writes it through `LedgerStore.record_decision`, and
+    #: `_default_accept_outcome` reads that row back. This is the only DURABLE
+    #: proof the merge landed: `ws.head()` does not move when `deliver` copies
+    #: the merged tree out, so the head check downstream is a floor, not a
+    #: verdict.
     accept_outcome_fn: Callable[[str], Any] | None = None
     triage_fn: Callable[[str, str, str], str] | None = None
     bound_channel_fn: Callable[[str], str] | None = None
@@ -270,9 +311,9 @@ class FixDeps:
         return (self.resolve_confirmation_fn or _default_resolve_confirmation)(cid, decision)
 
     def accept_outcome(self, cid: str) -> Any:
-        """``None`` when no seam is configured — the caller then falls back to
+        """``None`` when nothing was recorded — the caller then falls back to
         reading the workspace itself, never to assuming it worked."""
-        return self.accept_outcome_fn(cid) if self.accept_outcome_fn is not None else None
+        return (self.accept_outcome_fn or _default_accept_outcome)(cid)
 
     def bound_channel(self, project_id: str) -> str:
         return str((self.bound_channel_fn or _default_bound_channel)(project_id) or "")

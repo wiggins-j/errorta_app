@@ -701,8 +701,17 @@ def test_a_stall_is_fixed_accepted_deployed_and_relaunched(slack_channel: _Env) 
     _backdate_launches(env)
     assert _autopilot(env) == [staged["cid"]]
 
-    _wait_for_kind(env, run_id, "fix_accepted")
+    accepted = _detail(env, run_id, "fix_accepted")
     assert (fake_repo / "app.py").read_text() == FIXED_APP
+
+    # 4b. and the merge is believed because the effect RECORDED it, not because
+    # a branch head moved: `deliver` copies the merged tree out without moving
+    # `ws.head()` at all, so the decision row is the only durable proof.
+    assert accepted["verified_by"] == "accepted"
+    rows = [d for d in env.ledger_store.list_decisions()
+            if d.get("choice") == "accept_live_fix"]
+    assert [r.get("status") for r in rows] == ["accepted"]
+    assert rows[0].get("run_id") == run_id and rows[0].get("repo_id") == "brain"
 
     # 5. the deploy step ran, as the exact argv the profile declared.
     deploy = _detail(env, run_id, "deploy_step")
@@ -793,6 +802,61 @@ def test_the_day_cap_stops_the_cycle_before_it_starts(slack_channel: _Env) -> No
     assert final["reason"] == "fix_cycle_cap"
     assert env.dev_calls == []                      # no dev run was ever started
     assert env.ledger_store.list_tasks() == []      # and no task was filed
+
+
+def test_a_stop_mid_cycle_takes_the_merge_button_with_it(slack_channel: _Env) -> None:
+    """`stop_live_run` while an acceptance is pending. The button was posted to
+    a real channel and lives in the real confirmation store; leaving it there
+    would hand the next autopilot tick a merge nobody is waiting on any more.
+
+    Asserted against the REAL store, not the driver's own event: the withdrawal
+    is only worth anything if the record on disk actually stopped being
+    pending."""
+    from errorta_slack import store as slack_store
+
+    env = slack_channel
+    _fix_profile(env, Path(env.ledger_store.get_project().repo_path))
+    env.timing["accept_timeout_s"] = 600.0      # nothing may time out under us
+    fake_repo = Path(env.ledger_store.get_project().repo_path)
+
+    first = _start_with(env, _fake_dev(env))
+    run_id = first["run_id"]
+    staged = _detail(env, run_id, "fix_accept_staged")
+    assert slack_store.get_confirmation(staged["cid"])["state"] == "pending"
+
+    assert env.mgr.stop(project_id="proj")["status"] == "stopping"
+
+    aborted = _detail(env, run_id, "fix_aborted")
+    assert aborted["reason"] == "operator_stop" and aborted["at"] == "await"
+    assert aborted["accept_withdrawn"] is True
+    assert slack_store.get_confirmation(staged["cid"])["state"] != "pending"
+    assert _autopilot(env) == []                     # and the sweep finds nothing
+
+    final = _wait_terminal(env)
+    assert final["phase"] == "stopped"
+    assert (fake_repo / "app.py").read_text() == BROKEN_APP   # nothing merged
+    assert env.store.list_non_terminal() == []                # nothing relaunched
+
+
+def test_a_stop_during_the_dev_run_cancels_it(slack_channel: _Env) -> None:
+    """One level earlier: the dev run is still going. It outlives this
+    supervisor unless it is told to stop, through the same cooperative
+    `cancel_requested` flag Slack's own `stop_run` sets."""
+    env = slack_channel
+    _fix_profile(env, Path(env.ledger_store.get_project().repo_path))
+    env.timing["idle_timeout_s"] = 600.0        # the stop must be what ends this
+
+    first = _start_with(env, _fake_dev(env, go_idle=True))
+    run_id = first["run_id"]
+    _wait_for_kind(env, run_id, "fix_run")
+
+    assert env.mgr.stop(project_id="proj")["status"] == "stopping"
+
+    aborted = _detail(env, run_id, "fix_aborted")
+    assert aborted["run_cancelled"] is True
+    assert env.ledger_store.get_run_state()["cancel_requested"] is True
+    assert [e for e in _events(env, run_id) if e["kind"] == "fix_accept_staged"] == []
+    assert _wait_terminal(env)["phase"] == "stopped"
 
 
 def test_dev_repo_read_is_on_for_the_fixture_project(fix_env: _Env) -> None:
