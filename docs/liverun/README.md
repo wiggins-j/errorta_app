@@ -25,12 +25,22 @@ is invalid by construction until you author it.
 | `stop_live_run` | R | none, immediate — never waits on approval | evidence → teardown → logoff literals |
 | `live_status` | R | none | phase, elapsed, per-probe last-ok age, cap headroom, literals |
 | `resume_live_run <profile>` | C | **human tap only** | clears a `paused_awaiting_human` hold |
+| `pause_fix_loop <profile>` | R | none, immediate | stops this profile entering the fix loop; live runs keep running |
+| `resume_fix_loop <profile>` | C | **human tap only** | re-arms the fix loop |
+| `accept_live_fix` | C | staged **by the supervisor** | merges + delivers one fix; refuses anything it did not stage |
 
-`resume_live_run` is the one verb autopilot will not auto-approve
-(`errorta_slack.tools.HUMAN_ONLY_VERBS`): the hold exists *because* something
-ban-class or cap-class happened, and its whole value is that a person looks
-first. All five verbs answer only from a channel bound to a project, and only
-for allowlisted Slack team/user ids.
+`resume_live_run` and `resume_fix_loop` are the verbs autopilot will not
+auto-approve (`errorta_slack.tools.HUMAN_ONLY_VERBS`): the hold exists
+*because* something ban-class or cap-class happened, and its whole value is
+that a person looks first. Autopilot clearing its own hold is a loop, not a
+gate. `accept_live_fix` joins them **conditionally** — see the fix loop below.
+Every verb answers only from a channel bound to a project, and only for
+allowlisted Slack team/user ids.
+
+Pausing is deliberately asymmetric: `pause_fix_loop` is R-class and takes
+effect the moment it is asked for, because turning autonomy *off* should never
+wait on an approval; `resume_fix_loop` is C-class **and** human-only, because
+turning it back on is exactly the decision a loop must not make for itself.
 
 A bare "stop", "cancel" or "abort" in the channel calls `stop_live_run` in
 addition to the existing `stop_runtime` behaviour.
@@ -131,6 +141,158 @@ stranger. It fails closed: an orphan left behind is recoverable, a killed
 bystander is not.
 
 The sidecar exits with the desktop app, so an overnight run needs Errorta open.
+
+## The autonomous fix loop
+
+Optional, off unless a profile declares `repos:` and `fix_loop.enabled: true`.
+A profile without those keys is a complete live-run profile that watches,
+stops and reports, and never touches a file. This is the one part of the
+supervisor that changes code in your real checkouts — read this section before
+you turn it on.
+
+### The cycle
+
+A run that stops for a **fixable** reason (a stall, or a launch step that
+failed — never a ban signal, a cap, an operator stop, or the brain refusing)
+goes: evidence → teardown → **triage** → a dev task → a dev run → the **merge
+gate** → a staged acceptance → **deploy** → a **relaunch** as a new run id
+linked by `fix_of`. It runs on the supervisor's own thread; `stop_live_run`
+still interrupts it between steps.
+
+**Triage** is deterministic first. Each evidence class is a named signature
+over supervisor-owned state (the stop reason, a `/state` capture, a traceback
+banner), and the profile maps classes onto repos. Exactly one claimant is an
+answer; zero or two is `ambiguous`, and the one PM turn that may follow
+chooses from an enumeration of ids you already declared — a model cannot widen
+the blast radius past your own `repos:` list. No class may be claimed by two
+repos; the validator rejects that at load.
+
+The **brief** filed as the dev task carries the run's evidence inside a
+nonce-fenced UNTRUSTED block. The task title is template-generated from
+operator- and supervisor-owned values only ("Fix: … during live session
+`<run id>`" — "live session" rather than "live run" because the execution lint
+reads "run" as a run-verb and would re-route the task). Nothing a log printed
+ever becomes an instruction.
+
+### What it will not do
+
+The merge gate is **never** overridden. `accept_live_fix` is a separate verb
+from the desktop app's accept route for exactly one reason: that route takes
+an `override` that skips the gate, and a loop must not hold that switch. There
+is no parameter, flag or profile key that bypasses it, and a grep test keeps
+it that way.
+
+Every one of these ends the cycle in `paused_awaiting_human`, which only a
+person clears — the loop never retries its way past one:
+
+| Pause code | What happened |
+|---|---|
+| `triage_ambiguous` | no repo owned the evidence, or two did |
+| `repo_not_fixable` | triage named a repo marked `fixable: false` |
+| `fix_no_gate` | the project has no registrable acceptance gate |
+| `fix_project_busy` | something else owns that project's run |
+| `fix_run_failed` | the dev run could not start, or failed empty |
+| `fix_idle` | the dev run went quiet and was cancelled |
+| `fix_no_delivery` | a clean stop that delivered nothing is not a fix |
+| `fix_unsafe_paths` | a delivered path left the repository |
+| `fix_gate_blocked` | the merge gate said no; nothing was merged |
+| `fix_accept_unverified` | approved, but the merge cannot be confirmed |
+| `fix_declined` | the acceptance was declined, or never answered |
+| `ban_signal` | a ban-class string surfaced during deploy |
+| `fix_cycle_cap` | the day's fix cycles are spent |
+
+Caps: `max_fix_cycles_per_day` (default 3) is arithmetic over the ledger, not
+a counter in memory, and a cycle is counted whether it merged or paused. The
+relaunch is evaluated by the *untouched* Slice 1 launch caps — a fix that
+lands inside the minimum launch gap posts `relaunch_refused` and stops there.
+
+### Guarded paths — the human-only accept
+
+`accept_live_fix` is staged as a button either way. Whether **autopilot** may
+press it depends on what the diff touches. These prefixes always need a human
+tap:
+
+```
+senditai_ng/safety/
+senditai_ng/dispatch/killswitch
+errorta_liverun/
+```
+
+...plus anything under your profiles directory. These are the paths that
+decide whether the loop can be stopped at all, so a loop must not be the thing
+that edits them unattended.
+
+That list is **code** (`errorta_liverun.fixloop.GUARDED_PATH_PREFIXES`), not
+configuration, on purpose: a profile that could shrink it could shrink its way
+out of the gate. Adding to it is a one-line edit plus a test. A path the
+predicate cannot normalize (absolute, escaping, empty) answers "human" too —
+the cost of a false human-only is one button tap.
+
+The predicate is asked **twice**, by two different processes. The fix cycle
+asks it when it stages the confirmation, and the Slack bridge asks it again
+from the workspace's own merge-back preview immediately before merging. A
+staged record that says "safe" while the tree says otherwise is refused, not
+merged: the record is a file on disk written minutes earlier, and what the
+workspace is actually about to deliver is the only answer worth acting on.
+
+### Operator setup, once per repository
+
+1. **Register an acceptance gate** on the Errorta project the repo maps to:
+
+   ```python
+   LedgerStore("<project_id>").set_test_commands(
+       {"gate": {"argv": ["/usr/bin/python3", "-m", "pytest", "-q"],
+                 "cwd": ".", "timeout_seconds": 300}})
+   ```
+
+   argv only (no shell), ≤ 600 s, run under the seatbelt, no network. Without
+   a registrable gate the cycle stops at `fix_no_gate` — there is nothing that
+   could tell a good fix from a bad one, so it does not guess.
+
+2. **Confirm `dev_repo_read: true`** in `<project>/autonomy.json`, and that the
+   dev role is seated on a `claude_cli.*` route — only those members honour it.
+   A dev that cannot read the repository cannot fix it.
+
+3. **Adopt a Slack channel** for the project with `adopt_project` — it opens
+   and binds a NEW channel named from the `project_id` alone (and seats a team
+   if the project has none). Pass the `project_id` and nothing else: `start`
+   would begin a run now, and the fix loop starts its own. The staged
+   acceptance is posted to that channel, so a project with no binding has
+   nowhere to put its button and the cycle pauses at `fix_declined`.
+
+4. **Point the profile at it**: `repos[].path` is your checkout (must exist and
+   contain `.git`), `repos[].errorta_project` must name a project that already
+   exists — both are resolved at load, so a typo is reported by
+   `list_live_profiles` rather than minutes after a stall.
+
+### Why `osrs-reaper` ships as `fixable: false`
+
+Not a policy preference: Gradle cannot run inside the seatbelt the acceptance
+gate executes in, so that project has no registrable gate at all. With nothing
+able to produce a pass/fail signal, an autonomous merge there would be a merge
+on no evidence. Triage landing on the reaper pauses for a human, who has the
+whole brief and the evidence in the channel. Lifting this needs a separate
+"trusted unsandboxed gate" slice, not a profile edit.
+
+### What you will see, and what `live_status` adds
+
+Fix-loop lines are posted per event like every other: triage and its
+confidence, the filed task, the dev run, an idle cancellation, the staged
+acceptance (with "a human has to approve this one" in the *title* when it is
+human-only), the merge, each deploy step, a cap hit, an abandoned cycle and a
+withdrawn button. **Mandatory even when muted:** `fix_idle_cancel`,
+`fix_accept_staged`, `fix_accepted`, `fix_cycle_cap`, `relaunch_refused`,
+`fix_aborted`, `fix_accept_withdrawn`, and any phase change into
+`paused_awaiting_human` — a mute quiets routine progress, not an autonomous
+merge or the loop giving up.
+
+`live_status` gains `fix_cycle` and `fix_of` (where this run sits in a fix
+chain), `fix_repo_id`, `fix_cycles_today`, `fix_cap`, and `fix_paused`.
+
+A stop mid-cycle takes the merge button with it: the pending confirmation is
+withdrawn and the dev run is cancelled, so nothing merges minutes after you
+asked for a stop. If a human tapped Approve first, that race is reported
+rather than fought — the line says the approval was already answered.
 
 ## Authoring the OSRS profile — verify these first
 

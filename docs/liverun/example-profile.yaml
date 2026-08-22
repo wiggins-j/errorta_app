@@ -145,7 +145,18 @@ repos:
     # Which evidence classes this repo OWNS. No class may be claimed by two
     # repos: triage is deterministic precisely because exactly one repo
     # answers, and a shared class would make every cycle ambiguous.
-    classify: [python_traceback, journal_stall, brain_log_stall, brain_pid_dead]
+    #
+    # `launch_step_failed:<name>` names one of THIS profile's own `launch:`
+    # steps and is resolved against them at load, so a typo is a load error and
+    # not a rule that silently never fires. Declare it for every launch step
+    # whose owner is obvious: the bare `launch_step_failed` class is what a
+    # failed step carries otherwise, and no repo can claim that without
+    # claiming every launch failure in the profile. A step nobody claims (here:
+    # `quit-old-client`, `launch-client`, `tunnel`) makes triage ambiguous and
+    # pauses for a human, which is the right answer when the owner is genuinely
+    # unclear -- an osascript failure is usually macOS Accessibility, not code.
+    classify: [python_traceback, journal_stall, brain_log_stall, brain_pid_dead,
+               launch_step_failed:brain]
     deploy:
       # Runs AFTER the merge and BEFORE the relaunch. Argv-identity checked
       # like every other step: byte-identical to what is written here, or it
@@ -169,7 +180,12 @@ repos:
     # registrable gate at all (README, "Why osrs-reaper is fixable: false").
     # Triage landing here pauses for a human.
     fixable: false
-    classify: [jvm_exception, client_port_dead, client_state_stale]
+    # `rebuild-jar` IS this repo's build, so a failure there is unambiguously
+    # the reaper's -- even though `fixable: false` means triage landing here
+    # pauses rather than files a task. Attributing it is still worth doing: the
+    # channel line then names the repo instead of "ambiguous".
+    classify: [jvm_exception, client_port_dead, client_state_stale,
+               launch_step_failed:rebuild-jar]
     deploy: []                      # the `rebuild-jar` launch step above redeploys it
 
 fix_loop:

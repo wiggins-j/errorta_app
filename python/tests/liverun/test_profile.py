@@ -408,16 +408,33 @@ def test_default_project_exists_is_false_without_a_ledger(monkeypatch) -> None:
 DOCS = Path(__file__).resolve().parents[3] / "docs" / "liverun"
 
 
-def test_the_shipped_example_fix_loop_block_validates(tmp_path: Path,
-                                                      valid_doc: dict) -> None:
+def _example_doc(tmp_path: Path, valid_doc: dict) -> dict:
+    """The shipped `repos:`/`fix_loop:` block on a loadable profile.
+
+    The example's own `launch:` cannot be loaded (its argvs are `# FILL:`
+    lines), but its step NAMES are shipped, and `classify:` entries of the form
+    `launch_step_failed:<name>` are resolved against them at load. So the step
+    names come from the example and only the argvs are stubbed -- otherwise
+    this would assert the block against launch steps the operator will never
+    have.
+    """
     example = yaml.safe_load((DOCS / "example-profile.yaml").read_text())
     doc = dict(valid_doc)
+    doc["launch"] = [{"name": step["name"], "local": {"argv": ["/bin/true"]},
+                      "check": {"exit0": ["/bin/true"]}, "timeout_s": 5}
+                     for step in example["launch"]]
     doc["repos"] = example["repos"]
     doc["fix_loop"] = example["fix_loop"]
     # The one substitution: `/Users/OPERATOR/...` is the shape of a path, not a
     # path. Every other value in the block is shipped as-is.
     for i, name in enumerate(("senditai-ng", "osrs-reaper")):
         doc["repos"][i]["path"] = str(_repo_dir(tmp_path, name))
+    return doc
+
+
+def test_the_shipped_example_fix_loop_block_validates(tmp_path: Path,
+                                                      valid_doc: dict) -> None:
+    doc = _example_doc(tmp_path, valid_doc)
 
     prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
 
@@ -428,6 +445,30 @@ def test_the_shipped_example_fix_loop_block_validates(tmp_path: Path,
     # launch step already redeploys it.
     assert prof.repo_by_id("reaper").fixable is False
     assert prof.repo_by_id("reaper").deploy == ()
+
+
+@pytest.mark.parametrize("reason,repo_id", [
+    ("launch_step_failed:brain", "brain"),
+    ("launch_step_failed:rebuild-jar", "reaper"),
+])
+def test_the_shipped_example_routes_a_failed_launch_step(
+        tmp_path: Path, valid_doc: dict, reason: str, repo_id: str) -> None:
+    """A launch step that fails carries the generic `launch_step_failed` class,
+    which no repo may claim without claiming every launch failure -- so an
+    example that named no steps would pause for a human on the two most likely
+    failures it has. Whoever wrote the step owns it, and the example says so."""
+    from errorta_liverun import triage
+    from errorta_liverun.brief import EvidenceBundle
+
+    prof = _load(tmp_path, _example_doc(tmp_path, valid_doc),
+                 project_exists_fn=lambda pid: True)
+    bundle = EvidenceBundle(profile_name="osrs", run_id="r-1", stop_reason=reason,
+                            launch_step_name=reason.split(":", 1)[1])
+
+    res = triage.classify(bundle, prof)
+
+    assert res.repo_id == repo_id
+    assert res.confidence == triage.CONFIDENCE_DETERMINISTIC
 
 
 def test_the_shipped_example_declares_no_check_on_a_deploy_step() -> None:
