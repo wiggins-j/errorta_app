@@ -117,6 +117,7 @@ def _build_sync_poster(bot_token: str) -> Any:
 def _start_outbound(
     poster: Any, *, run_loop_fn: Any = None,
     interval_s: float | None = None, timeout_minutes: float | None = None,
+    fire_effect_fn: Any = None,
 ) -> None:
     """Run the outbound progress loop on its own thread.
 
@@ -130,6 +131,16 @@ def _start_outbound(
     ``run_loop`` only ever calls ``.is_set()`` on it, and the setter lives on
     another thread -- ``asyncio.Event.set()`` is not threadsafe, while
     ``threading.Event.set()`` is.
+
+    ``fire_effect_fn`` is the bridge's own ``_fire_confirmed_effect`` -- the
+    verified path a button tap takes. The outbound autopilot sweep
+    (``outbound.sweep_autopilot``) needs it to fire a confirmation the live-run
+    fix cycle staged off-channel; without it the sweep claims nothing at all.
+    Passing the bound method (rather than letting ``outbound`` call
+    ``tools.dispatch`` itself) keeps ``confirmed_via="block_actions"`` set in
+    exactly ONE place in this bridge. It is called from the outbound thread,
+    which is safe: the method is synchronous, touches no event loop, and the
+    store's own RLock covers the claim.
     """
     global _outbound_thread, _outbound_stop
 
@@ -155,11 +166,12 @@ def _start_outbound(
         try:
             asyncio.run(run_loop(
                 bindings_provider=slack_store.list_bindings,
-                deps=slack_outbound.OutboundDeps(),
+                deps=slack_outbound.OutboundDeps(fire_effect_fn=fire_effect_fn),
                 poster=poster,
                 stop_event=stop_event,
                 interval_s=interval,
                 timeout_minutes=timeout,
+                config_fn=slack_config.load,
             ))
         except Exception:  # pragma: no cover - defensive
             _LOG.warning("slack outbound loop exited", exc_info=True)
@@ -357,7 +369,8 @@ def _start_locked(cfg: dict[str, Any], app_token: str, bot_token: str) -> dict[s
     # The progress stream. Built and shipped long before this line existed:
     # `outbound.run_loop` had no production caller at all, so nothing was ever
     # posted into a bound channel unprompted.
-    _start_outbound(_build_sync_poster(bot_token))
+    _start_outbound(_build_sync_poster(bot_token),
+                    fire_effect_fn=bridge._fire_confirmed_effect)
 
     _thread = thread
     _loop = loop

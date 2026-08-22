@@ -230,6 +230,19 @@ def _catalog_line(verb: str, spec: dict) -> str:
     return f"{head} — args: {rendered}"
 
 
+def _advertised(catalog: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The catalog MINUS every ``hidden`` verb.
+
+    ``dispatch`` still routes a hidden verb — it has to, because the effect
+    layer calls it by name. What it must not do is TEACH one: `accept_live_fix`
+    is staged by the live-run supervisor and refuses any confirmation a live run
+    is not waiting on, so a model that read it off this list could only ever
+    compose a call that gets refused. Advertising is a separate question from
+    dispatchability; the catalog canary asserts exactly that split.
+    """
+    return {verb: spec for verb, spec in catalog.items() if not spec.get("hidden")}
+
+
 def build_system_prompt(
     project_id: str,
     *,
@@ -247,6 +260,7 @@ def build_system_prompt(
     rendered here against what ``tools.dispatch`` actually accepts.
     """
     pm_context = build_pm_reference_context(project_id, store=store)
+    catalog = _advertised(catalog)
     catalog_lines = [
         _catalog_line(verb, spec) for verb, spec in sorted(catalog.items())
     ]
@@ -303,7 +317,8 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 def _catalog_listing(catalog: dict[str, dict[str, str]]) -> str:
     return "\n".join(
-        f"- {verb}: {spec.get('summary', '')}" for verb, spec in sorted(catalog.items())
+        f"- {verb}: {spec.get('summary', '')}"
+        for verb, spec in sorted(_advertised(catalog).items())
     )
 
 

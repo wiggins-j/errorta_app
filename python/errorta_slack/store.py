@@ -299,6 +299,15 @@ def get_confirmation(cid: str) -> dict[str, Any] | None:
     return _load_confirmations().get(cid)
 
 
+def list_pending() -> dict[str, dict[str, Any]]:
+    """Every still-``pending`` confirmation, by id. A READER only — claiming
+    one is still ``resolve_confirmation``'s atomic pending -> decision
+    transition, so two callers reading the same snapshot cannot both fire it
+    (``outbound.sweep_autopilot`` is the caller this exists for)."""
+    return {cid: dict(record) for cid, record in _load_confirmations().items()
+            if record.get("state") == "pending"}
+
+
 def resolve_confirmation(cid: str, decision: str) -> tuple[dict[str, Any], bool]:
     """Atomically CLAIM ``cid``, transitioning it to ``decision`` only if it
     is still ``"pending"``. Returns ``(record, claimed)``.
@@ -471,6 +480,7 @@ __all__ = [
     "seen_event",
     "stage_confirmation",
     "get_confirmation",
+    "list_pending",
     "resolve_confirmation",
     "pop_pending_older_than",
     "set_pref",

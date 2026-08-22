@@ -667,6 +667,13 @@ class SlackBridge:
         "resume_live_run": (
             "Resume live run (human only)",
             "Approve to clear the paused-awaiting-human hold on this profile."),
+        "accept_live_fix": (
+            "Merge the live-run fix",
+            "Approve to merge this fix into your real files and deploy it. "
+            "The merge gate still applies — approving cannot bypass it."),
+        "resume_fix_loop": (
+            "Re-arm the fix loop (human only)",
+            "Approve to let this profile fix and merge on its own again."),
     }
 
     # Which arg fields each verb must SHOW before it can be approved, in order.
@@ -686,6 +693,10 @@ class SlackBridge:
         "adopt_project": (("project_id", "Project"),),
         "publish_pr": (("title", "PR title"), ("body", "PR description")),
         "spend_cloud": (("reason", "Reason"),),
+        # A merge into the operator's real files: the paths are the whole
+        # content of the decision, and the run id says which live run asked.
+        "accept_live_fix": (("changed_paths", "Files"), ("run_id", "From live run")),
+        "resume_fix_loop": (("profile", "Profile"),),
     }
 
     # Slack rejects a section over 3000 characters outright, which would mean a
@@ -722,6 +733,11 @@ class SlackBridge:
 
     @classmethod
     def _confirmation_field(cls, label: str, value: Any) -> str:
+        if isinstance(value, (list, tuple)):
+            # A list arg (the fix loop's `changed_paths`) rendered through
+            # `str()` would show a Python repr -- brackets, quotes, commas --
+            # to a human being asked to authorise a merge of those exact files.
+            value = "\n".join(str(v) for v in value)
         text = str(value if value is not None else "").strip()
         if not text:
             return ""
@@ -751,7 +767,7 @@ class SlackBridge:
         label = self._cap_escaped(
             render.escape_mrkdwn(
                 str(args.get("title") or args.get("profile")
-                    or args.get("project_id") or "").strip()),
+                    or args.get("repo_id") or args.get("project_id") or "").strip()),
             self._CONFIRMATION_LABEL_CAP)
         title = f"{base_title} — {label}" if label else base_title
         fields = [
@@ -779,7 +795,12 @@ class SlackBridge:
             # while firing another.
             record = self._deps.store.get_confirmation(cid)
             verb = str((record or {}).get("verb") or "")
-            if autopilot and verb not in tools.HUMAN_ONLY_VERBS:
+            # The record's ARGS decide too, not just its verb name: an
+            # `accept_live_fix` whose diff touches the brain's safety code is
+            # human-only, one that touches a game script is not. Same source
+            # for the args as for the verb -- the staged record is what
+            # `_autopilot_fire` would actually execute.
+            if autopilot and not tools.is_human_only(verb, (record or {}).get("args") or {}):
                 await self._autopilot_fire(channel_id, thread_ts, cid)
             else:
                 # A human-only verb falls through to the button even under
@@ -1102,13 +1123,22 @@ class SlackBridge:
                 confirmed_via="block_actions", deps=self._build_studio_deps(),
             )
         if approved:
+            args = dict(record.get("args") or {})
+            if verb == tools.ACCEPT_LIVE_FIX:
+                # The one verb whose effect is bound to LIVE supervisor state:
+                # it must be able to ask "is a running supervisor waiting on
+                # THIS confirmation?". The id is not in the staged args (it is
+                # minted by stage_confirmation, after them), so it is threaded
+                # in here — overwriting, never merging, so a chat turn that put
+                # a `_confirmation_id` in its own args cannot forge one.
+                args["_confirmation_id"] = str(record.get("id") or "")
             # Return the dispatch result (rather than discarding it) so an
             # autopilot audit line can be honest about a verb that "ran" but
             # reported a failure status (e.g. start_run -> provider logged
             # out). handle_interaction's per-project outcome ignores this
             # return, so surfacing it changes nothing on the button path.
             return tools.dispatch(
-                verb, dict(record.get("args") or {}),
+                verb, args,
                 channel_id=channel_id, thread_ts=thread_ts,
                 confirmed_via="block_actions", deps=self._deps,
             )

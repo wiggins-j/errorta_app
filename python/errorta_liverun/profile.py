@@ -44,8 +44,35 @@ PROBE_KINDS = {"http", "remote_pid_alive", "remote_file_mtime_advancing",
                "remote_stdout_advancing", "remote_stdout_matches", "elapsed_lt_s"}
 ACTION_KINDS = {"local", "remote", "remote_signal", "tunnel", "tunnel_close", "window_shot", "http"}
 TOP_KEYS = {"version", "created_by", "hosts", "tunnels", "launch", "watch", "evidence",
-            "teardown", "caps", "ban_signals"}
+            "teardown", "caps", "ban_signals", "repos", "fix_loop"}
 STEP_KEYS = {"name", "check", "timeout_s", "evidence_literal"} | ACTION_KINDS
+
+# --- Slice 2: the fix loop ------------------------------------------------- #
+# The closed evidence vocabulary a profile may map onto a repo. Closed by
+# design: a class name is what the deterministic triage signatures in
+# `errorta_liverun.triage` implement, so an unrecognised one in a profile is a
+# rule that would never fire -- silently, forever. Fail closed at load.
+EVIDENCE_CLASSES = frozenset({
+    "python_traceback", "brain_log_stall", "journal_stall", "brain_pid_dead",
+    "jvm_exception", "client_port_dead", "client_state_stale", "launch_step_failed",
+})
+TRIAGE_ROUTES = ("pm",)
+# A `classify:` entry may also name ONE launch step: `launch_step_failed:<name>`.
+# Which repo owns a failed launch step is a fact the operator already knows (the
+# step is theirs), so it is declared, not inferred -- without it a launch-step
+# failure has only the generic `launch_step_failed` class, which every repo would
+# have to fight over.
+LAUNCH_STEP_CLASS_PREFIX = "launch_step_failed:"
+# A deploy step may act locally, remotely, or signal a remote pid. `tunnel` /
+# `tunnel_close` / `window_shot` / `http` are launch-time concerns and are
+# rejected in a deploy list.
+DEPLOY_ACTION_KINDS = {"local", "remote", "remote_signal"}
+FIX_CAP_DEFAULTS = {"max_fix_cycles_per_day": 3, "idle_timeout_s": 1200,
+                    "accept_timeout_s": 1800}
+MIN_IDLE_TIMEOUT_S = 600      # the CLI per-turn timeout (reasoning_budget.py:78)
+REPO_KEYS = {"id", "path", "errorta_project", "fixable", "classify", "deploy"}
+FIX_LOOP_KEYS = {"enabled", "triage_route"} | set(FIX_CAP_DEFAULTS)
+_REPO_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class ProfileError(ValueError):
@@ -117,6 +144,25 @@ DEFAULT_CAPS = Caps()
 
 
 @dataclass(frozen=True)
+class RepoDef:
+    id: str
+    path: str
+    errorta_project: str
+    fixable: bool = True
+    classify: tuple[str, ...] = ()
+    deploy: tuple[Step, ...] = ()
+
+
+@dataclass(frozen=True)
+class FixLoop:
+    enabled: bool = False
+    max_fix_cycles_per_day: int = 3
+    idle_timeout_s: int = 1200
+    triage_route: str = "pm"
+    accept_timeout_s: int = 1800
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     hosts: dict[str, Host]
@@ -127,10 +173,41 @@ class Profile:
     teardown: tuple[Step, ...]
     caps: Caps = DEFAULT_CAPS
     ban_signals: tuple[str, ...] = ()
+    repos: tuple[RepoDef, ...] = ()
+    fix_loop: FixLoop | None = None
+
+    def repo_by_id(self, rid: str) -> RepoDef | None:
+        for r in self.repos:
+            if r.id == rid:
+                return r
+        return None
 
 
 def profiles_dir() -> Path:
     return errorta_home() / "liverun" / "profiles"
+
+
+def _import_ledger_store():
+    """Seam: the council package is an optional dependency of this module."""
+    try:
+        from errorta_council.coding.ledger import LedgerStore
+    except Exception:  # noqa: BLE001 - a missing/renamed package must not raise here
+        return None
+    return LedgerStore
+
+
+def default_project_exists(project_id: str) -> bool:
+    """Does `project_id` resolve in the coding ledger? Lazy, so profile.py still
+    imports without the council package, and fail-closed: any error at all --
+    ProjectNotFound, a broken store, an import failure -- means "no"."""
+    store_cls = _import_ledger_store()
+    if store_cls is None:
+        return False
+    try:
+        store_cls(project_id).get_project()
+    except Exception:  # noqa: BLE001 - ProjectNotFound and any store error alike
+        return False
+    return True
 
 
 def default_known_hosts_check(host: str) -> bool:
@@ -360,6 +437,100 @@ def _step(raw: Any, hosts, tunnels, *, where: str) -> Step:
     return Step(raw["name"], action, check, timeout, lit)
 
 
+def _repo(raw: dict[str, Any], hosts, tunnels, *, where: str,
+          project_exists_fn: Callable[[str], bool],
+          launch_step_names: frozenset[str] = frozenset()) -> RepoDef:
+    """One `repos:` entry. Deploy steps go through the *existing* `_step()`, so
+    every Slice 1 argv rule (absolute argv0, banned tokens, no shell chars, the
+    $SESSION_ID/$RUN_ID-only substitution) applies to them unchanged."""
+    extra = set(raw) - REPO_KEYS
+    if extra:
+        raise ProfileError("unknown_key", f"{where}: {sorted(extra)}")
+
+    rid = raw.get("id")                      # already shape-checked by the caller
+    path = raw.get("path")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise ProfileError("repo_path_not_absolute", f"{where}: {path!r}")
+    repo_path = Path(path)
+    if not repo_path.is_dir() or not (repo_path / ".git").exists():
+        raise ProfileError("repo_path_missing", f"{where}: {path} is not a git checkout")
+
+    project = raw.get("errorta_project")
+    if not isinstance(project, str) or not _TOKEN_RE.match(project):
+        raise ProfileError("unknown_errorta_project", f"{where}: {project!r}")
+    # Resolve it NOW: a profile naming a project that does not exist would fail
+    # at fix-cycle time, minutes after a stall, with the run already torn down.
+    if not project_exists_fn(project):
+        raise ProfileError("unknown_errorta_project", f"{where}: {project}")
+
+    fixable = raw.get("fixable", True)
+    if not isinstance(fixable, bool):
+        raise ProfileError("bad_repo", f"{where}: fixable must be a bool")
+
+    classify_raw = raw.get("classify") or []
+    if not isinstance(classify_raw, list) or not all(isinstance(c, str) for c in classify_raw):
+        raise ProfileError("bad_repo", f"{where}: classify must be a list of strings")
+    for c in classify_raw:
+        if c.startswith(LAUNCH_STEP_CLASS_PREFIX):
+            # Resolved against THIS profile's launch steps at load time: a typo
+            # here would otherwise be a class that silently never fires, and the
+            # cycle it should have attributed would pause as ambiguous.
+            step_name = c[len(LAUNCH_STEP_CLASS_PREFIX):]
+            if step_name not in launch_step_names:
+                raise ProfileError("unknown_launch_step", f"{where}: {c!r}")
+            continue
+        if c not in EVIDENCE_CLASSES:
+            raise ProfileError("unknown_evidence_class", f"{where}: {c!r}")
+
+    deploy_raw = raw.get("deploy") or []
+    if not isinstance(deploy_raw, list):
+        raise ProfileError("bad_deploy_step", f"{where}: deploy must be a list")
+    deploy: list[Step] = []
+    for i, s in enumerate(deploy_raw):
+        step = _step(s, hosts, tunnels, where=f"{where}.deploy[{i}]")
+        if step.action is None or step.action.kind not in DEPLOY_ACTION_KINDS:
+            kind = step.action.kind if step.action else None
+            raise ProfileError("bad_deploy_step", f"{where}.deploy[{i}]: {kind!r}")
+        deploy.append(step)
+
+    return RepoDef(str(rid), path, project, fixable, tuple(classify_raw), tuple(deploy))
+
+
+def _fix_loop(raw: Any, repos: tuple[RepoDef, ...]) -> FixLoop:
+    if not isinstance(raw, dict):
+        raise ProfileError("bad_fix_loop", repr(raw)[:80])
+    extra = set(raw) - FIX_LOOP_KEYS
+    if extra:
+        raise ProfileError("unknown_key", f"fix_loop: {sorted(extra)}")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ProfileError("bad_fix_loop", "enabled must be a bool")
+
+    values: dict[str, int] = {}
+    for k, default in FIX_CAP_DEFAULTS.items():
+        v = int(_num(raw.get(k, default), where=f"fix_loop.{k}"))
+        # Caps may only ever be LOWERED below the shipped default (mirrors _caps).
+        if v > default:
+            raise ProfileError("cap_raised", f"fix_loop.{k}={v} (default {default})")
+        if v <= 0:
+            raise ProfileError("bad_fix_loop", f"fix_loop.{k}={v}")
+        values[k] = v
+    # A hang detector below the CLI's own per-turn timeout would cancel a run
+    # every time one turn thought hard. Not a cap -- a correctness floor.
+    if values["idle_timeout_s"] <= MIN_IDLE_TIMEOUT_S:
+        raise ProfileError("idle_below_turn_timeout",
+                           f"idle_timeout_s={values['idle_timeout_s']} <= {MIN_IDLE_TIMEOUT_S}")
+
+    route = raw.get("triage_route", TRIAGE_ROUTES[0])
+    if route not in TRIAGE_ROUTES:
+        raise ProfileError("bad_triage_route", repr(route))
+
+    if enabled and not any(r.fixable for r in repos):
+        raise ProfileError("fix_loop_without_repos",
+                           "fix_loop.enabled needs at least one fixable repo")
+    return FixLoop(enabled=enabled, triage_route=str(route), **values)
+
+
 def _caps(raw: Any) -> Caps:
     if raw is None:
         return DEFAULT_CAPS
@@ -395,7 +566,8 @@ def _file_guard(path: Path) -> None:
         raise ProfileError("profile_mode_insecure", oct(stat.S_IMODE(st.st_mode)))
 
 
-def _build_profile(path: Path, doc: dict[str, Any], known_hosts_fn: Callable[[str], bool]) -> Profile:
+def _build_profile(path: Path, doc: dict[str, Any], known_hosts_fn: Callable[[str], bool],
+                   project_exists_fn: Callable[[str], bool] = default_project_exists) -> Profile:
     extra = set(doc) - TOP_KEYS
     if extra:
         raise ProfileError("unknown_key", str(sorted(extra)))
@@ -444,6 +616,43 @@ def _build_profile(path: Path, doc: dict[str, Any], known_hosts_fn: Callable[[st
                                 _num(w.get("stall_after_s", 0), where=f"watch[{i}]"), on_stall,
                                 _probe(w.get("probe"), hosts, where=f"watch[{i}]")))
 
+    repos_raw = doc.get("repos")
+    repos: tuple[RepoDef, ...] = ()
+    if repos_raw is not None:
+        if not isinstance(repos_raw, list) or not repos_raw:
+            raise ProfileError("bad_repo", "repos must be a non-empty list")
+        seen: set[str] = set()
+        for i, r in enumerate(repos_raw):
+            if not isinstance(r, dict):
+                raise ProfileError("bad_repo", f"repos[{i}]")
+            rid = r.get("id")
+            # Ids are checked across the whole list FIRST so a duplicate is
+            # reported as a duplicate, not as whatever the copy-pasted entry's
+            # next-worst field happens to be.
+            if not isinstance(rid, str) or not _REPO_ID_RE.match(rid):
+                raise ProfileError("bad_repo_id", f"repos[{i}]: {rid!r}")
+            if rid in seen:
+                raise ProfileError("duplicate_repo_id", rid)
+            seen.add(rid)
+        launch_names = frozenset(s.name for s in launch)
+        repos = tuple(_repo(r, hosts, tunnels, where=f"repos[{i}]",
+                            project_exists_fn=project_exists_fn,
+                            launch_step_names=launch_names)
+                      for i, r in enumerate(repos_raw))
+        claimed: dict[str, str] = {}
+        for r in repos:
+            for c in r.classify:
+                if c in claimed:
+                    raise ProfileError("ambiguous_class_mapping",
+                                       f"{c}: {claimed[c]} and {r.id}")
+                claimed[c] = r.id
+
+    fix_loop = None
+    if "fix_loop" in doc:
+        fix_loop = _fix_loop(doc.get("fix_loop"), repos)
+        if fix_loop.enabled and not repos:
+            raise ProfileError("fix_loop_without_repos", "fix_loop.enabled needs repos")
+
     bans = tuple(str(b) for b in (doc.get("ban_signals") or []))
     for b in bans:
         try:
@@ -453,10 +662,12 @@ def _build_profile(path: Path, doc: dict[str, Any], known_hosts_fn: Callable[[st
 
     return Profile(name=path.stem, hosts=hosts, tunnels=tunnels, launch=launch,
                    watch=tuple(watch), evidence=evidence, teardown=teardown,
-                   caps=_caps(doc.get("caps")), ban_signals=bans)
+                   caps=_caps(doc.get("caps")), ban_signals=bans, repos=repos,
+                   fix_loop=fix_loop)
 
 
-def load_profile(path: Path, *, known_hosts_fn: Callable[[str], bool] = default_known_hosts_check) -> Profile:
+def load_profile(path: Path, *, known_hosts_fn: Callable[[str], bool] = default_known_hosts_check,
+                 project_exists_fn: Callable[[str], bool] = default_project_exists) -> Profile:
     path = Path(path)
     _file_guard(path)
     try:
@@ -466,7 +677,7 @@ def load_profile(path: Path, *, known_hosts_fn: Callable[[str], bool] = default_
     if not isinstance(doc, dict):
         raise ProfileError("not_a_mapping")
     try:
-        return _build_profile(path, doc, known_hosts_fn)
+        return _build_profile(path, doc, known_hosts_fn, project_exists_fn)
     except ProfileError:
         raise
     except Exception as exc:  # last line of defence: any wrong-shaped YAML we
@@ -475,14 +686,15 @@ def load_profile(path: Path, *, known_hosts_fn: Callable[[str], bool] = default_
         raise ProfileError("profile_malformed", repr(exc)[:200]) from None
 
 
-def list_profiles(*, known_hosts_fn: Callable[[str], bool] = default_known_hosts_check) -> list[dict[str, Any]]:
+def list_profiles(*, known_hosts_fn: Callable[[str], bool] = default_known_hosts_check,
+                  project_exists_fn: Callable[[str], bool] = default_project_exists) -> list[dict[str, Any]]:
     d = profiles_dir()
     if not d.is_dir():
         return []
     rows = []
     for f in sorted(d.glob("*.yaml")):
         try:
-            load_profile(f, known_hosts_fn=known_hosts_fn)
+            load_profile(f, known_hosts_fn=known_hosts_fn, project_exists_fn=project_exists_fn)
             rows.append({"name": f.stem, "valid": True, "error": None})
         except ProfileError as exc:
             rows.append({"name": f.stem, "valid": False, "error": exc.code})
@@ -490,5 +702,7 @@ def list_profiles(*, known_hosts_fn: Callable[[str], bool] = default_known_hosts
 
 
 __all__ = ["Profile", "ProfileError", "Step", "WatchProbe", "Caps", "DEFAULT_CAPS", "Host",
-           "TunnelDef", "Check", "Probe", "Action", "load_profile", "list_profiles",
-           "profiles_dir", "BANNED_TOKENS", "LOCAL_ARGV0_ALLOWLIST", "BRAIN_REQUIRED_FLAGS"]
+           "TunnelDef", "Check", "Probe", "Action", "RepoDef", "FixLoop", "load_profile",
+           "list_profiles", "profiles_dir", "default_project_exists", "BANNED_TOKENS",
+           "LOCAL_ARGV0_ALLOWLIST", "BRAIN_REQUIRED_FLAGS", "EVIDENCE_CLASSES",
+           "TRIAGE_ROUTES", "DEPLOY_ACTION_KINDS", "FIX_CAP_DEFAULTS", "MIN_IDLE_TIMEOUT_S"]

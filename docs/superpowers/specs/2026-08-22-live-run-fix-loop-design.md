@@ -1,7 +1,7 @@
 # Live-Run Fix Loop — Design (Slice 2 of 3)
 
 **Date:** 2026-08-22
-**Status:** Design. Not yet implemented.
+**Status:** Implemented on `feat/live-run-fix-loop` (`29133bb..HEAD`), Tasks 1-7. The shipped example profile is `docs/liverun/example-profile.yaml`; the operator runbook is `docs/liverun/README.md` (the fix loop's own section is "The autonomous fix loop").
 **Depends on:** Slice 1 (`docs/superpowers/specs/2026-08-21-live-run-supervisor-design.md`), merged — profile schema, step primitives, `RemoteToolRunner`, the persisted state machine, boot recovery, and the five Slack live-run verbs.
 **New modules:** `python/errorta_liverun/triage.py`, `python/errorta_liverun/brief.py`, `python/errorta_liverun/fixloop.py`.
 **Touched:** `errorta_liverun/{profile,state,supervisor}.py`, `errorta_slack/{tools,connection,outbound}.py`, `errorta_app/slack_lifecycle.py`.
@@ -170,11 +170,13 @@ repos:
     fixable: true                  # default true
     classify: [python_traceback, journal_stall, brain_log_stall, brain_pid_dead]
     deploy:
+      # No `check:` — Slice 1's `exit0` check IS an argv to run
+      # (`profile._check` -> `_argv`), so `check: {exit0: true}` does not
+      # validate. A deploy step's action failing is already the failure signal.
       - name: rsync-brain
         local:
           argv: [/usr/bin/rsync, -az, --delete, --exclude, .git,
                  /Users/OPERATOR/GitHub/senditai-ng/, senditai:senditai-ng/]
-        check: {exit0: true}
         timeout_s: 300
   - id: reaper
     path: /Users/OPERATOR/GitHub/osrs-reaper

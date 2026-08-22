@@ -2246,3 +2246,171 @@ async def test_the_cancel_hook_survives_a_supervisor_that_explodes(
     bridge._default_cancel_hook("700.3", {"channel_id": "C1", "project_id": "proj-a"})
 
     assert seen == ["stop_runtime", "stop_live_run"]
+
+
+# --------------------------------------------------------------------------
+# Slice 2 (fix loop): the human-only carve-out is now ARGS-aware.
+#
+# `accept_live_fix` is the same verb whether the diff touches one game script
+# or the brain's kill switch. Gating on the verb name alone would either hand
+# autopilot the safety code or block every autonomous fix; the staged record's
+# own arguments are what separates the two.
+# --------------------------------------------------------------------------
+
+
+async def test_autopilot_does_not_fire_a_human_only_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": True,
+            "changed_paths": ["senditai_ng/safety/limits.py"]}
+    cid = store.stage_confirmation("accept_live_fix", args, "610.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn", lambda *a, **k: _staged_turn("accept_live_fix", args, cid))
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("autopilot must not fire a human-only accept")))
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev11", channel="C1", ts="610.1", thread_ts="610.1", text="accept it"))
+    await bridge.wait_idle("610.1")
+
+    assert store.get_confirmation(cid)["state"] == "pending"   # button posted instead
+    assert _approve_button_values(poster) == [cid]
+
+
+async def test_autopilot_fires_a_plain_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": False,
+            "changed_paths": ["app.py"]}
+    cid = store.stage_confirmation("accept_live_fix", args, "611.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn", lambda *a, **k: _staged_turn("accept_live_fix", args, cid))
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, *, channel_id, thread_ts, confirmed_via=None, deps: (
+            fired.append({"verb": verb, "confirmed_via": confirmed_via})
+            or {"status": "accepted", "delivered_to": "/repo"}))
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev12", channel="C1", ts="611.1", thread_ts="611.1", text="accept it"))
+    await bridge.wait_idle("611.1")
+
+    assert store.get_confirmation(cid)["state"] == "approved"
+    assert fired == [{"verb": "accept_live_fix", "confirmed_via": "block_actions"}]
+
+
+async def test_autopilot_reads_the_guarded_paths_off_the_record_not_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The staged record is the authority (that is why `_handle_staged_
+    confirmations` re-reads it), and within it the DIFF outranks the flag."""
+    store.bind_channel("C1", "proj-a")
+    config.save({"autopilot": True})
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": False,
+            "changed_paths": ["errorta_liverun/supervisor.py"]}
+    cid = store.stage_confirmation("accept_live_fix", args, "612.1", channel_id="C1")
+    monkeypatch.setattr(
+        concierge, "run_turn", lambda *a, **k: _staged_turn("accept_live_fix", args, cid))
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fire")))
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    await bridge.handle_event(_message_envelope(
+        event_id="Ev13", channel="C1", ts="612.1", thread_ts="612.1", text="accept it"))
+    await bridge.wait_idle("612.1")
+
+    assert store.get_confirmation(cid)["state"] == "pending"
+
+
+# --------------------------------------------------------------------------
+# Review fix: the accept effect must be able to ask "is a live supervisor
+# waiting on THIS confirmation?", and only the firing path knows the id.
+# --------------------------------------------------------------------------
+
+
+async def test_the_confirmation_id_is_threaded_into_the_accept_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`stage_confirmation` mints the id AFTER the cycle built the args, so the
+    id is in no staged record's args -- it has to be added at fire time."""
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": False,
+            "changed_paths": ["app.py"]}
+    cid = store.stage_confirmation("accept_live_fix", args, "613.1", channel_id="C1")
+    record = store.get_confirmation(cid)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, **kw: fired.append(dict(args)) or {"status": "accepted"})
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    bridge._fire_confirmed_effect(record, channel_id="C1", thread_ts="613.1",
+                                  verb="accept_live_fix", decision="approved",
+                                  approved=True)
+
+    assert fired[0]["_confirmation_id"] == cid
+
+
+async def test_a_forged_confirmation_id_in_the_staged_args_is_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat turn composes its own args. If it could put a `_confirmation_id`
+    in them and have that survive, the whole binding would be forgeable."""
+    args = {"project_id": "proj-a", "run_id": "r-1", "human_only": False,
+            "_confirmation_id": "cid-i-made-up"}
+    cid = store.stage_confirmation("accept_live_fix", args, "614.1", channel_id="C1")
+    record = store.get_confirmation(cid)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, **kw: fired.append(dict(args)) or {"status": "refused"})
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    bridge._fire_confirmed_effect(record, channel_id="C1", thread_ts="614.1",
+                                  verb="accept_live_fix", decision="approved",
+                                  approved=True)
+
+    assert fired[0]["_confirmation_id"] == cid != "cid-i-made-up"
+
+
+async def test_no_other_verb_grows_a_confirmation_id_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scoped to the one verb that reads it: `_confirmation_id` is not a general
+    argument every C-class verb suddenly receives."""
+    cid = store.stage_confirmation("spend_cloud", {"amount": 5}, "615.1", channel_id="C1")
+    record = store.get_confirmation(cid)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        tools, "dispatch",
+        lambda verb, args, **kw: fired.append(dict(args)) or {"status": "ok"})
+    bridge, _sdk, _poster = _bridge(tmp_path)
+
+    bridge._fire_confirmed_effect(record, channel_id="C1", thread_ts="615.1",
+                                  verb="spend_cloud", decision="approved", approved=True)
+
+    assert fired == [{"amount": 5}]
+
+
+async def test_the_accept_button_names_the_repo_and_the_paths(tmp_path: Path) -> None:
+    """A human tapping this is authorising a merge into their real files. A
+    button reading "Confirm accept_live_fix" tells them nothing about what."""
+    bridge, sdk, poster = _bridge(tmp_path)
+
+    title, detail = bridge._confirmation_title(
+        {"verb": "accept_live_fix",
+         "args": {"repo_id": "brain", "project_id": "p",
+                  "changed_paths": ["app.py", "src/thing.py"]}})
+
+    assert "brain" in title
+    assert "accept_live_fix" not in title
+    assert "app.py" in detail

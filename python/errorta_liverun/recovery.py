@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from . import profile as _profile
 from . import steps as _steps
+from .fixloop import ACCEPT_WITHDRAW_DECISION, _default_resolve_confirmation
 from .state import RunState, RunStore, now_iso
 from .supervisor import Supervisor
 
@@ -58,6 +59,15 @@ class _NullLedger:
     def check(self, *a: Any, **k: Any) -> None:
         return None
 
+    def record_fix_cycle(self, *a: Any, **k: Any) -> None:  # pragma: no cover
+        raise AssertionError("recovery must not record a fix cycle")
+
+    def fix_cycles_today(self, *a: Any, **k: Any) -> int:
+        # A recovered run never enters the fix loop (its reason is
+        # `sidecar_restart`, which is not fixable), but the supervisor reads
+        # this in `snapshot`, so answering is cheaper than an AttributeError.
+        return 0
+
 
 def _signal_remote_pidfiles(sup: Supervisor, state: RunState) -> None:
     """TERM-then-KILL every remote pid this run wrote down. The profile's own
@@ -92,10 +102,37 @@ def _signal_remote_pidfiles(sup: Supervisor, state: RunState) -> None:
             state.owned_remote_pidfiles.remove(ref)
 
 
+def _withdraw_staged_accept(state: RunState, store: RunStore, resolve_fn) -> None:
+    """Take back an acceptance the dead sidecar staged and never answered.
+
+    This is the one thing recovery must do BEFORE anything slow: a pending
+    ``accept_live_fix`` is a merge + deliver that Slack's autopilot sweep will
+    still fire, on behalf of a run that no longer exists. The store's resolve is
+    the atomic claim, so a human who tapped Approve in the meantime wins and is
+    reported as the winner."""
+    cid = state.fix_confirmation_id
+    if not cid:
+        return
+    detail: dict[str, Any] = {"cid": cid, "decision": ACCEPT_WITHDRAW_DECISION,
+                              "where": "boot_recovery"}
+    try:
+        result = resolve_fn(cid, ACCEPT_WITHDRAW_DECISION)
+        detail["claimed"] = bool(result[1]) if isinstance(result, tuple) and len(result) == 2 \
+            else False
+    except Exception as exc:  # noqa: BLE001 — an unknown/unreadable cid is not fatal
+        _LOG.warning("recovery: could not withdraw confirmation %s", cid, exc_info=True)
+        detail["claimed"] = False
+        detail["error"] = type(exc).__name__
+    state.fix_confirmation_id = None
+    store.save(state)
+    store.append_event(state.run_id, "fix_accept_withdrawn", detail)
+
+
 def recover_on_boot(*, store: RunStore | None = None, tunnels: Any = None, remote: Any = None,
                     load_profile: Callable[[Path], _profile.Profile] | None = None,
                     run_action=_steps.run_action,
-                    run_check=_steps.run_check) -> list[str]:
+                    run_check=_steps.run_check,
+                    resolve_confirmation_fn=None) -> list[str]:
     """Tear down every non-terminal run left by a prior sidecar. Returns the
     run ids marked ``lost_on_restart``."""
     store = store or RunStore()
@@ -106,11 +143,12 @@ def recover_on_boot(*, store: RunStore | None = None, tunnels: Any = None, remot
     if remote is None:
         from errorta_tools.runner.remote import RemoteToolRunner
         remote = RemoteToolRunner()
+    resolve_fn = resolve_confirmation_fn or _default_resolve_confirmation
     lost: list[str] = []
     for state in store.list_non_terminal():
         try:
             _recover_one(state, store=store, load=load, tunnels=tunnels, remote=remote,
-                         run_action=run_action, run_check=run_check)
+                         run_action=run_action, run_check=run_check, resolve_fn=resolve_fn)
         except Exception:  # noqa: BLE001 — one poisoned run must not skip the rest
             _LOG.exception("recovery: unrecoverable failure for %s", state.run_id)
         lost.append(state.run_id)
@@ -118,8 +156,9 @@ def recover_on_boot(*, store: RunStore | None = None, tunnels: Any = None, remot
 
 
 def _recover_one(state: RunState, *, store: RunStore, load, tunnels: Any, remote: Any,
-                 run_action, run_check) -> None:
+                 run_action, run_check, resolve_fn=_default_resolve_confirmation) -> None:
     store.append_event(state.run_id, "phase", {"to": "recovering", "reason": "sidecar_restart"})
+    _withdraw_staged_accept(state, store, resolve_fn)
     prof: _profile.Profile | None = None
     try:
         prof = load(_profile.profiles_dir() / f"{state.profile_name}.yaml")

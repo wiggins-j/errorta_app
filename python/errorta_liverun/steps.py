@@ -84,7 +84,11 @@ def substitute(argv: tuple[str, ...], ctx: Ctx) -> tuple[str, ...]:
 
 def _declared_argvs(profile: Profile) -> set[tuple[str, ...]]:
     out: set[tuple[str, ...]] = set()
-    for step in (*profile.launch, *profile.evidence, *profile.teardown):
+    # A repo's `deploy:` steps are validated at load time by the same `_step()`
+    # as every launch step, so they are declared argvs too — the fix loop runs
+    # them through this identical guard (spec §3.5, "deploying").
+    deploy = tuple(s for repo in profile.repos for s in repo.deploy)
+    for step in (*profile.launch, *profile.evidence, *profile.teardown, *deploy):
         if step.action and "argv" in step.action.params:
             out.add(tuple(step.action.params["argv"]))
         if step.check:

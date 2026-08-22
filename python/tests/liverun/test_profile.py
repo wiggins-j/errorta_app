@@ -250,3 +250,259 @@ def test_list_profiles_survives_malformed_yaml(tmp_path: Path) -> None:
     assert rows["good"]["valid"] is True
     assert rows["bad"]["valid"] is False
     assert rows["bad"]["error"] in ("bad_host", "profile_malformed")
+
+
+# --- Slice 2: repos / fix_loop --------------------------------------------- #
+
+@pytest.fixture
+def valid_doc() -> dict:
+    return _minimal()
+
+
+def _load(tmp_path: Path, doc: dict, *, name: str = "p",
+          known_hosts_fn=_ok_hosts, **kw):
+    return P.load_profile(_write(tmp_path, doc, name), known_hosts_fn=known_hosts_fn, **kw)
+
+
+def _repo_dir(tmp_path: Path, name: str = "senditai-ng") -> Path:
+    d = tmp_path / name
+    (d / ".git").mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _repos_doc(**over) -> dict:
+    # NOTE: no `check:` on the deploy step. The design sketch wrote
+    # `check: {exit0: true}`, but Slice 1's `exit0` check IS an argv to run
+    # (`profile._check` -> `_argv`, `steps.run_check` -> `_spawn_tracked`), and
+    # deploy steps are validated by the *existing* `_step()` unchanged. A bare
+    # `true` would need a new check form with no runtime behind it -- exactly the
+    # silently-ignored field `CHECK_ALLOWED_KEYS` exists to prevent.
+    repo = {"id": "brain", "path": None, "errorta_project": "senditai-ng",
+            "classify": ["python_traceback", "brain_log_stall"],
+            "deploy": [{"name": "rsync", "local": {"argv": [
+                "/usr/bin/rsync", "-az", "--delete", "--exclude", ".git",
+                "/Users/OPERATOR/GitHub/senditai-ng/", "senditai:senditai-ng/"]},
+                "timeout_s": 300}]}
+    repo.update(over)
+    return repo
+
+
+def test_repos_and_fix_loop_load(tmp_path: Path, valid_doc: dict) -> None:
+    repo_dir = _repo_dir(tmp_path)
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(repo_dir))]
+    doc["fix_loop"] = {"enabled": True, "max_fix_cycles_per_day": 3,
+                       "idle_timeout_s": 1200, "triage_route": "pm"}
+    prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert prof.fix_loop.enabled and prof.fix_loop.max_fix_cycles_per_day == 3
+    assert prof.fix_loop.accept_timeout_s == 1800
+    repo = prof.repo_by_id("brain")
+    assert repo.fixable is True and repo.deploy[0].action.kind == "local"
+    # the rsync argv survives _argv unchanged -- the trailing slash is load-bearing
+    assert repo.deploy[0].action.params["argv"][-2].endswith("senditai-ng/")
+    assert prof.repo_by_id("nope") is None
+
+
+def test_profile_without_repos_is_still_valid(tmp_path: Path, valid_doc: dict) -> None:
+    prof = _load(tmp_path, dict(valid_doc))
+    assert prof.repos == () and prof.fix_loop is None
+
+
+@pytest.mark.parametrize("mutate,code", [
+    (lambda d: d["repos"][0].update(path="senditai-ng"), "repo_path_not_absolute"),
+    (lambda d: d["repos"][0].update(errorta_project="nope"), "unknown_errorta_project"),
+    (lambda d: d["repos"][0].update(classify=["not_a_class"]), "unknown_evidence_class"),
+    (lambda d: d["repos"][0].update(classify=["launch_step_failed:nope"]), "unknown_launch_step"),
+    (lambda d: d["repos"][0].update(classify=["launch_step_failed:"]), "unknown_launch_step"),
+    (lambda d: d["repos"][0]["deploy"][0]["local"].update(argv=["rsync", "-a"]),
+     "argv0_not_absolute"),
+    (lambda d: d["repos"].append(_repos_doc(id="brain")), "duplicate_repo_id"),
+    (lambda d: d["repos"][0].update(id="Brain"), "bad_repo_id"),
+    (lambda d: d["repos"][0].update(bogus=1), "unknown_key"),
+    (lambda d: d["repos"][0].update(fixable="yes"), "bad_repo"),
+    (lambda d: d["repos"][0]["deploy"][0].update(
+        local=None, window_shot={"pgrep": "x"}), "bad_deploy_step"),
+    (lambda d: d["fix_loop"].update(max_fix_cycles_per_day=9), "cap_raised"),
+    (lambda d: d["fix_loop"].update(idle_timeout_s=300), "idle_below_turn_timeout"),
+    (lambda d: d["fix_loop"].update(idle_timeout_s=9000), "cap_raised"),
+    (lambda d: d["fix_loop"].update(accept_timeout_s=9999), "cap_raised"),
+    (lambda d: d["fix_loop"].update(triage_route="claude_cli.opus"), "bad_triage_route"),
+    (lambda d: d["fix_loop"].update(bogus=1), "unknown_key"),
+    (lambda d: d.pop("repos"), "fix_loop_without_repos"),
+    (lambda d: d["repos"][0].update(fixable=False), "fix_loop_without_repos"),
+])
+def test_repo_validator_rejects(tmp_path: Path, valid_doc: dict, mutate, code: str) -> None:
+    repo_dir = _repo_dir(tmp_path)
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(repo_dir))]
+    doc["fix_loop"] = {"enabled": True}
+    mutate(doc)
+    for r in doc.get("repos") or []:
+        for s in r.get("deploy") or []:
+            if "local" in s and s["local"] is None:
+                s.pop("local")
+    with pytest.raises(P.ProfileError) as exc:
+        _load(tmp_path, doc, project_exists_fn=lambda pid: pid == "senditai-ng")
+    assert exc.value.code == code
+
+
+def test_repo_path_must_exist_and_be_a_checkout(tmp_path: Path, valid_doc: dict) -> None:
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(tmp_path / "ghost"))]
+    with pytest.raises(P.ProfileError) as exc:
+        _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert exc.value.code == "repo_path_missing"
+    plain = tmp_path / "plain"; plain.mkdir()
+    doc["repos"] = [_repos_doc(path=str(plain))]
+    with pytest.raises(P.ProfileError) as exc:
+        _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert exc.value.code == "repo_path_missing"
+
+
+def test_two_repos_may_not_claim_the_same_class(tmp_path: Path, valid_doc: dict) -> None:
+    doc = dict(valid_doc)
+    doc["repos"] = [
+        _repos_doc(path=str(_repo_dir(tmp_path))),
+        _repos_doc(id="reaper", path=str(_repo_dir(tmp_path, "osrs-reaper")),
+                   errorta_project="osrs-reaper", deploy=[],
+                   classify=["jvm_exception", "brain_log_stall"]),
+    ]
+    with pytest.raises(P.ProfileError) as exc:
+        _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert exc.value.code == "ambiguous_class_mapping"
+
+
+def test_unfixable_repo_is_allowed_when_another_repo_is_fixable(
+        tmp_path: Path, valid_doc: dict) -> None:
+    doc = dict(valid_doc)
+    doc["repos"] = [
+        _repos_doc(path=str(_repo_dir(tmp_path))),
+        _repos_doc(id="reaper", path=str(_repo_dir(tmp_path, "osrs-reaper")),
+                   errorta_project="osrs-reaper", fixable=False, deploy=[],
+                   classify=["jvm_exception"]),
+    ]
+    doc["fix_loop"] = {"enabled": True}
+    prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert prof.repo_by_id("reaper").fixable is False
+    assert prof.repo_by_id("reaper").deploy == ()
+
+
+def test_default_project_exists_is_false_without_a_ledger(monkeypatch) -> None:
+    # the seam's production default must fail CLOSED, never raise
+    monkeypatch.setattr(P, "_import_ledger_store", lambda: None)
+    assert P.default_project_exists("anything") is False
+
+
+# --------------------------------------------------------------------------
+# The SHIPPED example profile. `docs/liverun/example-profile.yaml` is invalid
+# by construction as a whole (every operator-specific value is a `# FILL:`
+# line, including empty argvs the loader rejects) -- so what is asserted here
+# is the part the operator does NOT have to author: the `repos:` / `fix_loop:`
+# block ships complete except for the two checkout paths, and it must load.
+#
+# Without this, the shipped example is only as correct as the last person to
+# hand-edit it -- and an example that cannot load is worse than none, because
+# the operator debugs their own typing against a broken skeleton.
+# --------------------------------------------------------------------------
+
+DOCS = Path(__file__).resolve().parents[3] / "docs" / "liverun"
+
+
+def _example_doc(tmp_path: Path, valid_doc: dict) -> dict:
+    """The shipped `repos:`/`fix_loop:` block on a loadable profile.
+
+    The example's own `launch:` cannot be loaded (its argvs are `# FILL:`
+    lines), but its step NAMES are shipped, and `classify:` entries of the form
+    `launch_step_failed:<name>` are resolved against them at load. So the step
+    names come from the example and only the argvs are stubbed -- otherwise
+    this would assert the block against launch steps the operator will never
+    have.
+    """
+    example = yaml.safe_load((DOCS / "example-profile.yaml").read_text())
+    doc = dict(valid_doc)
+    doc["launch"] = [{"name": step["name"], "local": {"argv": ["/bin/true"]},
+                      "check": {"exit0": ["/bin/true"]}, "timeout_s": 5}
+                     for step in example["launch"]]
+    doc["repos"] = example["repos"]
+    doc["fix_loop"] = example["fix_loop"]
+    # The one substitution: `/Users/OPERATOR/...` is the shape of a path, not a
+    # path. Every other value in the block is shipped as-is.
+    for i, name in enumerate(("senditai-ng", "osrs-reaper")):
+        doc["repos"][i]["path"] = str(_repo_dir(tmp_path, name))
+    return doc
+
+
+def test_the_shipped_example_fix_loop_block_validates(tmp_path: Path,
+                                                      valid_doc: dict) -> None:
+    doc = _example_doc(tmp_path, valid_doc)
+
+    prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+
+    assert [r.id for r in prof.repos] == ["brain", "reaper"]
+    assert prof.fix_loop.enabled
+    assert prof.repo_by_id("brain").deploy[0].action.kind == "local"
+    # `reaper` has no registrable gate (G-3), and the profile's `rebuild-jar`
+    # launch step already redeploys it.
+    assert prof.repo_by_id("reaper").fixable is False
+    assert prof.repo_by_id("reaper").deploy == ()
+
+
+@pytest.mark.parametrize("reason,repo_id", [
+    ("launch_step_failed:brain", "brain"),
+    ("launch_step_failed:rebuild-jar", "reaper"),
+])
+def test_the_shipped_example_routes_a_failed_launch_step(
+        tmp_path: Path, valid_doc: dict, reason: str, repo_id: str) -> None:
+    """A launch step that fails carries the generic `launch_step_failed` class,
+    which no repo may claim without claiming every launch failure -- so an
+    example that named no steps would pause for a human on the two most likely
+    failures it has. Whoever wrote the step owns it, and the example says so."""
+    from errorta_liverun import triage
+    from errorta_liverun.brief import EvidenceBundle
+
+    prof = _load(tmp_path, _example_doc(tmp_path, valid_doc),
+                 project_exists_fn=lambda pid: True)
+    bundle = EvidenceBundle(profile_name="osrs", run_id="r-1", stop_reason=reason,
+                            launch_step_name=reason.split(":", 1)[1])
+
+    res = triage.classify(bundle, prof)
+
+    assert res.repo_id == repo_id
+    assert res.confidence == triage.CONFIDENCE_DETERMINISTIC
+
+
+def test_the_shipped_example_declares_no_check_on_a_deploy_step() -> None:
+    """The design sketch wrote `check: {exit0: true}`, which does not validate:
+    Slice 1's `exit0` IS an argv to run. An example carrying it would fail the
+    load with `argv_not_list_of_str` on the operator's first attempt."""
+    example = yaml.safe_load((DOCS / "example-profile.yaml").read_text())
+
+    for repo in example["repos"]:
+        for step in repo.get("deploy") or []:
+            assert "check" not in step or isinstance(
+                (step["check"] or {}).get("exit0"), list), step
+
+
+def test_a_repo_may_claim_one_named_launch_step(tmp_path: Path, valid_doc: dict) -> None:
+    """`launch_step_failed` on its own is a class every repo would have to fight
+    over. A launch step belongs to whoever wrote it, so the operator says so."""
+    repo_dir = _repo_dir(tmp_path)
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(repo_dir),
+                               classify=["brain_log_stall", "launch_step_failed:start"])]
+    doc["fix_loop"] = {"enabled": True}
+    prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert "launch_step_failed:start" in prof.repo_by_id("brain").classify
+
+
+def test_two_repos_may_not_claim_the_same_launch_step(tmp_path: Path, valid_doc: dict) -> None:
+    repo_dir = _repo_dir(tmp_path)
+    other = _repo_dir(tmp_path, "osrs-reaper")
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(repo_dir), classify=["launch_step_failed:start"]),
+                    _repos_doc(id="reaper", path=str(other), deploy=[],
+                               classify=["launch_step_failed:start"])]
+    doc["fix_loop"] = {"enabled": True}
+    with pytest.raises(P.ProfileError) as exc:
+        _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert exc.value.code == "ambiguous_class_mapping"
