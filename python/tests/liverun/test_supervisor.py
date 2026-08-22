@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -923,3 +924,27 @@ def test_a_recovered_run_never_resumes_a_fix_cycle() -> None:
     reloaded = store.load(sup.state.run_id)
     assert reloaded.phase == "lost_on_restart"
     assert fake.store.tasks == []
+
+
+def test_a_fix_cycle_runs_on_the_daemon_thread_and_leaks_nothing() -> None:
+    """End to end on REAL threads and the REAL (unconfigured) seams: the cycle
+    pauses on the first thing it cannot do instead of killing the run's thread,
+    and the manager still joins it."""
+    prof = _fix_profile()
+    prof = P.Profile(prof.name, prof.hosts, prof.tunnels, prof.launch,
+                     (P.WatchProbe("brain-log", 1, 0, "stop",
+                                   P.Probe("http", {"url": "http://127.0.0.1:1/"})),),
+                     prof.evidence, prof.teardown, prof.caps, prof.ban_signals,
+                     prof.repos, prof.fix_loop)
+    before = threading.active_count()
+    mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None,
+                         load_profile=lambda path: prof)
+    try:
+        assert mgr.start("p", project_id="live-proj")["status"] == "started"
+        sup = mgr._runs["p"]
+        assert _wait_for(lambda: sup.state.phase in _TERMINAL, timeout=20.0)
+    finally:
+        mgr.teardown_all()
+    assert sup.state.phase == "paused_awaiting_human"
+    assert sup.state.reason in ("fix_no_gate", "triage_ambiguous", "fix_run_failed")
+    assert _wait_for(lambda: threading.active_count() <= before, timeout=10.0)
