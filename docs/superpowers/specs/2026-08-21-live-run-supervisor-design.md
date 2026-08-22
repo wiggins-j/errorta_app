@@ -119,23 +119,23 @@ tunnels:
     reverse: [{remote_port: 8081, local_port: 8081}, {remote_port: 8082, local_port: 8082}]
 launch:                             # ordered; each step must pass its check before the next
   - name: quit-old-client
-    local: {argv: [/Users/wiggins/GitHub/senditai-ng/jagex-quit]}
+    local: {argv: [/Users/OPERATOR/GitHub/senditai-ng/jagex-quit]}
     check: {pgrep_absent: "RuneLite.app/Contents/MacOS/RuneLite"}
     timeout_s: 30
   - name: rebuild-jar
-    local: {argv: [./gradlew, :client:shadowJar, :client:microbotLatestJar], cwd: /Users/wiggins/GitHub/osrs-reaper}
-    check: {file_mtime_newer: {path: /Users/wiggins/GitHub/osrs-reaper/runelite-client/build/libs/microbot-shaded.jar, than: step_start}}
+    local: {argv: [./gradlew, :client:shadowJar, :client:microbotLatestJar], cwd: /Users/OPERATOR/GitHub/osrs-reaper}
+    check: {file_mtime_newer: {path: /Users/OPERATOR/GitHub/osrs-reaper/runelite-client/build/libs/microbot-shaded.jar, than: step_start}}
     timeout_s: 900
   - name: launch-client
-    local: {argv: [osascript, -e, 'tell application "Terminal" to do script "/Users/wiggins/GitHub/senditai-ng/jagex-play"']}
-    check: {all: [{file_exists: /Users/wiggins/.runelite/.agent-token}, {http: {url: "http://127.0.0.1:8081/state", expect_status: 200}}]}
+    local: {argv: [osascript, -e, 'tell application "Terminal" to do script "/Users/OPERATOR/GitHub/senditai-ng/jagex-play"']}
+    check: {all: [{file_exists: /Users/OPERATOR/.runelite/.agent-token}, {http: {url: "http://127.0.0.1:8081/state", expect_status: 200}}]}
     timeout_s: 180
   - name: tunnel
     tunnel: reverse
     check: {tunnel_up: reverse}
     timeout_s: 30
   - name: brain
-    remote: {host: senditai, argv: [...], detach: true, pidfile: ~/.senditai_ng/liverun.pid, stdin_file: /Users/wiggins/.runelite/.agent-token}
+    remote: {host: senditai, argv: [...], detach: true, pidfile: ~/.senditai_ng/liverun.pid, stdin_file: /Users/OPERATOR/.runelite/.agent-token}
     check: {remote_pid_alive: {host: senditai, pidfile: ~/.senditai_ng/liverun.pid}}
     timeout_s: 60
 watch:                              # polled concurrently; wall-clock
@@ -154,7 +154,7 @@ teardown:                           # ordered; always; each sub-step records evi
   - {name: kill-marker,   remote: {host: senditai, argv: [...senditai_ng.cli, kill, --session, "$SESSION_ID"]}, timeout_s: 20}
   - {name: logoff-wait,   check: {http_json: {url: "http://127.0.0.1:8081/state", path: gameState, not_equals: LOGGED_IN}}, timeout_s: 45, evidence_literal: logoff_verified}
   - {name: brain-stop,    remote_signal: {host: senditai, pidfile: ~/.senditai_ng/liverun.pid, signal: TERM, grace_s: 15, then: KILL}}
-  - {name: quit-client,   local: {argv: [/Users/wiggins/GitHub/senditai-ng/jagex-quit]}, timeout_s: 30}
+  - {name: quit-client,   local: {argv: [/Users/OPERATOR/GitHub/senditai-ng/jagex-quit]}, timeout_s: 30}
   - {name: tunnel-down,   tunnel_close: reverse}
 caps:                               # may only be lowered below defaults
   max_launches_per_hour: 2

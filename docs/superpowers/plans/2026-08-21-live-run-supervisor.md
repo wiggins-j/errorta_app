@@ -23,7 +23,7 @@ Spec: `docs/superpowers/specs/2026-08-21-live-run-supervisor-design.md`. Read it
 - `errorta_council` must never import `errorta_liverun` or `errorta_tools.runner.remote` (existing import-lint tests must stay green).
 - All text reaching the ledger/Slack passes `errorta_council.coding.runtime_process.redact_log_line`.
 - Every new module gets tests before the OSRS profile is authored; run `python3 -m pytest -q tests/<area>` after each task and the full `python3 -m pytest -q` before the final commit.
-- Commit after every task. Work from `python/` as the cwd for pytest (`cd /Users/wiggins/GitHub/errorta_app/python`).
+- Commit after every task. Work from `python/` as the cwd for pytest (`cd /Users/OPERATOR/GitHub/errorta_app/python`).
 
 ## File Structure
 
