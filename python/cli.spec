@@ -141,6 +141,7 @@ _CLI_COMMAND_MODULES = [
         "watch",  # Spec 06 — live run dashboard
         "runctl", "connect", "wizard", "project", "focus",
         "interject", "task", "files", "publish", "grounding", "testcfg",
+        "liverun",  # live-run supervisor control surface
     )
 ]
 

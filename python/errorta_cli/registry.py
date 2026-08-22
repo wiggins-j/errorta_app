@@ -63,6 +63,12 @@ class Command:
     # F151: how ``--watch`` renders. "snapshot" (default) = full re-render + clear
     # each tick (status/tasks/…); "stream" = tail (append only new events; log).
     watch_mode: str = "snapshot"
+    # The command's own preferred watch tick, in seconds. Used only when the
+    # operator did NOT set one (``--poll-interval`` still wins), so a view whose
+    # source moves on its own clock — `liverun status` reads a supervisor that
+    # ticks once a second and probes far slower — can pick a sane cadence instead
+    # of hammering the route at the 2.5s default. ``None`` = use the default.
+    watch_interval: float | None = None
     # F158: a command with BOTH tail-able and snapshot sub-verbs (e.g. `pm chat`
     # streams, `pm changes` snapshots) sets this to pick the mode from the
     # resolved args; default returns the static ``watch_mode``.
@@ -361,6 +367,7 @@ _COMMAND_MODULES = (
                          #      + north-star / focus steering
     "interject", "task", "files",  # S6 — mid-run steering + file/worktree edit/accept
     "publish", "grounding", "testcfg",  # S7 — publish + grounding + test-command config
+    "liverun",  # live-run supervisor: profiles/start/stop/status/resume/fix pause|resume
     # NB: `runtime` (S2 read) is listed once; S7 rewrote it in place with the
     # runtime-control sub-actions. It already appears in this tuple above.
 )
