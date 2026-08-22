@@ -22,7 +22,7 @@ from typing import Callable
 
 from .brief import (EvidenceBundle, begin_marker, defang_fence_markers, end_marker,
                     fence_preamble)
-from .profile import EVIDENCE_CLASSES
+from .profile import EVIDENCE_CLASSES, LAUNCH_STEP_CLASS_PREFIX
 
 _TRACEBACK_RE = re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)
 _JVM_RE = re.compile(r"^(?:Exception in thread|[ \t]+at [A-Za-z0-9_.$]+\()", re.MULTILINE)
@@ -86,11 +86,29 @@ assert set(_SIGNATURES) == set(EVIDENCE_CLASSES), (
     "every EVIDENCE_CLASS needs a deterministic signature")
 
 
+def failed_launch_step(stop_reason: str) -> str | None:
+    """The launch step named by a ``launch_step_failed:<name>[:...]`` reason.
+
+    The supervisor writes that reason itself from the profile's own step name,
+    so this reads operator-owned text, never anything a program printed."""
+    text = str(stop_reason or "")
+    if not text.startswith(LAUNCH_STEP_CLASS_PREFIX):
+        return None
+    name = text[len(LAUNCH_STEP_CLASS_PREFIX):].split(":", 1)[0]
+    return name or None
+
+
 def classify(bundle: EvidenceBundle, profile) -> TriageResult:
     """Compute the class set, map it onto the repos that declare each class, and
     name exactly one repo or give up. Never a coin flip: zero or 2+ claimants is
     ``ambiguous``, which the caller escalates or pauses on."""
     classes = tuple(sorted(name for name, sig in _SIGNATURES.items() if sig(bundle)))
+    step = failed_launch_step(bundle.stop_reason)
+    if step is not None:
+        # The qualified class sits BESIDE the generic one: a repo that declares
+        # `launch_step_failed:rebuild-jar` claims exactly that step, and a repo
+        # that declares the bare class still claims every launch failure.
+        classes = tuple(sorted({*classes, f"{LAUNCH_STEP_CLASS_PREFIX}{step}"}))
     claimants: list[str] = []
     for repo in getattr(profile, "repos", ()) or ():
         if any(c in repo.classify for c in classes) and repo.id not in claimants:

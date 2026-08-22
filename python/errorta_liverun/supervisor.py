@@ -114,12 +114,14 @@ class Supervisor:
         self._run_action, self._run_check, self._run_probe = run_action, run_check, run_probe
         self._thread: threading.Thread | None = None
         self._stop_reason: str | None = None
+        self._operator_stop_reason: str | None = None   # what `stop()` was told
         self._stopping = False
         self._closed = False
         self._closed_once = False
         self._banned = False
         self._refused = False        # a launch step DECLINED; not a bug to fix
         self._fix: FixCycle | None = None
+        self._fix_aborted = False
         self._fix_deps = fix_deps or FixDeps()
         self._relaunch_fn = relaunch_fn
         self._relaunched = False
@@ -196,7 +198,14 @@ class Supervisor:
                 raise
 
     def stop(self, reason: str = "operator_stop") -> None:
-        """Never gated: the next tick from any non-terminal phase tears down."""
+        """Never gated: the next tick from any non-terminal phase tears down.
+
+        The reason is recorded TWICE on purpose. `_stop_reason` keeps Slice 1's
+        first-reason-wins semantics (a stall that is already tearing down is
+        what ended the run). `_operator_stop_reason` is what THIS call asked
+        for, which is the only honest answer for a run that had already stopped
+        and was in a fix cycle when the request arrived."""
+        self._operator_stop_reason = self._operator_stop_reason or reason
         self._stop_reason = self._stop_reason or reason
         self._stop.set()
 
@@ -326,12 +335,27 @@ class Supervisor:
         if self.state.phase in TERMINAL_PHASES:
             return                              # already closed out; a no-op
         reason = self._stop_reason or "unknown"
+        in_fix = self._fix is not None and self.state.phase in _FIX_PHASES
+        if in_fix:
+            # A fix cycle owns a coding run and a staged acceptance. Both have
+            # to be told, BEFORE anything here lands the run terminal — a
+            # supervisor that just exits leaves a dev run burning tokens and a
+            # button the autopilot sweep will happily press.
+            self._abort_fix(self._operator_stop_reason or reason)
         if self._stopping:
             # Re-entered while a first pass was unwinding — the crash handler in
-            # `run_once_blocking` comes back through here. Never replay evidence
-            # or teardown, but do finish the closing sequence the first pass
-            # dropped (`_close_out` is itself idempotent).
-            self._close_out(final_phase="failed", reason=reason)
+            # `run_once_blocking` comes back through here, and so does a stop
+            # that arrived during a fix cycle. Never replay evidence or teardown,
+            # but do finish the closing sequence the first pass dropped
+            # (`_close_out` is itself idempotent).
+            if in_fix and self._operator_stop_reason:
+                # The RUN already stopped (that stall is why there was a cycle
+                # at all). What ended THIS is the operator, and it is not a
+                # failure — reporting `failed: stall:brain-log` would blame the
+                # profile for a human pressing stop.
+                self._close_out(final_phase="stopped", reason=self._operator_stop_reason)
+            else:
+                self._close_out(final_phase="failed", reason=reason)
             return
         self._stopping = True
         try:
@@ -514,8 +538,15 @@ class Supervisor:
             self.state.fix_repo_id, dirty = cycle.repo_id, True
         if cycle.task_id and self.state.fix_task_id != cycle.task_id:
             self.state.fix_task_id, dirty = cycle.task_id, True
+        # The PENDING cid only: once it resolves either way the cycle clears it,
+        # and boot recovery must not try to withdraw a confirmation somebody
+        # already answered.
+        if (cycle.cid or None) != self.state.fix_confirmation_id:
+            self.state.fix_confirmation_id, dirty = cycle.cid or None, True
         if dirty:
             self._save()
+        if out.kind == "aborted":
+            return                              # `_do_stopping` owns what happens next
         if out.kind == "paused":
             if out.failed:
                 self._record_fix_cycle(failed=True)
@@ -530,6 +561,25 @@ class Supervisor:
             return
         if cycle.phase != self.state.phase:
             self._set_phase(cycle.phase)
+
+    def _abort_fix(self, reason: str) -> None:
+        """Stop everything the cycle started, once."""
+        cycle = self._fix
+        if cycle is None or self._fix_aborted:
+            return
+        self._fix_aborted = True
+        try:
+            out = cycle.abort(reason)
+        except Exception:  # noqa: BLE001 — the run must still land terminal
+            _LOG.exception("liverun %s fix abort failed", self.state.run_id)
+            return
+        for kind, detail in out.events:
+            self._event(kind, detail)
+        self.state.fix_confirmation_id = None
+        # Counted, but NOT as a failure: an operator stop (or a sidecar
+        # shutdown) is not the repository's fault, and a cycle that spent a dev
+        # run should still count against the day cap.
+        self._record_fix_cycle(failed=False)
 
     def _record_fix_cycle(self, *, failed: bool) -> None:
         try:
@@ -710,11 +760,19 @@ class Supervisor:
                 # chain, and how much autonomy is left before a human is needed.
                 "fix_cycle": st.fix_cycle, "fix_of": st.fix_of,
                 "fix_repo_id": st.fix_repo_id,
-                "fix_cycles_today": self.ledger.fix_cycles_today(self.profile.name, self._wall()),
+                "fix_cycles_today": self._fix_cycles_today(),
                 "fix_cap": int(self.profile.fix_loop.max_fix_cycles_per_day)
                 if self.profile.fix_loop is not None
                 else int(_profile.FIX_CAP_DEFAULTS["max_fix_cycles_per_day"]),
                 "fix_paused": fix_paused_marker(self.profile.name).exists()}
+
+    def _fix_cycles_today(self) -> int:
+        """Reporting only — a ledger this cannot read must not break `status`."""
+        try:
+            return int(self.ledger.fix_cycles_today(self.profile.name, self._wall()))
+        except Exception:  # noqa: BLE001
+            _LOG.exception("liverun %s could not count fix cycles", self.state.run_id)
+            return -1
 
     # -- bookkeeping ------------------------------------------------------- #
     def _set_phase(self, phase: str, reason: str | None = None) -> None:

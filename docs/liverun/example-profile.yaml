@@ -124,3 +124,57 @@ caps:                               # may only be LOWERED below these defaults
 ban_signals:                        # regexes over any evidence/log text; match -> paused_awaiting_human
   - 'Account is banned'
   - 'Login failed'
+
+# ---------------------------------------------------------------------------
+# The fix loop (Slice 2). BOTH keys below are optional: a profile without them
+# is a valid live-run profile that watches, stops and reports, and never enters
+# the fix loop at all. Read README.md's "The autonomous fix loop" section
+# before you enable this — it is the one part of the supervisor that changes
+# files in your real checkouts.
+#
+# Repoint `path` at your own checkouts (the only FILL left in this block); each
+# must be an existing directory containing `.git`. `errorta_project` must name
+# an Errorta coding project that ALREADY exists — it is resolved at load time,
+# so a typo is reported by `list_live_profiles`, not minutes after a stall.
+# ---------------------------------------------------------------------------
+repos:
+  - id: brain
+    path: /Users/OPERATOR/GitHub/senditai-ng     # FILL: your checkout
+    errorta_project: senditai-ng
+    fixable: true                   # default true; false = triage here pauses for a human
+    # Which evidence classes this repo OWNS. No class may be claimed by two
+    # repos: triage is deterministic precisely because exactly one repo
+    # answers, and a shared class would make every cycle ambiguous.
+    classify: [python_traceback, journal_stall, brain_log_stall, brain_pid_dead]
+    deploy:
+      # Runs AFTER the merge and BEFORE the relaunch. Argv-identity checked
+      # like every other step: byte-identical to what is written here, or it
+      # does not run. Note the trailing slashes — rsync semantics, not a typo.
+      #
+      # NO `check:` here. Slice 1's `exit0` check IS an argv to run, so the
+      # design sketch's `check: {exit0: true}` does not validate. A deploy
+      # step's action failing is already the failure signal (`deploy_failed:
+      # <name>` -> paused_awaiting_human); a check is only worth adding when
+      # you have a real one, e.g. an http probe against the deployed box.
+      - name: rsync-brain
+        local:
+          argv: [/usr/bin/rsync, -az, --delete, --exclude, .git,
+                 /Users/OPERATOR/GitHub/senditai-ng/, senditai:senditai-ng/]
+        timeout_s: 300
+  - id: reaper
+    path: /Users/OPERATOR/GitHub/osrs-reaper      # FILL: your checkout
+    errorta_project: osrs-reaper
+    # False on purpose, and not a policy choice: Gradle cannot run inside the
+    # seatbelt the acceptance gate executes in, so this project has no
+    # registrable gate at all (README, "Why osrs-reaper is fixable: false").
+    # Triage landing here pauses for a human.
+    fixable: false
+    classify: [jvm_exception, client_port_dead, client_state_stale]
+    deploy: []                      # the `rebuild-jar` launch step above redeploys it
+
+fix_loop:
+  enabled: true
+  max_fix_cycles_per_day: 3         # default 3; may only be LOWERED
+  idle_timeout_s: 1200              # default 1200; may only be LOWERED; must be > 600
+  accept_timeout_s: 1800            # default 1800; may only be LOWERED
+  triage_route: pm                  # the project's own PM route; `pm` is the only value

@@ -77,6 +77,11 @@ class RunState:
     fix_cycle: int = 0                 # how many fix cycles deep this chain is
     fix_repo_id: str | None = None     # the repo triage attributed the failure to
     fix_task_id: str | None = None     # the dev task filed for it
+    # The acceptance confirmation this run staged, while it is still PENDING.
+    # Persisted so a sidecar that dies mid-cycle can WITHDRAW it on the next
+    # boot: a pending accept_live_fix is a merge the autopilot sweep would
+    # still fire, against a run that no longer exists.
+    fix_confirmation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

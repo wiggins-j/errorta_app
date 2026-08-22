@@ -95,9 +95,12 @@ class Fake:
         self.staged: list[tuple[str, dict, str, str]] = []
         self.confirmations: dict[str, dict] = {}
         self.confirm_state = "approved"
+        self.resolved: list[tuple[str, str]] = []
+        self.accept_outcome: dict | None = None
         self.action_results: dict[str, StepResult] = {}
         self.actions: list[str] = []
         self.checks: list[str] = []
+        self.check_starts: list[float] = []
         self.check_ok = True
         self.banned: list[str] = []
         self.triage_replies: list[str] = []
@@ -116,11 +119,22 @@ class Fake:
             start_run_fn=self._start_run,
             team_log_fn=lambda store: list(self.store.log),
             stage_confirmation_fn=self._stage,
-            get_confirmation_fn=lambda cid: self.confirmations.get(cid),
+            get_confirmation_fn=lambda cid: dict(self.confirmations[cid])
+            if cid in self.confirmations else None,
+            resolve_confirmation_fn=self._resolve,
+            accept_outcome_fn=(lambda cid: self.accept_outcome)
+            if self.accept_outcome is not None else None,
             triage_fn=(lambda prompt, project_id, route: self.triage_replies.pop(0))
             if self.triage_replies else None,
             bound_channel_fn=lambda pid: "C-live",
         )
+
+    def finish_run(self, status: str | None = None) -> None:
+        """The dev run ends. A run that delivered anything moved the branch —
+        `head` is how the cycle later tells delivered work from none."""
+        self.store.state["status"] = status or self.run_end_status
+        if self.ws.changed:
+            self.ws.head_value = "h1"
 
     def _start_run(self, project_id: str, *, resume: bool, continue_: bool) -> dict:
         if self.start_raises is not None:
@@ -129,6 +143,16 @@ class Fake:
         if self.start_sets_running and self.start_result.get("status") == "started":
             self.store.state["status"] = "running"
         return dict(self.start_result)
+
+    def _resolve(self, cid: str, decision: str):
+        """The store's atomic claim, faithfully: only a PENDING record moves,
+        and the caller is told whether IT was the one that moved it."""
+        record = self.confirmations[cid]                      # KeyError if unknown
+        self.resolved.append((cid, decision))
+        if record.get("state") != "pending":
+            return dict(record), False
+        record["state"] = decision
+        return dict(record), True
 
     def _stage(self, verb: str, args: dict, thread_ts: str, *, channel_id: str = "") -> str:
         cid = f"cid{len(self.staged)}"
@@ -145,6 +169,7 @@ class Fake:
 
     def run_check(self, check, ctx, *, step_start):
         self.checks.append(check.kind)
+        self.check_starts.append(step_start)
         return self.check_ok
 
     def ban_scan(self, text: str, *, where: str) -> bool:
@@ -207,7 +232,7 @@ def _drive(cyc: FixCycle, fake: Fake, *, limit: int = 40):
         if out.kind in ("paused", "deployed"):
             break
         if fake.started and fake.store.state.get("status") == "running":
-            fake.store.state["status"] = fake.run_end_status
+            fake.finish_run()
         fake.clock.advance(31)
     assert out is not None
     out.events[:] = events
@@ -237,7 +262,7 @@ def test_the_run_goes_terminal_before_the_diff_is_ever_read() -> None:
     cyc = _cycle(fake)
     cyc.step(); cyc.step(); cyc.step()          # triage, task, run
     assert fake.ws.calls == []                  # still running: nothing read
-    fake.store.state["status"] = "stopped"
+    fake.finish_run("stopped")
     fake.clock.advance(31)
     cyc.step()                                  # watch sees terminal
     fake.clock.advance(31)
@@ -289,7 +314,8 @@ def test_a_cancelled_run_that_does_go_terminal_is_still_a_failed_cycle() -> None
     cyc.step(); cyc.step(); cyc.step()
     fake.clock.advance(1201)
     cyc.step()
-    fake.store.state["status"] = "stopped"
+    fake.finish_run("stopped")
+    fake.clock.advance(31)
     out = cyc.step()
     assert out.code == "fix_idle" and out.failed is True
 
@@ -470,7 +496,7 @@ def test_an_unanswered_confirmation_times_out_as_a_failed_cycle() -> None:
     fake.confirm_state = "pending"
     cyc = _cycle(fake, accept_timeout_s=1800)
     cyc.step(); cyc.step(); cyc.step()
-    fake.store.state["status"] = "stopped"
+    fake.finish_run("stopped")
     fake.clock.advance(31); cyc.step()           # watch -> stage
     cyc.step()                                   # stage -> await
     assert fake.staged and cyc.step().kind == "pending"   # waiting, not fired
@@ -492,11 +518,12 @@ def test_a_gate_that_closes_between_staging_and_approval_never_deploys() -> None
     fake = Fake()
     cyc = _cycle(fake)
     cyc.step(); cyc.step(); cyc.step()
-    fake.store.state["status"] = "stopped"
+    fake.finish_run("stopped")
     fake.clock.advance(31); cyc.step()          # watch -> stage
     cyc.step()                                  # stage: gate open, confirmation staged
     assert fake.staged
     fake.merge_gate = False
+    fake.clock.advance(31)
     out = cyc.step()
     assert out.code == "fix_gate_blocked" and fake.actions == []
 
@@ -505,7 +532,7 @@ def test_the_accepted_event_names_the_repo_and_the_head() -> None:
     fake = Fake()
     out = _drive(_cycle(fake), fake)
     accepted = [d for k, d in out.events if k == "fix_accepted"][0]
-    assert accepted["repo_id"] == "brain" and accepted["head"] == "h0"
+    assert accepted["repo_id"] == "brain" and accepted["head"] == "h1"
     assert accepted["delivered_to"] == "/r/senditai-ng"
 
 
@@ -600,7 +627,7 @@ def test_a_continue_start_is_not_mistaken_for_a_finished_run() -> None:
     assert fake.ws.calls == []                   # nothing read: no diff exists yet
     fake.store.state["status"] = "running"
     fake.clock.advance(31); cyc.step()
-    fake.store.state["status"] = "stopped"
+    fake.finish_run("stopped")
     fake.clock.advance(31); cyc.step()
     assert fake.ws.calls == [("master", "h0")]
 
@@ -634,3 +661,185 @@ def test_an_already_running_project_reported_by_the_engine_is_not_fought() -> No
     fake.start_result = {"status": "already_running"}
     out = _drive(_cycle(fake), fake)
     assert out.code == "fix_project_busy" and out.failed is False
+
+
+# -- a staged acceptance is never left behind ------------------------------ #
+
+def _pending_cids(fake: Fake) -> list[str]:
+    return [cid for cid, r in fake.confirmations.items() if r["state"] == "pending"]
+
+
+def test_an_unanswered_acceptance_is_withdrawn_not_left_pending() -> None:
+    """The autopilot sweep fires on PENDING records. A cycle that stopped
+    waiting must take its own button off the table, or the merge happens
+    minutes after the cycle paused."""
+    fake = Fake()
+    fake.confirm_state = "pending"
+    cyc = _cycle(fake, accept_timeout_s=1500)
+    cyc.step(); cyc.step(); cyc.step()
+    fake.finish_run("stopped")
+    fake.clock.advance(31); cyc.step()
+    cyc.step()
+    cid = fake.confirmations and list(fake.confirmations)[0]
+    assert _pending_cids(fake) == [cid]
+    fake.clock.advance(1501)
+    out = cyc.step()
+    assert out.code == "fix_declined"
+    assert _pending_cids(fake) == []
+    assert fake.resolved == [(cid, "declined")]
+    assert ("fix_accept_withdrawn", {"cid": cid, "claimed": True,
+                                     "decision": "declined"}) in out.events
+
+
+def test_a_declined_acceptance_is_not_withdrawn_twice() -> None:
+    fake = Fake()
+    fake.confirm_state = "declined"
+    out = _drive(_cycle(fake), fake)
+    assert out.code == "fix_declined"
+    withdrawn = [d for k, d in out.events if k == "fix_accept_withdrawn"]
+    assert len(withdrawn) == 1 and withdrawn[0]["claimed"] is False   # already resolved
+
+
+def test_an_approved_acceptance_is_never_withdrawn() -> None:
+    fake = Fake()
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "deployed"
+    assert fake.resolved == [] and [k for k, _ in out.events if k == "fix_accept_withdrawn"] == []
+
+
+def test_a_deploy_failure_after_approval_withdraws_nothing() -> None:
+    fake = Fake()
+    fake.action_results["/usr/bin/rsync"] = StepResult(False, "a", "b", exit_code=23)
+    out = _drive(_cycle(fake), fake)
+    assert out.code == "deploy_failed:rsync" and fake.resolved == []
+
+
+def test_the_accept_timeout_can_never_outlast_slacks_own_sweep() -> None:
+    """Slack's `sweep_timeouts` claims a pending confirmation after 30 min. A
+    profile that asks for longer gets the bound, not the ask."""
+    from errorta_liverun.fixloop import DEFAULT_ACCEPT_TIMEOUT_S
+
+    assert DEFAULT_ACCEPT_TIMEOUT_S < 30 * 60
+    cyc = _cycle(Fake(), accept_timeout_s=99_999)
+    assert cyc._accept_timeout_s == DEFAULT_ACCEPT_TIMEOUT_S
+    assert _cycle(Fake(), accept_timeout_s=60)._accept_timeout_s == 60
+
+
+# -- abort ------------------------------------------------------------------ #
+
+def test_abort_cancels_the_dev_run_and_withdraws_the_button() -> None:
+    fake = Fake()
+    fake.confirm_state = "pending"
+    cyc = _cycle(fake)
+    cyc.step(); cyc.step(); cyc.step()
+    fake.finish_run("stopped")
+    fake.clock.advance(31); cyc.step(); cyc.step()      # staged, awaiting
+    assert _pending_cids(fake)
+    fake.store.state["status"] = "running"              # a turn is still going
+    out = cyc.abort("operator_stop")
+    assert out.kind == "aborted" and out.failed is False
+    assert fake.store.state["cancel_requested"] is True
+    assert _pending_cids(fake) == []
+    detail = dict(out.events)["fix_aborted"]
+    assert detail["run_cancelled"] is True and detail["accept_withdrawn"] is True
+    assert detail["repo_id"] == "brain" and detail["at"] == "await"
+
+
+def test_abort_before_a_run_started_cancels_nothing() -> None:
+    fake = Fake()
+    cyc = _cycle(fake)
+    cyc.step()                                          # triage only
+    out = cyc.abort("operator_stop")
+    assert out.kind == "aborted"
+    assert fake.store.state.get("cancel_requested") is not True
+    assert fake.started == [] and dict(out.events)["fix_aborted"]["run_cancelled"] is False
+
+
+def test_abort_does_not_re_cancel_a_run_that_already_stopped() -> None:
+    fake = Fake()
+    cyc = _cycle(fake)
+    cyc.step(); cyc.step(); cyc.step()
+    fake.finish_run("stopped")
+    out = cyc.abort("sidecar_shutdown")
+    assert fake.store.state.get("cancel_requested") is not True
+    assert dict(out.events)["fix_aborted"]["run_cancelled"] is False
+
+
+def test_abort_is_idempotent_and_the_cycle_stays_aborted() -> None:
+    fake = Fake()
+    cyc = _cycle(fake)
+    cyc.step(); cyc.step(); cyc.step()
+    first = cyc.abort("operator_stop")
+    second = cyc.abort("operator_stop")
+    assert first.events and second.events == []
+    assert cyc.step().kind == "aborted"
+    assert len(fake.resolved) <= 1
+
+
+# -- approved is a decision; merged is a fact ------------------------------- #
+
+def test_an_approval_that_left_the_branch_untouched_is_not_a_fix() -> None:
+    fake = Fake()
+    fake.ws.head_value = "h0"           # the delivered work is gone from master
+    cyc = _cycle(fake)
+    cyc.step(); cyc.step(); cyc.step()
+    fake.store.state["status"] = "stopped"          # finish WITHOUT moving head
+    out = None
+    for _ in range(6):
+        fake.clock.advance(31)
+        out = cyc.step()
+        if out.kind == "paused":
+            break
+    assert out.code == "fix_accept_unverified" and out.failed is True
+    assert fake.actions == []
+
+
+def test_a_recorded_gate_block_is_believed_over_the_re_check() -> None:
+    fake = Fake()
+    fake.accept_outcome = {"status": "gate_blocked", "gate": {"blockers": ["tests"]}}
+    out = _drive(_cycle(fake), fake)
+    assert out.code == "fix_gate_blocked" and fake.actions == []
+
+
+def test_a_recorded_accept_names_what_verified_it() -> None:
+    fake = Fake()
+    fake.accept_outcome = {"status": "accepted", "delivered_to": "/r/senditai-ng"}
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "deployed"
+    accepted = [d for k, d in out.events if k == "fix_accepted"][0]
+    assert accepted["verified_by"] == "accepted"
+
+
+def test_an_unknown_recorded_outcome_pauses_rather_than_deploying() -> None:
+    fake = Fake()
+    fake.accept_outcome = {"status": "refused", "detail": "no worktree"}
+    out = _drive(_cycle(fake), fake)
+    assert out.code == "fix_accept_unverified" and out.detail == "refused"
+
+
+def test_a_deploy_check_is_told_when_its_step_started_not_when_it_polled() -> None:
+    """`file_mtime_newer` compares `step_start` against a file's mtime. A start
+    stamp that moved with every poll would always be newer than the file the
+    check is waiting for, so the check could never pass."""
+    fake = Fake()
+    act = P.Action("local", {"argv": ("/usr/bin/rsync", "-az", "/src/", "h:dst/"), "cwd": None})
+    prof = _profile()
+    repo = prof.repos[0]
+    prof = P.Profile(prof.name, prof.hosts, prof.tunnels, prof.launch, prof.watch,
+                     prof.evidence, prof.teardown, prof.caps, prof.ban_signals,
+                     (P.RepoDef(repo.id, repo.path, repo.errorta_project, True, repo.classify,
+                                (P.Step("rsync", act, P.Check("file_exists", "/nope"), 600),)),
+                      *prof.repos[1:]), prof.fix_loop)
+    fake.check_ok = False
+    cyc = _cycle(fake, prof=prof)
+    for _ in range(10):
+        out = cyc.step()
+        if out.kind in ("paused", "deployed"):
+            break
+        if fake.started and fake.store.state.get("status") == "running":
+            fake.finish_run()
+        fake.clock.advance(31)
+    started_at = fake.check_starts[0]
+    assert len(fake.check_starts) >= 3
+    assert set(fake.check_starts) == {started_at}          # one stamp, not one per poll
+    assert started_at <= fake.clock.t - 60                 # ... and it is the STEP's start

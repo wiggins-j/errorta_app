@@ -57,6 +57,12 @@ EVIDENCE_CLASSES = frozenset({
     "jvm_exception", "client_port_dead", "client_state_stale", "launch_step_failed",
 })
 TRIAGE_ROUTES = ("pm",)
+# A `classify:` entry may also name ONE launch step: `launch_step_failed:<name>`.
+# Which repo owns a failed launch step is a fact the operator already knows (the
+# step is theirs), so it is declared, not inferred -- without it a launch-step
+# failure has only the generic `launch_step_failed` class, which every repo would
+# have to fight over.
+LAUNCH_STEP_CLASS_PREFIX = "launch_step_failed:"
 # A deploy step may act locally, remotely, or signal a remote pid. `tunnel` /
 # `tunnel_close` / `window_shot` / `http` are launch-time concerns and are
 # rejected in a deploy list.
@@ -432,7 +438,8 @@ def _step(raw: Any, hosts, tunnels, *, where: str) -> Step:
 
 
 def _repo(raw: dict[str, Any], hosts, tunnels, *, where: str,
-          project_exists_fn: Callable[[str], bool]) -> RepoDef:
+          project_exists_fn: Callable[[str], bool],
+          launch_step_names: frozenset[str] = frozenset()) -> RepoDef:
     """One `repos:` entry. Deploy steps go through the *existing* `_step()`, so
     every Slice 1 argv rule (absolute argv0, banned tokens, no shell chars, the
     $SESSION_ID/$RUN_ID-only substitution) applies to them unchanged."""
@@ -464,6 +471,14 @@ def _repo(raw: dict[str, Any], hosts, tunnels, *, where: str,
     if not isinstance(classify_raw, list) or not all(isinstance(c, str) for c in classify_raw):
         raise ProfileError("bad_repo", f"{where}: classify must be a list of strings")
     for c in classify_raw:
+        if c.startswith(LAUNCH_STEP_CLASS_PREFIX):
+            # Resolved against THIS profile's launch steps at load time: a typo
+            # here would otherwise be a class that silently never fires, and the
+            # cycle it should have attributed would pause as ambiguous.
+            step_name = c[len(LAUNCH_STEP_CLASS_PREFIX):]
+            if step_name not in launch_step_names:
+                raise ProfileError("unknown_launch_step", f"{where}: {c!r}")
+            continue
         if c not in EVIDENCE_CLASSES:
             raise ProfileError("unknown_evidence_class", f"{where}: {c!r}")
 
@@ -619,8 +634,10 @@ def _build_profile(path: Path, doc: dict[str, Any], known_hosts_fn: Callable[[st
             if rid in seen:
                 raise ProfileError("duplicate_repo_id", rid)
             seen.add(rid)
+        launch_names = frozenset(s.name for s in launch)
         repos = tuple(_repo(r, hosts, tunnels, where=f"repos[{i}]",
-                            project_exists_fn=project_exists_fn)
+                            project_exists_fn=project_exists_fn,
+                            launch_step_names=launch_names)
                       for i, r in enumerate(repos_raw))
         claimed: dict[str, str] = {}
         for r in repos:

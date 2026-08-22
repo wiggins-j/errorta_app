@@ -312,6 +312,8 @@ def test_profile_without_repos_is_still_valid(tmp_path: Path, valid_doc: dict) -
     (lambda d: d["repos"][0].update(path="senditai-ng"), "repo_path_not_absolute"),
     (lambda d: d["repos"][0].update(errorta_project="nope"), "unknown_errorta_project"),
     (lambda d: d["repos"][0].update(classify=["not_a_class"]), "unknown_evidence_class"),
+    (lambda d: d["repos"][0].update(classify=["launch_step_failed:nope"]), "unknown_launch_step"),
+    (lambda d: d["repos"][0].update(classify=["launch_step_failed:"]), "unknown_launch_step"),
     (lambda d: d["repos"][0]["deploy"][0]["local"].update(argv=["rsync", "-a"]),
      "argv0_not_absolute"),
     (lambda d: d["repos"].append(_repos_doc(id="brain")), "duplicate_repo_id"),
@@ -389,3 +391,77 @@ def test_default_project_exists_is_false_without_a_ledger(monkeypatch) -> None:
     # the seam's production default must fail CLOSED, never raise
     monkeypatch.setattr(P, "_import_ledger_store", lambda: None)
     assert P.default_project_exists("anything") is False
+
+
+# --------------------------------------------------------------------------
+# The SHIPPED example profile. `docs/liverun/example-profile.yaml` is invalid
+# by construction as a whole (every operator-specific value is a `# FILL:`
+# line, including empty argvs the loader rejects) -- so what is asserted here
+# is the part the operator does NOT have to author: the `repos:` / `fix_loop:`
+# block ships complete except for the two checkout paths, and it must load.
+#
+# Without this, the shipped example is only as correct as the last person to
+# hand-edit it -- and an example that cannot load is worse than none, because
+# the operator debugs their own typing against a broken skeleton.
+# --------------------------------------------------------------------------
+
+DOCS = Path(__file__).resolve().parents[3] / "docs" / "liverun"
+
+
+def test_the_shipped_example_fix_loop_block_validates(tmp_path: Path,
+                                                      valid_doc: dict) -> None:
+    example = yaml.safe_load((DOCS / "example-profile.yaml").read_text())
+    doc = dict(valid_doc)
+    doc["repos"] = example["repos"]
+    doc["fix_loop"] = example["fix_loop"]
+    # The one substitution: `/Users/OPERATOR/...` is the shape of a path, not a
+    # path. Every other value in the block is shipped as-is.
+    for i, name in enumerate(("senditai-ng", "osrs-reaper")):
+        doc["repos"][i]["path"] = str(_repo_dir(tmp_path, name))
+
+    prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+
+    assert [r.id for r in prof.repos] == ["brain", "reaper"]
+    assert prof.fix_loop.enabled
+    assert prof.repo_by_id("brain").deploy[0].action.kind == "local"
+    # `reaper` has no registrable gate (G-3), and the profile's `rebuild-jar`
+    # launch step already redeploys it.
+    assert prof.repo_by_id("reaper").fixable is False
+    assert prof.repo_by_id("reaper").deploy == ()
+
+
+def test_the_shipped_example_declares_no_check_on_a_deploy_step() -> None:
+    """The design sketch wrote `check: {exit0: true}`, which does not validate:
+    Slice 1's `exit0` IS an argv to run. An example carrying it would fail the
+    load with `argv_not_list_of_str` on the operator's first attempt."""
+    example = yaml.safe_load((DOCS / "example-profile.yaml").read_text())
+
+    for repo in example["repos"]:
+        for step in repo.get("deploy") or []:
+            assert "check" not in step or isinstance(
+                (step["check"] or {}).get("exit0"), list), step
+
+
+def test_a_repo_may_claim_one_named_launch_step(tmp_path: Path, valid_doc: dict) -> None:
+    """`launch_step_failed` on its own is a class every repo would have to fight
+    over. A launch step belongs to whoever wrote it, so the operator says so."""
+    repo_dir = _repo_dir(tmp_path)
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(repo_dir),
+                               classify=["brain_log_stall", "launch_step_failed:start"])]
+    doc["fix_loop"] = {"enabled": True}
+    prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert "launch_step_failed:start" in prof.repo_by_id("brain").classify
+
+
+def test_two_repos_may_not_claim_the_same_launch_step(tmp_path: Path, valid_doc: dict) -> None:
+    repo_dir = _repo_dir(tmp_path)
+    other = _repo_dir(tmp_path, "osrs-reaper")
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(repo_dir), classify=["launch_step_failed:start"]),
+                    _repos_doc(id="reaper", path=str(other), deploy=[],
+                               classify=["launch_step_failed:start"])]
+    doc["fix_loop"] = {"enabled": True}
+    with pytest.raises(P.ProfileError) as exc:
+        _load(tmp_path, doc, project_exists_fn=lambda pid: True)
+    assert exc.value.code == "ambiguous_class_mapping"

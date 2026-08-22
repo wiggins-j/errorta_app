@@ -49,8 +49,17 @@ CANCEL_WAIT_S = 120.0
 RUN_START_GRACE_S = 120.0
 TERMINAL_RUN_STATUSES = frozenset({"stopped", "failed"})
 DEFAULT_IDLE_TIMEOUT_S = 1200.0
-DEFAULT_ACCEPT_TIMEOUT_S = 1800.0
+# STRICTLY below Slack's own confirmation sweep window
+# (`config.DEFAULT_CONFIG["timeout_minutes"] = 30` -> 1800 s, applied by
+# `outbound.sweep_timeouts`). The cycle must be the one that withdraws its own
+# staged acceptance: if the sweep claims it first the record is `timed_out`
+# rather than `declined`, and for the window in between it is still PENDING —
+# which is exactly what `sweep_autopilot` fires on. This is also an upper BOUND,
+# not just a default: a profile may lower `accept_timeout_s`, never raise it
+# past this (see `FixCycle.__init__`).
+DEFAULT_ACCEPT_TIMEOUT_S = 1500.0
 ACCEPT_VERB = "accept_live_fix"
+ACCEPT_WITHDRAW_DECISION = "declined"
 MAX_STAGED_PATHS = 50
 
 #: Every code this driver can pause a cycle with. Declared as data so the
@@ -65,6 +74,7 @@ PAUSE_CODES = (
     "fix_no_delivery",      # a clean stop that delivered nothing is not a fix
     "fix_unsafe_paths",     # a delivered path escaped the repository
     "fix_gate_blocked",     # the merge gate said no; nothing was merged
+    "fix_accept_unverified",  # approved, but the delivered work is not there
     "fix_declined",         # the confirmation was declined or never answered
     "ban_signal",           # a ban-class string surfaced during deploy
 )
@@ -189,6 +199,14 @@ def _default_get_confirmation(cid: str) -> dict[str, Any] | None:
     return slack_store.get_confirmation(cid)
 
 
+def _default_resolve_confirmation(cid: str, decision: str) -> tuple[dict[str, Any], bool]:
+    """The store's atomic claim, used here only to WITHDRAW: a staged acceptance
+    the cycle is no longer waiting on must not be left pending, or the autopilot
+    sweep will merge and deliver it minutes after the cycle paused."""
+    from errorta_slack import store as slack_store
+    return slack_store.resolve_confirmation(cid, decision)
+
+
 def _default_bound_channel(project_id: str) -> str:
     from errorta_slack import store as slack_store
     return slack_store.channel_for_project(project_id) or ""
@@ -212,6 +230,12 @@ class FixDeps:
     team_log_fn: Callable[[Any], list] | None = None
     stage_confirmation_fn: Callable[..., str] | None = None
     get_confirmation_fn: Callable[[str], Any] | None = None
+    resolve_confirmation_fn: Callable[[str, str], Any] | None = None
+    #: What the accept effect actually did, once something records it
+    #: (spec §7's open question; Task 5 writes it through `record_decision`).
+    #: ``None`` means "nobody records it yet" and the cycle falls back to
+    #: re-reading the workspace.
+    accept_outcome_fn: Callable[[str], Any] | None = None
     triage_fn: Callable[[str, str, str], str] | None = None
     bound_channel_fn: Callable[[str], str] | None = None
 
@@ -242,6 +266,14 @@ class FixDeps:
     def get_confirmation(self, cid: str) -> Any:
         return (self.get_confirmation_fn or _default_get_confirmation)(cid)
 
+    def resolve_confirmation(self, cid: str, decision: str) -> Any:
+        return (self.resolve_confirmation_fn or _default_resolve_confirmation)(cid, decision)
+
+    def accept_outcome(self, cid: str) -> Any:
+        """``None`` when no seam is configured — the caller then falls back to
+        reading the workspace itself, never to assuming it worked."""
+        return self.accept_outcome_fn(cid) if self.accept_outcome_fn is not None else None
+
     def bound_channel(self, project_id: str) -> str:
         return str((self.bound_channel_fn or _default_bound_channel)(project_id) or "")
 
@@ -253,7 +285,8 @@ class FixOutcome:
     ``kind``: ``pending`` (still working), ``accepted`` (the delivered work
     landed; the cycle is now deploying), ``paused`` (the supervisor must
     ``_pause(code)``), ``deployed`` (the cycle is complete and the relaunch may
-    happen). ``failed`` says whether the launch ledger should count a FAILED fix
+    happen), ``aborted`` (a stop arrived mid-cycle; everything the cycle started
+    has been stopped and everything it staged has been withdrawn). ``failed`` says whether the launch ledger should count a FAILED fix
     cycle — the driver decides that, because only it knows whether a pause
     consumed a cycle or merely declined to start one."""
     kind: str
@@ -285,7 +318,9 @@ class FixCycle:
         self.cycle = int(cycle)
         self._clock, self._wall = clock, wall
         self._idle_timeout_s = float(idle_timeout_s)
-        self._accept_timeout_s = float(accept_timeout_s)
+        # Never above the module bound: the cycle has to withdraw its own staged
+        # acceptance before Slack's timeout sweep can claim it.
+        self._accept_timeout_s = min(float(accept_timeout_s), DEFAULT_ACCEPT_TIMEOUT_S)
         self._ctx = ctx
         self._run_action = run_action
         self._run_check = run_check
@@ -298,7 +333,9 @@ class FixCycle:
         self._ws: Any = None
         self._head_before = ""
         self.task_id: str | None = None
-        self.cid: str = ""
+        self.cid: str = ""          # cleared the moment it is resolved either way
+        self.accept_cid: str = ""   # what was staged, for the record
+        self._run_started = False
         self._run_status = ""
         self._run_started_at = 0.0
         self._saw_running = False
@@ -309,6 +346,7 @@ class FixCycle:
         self._accept_deadline = 0.0
         self._deploy_i = 0
         self._deploy_started: float | None = None
+        self._deploy_started_wall = 0.0
         self._deploy_action_done = False
 
     # -- what the supervisor reads ---------------------------------------- #
@@ -320,6 +358,11 @@ class FixCycle:
     def phase(self) -> str:
         return {"stage": "accepting", "await": "accepting",
                 "deploy": "deploying", "done": "deploying"}.get(self._state, "fixing")
+
+    @property
+    def run_started(self) -> bool:
+        """Whether this cycle started a coding run that may still be going."""
+        return self._run_started
 
     # -- the tick ---------------------------------------------------------- #
     def step(self) -> FixOutcome:
@@ -334,12 +377,57 @@ class FixCycle:
         return FixOutcome("pending", code, self._events)
 
     def _pause(self, code: str, *, failed: bool, detail: str = "") -> FixOutcome:
+        # EVERY exit that is not an approval takes the staged acceptance with it.
+        self._withdraw_accept()
         self._state = "paused"
         return FixOutcome("paused", code, self._events, failed=failed, detail=detail)
 
     def _do_paused(self) -> FixOutcome:
         # Terminal for this object: the supervisor has already paused the run.
         return FixOutcome("paused", "", [], failed=False)
+
+    def _do_aborted(self) -> FixOutcome:
+        return FixOutcome("aborted", "fix_aborted", [], failed=False)
+
+    def _withdraw_accept(self) -> bool:
+        """Claim this cycle's own pending confirmation as ``declined``.
+
+        A staged acceptance nobody is waiting on is not inert: the autopilot
+        sweep fires on PENDING records, so leaving one behind turns a paused or
+        stopped cycle into an autonomous merge + deliver minutes later. The
+        store's resolve IS the atomic claim, so losing the race to a human tap
+        (or to the timeout sweep) is reported, never fought."""
+        cid, self.cid = self.cid, ""
+        if not cid:
+            return False
+        result = self._safe(self.deps.resolve_confirmation, cid, ACCEPT_WITHDRAW_DECISION,
+                            default=None)
+        claimed = bool(result[1]) if isinstance(result, tuple) and len(result) == 2 else False
+        self._event("fix_accept_withdrawn", {"cid": cid, "claimed": claimed,
+                                             "decision": ACCEPT_WITHDRAW_DECISION})
+        return claimed
+
+    def abort(self, reason: str) -> FixOutcome:
+        """A stop arrived mid-cycle. Leave nothing running and nothing pending.
+
+        Called by the supervisor from its stopping path, on the same thread, so
+        it can rely on `step()` not being in flight. Idempotent."""
+        self._events = []
+        if self._state == "aborted":
+            return FixOutcome("aborted", "fix_aborted", [], failed=False, detail=reason)
+        cancelled = False
+        if self._run_started and self._status() not in TERMINAL_RUN_STATUSES:
+            # The dev run outlives this supervisor unless it is told to stop —
+            # through the one cancel signal Slack's `stop_run` also uses.
+            cancelled = self._safe(
+                lambda: self._store.set_run_state(cancel_requested=True), default=None) is not None
+        withdrawn = self._withdraw_accept()
+        at_state, self._state = self._state, "aborted"
+        self._event("fix_aborted", {"reason": reason, "repo_id": self.repo_id,
+                                    "at": at_state, "run_cancelled": cancelled,
+                                    "accept_withdrawn": withdrawn,
+                                    "task_id": self.task_id or ""})
+        return FixOutcome("aborted", "fix_aborted", self._events, failed=False, detail=reason)
 
     # -- 1. triage --------------------------------------------------------- #
     def _do_triage(self) -> FixOutcome:
@@ -444,6 +532,7 @@ class FixCycle:
         if out_status != "started":
             return self._pause("fix_run_failed", failed=True, detail=out_status)
         now = self._clock()
+        self._run_started = True
         self._run_started_at = now
         self._last_progress = now
         self._next_poll = now + POLL_S
@@ -492,8 +581,11 @@ class FixCycle:
         """A cancelled run is a failed cycle whatever it does next; we wait only
         so the pause is honest about whether the run actually stopped."""
         now = self._clock()
-        status = self._status()
         waited = now - (self._cancelled_at or now)
+        if now < self._next_poll and waited <= CANCEL_WAIT_S:
+            return self._pending("fix_idle_wait")
+        self._next_poll = now + POLL_S
+        status = self._status()
         if status in TERMINAL_RUN_STATUSES or waited > CANCEL_WAIT_S:
             return self._pause("fix_idle", failed=True,
                                detail=status if status in TERMINAL_RUN_STATUSES
@@ -545,6 +637,8 @@ class FixCycle:
         except Exception as exc:  # noqa: BLE001
             _LOG.exception("liverun %s could not stage the acceptance", self.run_id)
             return self._pause("fix_declined", failed=True, detail=type(exc).__name__)
+        self.accept_cid = self.cid
+        self._next_poll = self._clock() + POLL_S
         self._event("fix_accept_staged", {"cid": self.cid, "repo_id": self.repo_id,
                                           "human_only": human_only, "n_paths": len(paths)})
         self._accept_deadline = self._clock() + self._accept_timeout_s
@@ -553,24 +647,52 @@ class FixCycle:
 
     # -- 6. wait for the decision ------------------------------------------ #
     def _do_await(self) -> FixOutcome:
+        now = self._clock()
+        timed_out = now > self._accept_deadline
+        if now < self._next_poll and not timed_out:
+            return self._pending("fix_awaiting_accept")
+        self._next_poll = now + POLL_S
         record = self._safe(self.deps.get_confirmation, self.cid, default=None)
         state = str((record or {}).get("state") or "") if isinstance(record, dict) else ""
         if state == "pending":
-            if self._clock() > self._accept_deadline:
+            if timed_out:
+                # `_pause` withdraws it: an unanswered acceptance must not be
+                # left pending for the autopilot sweep to find later.
                 return self._pause("fix_declined", failed=True, detail="timeout")
             return self._pending("fix_awaiting_accept")
         if state != "approved":
             return self._pause("fix_declined", failed=True, detail=state or "missing")
-        # Approved means the confirmation was CLAIMED and its effect fired. Ask
-        # the gate once more before deploying: `accept_live_fix` asks exactly the
-        # same question, so a gate that is closed now is a gate that merged
-        # nothing — and deploying an unmerged tree would ship a fix that is not
-        # there.
+        # Approved means the confirmation was CLAIMED and its effect fired.
+        # Nothing to withdraw any more.
+        self.cid = ""
+        return self._verify_accepted()
+
+    def _verify_accepted(self) -> FixOutcome:
+        """Approved is what the DECISION was; this asks what actually happened.
+
+        Three questions, cheapest last-resort first: what the effect recorded
+        (once anything records it — `accept_outcome_fn`), whether the merge gate
+        is still open (`accept_live_fix` asks the identical question, so a closed
+        gate now means it merged nothing), and whether the delivered work is
+        still on the branch at all. The third is a floor, not a proof of merge:
+        it catches a workspace that was reset or re-seeded between staging and
+        approval, which would make deploying meaningless.
+        """
+        outcome = self._safe(self.deps.accept_outcome, self.accept_cid, default=None)
+        status = str((outcome or {}).get("status") or "") if isinstance(outcome, dict) else ""
+        if status == "gate_blocked":
+            return self._pause("fix_gate_blocked", failed=True, detail=status)
+        if status and status != "accepted":
+            return self._pause("fix_accept_unverified", failed=True, detail=status)
         if not self._safe(self.deps.merge_gate_ok, self._store, self._ws, default=False):
             return self._pause("fix_gate_blocked", failed=True, detail="gate closed at accept")
+        head = str(self._safe(self._ws.head, default="") or "")
+        if not head or head == self._head_before:
+            return self._pause("fix_accept_unverified", failed=True,
+                               detail=f"head unchanged at {head or 'unknown'}")
         self._event("fix_accepted", {"repo_id": self.repo_id,
                                      "delivered_to": str(getattr(self._repo, "path", "")),
-                                     "head": str(self._safe(self._ws.head, default="") or "")})
+                                     "head": head, "verified_by": status or "workspace"})
         self._state = "deploy"
         return FixOutcome("accepted", "fix_accepted", self._events)
 
@@ -582,7 +704,12 @@ class FixCycle:
             return FixOutcome("deployed", f"fix_cycle_complete:{self.repo_id}", self._events)
         step = steps[self._deploy_i]
         if not self._deploy_action_done:
+            # Recorded ONCE per step, not per tick: `file_mtime_newer` compares
+            # a check's `step_start` against an mtime, so a start stamp that
+            # moved with every poll could never be older than the file it is
+            # waiting for.
             self._deploy_started = self._clock()
+            self._deploy_started_wall = self._wall()
             if step.action is not None:
                 try:
                     res = self._run_action(step.action, self._ctx, timeout_s=step.timeout_s)
@@ -606,7 +733,8 @@ class FixCycle:
             return self._next_deploy_step()
         ok = False
         try:
-            ok = bool(self._run_check(step.check, self._ctx, step_start=self._wall()))
+            ok = bool(self._run_check(step.check, self._ctx,
+                                      step_start=self._deploy_started_wall))
         except Exception:  # noqa: BLE001 - a check that throws is a check that hasn't passed
             _LOG.exception("liverun %s deploy check %s raised", self.run_id, step.name)
         if ok:
@@ -621,6 +749,7 @@ class FixCycle:
         self._deploy_i += 1
         self._deploy_action_done = False
         self._deploy_started = None
+        self._deploy_started_wall = 0.0
         if self._deploy_i >= len(tuple(getattr(self._repo, "deploy", ()) or ())):
             self._state = "done"
             return FixOutcome("deployed", f"fix_cycle_complete:{self.repo_id}", self._events)
@@ -646,17 +775,15 @@ class FixCycle:
 
 
 def _gate_label(store: Any) -> str:
-    """One human-readable line naming the gate the dev team must pass. Best
-    effort: the label is prose in the brief, never a decision."""
+    """One human-readable line naming the gate the dev team must pass. Prose for
+    the brief, never a decision — so any failure degrades to a generic name."""
     try:
         commands = store.get_test_commands() or {}
+        cmd_id = sorted(commands)[0]
+        argv = commands[cmd_id].get("argv") or []
+        return f"{cmd_id} — {' '.join(str(a) for a in argv)}".strip(" —")[:200]
     except Exception:  # noqa: BLE001
-        return "registered test command"
-    for cmd_id, spec in sorted(commands.items()):
-        argv = spec.get("argv") if isinstance(spec, dict) else None
-        argv_text = " ".join(str(a) for a in argv) if isinstance(argv, (list, tuple)) else ""
-        return f"{cmd_id} — {argv_text}"[:200] if argv_text else str(cmd_id)[:200]
-    return "runtime profile"
+        return "the project's registered acceptance gate"
 
 
 __all__ = ["FixCycle", "FixDeps", "FixOutcome", "GUARDED_PATH_PREFIXES", "PAUSE_CODES",

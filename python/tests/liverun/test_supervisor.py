@@ -606,7 +606,7 @@ def _drive_cycle(sup, clock, fake: FixFake, *, limit: int = 40) -> None:
             return
         sup._tick()
         if fake.started and fake.store.state.get("status") == "running":
-            fake.store.state["status"] = fake.run_end_status
+            fake.finish_run()
         clock.sleep(31)
 
 
@@ -820,7 +820,7 @@ def test_stop_during_deploying_interrupts_and_lands_terminal() -> None:
     for _ in range(6):                                # into `deploying`
         sup._tick()
         if fake.started and fake.store.state.get("status") == "running":
-            fake.store.state["status"] = "stopped"
+            fake.finish_run("stopped")
         clock.sleep(31)
         if sup.state.phase == "deploying":
             break
@@ -840,7 +840,7 @@ def test_the_fix_phases_are_persisted_at_every_transition() -> None:
     for _ in range(12):
         sup._tick()
         if fake.started and fake.store.state.get("status") == "running":
-            fake.store.state["status"] = "stopped"
+            fake.finish_run("stopped")
         clock.sleep(31)
         seen.add(sup.store.load(sup.state.run_id).phase)
         if sup.state.phase in _TERMINAL:
@@ -884,24 +884,29 @@ def test_fix_paused_marker_lives_beside_the_run_marker() -> None:
     assert fix_paused_marker("p").parent.parent == paused_marker("p").parent.parent
 
 
-def test_a_deploy_that_finishes_into_a_shutdown_does_not_relaunch() -> None:
+def _to_phase(sup, clock, fake: FixFake, phase: str, *, limit: int = 12) -> None:
+    for _ in range(limit):
+        if sup.state.phase == phase:
+            return
+        sup._tick()
+        if fake.started and fake.store.state.get("status") == "running":
+            fake.finish_run("stopped")
+        clock.sleep(31)
+    raise AssertionError(f"never reached {phase}: {sup.state.phase}")
+
+
+def test_a_shutdown_mid_deploy_never_relaunches() -> None:
     clock = FakeClock()
     fake = FixFake()
     calls: list[dict] = []
     sup = _fix_sup(clock, fake, relaunch=lambda **kw: (calls.append(kw), {"status": "started"})[1])
     _to_terminal(sup, clock)
-    for _ in range(8):                                # into `deploying`
-        sup._tick()
-        if fake.started and fake.store.state.get("status") == "running":
-            fake.store.state["status"] = "stopped"
-        clock.sleep(31)
-        if sup.state.phase == "deploying":
-            break
-    sup._stop.set()                                   # a shutdown lands mid-deploy
-    sup._tick_fix()                                   # the deploy step completes
-    assert calls == []
-    refused = [e for e in _events(sup) if e["kind"] == "relaunch_refused"]
-    assert len(refused) == 1 and refused[0]["detail"]["code"] == "stop_requested"
+    _to_phase(sup, clock, fake, "deploying")
+    sup.stop("sidecar_shutdown")                      # a shutdown lands mid-deploy
+    sup._tick()
+    assert calls == []                                # no client launched behind it
+    assert sup.state.phase in _TERMINAL
+    assert "/usr/bin/rsync" not in fake.actions[1:] or sup.state.reason == "sidecar_shutdown"
 
 
 def test_a_recovered_run_never_resumes_a_fix_cycle() -> None:
@@ -992,3 +997,170 @@ def test_a_fix_paused_profile_still_runs_but_files_nothing() -> None:
     assert fake.store.tasks == []
     assert [e["detail"]["code"] for e in sup.store.events(sup.state.run_id)
             if e["kind"] == "fix_skipped"] == ["fix_loop_paused"]
+
+
+# --- fix round 1: what a stopped cycle leaves behind ------------------------ #
+
+def _pending_cids(fake: FixFake) -> list[str]:
+    return [cid for cid, r in fake.confirmations.items() if r["state"] == "pending"]
+
+
+def test_stop_while_awaiting_acceptance_leaves_no_run_and_no_button() -> None:
+    """The two things a fix cycle owns that outlive this process: a coding run
+    burning tokens, and a staged acceptance the autopilot sweep would fire."""
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()                                        # stage -> await
+    assert _pending_cids(fake)
+    fake.store.state["status"] = "running"             # a dev turn is still going
+    sup.stop("operator_stop")
+    sup._tick()
+
+    assert sup.state.phase == "stopped"                 # not `failed`
+    assert sup.state.reason == "operator_stop"          # not the stall that started it
+    assert fake.store.state["cancel_requested"] is True
+    assert _pending_cids(fake) == []
+    assert fake.resolved == [(fake.staged and list(fake.confirmations)[0], "declined")]
+    aborted = [e for e in _events(sup) if e["kind"] == "fix_aborted"]
+    assert len(aborted) == 1 and aborted[0]["detail"]["run_cancelled"] is True
+    assert aborted[0]["detail"]["accept_withdrawn"] is True
+    assert sup.store.load(sup.state.run_id).fix_confirmation_id is None
+    # counted against the day cap, but NOT as the repository's failure
+    assert sup.ledger.fix_cycles_today("p", clock()) == 1
+    rows = [r for r in sup.ledger._rows() if r.get("kind") == "outcome"]
+    assert len(rows) == 1                               # the live session's, once
+
+
+def test_stop_while_the_dev_run_is_still_working_cancels_it() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    sup._tick(); sup._tick(); sup._tick()               # triage, task, run
+    assert fake.started and fake.store.state["status"] == "running"
+    sup.stop("operator_stop")
+    sup._tick()
+    assert sup.state.phase in _TERMINAL
+    assert fake.store.state["cancel_requested"] is True
+    assert fake.staged == []                            # nothing was ever staged
+
+
+def test_a_supervisor_crash_mid_cycle_still_withdraws_the_acceptance() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()                                        # awaiting
+    assert _pending_cids(fake)
+    sup._stop_reason = "supervisor_error:RuntimeError"
+    sup._do_stopping(final_phase="failed")
+    assert sup.state.phase in _TERMINAL
+    assert _pending_cids(fake) == []
+
+
+def test_the_pending_confirmation_id_is_persisted_and_then_cleared() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+    cid = list(fake.confirmations)[0]
+    assert sup.store.load(sup.state.run_id).fix_confirmation_id == cid
+    # ... and once a human answers it, the run stops claiming it is pending
+    fake.confirmations[cid]["state"] = "approved"
+    clock.sleep(31); sup._tick()
+    assert sup.store.load(sup.state.run_id).fix_confirmation_id is None
+
+
+def test_boot_recovery_withdraws_an_acceptance_the_dead_sidecar_staged() -> None:
+    """The sidecar died between staging and approval. The record is still
+    PENDING, and `sweep_autopilot` fires on pending records — for a run that no
+    longer exists."""
+    from errorta_liverun import recovery
+
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    store = RunStore()
+    sup = _fix_sup(clock, fake)
+    sup.store = store
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+    cid = list(fake.confirmations)[0]
+    assert _pending_cids(fake) == [cid]
+
+    lost = recovery.recover_on_boot(store=store, tunnels=None, remote=None,
+                                    load_profile=lambda path: _fix_profile(),
+                                    run_action=_ok,
+                                    run_check=lambda c, ctx, step_start: True,
+                                    resolve_confirmation_fn=fake._resolve)
+    assert lost == [sup.state.run_id]
+    assert _pending_cids(fake) == []
+    assert fake.resolved == [(cid, "declined")]
+    reloaded = store.load(sup.state.run_id)
+    assert reloaded.phase == "lost_on_restart" and reloaded.fix_confirmation_id is None
+    withdrawn = [e for e in store.events(sup.state.run_id) if e["kind"] == "fix_accept_withdrawn"]
+    assert len(withdrawn) == 1 and withdrawn[0]["detail"]["claimed"] is True
+    assert withdrawn[0]["detail"]["where"] == "boot_recovery"
+
+
+def test_boot_recovery_survives_a_confirmation_store_that_refuses() -> None:
+    from errorta_liverun import recovery
+
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    store = RunStore()
+    sup = _fix_sup(clock, fake)
+    sup.store = store
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+
+    def boom(cid, decision):
+        raise KeyError(cid)
+
+    assert recovery.recover_on_boot(store=store, tunnels=None, remote=None,
+                                    load_profile=lambda path: _fix_profile(),
+                                    run_action=_ok,
+                                    run_check=lambda c, ctx, step_start: True,
+                                    resolve_confirmation_fn=boom) == [sup.state.run_id]
+    assert store.load(sup.state.run_id).phase == "lost_on_restart"
+    ev = [e for e in store.events(sup.state.run_id) if e["kind"] == "fix_accept_withdrawn"][0]
+    assert ev["detail"]["claimed"] is False and ev["detail"]["error"] == "KeyError"
+
+
+def test_a_human_who_approved_first_wins_the_withdrawal_race() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "pending"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _to_phase(sup, clock, fake, "accepting")
+    sup._tick()
+    cid = list(fake.confirmations)[0]
+    fake.confirmations[cid]["state"] = "approved"       # tapped a moment earlier
+    sup.stop("operator_stop")
+    sup._tick()
+    assert fake.confirmations[cid]["state"] == "approved"   # the claim is not fought
+    aborted = [e for e in _events(sup) if e["kind"] == "fix_aborted"][0]
+    assert aborted["detail"]["accept_withdrawn"] is False
+
+
+def test_snapshot_survives_a_ledger_that_cannot_be_read() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    sup.start(blocking=False)
+    sup.ledger.fix_cycles_today = lambda *a, **k: (_ for _ in ()).throw(OSError("gone"))
+    assert sup.snapshot()["fix_cycles_today"] == -1
+    sup.stop("operator_stop"); sup._tick()

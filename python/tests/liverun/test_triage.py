@@ -164,3 +164,43 @@ def test_an_unindented_at_line_is_not_a_jvm_frame() -> None:
     res2 = classify(_bundle(evidence=[_item("e", stdout_tail="\n    at net.runelite.X(Y.java:1)")]),
                     _profile())
     assert "jvm_exception" in res2.classes
+
+
+def _profile_with_step_owner() -> Profile:
+    prof = _profile()
+    brain, reaper = prof.repos
+    return Profile(
+        name=prof.name, hosts={}, tunnels={}, launch=(), watch=(), evidence=(), teardown=(),
+        caps=DEFAULT_CAPS, ban_signals=(),
+        repos=(RepoDef(brain.id, brain.path, brain.errorta_project, True,
+                       (*brain.classify, "launch_step_failed:start-brain"), ()),
+               RepoDef(reaper.id, reaper.path, reaper.errorta_project, True,
+                       (*reaper.classify, "launch_step_failed:rebuild-jar"), ())),
+        fix_loop=prof.fix_loop)
+
+
+@pytest.mark.parametrize("reason,repo", [
+    ("launch_step_failed:rebuild-jar", "reaper"),
+    ("launch_step_failed:start-brain", "brain"),
+    ("launch_step_failed:start-brain:check_timeout", "brain"),
+])
+def test_a_named_launch_step_is_attributed_to_the_repo_that_claims_it(reason, repo) -> None:
+    res = classify(_bundle(stop_reason=reason, stalled_probe_id=None), _profile_with_step_owner())
+    assert res.repo_id == repo and res.confidence == "deterministic"
+    assert f"launch_step_failed:{reason.split(':')[1]}" in res.classes
+    assert "launch_step_failed" in res.classes
+
+
+def test_an_unclaimed_launch_step_is_still_ambiguous_not_a_guess() -> None:
+    res = classify(_bundle(stop_reason="launch_step_failed:tunnel", stalled_probe_id=None),
+                   _profile_with_step_owner())
+    assert res.repo_id is None and res.confidence == "ambiguous"
+
+
+def test_the_step_name_comes_off_the_reason_not_off_captured_text() -> None:
+    from errorta_liverun.triage import failed_launch_step
+
+    assert failed_launch_step("launch_step_failed:rebuild-jar") == "rebuild-jar"
+    assert failed_launch_step("launch_step_failed:x:check_timeout") == "x"
+    assert failed_launch_step("launch_step_failed:") is None
+    assert failed_launch_step("stall:brain-log") is None
