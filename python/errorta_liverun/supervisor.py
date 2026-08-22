@@ -744,10 +744,15 @@ class LiveRunManager:
 
     def __init__(self, *, store: RunStore | None = None, ledger: LaunchLedger | None = None,
                  tunnels: Any = None, remote: Any = None,
-                 load_profile=None) -> None:
+                 load_profile=None, fix_deps: FixDeps | None = None) -> None:
         self._store, self._ledger = store, ledger
         self._tunnels, self._remote = tunnels, remote
         self._load_profile = load_profile or _profile.load_profile
+        # Handed to every supervisor this manager starts, so a fix cycle can be
+        # driven against injected engine seams without reaching past the
+        # manager to construct a Supervisor by hand. `None` keeps every seam on
+        # its lazily-resolved production default.
+        self._fix_deps = fix_deps
         # Re-entrant: `start` holds the lock across its own `_active()` call.
         self._lock = threading.RLock()
         self._runs: dict[str, Supervisor] = {}  # profile name -> latest supervisor
@@ -804,7 +809,13 @@ class LiveRunManager:
             if project_id and any(s.state.project_id == project_id for s in active.values()):
                 return {"status": "refused", "reason": "project_has_live_run"}
             sup = Supervisor(prof, store=store, ledger=ledger, tunnels=tunnels, remote=remote,
-                             project_id=project_id, fix_of=fix_of, fix_cycle=fix_cycle)
+                             project_id=project_id, fix_of=fix_of, fix_cycle=fix_cycle,
+                             fix_deps=self._fix_deps,
+                             # THIS manager, not the module singleton: a
+                             # supervisor must relaunch into the registry that
+                             # holds it, or the relaunch lands in a manager that
+                             # will never stop or join it.
+                             relaunch_fn=self.start)
             try:
                 sup.start_background()
             except LiveRunRefused as exc:
