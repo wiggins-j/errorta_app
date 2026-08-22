@@ -531,3 +531,395 @@ def test_unreleased_tunnels_stay_owned_and_are_reported_absent() -> None:
     ev = [e["detail"] for e in sup.store.events(sup.state.run_id)
           if e["kind"] == "recovery" and e["detail"].get("tunnel") == "t1"]
     assert ev and ev[-1]["tunnel_close"] == "ABSENT"
+
+
+# --- slice 2: the fix loop ------------------------------------------------- #
+
+from errorta_liverun.state import TERMINAL_PHASES as _TERMINAL  # noqa: E402
+from errorta_liverun.supervisor import fix_paused_marker  # noqa: E402
+from tests.liverun.test_fixloop import Fake as FixFake  # noqa: E402
+
+
+def _repo(*, deploy: bool = True, fixable: bool = True) -> P.RepoDef:
+    steps = (P.Step("rsync", P.Action("local", {"argv": ("/usr/bin/rsync", "-az", "/s/", "h:d/"),
+                                                "cwd": None}), None, 300),) if deploy else ()
+    return P.RepoDef("brain", "/r/senditai-ng", "senditai-ng", fixable,
+                     ("python_traceback", "brain_log_stall", "journal_stall",
+                      "brain_pid_dead"), steps)
+
+
+def _fix_profile(*, repos=None, fix_loop=None, deploy: bool = True) -> P.Profile:
+    """A Slice 1 profile whose stall reason (`stall:brain-log`) triages
+    deterministically onto the one declared repo."""
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    launch = (P.Step("one", act, P.Check("file_exists", "/"), 5),)
+    watch = (P.WatchProbe("brain-log", 10, 30, "stop", P.Probe("http", {"url": "http://127.0.0.1:1/"})),)
+    teardown = (P.Step("logoff", None, P.Check("file_exists", "/"), 5, "logoff_verified"),)
+    evidence = (P.Step("ev", act, None, 5),)
+    return P.Profile("p", {}, {}, launch, watch, evidence, teardown, P.DEFAULT_CAPS,
+                     ("Account is banned",),
+                     (_repo(deploy=deploy),) if repos is None else repos,
+                     P.FixLoop(enabled=True) if fix_loop is None else fix_loop)
+
+
+def _fix_sup(clock, fake: FixFake, *, prof=None, ledger=None, relaunch=None, **kw) -> Supervisor:
+    sup = Supervisor(prof or _fix_profile(), store=RunStore(), ledger=ledger or LaunchLedger(),
+                     tunnels=None, remote=None, project_id="live-proj",
+                     clock=clock, sleep=clock.sleep, teardown_sleep=clock.sleep, wall=clock,
+                     run_action=kw.pop("action", None) or fake.run_action,
+                     run_check=kw.pop("check", None) or (lambda c, ctx, step_start: True),
+                     run_probe=kw.pop("probe", None) or (lambda p, ctx: False),
+                     fix_deps=fake.deps(), relaunch_fn=relaunch, **kw)
+    return sup
+
+
+def _events(sup) -> list[dict]:
+    return sup.store.events(sup.state.run_id)
+
+
+def _kinds(sup) -> list[str]:
+    return [e["kind"] for e in _events(sup)]
+
+
+def _skip_codes(sup) -> list[str]:
+    return [e["detail"]["code"] for e in _events(sup) if e["kind"] == "fix_skipped"]
+
+
+def _to_terminal(sup, clock, *, ticks: int = 10) -> None:
+    """Drive a real stall (`stall:brain-log`) — the probe is dead from the first
+    tick — through launch, watch and teardown, exactly as production does."""
+    sup.start(blocking=False)
+    sup._tick(); sup._tick()
+    for _ in range(ticks):
+        if sup.state.phase not in ("launching", "watching"):
+            break
+        clock.sleep(10)
+        sup._tick()
+
+
+def _drive_cycle(sup, clock, fake: FixFake, *, limit: int = 40) -> None:
+    """Tick the fix cycle to a terminal phase, finishing the dev run the first
+    time the supervisor watches it."""
+    for _ in range(limit):
+        if sup.state.phase in _TERMINAL:
+            return
+        sup._tick()
+        if fake.started and fake.store.state.get("status") == "running":
+            fake.store.state["status"] = fake.run_end_status
+        clock.sleep(31)
+
+
+@pytest.mark.parametrize("setup,code", [
+    (lambda s: s.stop("operator_stop"), "reason_not_fixable"),
+    (lambda s: setattr(s, "_refused", True), "brain_refused"),
+    (lambda s: s.profile.__dict__.update(fix_loop=None), "fix_loop_disabled"),
+    (lambda s: s.profile.__dict__.update(repos=()), "no_repos"),
+    (lambda s: fix_paused_marker(s.profile.name).parent.mkdir(parents=True, exist_ok=True)
+     or fix_paused_marker(s.profile.name).touch(), "fix_loop_paused"),
+])
+def test_entry_conditions_emit_exactly_one_fix_skipped(setup, code) -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    setup(sup)
+    _to_terminal(sup, clock)
+    assert _skip_codes(sup) == [code]
+    assert sup.state.phase in ("stopped", "failed")
+    assert fake.store.tasks == []
+
+
+def test_a_ban_signal_pauses_and_never_reaches_the_fix_loop() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake,
+                   action=lambda a, ctx, timeout_s: StepResult(True, "t", "t",
+                                                               stdout_tail="Account is banned"))
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "paused_awaiting_human"
+    assert _skip_codes(sup) == [] and fake.store.tasks == []
+
+
+def test_a_slice1_profile_never_mentions_the_fix_loop_at_all() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake, prof=_profile())      # no repos, no fix_loop
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "stopped" and _skip_codes(sup) == []
+
+
+@pytest.mark.parametrize("result", [
+    StepResult(False, "t", "t", exit_code=3),
+    StepResult(False, "t", "t", exit_code=1, stdout_tail="REFUSED: risk budget exhausted"),
+])
+def test_a_refusing_launch_step_is_not_a_fixable_failure(result) -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake, action=lambda a, ctx, timeout_s: result)
+    sup.start(blocking=False)
+    for _ in range(4):
+        sup._tick()
+    assert sup.state.phase == "failed"
+    assert _skip_codes(sup) == ["brain_refused"]
+
+
+def test_a_plain_launch_step_failure_is_fixable() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake, action=lambda a, ctx, timeout_s: StepResult(False, "t", "t",
+                                                                            exit_code=1))
+    sup.start(blocking=False)
+    sup._tick()
+    assert sup.state.phase == "fixing"
+    assert sup.state.reason.startswith("launch_step_failed:one")
+    assert _skip_codes(sup) == []
+
+
+def test_a_launch_failure_no_repo_claims_pauses_rather_than_guessing() -> None:
+    """`launch_step_failed` is a class like any other: a profile whose repos do
+    not declare it gets an ambiguous triage and a human, not a coin flip."""
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake, action=lambda a, ctx, timeout_s: StepResult(False, "t", "t",
+                                                                            exit_code=1))
+    sup.start(blocking=False)
+    for _ in range(4):
+        sup._tick()
+    assert sup.state.phase == "paused_awaiting_human"
+    assert sup.state.reason == "triage_ambiguous" and fake.store.tasks == []
+
+
+def test_fixable_stop_enters_fixing_after_teardown_completed() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "fixing"
+    sup._tick()                                  # the cycle's first step: triage
+    kinds = _kinds(sup)
+    assert kinds.index("teardown_step") < kinds.index("fix_triage")
+    assert kinds.index("literals") < kinds.index("fix_triage")
+
+
+def test_the_whole_cycle_files_a_task_deploys_and_relaunches() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    seen: list[tuple[str, dict]] = []
+    sup = _fix_sup(clock, fake,
+                   relaunch=lambda **kw: (seen.append((sup.state.phase, kw)),
+                                          {"status": "started", "run_id": "lr-2"})[1])
+    _to_terminal(sup, clock)
+    _drive_cycle(sup, clock, fake)
+    assert sup.state.phase == "stopped"
+    assert sup.state.reason == "fix_cycle_complete:brain"
+    assert fake.store.tasks and fake.started
+    assert "/usr/bin/rsync" in fake.actions
+    kinds = _kinds(sup)
+    for k in ("fix_triage", "fix_task", "fix_run", "fix_accept_staged", "fix_accepted",
+              "deploy_step"):
+        assert k in kinds, k
+    assert len(seen) == 1
+    phase_at_relaunch, kw = seen[0]
+    assert phase_at_relaunch in _TERMINAL            # never "deploying"
+    assert kw["fix_of"] == sup.state.run_id and kw["fix_cycle"] == 1
+    assert kw["profile_name"] == "p" and kw["project_id"] == "live-proj"
+    assert sup.ledger.fix_cycles_today("p", clock()) == 1
+    assert sup.state.fix_repo_id == "brain" and sup.state.fix_task_id == "t1"
+
+
+def test_a_cap_refused_relaunch_is_an_event_not_a_retry() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    calls: list[dict] = []
+    sup = _fix_sup(clock, fake,
+                   relaunch=lambda **kw: (calls.append(kw),
+                                          {"status": "refused", "reason": "cap_gap"})[1])
+    _to_terminal(sup, clock)
+    _drive_cycle(sup, clock, fake)
+    refused = [e for e in _events(sup) if e["kind"] == "relaunch_refused"]
+    assert len(refused) == 1 and refused[0]["detail"]["code"] == "cap_gap"
+    assert len(calls) == 1                            # refused once, never retried
+    assert sup.state.phase in _TERMINAL
+
+
+def test_a_relaunch_that_raises_is_still_only_one_event() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    def boom(**kw):
+        raise RuntimeError("manager down")
+    sup = _fix_sup(clock, fake, relaunch=boom)
+    _to_terminal(sup, clock)
+    _drive_cycle(sup, clock, fake)
+    refused = [e for e in _events(sup) if e["kind"] == "relaunch_refused"]
+    assert len(refused) == 1 and refused[0]["detail"]["code"] == "error:RuntimeError"
+
+
+def test_day_cap_pauses_on_the_fourth_cycle() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    ledger = LaunchLedger()
+    for i in range(3):
+        ledger.record_fix_cycle("p", f"r{i}", "brain", failed=False, at=clock())
+    sup = _fix_sup(clock, fake, ledger=ledger)
+    _to_terminal(sup, clock)
+    caps = [e for e in _events(sup) if e["kind"] == "fix_cycle_cap"]
+    assert len(caps) == 1 and caps[0]["detail"] == {"cycles_today": 3, "cap": 3}
+    assert sup.state.phase == "paused_awaiting_human"
+    assert paused_marker("p").exists() and fake.store.tasks == []
+    assert _skip_codes(sup) == []                     # the cap event says it, once
+
+
+def test_the_day_cap_counter_survives_a_ledger_reload() -> None:
+    clock = FakeClock()
+    ledger = LaunchLedger()
+    for i in range(3):
+        ledger.record_fix_cycle("p", f"r{i}", "brain", failed=False, at=clock())
+    assert LaunchLedger().fix_cycles_today("p", clock()) == 3
+
+
+def test_a_paused_cycle_counts_a_failed_fix_cycle() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.confirm_state = "declined"
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _drive_cycle(sup, clock, fake)
+    assert sup.state.phase == "paused_awaiting_human" and sup.state.reason == "fix_declined"
+    assert sup.ledger.fix_cycles_today("p", clock()) == 1
+    assert "/usr/bin/rsync" not in fake.actions       # nothing deployed
+
+
+def test_a_cycle_that_never_starts_costs_no_fix_cycle() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    fake.gate = False
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    _drive_cycle(sup, clock, fake)
+    assert sup.state.reason == "fix_no_gate"
+    assert sup.ledger.fix_cycles_today("p", clock()) == 0
+
+
+def test_stop_during_fixing_interrupts_and_lands_terminal() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "fixing"
+    sup.stop("operator_stop")
+    sup._tick()
+    assert sup.state.phase in _TERMINAL
+    assert "/usr/bin/rsync" not in fake.actions       # no deploy after an operator stop
+
+
+def test_stop_during_deploying_interrupts_and_lands_terminal() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    for _ in range(6):                                # into `deploying`
+        sup._tick()
+        if fake.started and fake.store.state.get("status") == "running":
+            fake.store.state["status"] = "stopped"
+        clock.sleep(31)
+        if sup.state.phase == "deploying":
+            break
+    assert sup.state.phase == "deploying"
+    sup.stop("operator_stop")
+    sup._tick()
+    assert sup.state.phase in _TERMINAL
+
+
+def test_the_fix_phases_are_persisted_at_every_transition() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    _to_terminal(sup, clock)
+    assert sup.store.load(sup.state.run_id).phase == "fixing"
+    seen = set()
+    for _ in range(12):
+        sup._tick()
+        if fake.started and fake.store.state.get("status") == "running":
+            fake.store.state["status"] = "stopped"
+        clock.sleep(31)
+        seen.add(sup.store.load(sup.state.run_id).phase)
+        if sup.state.phase in _TERMINAL:
+            break
+    assert {"fixing", "accepting", "deploying"} <= seen
+    saved = sup.store.load(sup.state.run_id)
+    assert saved.fix_repo_id == "brain" and saved.fix_task_id == "t1"
+
+
+def test_snapshot_reports_the_fix_loop_state() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake)
+    sup.start(blocking=False)
+    snap = sup.snapshot()
+    assert snap["fix_cycle"] == 0 and snap["fix_of"] is None
+    assert snap["fix_cycles_today"] == 0 and snap["fix_cap"] == 3
+    assert snap["fix_paused"] is False and snap["fix_repo_id"] is None
+    fix_paused_marker("p").parent.mkdir(parents=True, exist_ok=True)
+    fix_paused_marker("p").touch()
+    assert sup.snapshot()["fix_paused"] is True
+    sup.stop("operator_stop"); sup._tick()
+
+
+def test_a_relaunched_run_records_its_lineage() -> None:
+    prof = _fix_profile()
+    mgr = LiveRunManager(store=RunStore(), ledger=LaunchLedger(), tunnels=None, remote=None,
+                         load_profile=lambda path: prof)
+    started = mgr.start("p", project_id="live-proj", fix_of="lr-old", fix_cycle=2)
+    try:
+        assert started["status"] == "started"
+        sup = mgr._runs["p"]
+        assert sup.state.fix_of == "lr-old" and sup.state.fix_cycle == 2
+        assert sup.snapshot()["fix_of"] == "lr-old"
+    finally:
+        mgr.teardown_all()
+
+
+def test_fix_paused_marker_lives_beside_the_run_marker() -> None:
+    assert fix_paused_marker("p") != paused_marker("p")
+    assert fix_paused_marker("p").parent.parent == paused_marker("p").parent.parent
+
+
+def test_a_deploy_that_finishes_into_a_shutdown_does_not_relaunch() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    calls: list[dict] = []
+    sup = _fix_sup(clock, fake, relaunch=lambda **kw: (calls.append(kw), {"status": "started"})[1])
+    _to_terminal(sup, clock)
+    for _ in range(8):                                # into `deploying`
+        sup._tick()
+        if fake.started and fake.store.state.get("status") == "running":
+            fake.store.state["status"] = "stopped"
+        clock.sleep(31)
+        if sup.state.phase == "deploying":
+            break
+    sup._stop.set()                                   # a shutdown lands mid-deploy
+    sup._tick_fix()                                   # the deploy step completes
+    assert calls == []
+    refused = [e for e in _events(sup) if e["kind"] == "relaunch_refused"]
+    assert len(refused) == 1 and refused[0]["detail"]["code"] == "stop_requested"
+
+
+def test_a_recovered_run_never_resumes_a_fix_cycle() -> None:
+    """A run persisted mid-`fixing` is lost on restart like any other: its
+    reason becomes `sidecar_restart`, which no fix cycle may act on."""
+    from errorta_liverun import recovery
+
+    clock = FakeClock()
+    fake = FixFake()
+    store = RunStore()
+    sup = _fix_sup(clock, fake, prof=_fix_profile())
+    sup.store = store
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "fixing"
+    lost = recovery.recover_on_boot(store=store, tunnels=None, remote=None,
+                                    load_profile=lambda path: _fix_profile(),
+                                    run_action=_ok,
+                                    run_check=lambda c, ctx, step_start: True)
+    assert lost == [sup.state.run_id]
+    reloaded = store.load(sup.state.run_id)
+    assert reloaded.phase == "lost_on_restart"
+    assert fake.store.tasks == []

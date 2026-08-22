@@ -4,6 +4,10 @@ idle -> launching(step i) -> watching -> stopping(reason) -> stopped
                                                           -> paused_awaiting_human
 step failed ----------------------------------------------> failed
 
+A stop the fix loop can act on continues instead of ending, ON THE SAME THREAD:
+
+  stopping(reason) -> fixing -> accepting -> deploying -> stopped + relaunch
+
 Every exit path — stall, launch failure, operator stop, supervisor crash —
 goes through ``_do_stopping``: evidence first, then teardown, then the
 ``literals`` verdict. Nothing here retries a launch; a refusal or a failure
@@ -14,7 +18,10 @@ clock, never a tick count, so a slow or blocked tick can't fake liveness.
 
 Event kinds appended to the run's ``events.jsonl``: ``phase``, ``launch_step``,
 ``probe_warn``, ``probe_error``, ``stall``, ``evidence``, ``teardown_step``,
-``literals``, ``caps``, ``ban_signal``, ``refused``.
+``literals``, ``caps``, ``ban_signal``, ``refused`` — and, for a run that
+enters the Slice 2 fix loop, ``fix_skipped``, ``fix_triage``, ``fix_task``,
+``fix_run``, ``fix_idle_cancel``, ``fix_accept_staged``, ``fix_accepted``,
+``deploy_step``, ``fix_cycle_cap`` and ``relaunch_refused``.
 """
 from __future__ import annotations
 
@@ -30,6 +37,8 @@ from errorta_app.paths import errorta_home
 
 from . import profile as _profile
 from . import steps as _steps
+from .brief import EvidenceBundle, EvidenceItem
+from .fixloop import FixCycle, FixDeps, FixOutcome
 from .state import TERMINAL_PHASES, LaunchLedger, RunState, RunStore, now_iso
 
 _LOG = logging.getLogger("errorta.liverun")
@@ -38,6 +47,14 @@ _TICK_S = 1.0
 _WATCH_SAVE_S = 30.0
 _UNCAPPED = 1 << 30
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_FIX_PHASES = ("fixing", "accepting", "deploying")
+# Only a stall or a plain launch-step failure is a bug to fix. A refusal, a ban,
+# a cap and an operator stop are all decisions to respect (spec §3.8 rule 7).
+_FIXABLE_REASON_RE = re.compile(r"^(stall|launch_step_failed):")
+_REFUSAL_TAIL_RE = re.compile(r"^REFUSED:", re.MULTILINE)
+# Skip codes that are NOT worth an event: nothing was expected to happen, or the
+# more specific event (`fix_cycle_cap`) has already said it.
+_SILENT_SKIPS = frozenset({"not_configured", "fix_in_flight", "fix_cycle_cap"})
 
 
 class LiveRunRefused(RuntimeError):
@@ -53,6 +70,14 @@ def paused_marker(profile_name: str) -> Path:
     return errorta_home() / "liverun" / "paused" / profile_name
 
 
+def fix_paused_marker(profile_name: str) -> Path:
+    """Marker file that keeps ``profile_name`` running but refuses to enter the
+    FIX loop. Separate from ``paused_marker`` on purpose: pausing autonomous
+    merging is subtractive and R-class (`pause_fix_loop`), while re-arming it is
+    human-only — and neither should silently stop or start live runs."""
+    return errorta_home() / "liverun" / "fix-paused" / profile_name
+
+
 class Supervisor:
     """Drives one live run. `_tick` is the whole machine: `run_once_blocking`
     just calls it until the phase is terminal, and tests call it directly so
@@ -65,7 +90,9 @@ class Supervisor:
                  teardown_sleep: Callable[[float], Any] | None = None,
                  wall: Callable[[], float] = time.time,
                  run_action=_steps.run_action, run_check=_steps.run_check,
-                 run_probe=_steps.run_probe) -> None:
+                 run_probe=_steps.run_probe, fix_deps: FixDeps | None = None,
+                 relaunch_fn: Callable[..., dict] | None = None,
+                 fix_of: str | None = None, fix_cycle: int = 0) -> None:
         self.profile = profile
         self.store = store
         self.ledger = ledger
@@ -84,7 +111,15 @@ class Supervisor:
         self._stop_reason: str | None = None
         self._stopping = False
         self._closed = False
+        self._closed_once = False
         self._banned = False
+        self._refused = False        # a launch step DECLINED; not a bug to fix
+        self._fix: FixCycle | None = None
+        self._fix_deps = fix_deps or FixDeps()
+        self._relaunch_fn = relaunch_fn
+        self._relaunched = False
+        self._evidence_items: list[EvidenceItem] = []
+        self._stalled_s: float | None = None
         self._warned: set[str] = set()
         self._probe_next: dict[str, float] = {}
         self._probe_last_ok: dict[str, float] = {}
@@ -95,7 +130,8 @@ class Supervisor:
         self.state = RunState(
             run_id=rid, profile_name=profile.name, project_id=project_id, phase="idle",
             reason=None, session_id=f"lr-{rid}", step_index=0, started_at=now_iso(),
-            launched_at=None, ended_at=None, evidence_dir=str(store.evidence_dir(rid)))
+            launched_at=None, ended_at=None, evidence_dir=str(store.evidence_dir(rid)),
+            fix_of=fix_of, fix_cycle=int(fix_cycle))
         self.ctx = _steps.Ctx(
             profile=profile, run_id=rid, session_id=self.state.session_id,
             evidence_dir=Path(self.state.evidence_dir), tunnels=tunnels, remote=remote,
@@ -174,6 +210,8 @@ class Supervisor:
             self._tick_launch()
         elif ph == "watching":
             self._tick_watch()
+        elif ph in _FIX_PHASES:
+            self._tick_fix()
 
     def _tick_launch(self) -> None:
         steps = self.profile.launch
@@ -202,10 +240,17 @@ class Supervisor:
                     return
                 if not res.ok:
                     reason = f"launch_step_failed:{step.name}"
+                    tails = f"{res.stdout_tail}\n{res.stderr_tail}"
+                    if res.exit_code == 3 or _REFUSAL_TAIL_RE.search(tails):
+                        # The brain DECLINED the launch (risk budget). Not an
+                        # error to retry, and not a bug to file a task about —
+                        # a decision to respect (Slice 1 F-A, spec §3.5).
+                        self._refused = True
                     if res.exit_code == 3:
-                        # The brain refused the launch (risk budget). Not an
-                        # error to retry — a decision to respect.
                         reason += ":refused"
+                    self._evidence_items.append(EvidenceItem(
+                        id=f"launch:{step.name}", ok=False, detail=res.detail,
+                        stdout_tail=res.stdout_tail, stderr_tail=res.stderr_tail))
                     self._stop_reason = reason
                     self._do_stopping(final_phase="failed")
                     return
@@ -252,6 +297,7 @@ class Supervisor:
                     self._event("probe_warn", {"id": w.id, "stalled_s": stalled_for})
                 continue
             self._event("stall", {"id": w.id, "stalled_s": stalled_for})
+            self._stalled_s = stalled_for
             self._stop_reason = f"stall:{w.id}"
             self._do_stopping()
             return
@@ -302,6 +348,14 @@ class Supervisor:
                 _LOG.exception("liverun %s evidence step %s failed", self.state.run_id, step.name)
                 res = _steps.StepResult(False, now_iso(), now_iso(), detail=type(exc).__name__)
             self._scan_ban(f"{res.stdout_tail}\n{res.stderr_tail}", where=f"evidence:{step.name}")
+            # Keep the full (already redacted, already bounded) capture in
+            # memory: the event log records only 'what happened', while the fix
+            # brief and triage need the text itself, and re-reading it off disk
+            # would re-import untrusted bytes through a second path.
+            self._evidence_items.append(EvidenceItem(
+                id=step.name, ok=bool(res.ok), detail=res.detail,
+                stdout_tail=res.stdout_tail, stderr_tail=res.stderr_tail,
+                refs=tuple(res.evidence_refs or ())))
             self._event("evidence", {"id": step.name, "ok": res.ok, "refs": res.evidence_refs,
                                      "detail": res.detail})
 
@@ -323,14 +377,22 @@ class Supervisor:
         if self._closed:
             return
         self._closed = True
-        for stage, fn in (("kill_owned", self._kill_owned),
-                          ("save", self._save),
-                          ("outcome", lambda: self._record_outcome(final_phase, reason)),
-                          ("literals", self._emit_literals)):
+        # A fix cycle re-opens the close-out (`_enter_fix_loop` clears `_closed`)
+        # so the run can land terminal after it. The kills and the state write
+        # must run again — a deploy step can spawn a local process — but the
+        # ledger outcome and the literals verdict are statements about the LIVE
+        # session and are made exactly once.
+        stages: tuple[tuple[str, Callable[[], Any]], ...] = (
+            ("kill_owned", self._kill_owned), ("save", self._save))
+        if not self._closed_once:
+            stages += (("outcome", lambda: self._record_outcome(final_phase, reason)),
+                       ("literals", self._emit_literals))
+        for stage, fn in stages:
             try:
                 fn()
             except Exception:  # noqa: BLE001
                 _LOG.exception("liverun %s close-out stage %s failed", self.state.run_id, stage)
+        self._closed_once = True
         try:
             if self._banned:
                 self._pause("ban_signal")
@@ -338,6 +400,17 @@ class Supervisor:
                 self._event("caps", {"code": "cap_consecutive_failures"})
                 self._pause("cap_consecutive_failures")
             else:
+                # Slice 2: the ONE behavioural change to the closing sequence.
+                # Teardown has already completed here — the fix cycle never runs
+                # against a live game session.
+                skip = self._enter_fix_loop(reason)
+                if skip is None:
+                    return                  # phase is now `fixing`; the tick loop drives on
+                if skip == "fix_cycle_cap":
+                    self._pause("fix_cycle_cap")
+                    return
+                if skip not in _SILENT_SKIPS:
+                    self._event("fix_skipped", {"code": skip})
                 self._finish(final_phase, reason)
         except Exception:  # noqa: BLE001
             _LOG.exception("liverun %s could not finish", self.state.run_id)
@@ -349,6 +422,141 @@ class Supervisor:
             self.state.phase = "failed"
             self.state.reason = self.state.reason or reason
             self.state.ended_at = self.state.ended_at or now_iso()
+
+    # -- the fix loop (spec §3.5) ------------------------------------------ #
+    def _enter_fix_loop(self, reason: str) -> str | None:
+        """``None`` means the run just entered ``fixing``; any string is the code
+        that kept it out. Evaluated in the order the spec states the conditions,
+        so the FIRST true reason is the one reported."""
+        if not self.profile.repos and self.profile.fix_loop is None:
+            return "not_configured"            # a Slice 1 profile: say nothing
+        if self._fix is not None:
+            return "fix_in_flight"             # this run already had its cycle
+        if self._refused:
+            return "brain_refused"
+        if not _FIXABLE_REASON_RE.match(reason or "") or (reason or "").endswith(":refused"):
+            return "reason_not_fixable"
+        if self._stop.is_set():
+            # Someone asked for this run to END (operator stop, sidecar
+            # shutdown). Starting a fix cycle now would ignore that request and
+            # keep the thread alive doing new work.
+            return "stop_requested"
+        fix_loop = self.profile.fix_loop
+        if fix_loop is None or not fix_loop.enabled:
+            return "fix_loop_disabled"
+        if not self.profile.repos:
+            return "no_repos"
+        if paused_marker(self.profile.name).exists():
+            return "profile_paused"
+        if fix_paused_marker(self.profile.name).exists():
+            return "fix_loop_paused"
+        cap = int(fix_loop.max_fix_cycles_per_day)
+        try:
+            today = int(self.ledger.fix_cycles_today(self.profile.name, self._wall()))
+        except Exception:  # noqa: BLE001 — an unreadable ledger is a full ledger
+            _LOG.exception("liverun %s could not read the fix-cycle ledger", self.state.run_id)
+            today = cap
+        if today >= cap:
+            self._event("fix_cycle_cap", {"cycles_today": today, "cap": cap})
+            return "fix_cycle_cap"
+        self._closed = False                   # this run is not over after all
+        self.state.fix_repo_id = None
+        self._set_phase("fixing", reason)
+        self._fix = FixCycle(
+            self._fix_bundle(reason), self.profile, None, self._fix_deps,
+            run_id=self.state.run_id, project_id=self.state.project_id or "",
+            clock=self._clock, wall=self._wall,
+            idle_timeout_s=fix_loop.idle_timeout_s,
+            accept_timeout_s=fix_loop.accept_timeout_s,
+            cycle=self.state.fix_cycle + 1, ctx=self.ctx,
+            run_action=self._run_action, run_check=self._run_check,
+            ban_scan=self._scan_ban)
+        return None
+
+    def _fix_bundle(self, reason: str) -> EvidenceBundle:
+        """What the dev team is told, built from what this run already holds. The
+        probe / step id comes off the reason string the supervisor itself wrote,
+        never off captured text."""
+        probe_id = reason.split(":", 1)[1] if reason.startswith("stall:") else None
+        step_name = None
+        if reason.startswith("launch_step_failed:"):
+            step_name = reason.split(":")[1] or None
+        return EvidenceBundle(
+            run_id=self.state.run_id, profile_name=self.profile.name, stop_reason=reason,
+            stalled_probe_id=probe_id, stalled_s=self._stalled_s, launch_step_name=step_name,
+            literals=dict(self.state.literals), evidence=tuple(self._evidence_items),
+            evidence_dir=self.state.evidence_dir)
+
+    def _tick_fix(self) -> None:
+        """One step of the fix cycle, then translate its outcome. The cycle owns
+        no thread and never sleeps: it runs here, on the supervisor's own daemon
+        thread, so `stop()` still interrupts between ticks and `teardown_all`
+        still joins it."""
+        cycle = self._fix
+        if cycle is None:                       # can only happen after a restart
+            self._finish("failed", self._stop_reason or "fix_cycle_lost")
+            return
+        try:
+            out = cycle.step()
+        except Exception as exc:  # noqa: BLE001 — a driver bug pauses; it never wedges the run
+            _LOG.exception("liverun %s fix cycle raised", self.state.run_id)
+            out = FixOutcome("paused", f"fix_error:{type(exc).__name__}", [], failed=True)
+        for kind, detail in out.events:
+            self._event(kind, detail)
+        dirty = False
+        if cycle.repo_id and self.state.fix_repo_id != cycle.repo_id:
+            self.state.fix_repo_id, dirty = cycle.repo_id, True
+        if cycle.task_id and self.state.fix_task_id != cycle.task_id:
+            self.state.fix_task_id, dirty = cycle.task_id, True
+        if dirty:
+            self._save()
+        if out.kind == "paused":
+            if out.failed:
+                self._record_fix_cycle(failed=True)
+            self._pause(out.code)
+            return
+        if out.kind == "deployed":
+            self._record_fix_cycle(failed=False)
+            # The OLD run goes terminal first: until it does, the manager still
+            # holds this profile and would refuse the relaunch as already_running.
+            self._close_out(final_phase="stopped", reason=out.code)
+            self._relaunch()
+            return
+        if cycle.phase != self.state.phase:
+            self._set_phase(cycle.phase)
+
+    def _record_fix_cycle(self, *, failed: bool) -> None:
+        try:
+            self.ledger.record_fix_cycle(self.profile.name, self.state.run_id,
+                                         self.state.fix_repo_id or "", failed=failed,
+                                         at=self._wall())
+        except Exception:  # noqa: BLE001 — an unrecorded cycle must not wedge the run
+            _LOG.exception("liverun %s could not record the fix cycle", self.state.run_id)
+
+    def _relaunch(self) -> None:
+        """A NEW run id, linked by ``fix_of``, entering ``launching`` from the
+        top — so every Slice 1 cap is evaluated by the untouched `start`. A
+        refusal is an event, never a retry."""
+        if self._relaunched:
+            return
+        self._relaunched = True
+        if self._stop.is_set():
+            # The deploy finished into a shutdown / operator stop. Starting a
+            # new live run now would launch a client nobody asked for.
+            self._event("relaunch_refused", {"code": "stop_requested"})
+            return
+        fn = self._relaunch_fn or live_run_manager.start
+        try:
+            result = fn(profile_name=self.profile.name, project_id=self.state.project_id,
+                        fix_of=self.state.run_id, fix_cycle=self.state.fix_cycle + 1)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.exception("liverun %s relaunch failed", self.state.run_id)
+            self._event("relaunch_refused", {"code": f"error:{type(exc).__name__}"})
+            return
+        result = result if isinstance(result, dict) else {}
+        if str(result.get("status") or "") != "started":
+            self._event("relaunch_refused",
+                        {"code": str(result.get("reason") or result.get("status") or "unknown")})
 
     def _record_outcome(self, final_phase: str, reason: str) -> None:
         failed = (final_phase == "failed" or reason.startswith("stall")
@@ -491,7 +699,16 @@ class Supervisor:
                 # Headroom, stated as the refusal a relaunch would get right now.
                 "caps": {"would_refuse": self.ledger.check(self.profile.name, self.profile.caps,
                                                            self._wall())},
-                "literals": dict(st.literals)}
+                "literals": dict(st.literals),
+                # The fix loop, stated the same way: where this run sits in a fix
+                # chain, and how much autonomy is left before a human is needed.
+                "fix_cycle": st.fix_cycle, "fix_of": st.fix_of,
+                "fix_repo_id": st.fix_repo_id,
+                "fix_cycles_today": self.ledger.fix_cycles_today(self.profile.name, self._wall()),
+                "fix_cap": int(self.profile.fix_loop.max_fix_cycles_per_day)
+                if self.profile.fix_loop is not None
+                else int(_profile.FIX_CAP_DEFAULTS["max_fix_cycles_per_day"]),
+                "fix_paused": fix_paused_marker(self.profile.name).exists()}
 
     # -- bookkeeping ------------------------------------------------------- #
     def _set_phase(self, phase: str, reason: str | None = None) -> None:
@@ -559,7 +776,11 @@ class LiveRunManager:
             return None
         return max(active.values(), key=lambda s: s.state.started_at)
 
-    def start(self, profile_name: str, *, project_id: str | None = None) -> dict[str, Any]:
+    def start(self, profile_name: str, *, project_id: str | None = None,
+              fix_of: str | None = None, fix_cycle: int = 0) -> dict[str, Any]:
+        """``fix_of``/``fix_cycle`` only LABEL the new run; nothing else about
+        this method changes, so a relaunch after a fix is refused by exactly the
+        same caps as any other start."""
         if not _PROFILE_NAME_RE.match(profile_name or ""):
             return {"status": "refused", "reason": "bad_profile_name"}
         store, ledger, tunnels, remote = self._deps()
@@ -577,7 +798,7 @@ class LiveRunManager:
             if project_id and any(s.state.project_id == project_id for s in active.values()):
                 return {"status": "refused", "reason": "project_has_live_run"}
             sup = Supervisor(prof, store=store, ledger=ledger, tunnels=tunnels, remote=remote,
-                             project_id=project_id)
+                             project_id=project_id, fix_of=fix_of, fix_cycle=fix_cycle)
             try:
                 sup.start_background()
             except LiveRunRefused as exc:
@@ -624,4 +845,5 @@ class LiveRunManager:
 
 live_run_manager = LiveRunManager()
 
-__all__ = ["Supervisor", "LiveRunManager", "LiveRunRefused", "live_run_manager", "paused_marker"]
+__all__ = ["Supervisor", "LiveRunManager", "LiveRunRefused", "live_run_manager",
+           "paused_marker", "fix_paused_marker"]

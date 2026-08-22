@@ -58,6 +58,15 @@ class _NullLedger:
     def check(self, *a: Any, **k: Any) -> None:
         return None
 
+    def record_fix_cycle(self, *a: Any, **k: Any) -> None:  # pragma: no cover
+        raise AssertionError("recovery must not record a fix cycle")
+
+    def fix_cycles_today(self, *a: Any, **k: Any) -> int:
+        # A recovered run never enters the fix loop (its reason is
+        # `sidecar_restart`, which is not fixable), but the supervisor reads
+        # this in `snapshot`, so answering is cheaper than an AttributeError.
+        return 0
+
 
 def _signal_remote_pidfiles(sup: Supervisor, state: RunState) -> None:
     """TERM-then-KILL every remote pid this run wrote down. The profile's own
