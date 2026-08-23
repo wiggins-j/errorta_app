@@ -518,12 +518,15 @@ class Supervisor:
         probe / step id comes off the reason string the supervisor itself wrote,
         never off captured text."""
         probe_id = reason.split(":", 1)[1] if reason.startswith("stall:") else None
+        probe_kind = next((w.probe.kind for w in self.profile.watch if w.id == probe_id), None) \
+            if probe_id else None
         step_name = None
         if reason.startswith("launch_step_failed:"):
             step_name = reason.split(":")[1] or None
         return EvidenceBundle(
             run_id=self.state.run_id, profile_name=self.profile.name, stop_reason=reason,
-            stalled_probe_id=probe_id, stalled_s=self._stalled_s, launch_step_name=step_name,
+            stalled_probe_id=probe_id, stalled_probe_kind=probe_kind, stalled_s=self._stalled_s,
+            launch_step_name=step_name,
             literals=dict(self.state.literals), evidence=tuple(self._evidence_items),
             evidence_dir=self.state.evidence_dir)
 

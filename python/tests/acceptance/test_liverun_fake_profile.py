@@ -481,8 +481,13 @@ def _fix_profile(env: _Env, fake_repo: Path, *, deploy: bool = True,
     rsync = shutil.which("rsync")
     if rsync is None:                       # pragma: no cover - macOS/Linux both ship it
         pytest.skip("rsync is not installed")
+    # The "brain-log" watch probe tails the brain's log via `remote_stdout_advancing`
+    # (see the profile's `watch` list above), which triage now classifies by
+    # *kind* as `journal_stall`, not `brain_log_stall` (that class is for a
+    # `remote_file_mtime_advancing` probe). Declare both so this stall still
+    # attributes deterministically to the one repo.
     repo: dict = {"id": "brain", "path": str(fake_repo), "errorta_project": env.project_id,
-                  "classify": ["brain_log_stall", "python_traceback"]}
+                  "classify": ["brain_log_stall", "journal_stall", "python_traceback"]}
     if deploy:
         repo["deploy"] = [{"name": "rsync", "timeout_s": 60,
                            "local": {"argv": [rsync, "-a", "--delete", "--exclude", ".git",

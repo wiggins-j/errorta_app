@@ -411,10 +411,12 @@ them:
    `file_mtime_newer` never passes; use `file_exists` and trust the exit code.
 7. **Tunnels**: if an `autossh` already reverse-forwards 8081, forward only
    what it does not (8082), or `ExitOnForwardFailure` kills yours.
-8. **Probe ids are part of triage.** The fix loop's deterministic classifier
-   keys on the stall reason, which carries the probe id: name the probes
-   `client-state`, `brain-alive`, `brain-log`, `journal-seq`, `feed-live`
-   exactly, or triage reports "no evidence class matched" and pauses.
+8. **Probe kinds drive triage.** The deterministic classifier keys on the
+   stalled probe's *kind* (`remote_pid_alive` → `brain_pid_dead`,
+   `remote_file_mtime_advancing` → `brain_log_stall`,
+   `remote_stdout_advancing`/`remote_stdout_matches` → `journal_stall`,
+   `http` → `client_port_dead`, `elapsed_lt_s` → nothing); name probes however
+   you like.
 9. **Caps are real.** 2 launches/hour and a 900 s gap means a shakedown with
    profile fixes takes hours; plan relaunch times instead of loosening caps.
 10. **Seed the project's worktree before the first fix cycle.** `adopt_project`
@@ -441,7 +443,6 @@ model-limited until the items below land.
 - Fix-loop dev capacity: an opus dev for existing-repo projects, a larger
   `ERRORTA_REPO_READ_MAX_TURNS`, and a longer CLI turn timeout for repo-read
   turns; measure the fix rate on real stalls before widening anything.
-- Triage should classify by probe **kind**, not probe id (see item 8).
 - The fix cycle should seed a missing project worktree itself (item 10).
 - `window_shot` never captured RuneLite: the `pgrep` pattern does not match the
   launcher-spawned process name; fix the pattern.

@@ -54,6 +54,10 @@ class EvidenceBundle:
     profile_name: str
     stop_reason: str = ""
     stalled_probe_id: str | None = None
+    #: The stalled probe's `Probe.kind` (profile.PROBE_KINDS), resolved by the
+    #: supervisor from the profile. Triage keys on this, never on the id an
+    #: operator happened to choose; None when the bundle has no profile context.
+    stalled_probe_kind: str | None = None
     stalled_s: float | None = None
     launch_step_name: str | None = None
     literals: dict[str, bool] = field(default_factory=dict)

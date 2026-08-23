@@ -16,7 +16,7 @@ def _item(eid: str, *, ok: bool = False, stdout_tail: str = "", **kw) -> Evidenc
 
 def _bundle(**over) -> EvidenceBundle:
     kw = dict(run_id="lr-1", profile_name="osrs", stop_reason="stall:unknown",
-              stalled_probe_id="p", stalled_s=10.0, launch_step_name=None,
+              stalled_probe_id=None, stalled_s=10.0, launch_step_name=None,
               literals={}, evidence=(), evidence_dir="/tmp/e")
     kw.update(over)
     kw["evidence"] = tuple(kw["evidence"])
@@ -94,6 +94,44 @@ def test_client_state_stale_needs_two_identical_samples() -> None:
     moving = '{"gameState": "LOGIN_SCREEN"}\n{"gameState": "LOGGED_IN"}'
     res2 = classify(_bundle(evidence=[_item("client-state", stdout_tail=moving)]), _profile())
     assert "client_state_stale" not in res2.classes
+
+
+def test_kind_classifies_a_renamed_journal_probe() -> None:
+    res = classify(_bundle(stop_reason="stall:j", stalled_probe_id="j",
+                           stalled_probe_kind="remote_stdout_advancing"), _profile())
+    assert res.repo_id == "brain" and "journal_stall" in res.classes
+
+
+@pytest.mark.parametrize("kind,cls", [
+    ("remote_pid_alive", "brain_pid_dead"),
+    ("remote_file_mtime_advancing", "brain_log_stall"),
+    ("remote_stdout_advancing", "journal_stall"),
+    ("remote_stdout_matches", "journal_stall"),
+    ("http", "client_port_dead"),
+])
+def test_each_probe_kind_maps_to_one_stall_class(kind: str, cls: str) -> None:
+    res = classify(_bundle(stop_reason="stall:x", stalled_probe_id="x",
+                           stalled_probe_kind=kind), _profile())
+    assert cls in res.classes
+
+
+def test_session_clock_kind_is_not_a_defect() -> None:
+    res = classify(_bundle(stop_reason="stall:clock", stalled_probe_id="clock",
+                           stalled_probe_kind="elapsed_lt_s"), _profile())
+    assert res.classes == () and res.repo_id is None
+
+
+def test_kind_wins_over_a_misleading_legacy_id() -> None:
+    # The id says brain-log; the probe is an http probe on the client port.
+    res = classify(_bundle(stop_reason="stall:brain-log", stalled_probe_id="brain-log",
+                           stalled_probe_kind="http"), _profile())
+    assert "client_port_dead" in res.classes and "brain_log_stall" not in res.classes
+
+
+def test_legacy_ids_still_classify_when_no_kind_is_known() -> None:
+    res = classify(_bundle(stop_reason="stall:journal-seq", stalled_probe_id="journal-seq"),
+                   _profile())
+    assert "journal_stall" in res.classes
 
 
 def test_triage_prompt_fences_the_evidence_and_enumerates_the_ids() -> None:

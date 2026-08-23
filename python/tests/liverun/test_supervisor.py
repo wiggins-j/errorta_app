@@ -551,10 +551,13 @@ def _repo(*, deploy: bool = True, fixable: bool = True) -> P.RepoDef:
 
 def _fix_profile(*, repos=None, fix_loop=None, deploy: bool = True) -> P.Profile:
     """A Slice 1 profile whose stall reason (`stall:brain-log`) triages
-    deterministically onto the one declared repo."""
+    deterministically onto the one declared repo. The probe's *kind* is what
+    triage keys on now, so it must actually be a `remote_file_mtime_advancing`
+    probe -- not just a watch entry an operator happened to name "brain-log"."""
     act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
     launch = (P.Step("one", act, P.Check("file_exists", "/"), 5),)
-    watch = (P.WatchProbe("brain-log", 10, 30, "stop", P.Probe("http", {"url": "http://127.0.0.1:1/"})),)
+    watch = (P.WatchProbe("brain-log", 10, 30, "stop",
+                          P.Probe("remote_file_mtime_advancing", {"host": "h", "path": "/l"})),)
     teardown = (P.Step("logoff", None, P.Check("file_exists", "/"), 5, "logoff_verified"),)
     evidence = (P.Step("ev", act, None, 5),)
     return P.Profile("p", {}, {}, launch, watch, evidence, teardown, P.DEFAULT_CAPS,
@@ -1410,3 +1413,13 @@ def test_resume_records_a_streak_reset_so_the_next_start_is_not_refused(tmp_path
     mgr = LiveRunManager(ledger=led)
     assert mgr.resume("p") == {"status": "resumed"}
     assert led.check("p", P.DEFAULT_CAPS, 10**9) is None
+
+
+def test_fix_bundle_carries_the_stalled_probe_kind() -> None:
+    clock = FakeClock()
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True)
+    sup.start(blocking=False)
+    assert sup._fix_bundle("stall:alive").stalled_probe_kind == "http"
+    assert sup._fix_bundle("stall:clock").stalled_probe_kind == "elapsed_lt_s"
+    assert sup._fix_bundle("stall:no-such-probe").stalled_probe_kind is None
+    assert sup._fix_bundle("launch_step_failed:one").stalled_probe_kind is None

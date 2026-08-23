@@ -2,8 +2,10 @@
 
 Pure functions over an ``EvidenceBundle``. The deterministic half is the whole
 point: each evidence class is a *named signature* over supervisor-owned state
-and already-redacted captures, and when exactly one repo claims the resulting
-class set, no model is consulted at all.
+and already-redacted captures -- a stall's signature keys on the stalled
+probe's *kind* (``profile.PROBE_KINDS``), never on the id an operator happened
+to name it -- and when exactly one repo claims the resulting class set, no
+model is consulted at all.
 
 When two repos (or none) are claimed, the caller may take one PM turn over
 ``build_triage_prompt``. That prompt fences the evidence with its own nonce and
@@ -27,7 +29,16 @@ from .profile import EVIDENCE_CLASSES, LAUNCH_STEP_CLASS_PREFIX
 _TRACEBACK_RE = re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)
 _JVM_RE = re.compile(r"^(?:Exception in thread|[ \t]+at [A-Za-z0-9_.$]+\()", re.MULTILINE)
 _GAME_STATE_RE = re.compile(r'"gameState"\s*:\s*"([A-Za-z0-9_]+)"')
-_JOURNAL_REASONS = ("stall:journal-seq", "stall:feed-live")
+# Legacy ids -> kinds, used ONLY when a bundle carries no `stalled_probe_kind`
+# (profiles from before triage keyed on kind, and bundles built without one).
+_LEGACY_ID_KINDS = {
+    "brain-alive": "remote_pid_alive",
+    "brain-log": "remote_file_mtime_advancing",
+    "journal-seq": "remote_stdout_advancing",
+    "feed-live": "remote_stdout_matches",
+    "client-state": "http",
+}
+_JOURNAL_KINDS = ("remote_stdout_advancing", "remote_stdout_matches")
 
 CONFIDENCE_DETERMINISTIC = "deterministic"
 CONFIDENCE_AMBIGUOUS = "ambiguous"
@@ -50,8 +61,20 @@ def _text(bundle: EvidenceBundle) -> str:
         for part in (item.stdout_tail or "", item.stderr_tail or "") if part)
 
 
+def _stall_kind(bundle: EvidenceBundle) -> str | None:
+    """The kind of the probe that stalled: the bundle's own, else the kind the
+    legacy id implies, else None. `elapsed_lt_s` is a kind too -- and maps to
+    no class below, because a session clock running out is not a defect."""
+    if not str(bundle.stop_reason or "").startswith("stall:"):
+        return None
+    if bundle.stalled_probe_kind:
+        return str(bundle.stalled_probe_kind)
+    probe_id = bundle.stalled_probe_id or bundle.stop_reason.split(":", 1)[1]
+    return _LEGACY_ID_KINDS.get(probe_id)
+
+
 def _brain_pid_dead(bundle: EvidenceBundle) -> bool:
-    return bundle.stop_reason == "stall:brain-alive"
+    return _stall_kind(bundle) == "remote_pid_alive"
 
 
 def _client_state_stale(bundle: EvidenceBundle) -> bool:
@@ -71,14 +94,13 @@ def _client_state_stale(bundle: EvidenceBundle) -> bool:
 # triage cannot detect is a profile rule that would never fire.
 _SIGNATURES: dict[str, Callable[[EvidenceBundle], bool]] = {
     "python_traceback": lambda b: bool(_TRACEBACK_RE.search(_text(b))),
-    "brain_log_stall": lambda b: b.stop_reason == "stall:brain-log",
-    "journal_stall": lambda b: b.stop_reason in _JOURNAL_REASONS,
+    "brain_log_stall": lambda b: _stall_kind(b) == "remote_file_mtime_advancing",
+    "journal_stall": lambda b: _stall_kind(b) in _JOURNAL_KINDS,
     "brain_pid_dead": _brain_pid_dead,
     "jvm_exception": lambda b: bool(_JVM_RE.search(_text(b))),
     # The JVM side died while the brain lived -- if the brain is gone too, that
     # is the brain's story and this class must not also claim the reaper.
-    "client_port_dead": lambda b: (b.stop_reason == "stall:client-state"
-                                   and not _brain_pid_dead(b)),
+    "client_port_dead": lambda b: (_stall_kind(b) == "http" and not _brain_pid_dead(b)),
     "client_state_stale": _client_state_stale,
     "launch_step_failed": lambda b: str(b.stop_reason or "").startswith("launch_step_failed:"),
 }
