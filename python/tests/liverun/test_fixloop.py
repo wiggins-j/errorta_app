@@ -403,11 +403,85 @@ def test_no_gate_pauses_before_any_task_is_filed() -> None:
     assert fake.store.tasks == [] and fake.started == []
 
 
+def test_default_assign_dev_route_over_a_real_ledger_store(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_default_assign_dev_route` is the seam's only production implementation
+    and, before this test, had no coverage of its own -- everything else drives
+    it through the `Fake`. Exercise it directly against a real `LedgerStore`
+    (the fixture-provided `ERRORTA_HOME` already points at `tmp_path`).
+
+    Covers: (a) a single-mode dev on another route is reseated; (b) every dev
+    already single-mode on the route is a no-op; (c) a MULTI-mode dev whose
+    `gateway_route_id` already equals the route is still reseated (to single);
+    (d) a non-dev member is neither counted nor touched.
+    """
+    from errorta_council.coding import control_actions, pm_reference
+    from errorta_council.coding.ledger import LedgerStore
+
+    monkeypatch.setattr(
+        pm_reference, "list_available_routes",
+        lambda: [{"route_id": "claude_cli.opus", "family": "opus",
+                  "provider_class": "claude_cli"}])
+    calls: list[tuple] = []
+    real_assign = control_actions.assign_models_by_role
+
+    def _spy(store, role_routes, **kw):
+        calls.append((role_routes, kw))
+        return real_assign(store, role_routes, **kw)
+
+    monkeypatch.setattr(control_actions, "assign_models_by_role", _spy)
+
+    # (a) single-mode dev on another route -> action called, prior route
+    # returned, run_config now shows opus.
+    store_a = LedgerStore("unit-a")
+    store_a.set_run_config(members=[
+        {"id": "d1", "coding_role": "dev", "gateway_route_id": "claude_cli.sonnet",
+         "model_mode": "single"}])
+    prior_a = F._default_assign_dev_route("unit-a", "claude_cli.opus")
+    assert prior_a == ["claude_cli.sonnet"]
+    assert len(calls) == 1
+    member_a = store_a.get_run_config()["members"][0]
+    assert member_a["gateway_route_id"] == "claude_cli.opus"
+    assert member_a["model_mode"] == "single"
+
+    # (b) every dev already single-mode on the route -> no call, [].
+    prior_b = F._default_assign_dev_route("unit-a", "claude_cli.opus")
+    assert prior_b == [] and len(calls) == 1
+
+    # (c) multi-mode dev already on the route -> still reseated (mode -> single).
+    store_c = LedgerStore("unit-c")
+    store_c.set_run_config(members=[
+        {"id": "d1", "coding_role": "dev", "gateway_route_id": "claude_cli.opus",
+         "model_mode": "multi", "model_pool": ["claude_cli.opus", "claude_cli.sonnet"]}])
+    prior_c = F._default_assign_dev_route("unit-c", "claude_cli.opus")
+    assert prior_c == ["claude_cli.opus"]
+    assert len(calls) == 2
+    member_c = store_c.get_run_config()["members"][0]
+    assert member_c["model_mode"] == "single"
+    assert member_c["gateway_route_id"] == "claude_cli.opus"
+    assert "model_pool" not in member_c
+
+    # (d) a non-dev member on another route is not counted or changed.
+    store_d = LedgerStore("unit-d")
+    store_d.set_run_config(members=[
+        {"id": "r1", "coding_role": "reviewer", "gateway_route_id": "claude_cli.sonnet",
+         "model_mode": "single"}])
+    prior_d = F._default_assign_dev_route("unit-d", "claude_cli.opus")
+    assert prior_d == [] and len(calls) == 2
+    member_d = store_d.get_run_config()["members"][0]
+    assert member_d["gateway_route_id"] == "claude_cli.sonnet"
+
+
 def test_already_running_project_is_never_fought() -> None:
     fake = Fake()
     fake.store.state = {"status": "running"}
     out = _drive(_cycle(fake), fake)
     assert out.code == "fix_project_busy" and fake.store.tasks == []
+    # `assign_dev_route` durably rewrites `run_config` (`set_run_config`); a
+    # busy pause has nothing to restore that with, so the team must not be
+    # touched ahead of the busy check.
+    assert fake.assigned == []
+    assert "fix_team_model" not in [k for k, _ in out.events]
 
 
 def test_an_unfixable_repo_pauses_for_a_human() -> None:

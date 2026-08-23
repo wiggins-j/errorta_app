@@ -257,23 +257,39 @@ def _default_bound_channel(project_id: str) -> str:
 def _default_assign_dev_route(project_id: str, route: str) -> list[str]:
     """Seat every `dev` member of `project_id`'s team on `route`.
 
-    Compares routes BEFORE calling `assign_models_by_role`: that action raises
-    `ControlActionError("no_matching_members")` when nothing would change, and
-    "nothing to seat" (no team yet, or every dev already on `route`) is a
-    silent no-op here, not a pause.
+    Computes "needs a change" the same way `assign_models_by_role` does
+    (control_actions.py ~122-125): route mismatch OR `model_mode != "single"`
+    -- a multi-mode dev already parked on `route`'s `gateway_route_id` still
+    needs reseating to single-mode, and comparing routes alone would miss it.
+    Calling the action when nothing would change raises
+    `ControlActionError("no_matching_members")`, so this checks BEFORE
+    calling it: "nothing to seat" (no team yet, or every dev already
+    single-mode on `route`) is a silent no-op here, not a pause.
     """
     from errorta_council.coding import control_actions, pm_reference
     from errorta_council.coding.ledger import LedgerStore
     store = LedgerStore(project_id)
     members = [m for m in (store.get_run_config().get("members") or []) if isinstance(m, dict)]
-    prior = [str(m.get("gateway_route_id") or "") for m in members
-             if control_actions.coding_role_of(m) == "dev"
-             and str(m.get("gateway_route_id") or "") != route]
-    if not prior:
+    devs = [m for m in members if control_actions.coding_role_of(m) == "dev"]
+    needs_change = [
+        m for m in devs
+        if str(m.get("gateway_route_id") or "") != route
+        or str(m.get("model_mode") or "single") != "single"
+    ]
+    if not needs_change:
         return []
+    prior = [str(m.get("gateway_route_id") or "") or "unset" for m in needs_change]
     control_actions.assign_models_by_role(
         store, {"dev": route}, available=pm_reference.list_available_routes(),
-        surface="liverun")
+        # "liverun" is not a member of `pm_changes.SURFACES` (`("pop", "log")`)
+        # -- passing it raised `PmChangeError` on every call that actually
+        # changed anything, caught nowhere but `_do_triage`'s `except
+        # Exception`, so it silently paused `fix_run_failed` instead of ever
+        # seating a dev. This is an engine-initiated action during an already
+        # -running autonomous cycle, not a user-typed Slack command: "log"
+        # (Team-Log only, no Accept/Decline card) is the same surface a PM's
+        # own autonomous turn uses, so that's what fits here.
+        surface="log")
     return prior
 
 
@@ -545,6 +561,14 @@ class FixCycle:
             # cannot be merged, and filing it would spend a dev run to prove it.
             return self._pause("fix_no_gate", failed=False,
                                detail=f"project `{project_id}` has no registrable gate")
+        status = self._status()
+        if status == "running":
+            return self._pause("fix_project_busy", failed=False, detail=status)
+        # Seating the dev is a DURABLE team mutation (`set_run_config`), so it
+        # must not happen ahead of a check that can still bounce the cycle
+        # with nothing to restore -- `fix_project_busy` above included. Past
+        # this point the cycle is committed to running (or pausing for a
+        # reason that has nothing to undo).
         route = str(getattr(getattr(self.profile, "fix_loop", None), "dev_route", "") or "")
         if route:
             try:
@@ -556,9 +580,6 @@ class FixCycle:
             if prior:
                 self._event("fix_team_model", {"project_id": project_id, "role": "dev",
                                                "from": prior, "to": route})
-        status = self._status()
-        if status == "running":
-            return self._pause("fix_project_busy", failed=False, detail=status)
         try:
             self._ws = self.deps.workspace(project_id)
             self._head_before = str(self._ws.head() or "")
