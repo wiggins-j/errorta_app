@@ -73,9 +73,21 @@ _SKIPPED_DIR_NAMES = frozenset({
 # source directories -- live 2026-08-23 osrs-reaper has a Java package named
 # `microfighter/target/`, and a blanket skip dropped its sources, so the first
 # trusted gate failed on `cannot find symbol` rather than on the build.
+# NOTE: `repo_reader.py` prunes with `is_skipped_dir` too -- keep the rule here.
 _OUTPUT_DIRS_BESIDE_BUILD_SCRIPT = frozenset({"build", "target"})
 _BUILD_SCRIPT_NAMES = ("build.gradle", "build.gradle.kts", "settings.gradle",
                        "settings.gradle.kts", "pom.xml")
+
+
+def is_skipped_dir(parent: Path, name: str) -> bool:
+    """Is ``parent/name`` a directory the engine never reads or copies? The
+    always-skipped set, plus ``build``/``target`` when a build script sits
+    beside them (a module's outputs). Shared by the workspace copy and the
+    orientation repo reader so the two can never disagree."""
+    if name in _SKIPPED_DIR_NAMES:
+        return True
+    return (name in _OUTPUT_DIRS_BESIDE_BUILD_SCRIPT
+            and any((parent / b).is_file() for b in _BUILD_SCRIPT_NAMES))
 
 _SKIPPED_FILE_NAMES = frozenset({
     ".coverage",
@@ -231,10 +243,7 @@ def _copy_ignore(src: str, names: list[str]) -> set[str]:
         lowered = name.lower()
         if path.is_symlink():
             ignored.add(name)
-        elif path.is_dir() and name in _SKIPPED_DIR_NAMES:
-            ignored.add(name)
-        elif (path.is_dir() and name in _OUTPUT_DIRS_BESIDE_BUILD_SCRIPT
-              and any((root / b).is_file() for b in _BUILD_SCRIPT_NAMES)):
+        elif path.is_dir() and is_skipped_dir(root, name):
             ignored.add(name)
         elif name in _SKIPPED_FILE_NAMES:
             ignored.add(name)

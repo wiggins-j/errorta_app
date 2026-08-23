@@ -206,3 +206,20 @@ def test_build_and_target_are_skipped_only_beside_a_build_script(
     assert not (root / "mvn" / "target").exists()
     assert (root / "src" / "main" / "java" / "app" / "target" / "TargetSelector.java").exists()
     assert (root / "tools" / "build" / "helper.py").exists()
+
+
+def test_repo_reader_prunes_with_the_same_rule(tmp_path: Path) -> None:
+    """`repo_reader` shares `is_skipped_dir`: a module's build/ is pruned from the
+    orientation scan, a source package named target/ is not."""
+    from errorta_tools.runner.repo_reader import _iter_files
+    repo = tmp_path / "r"
+    (repo / "mod").mkdir(parents=True)
+    (repo / "mod" / "build.gradle.kts").write_text("plugins { java }\n")
+    (repo / "mod" / "build").mkdir()
+    (repo / "mod" / "build" / "Out.class").write_text("x\n")
+    pkg = repo / "src" / "target"
+    pkg.mkdir(parents=True)
+    (pkg / "T.java").write_text("class T {}\n")
+    rels = sorted(str(rel) for rel, _abs in _iter_files(repo))
+    assert "src/target/T.java" in rels
+    assert not any(r.startswith("mod/build/") for r in rels)

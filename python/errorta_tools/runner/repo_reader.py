@@ -21,8 +21,8 @@ from pathlib import Path
 from .apply_workspace import (
     _ENV_EXAMPLE_NAMES,
     _SECRET_SUFFIXES,
-    _SKIPPED_DIR_NAMES,
     _SKIPPED_FILE_NAMES,
+    is_skipped_dir,
 )
 
 # README + common dependency/manifest files, read first (highest signal for "what
@@ -80,7 +80,7 @@ def _iter_files(root: Path):
         # prune skipped + symlinked dirs in place so os.walk doesn't descend
         dirnames[:] = sorted(
             d for d in dirnames
-            if d not in _SKIPPED_DIR_NAMES
+            if not is_skipped_dir(Path(dirpath), d)
             and not os.path.islink(os.path.join(dirpath, d))
         )
         for name in sorted(filenames):
