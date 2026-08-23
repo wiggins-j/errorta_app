@@ -69,13 +69,17 @@ LAUNCH_STEP_CLASS_PREFIX = "launch_step_failed:"
 DEPLOY_ACTION_KINDS = {"local", "remote", "remote_signal"}
 FIX_CAP_DEFAULTS = {"max_fix_cycles_per_day": 3, "idle_timeout_s": 2400,
                     "accept_timeout_s": 1800}
-# A single repository-read dev turn may run for ERRORTA_REPO_READ_TIMEOUT_S
-# (async_claude_cli.py, default 1500 s); the idle detector must outlast it.
-MIN_IDLE_TIMEOUT_S = 1500
+# One dev turn can be TWO subprocess attempts back to back: the retrieval
+# attempt at ERRORTA_REPO_READ_TIMEOUT_S (async_claude_cli.py, default 1500 s),
+# and — when that returns empty — the plain fallback at the request's own
+# timeout (errorta_council/reasoning_budget.py default_timeout_seconds, 600 s).
+# The idle detector must outlast both attempts combined (1500 + 600), or a
+# turn that falls through to the fallback gets killed as "idle" mid-turn.
+MIN_IDLE_TIMEOUT_S = 2100
 REPO_KEYS = {"id", "path", "errorta_project", "fixable", "classify", "deploy"}
 FIX_LOOP_KEYS = {"enabled", "triage_route", "dev_route"} | set(FIX_CAP_DEFAULTS)
 _REPO_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-_DEV_ROUTE_RE = re.compile(r"^[a-z_]+\.[a-z0-9][a-z0-9_.-]*$")
+_DEV_ROUTE_RE = re.compile(r"^[a-z_]+\.[a-z0-9][a-z0-9_.-]*")
 
 
 class ProfileError(ValueError):
@@ -530,7 +534,7 @@ def _fix_loop(raw: Any, repos: tuple[RepoDef, ...]) -> FixLoop:
         raise ProfileError("bad_triage_route", repr(route))
 
     dev_route = raw.get("dev_route", "claude_cli.opus")
-    if not isinstance(dev_route, str) or not _DEV_ROUTE_RE.match(dev_route):
+    if not isinstance(dev_route, str) or not _DEV_ROUTE_RE.fullmatch(dev_route):
         raise ProfileError("bad_dev_route", repr(dev_route)[:80])
 
     if enabled and not any(r.fixable for r in repos):

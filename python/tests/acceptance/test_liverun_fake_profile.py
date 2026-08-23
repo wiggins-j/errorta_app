@@ -242,7 +242,7 @@ def env(tmp_path: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch):
     _write_profile()
 
     # Timing-only overrides, applied AFTER the real validator has run. The
-    # validator's floors (idle_timeout_s > 1500) are unit-tested where they
+    # validator's floors (idle_timeout_s > 2100) are unit-tested where they
     # belong; an acceptance test cannot wait forty minutes to watch an idle dev
     # run get cancelled. The logic under test is untouched -- only the clock.
     timing: dict[str, float] = {}
@@ -494,7 +494,7 @@ def _fix_profile(env: _Env, fake_repo: Path, *, deploy: bool = True,
                                               f"{fake_repo}/", f"{deploy_dest}/"]}}]
     env.doc["repos"] = [repo]
     env.doc["fix_loop"] = {"enabled": True, "max_fix_cycles_per_day": max_cycles,
-                           "idle_timeout_s": 1501, "accept_timeout_s": 1800}
+                           "idle_timeout_s": 2101, "accept_timeout_s": 1800}
     env.doc["launch"][1]["remote"]["argv"][3] = "0.5"        # the brain's active window
     env.write_profile()
     env.deploy_dest = deploy_dest

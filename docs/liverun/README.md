@@ -294,10 +294,13 @@ person clears — the loop never retries its way past one:
 
 Caps: `max_fix_cycles_per_day` (default 3) is arithmetic over the ledger, not
 a counter in memory, and a cycle is counted whether it merged or paused.
-`idle_timeout_s` (default 2400, floor 1500) must outlast the repository-read
-dev turn: a single Claude CLI retrieval turn may run for up to
-`ERRORTA_REPO_READ_TIMEOUT_S` (1500 s by default), so an idle detector at or
-below that floor would cancel a run every time one turn thought hard. The
+`idle_timeout_s` (default 2400, floor 2100) must outlast the repository-read
+dev turn, which can be TWO subprocess attempts back to back: the retrieval
+attempt at `ERRORTA_REPO_READ_TIMEOUT_S` (1500 s by default) plus, when it
+returns empty, the plain fallback at the request's own timeout (600 s by
+default), so an idle detector at or below that 1500 + 600 = 2100 s floor
+would cancel a run every time one turn fell through to the fallback. The
+valid operator range is 2101–2400 (above 2400 fails `cap_raised`). The
 relaunch is evaluated by the *untouched* Slice 1 launch caps — a fix that
 lands inside the minimum launch gap posts `relaunch_refused` and stops there.
 
@@ -363,9 +366,9 @@ workspace is actually about to deliver is the only answer worth acting on.
    `list_live_profiles` rather than minutes after a stall.
 
 > **Existing profiles**: `idle_timeout_s` now defaults to 2400 with a floor of
-> 1500 (up from 1200 / 600) — see "Caps" above. An operator profile that still
-> declares `idle_timeout_s: 1200` must be edited to `2400` (or any value above
-> 1500), or it will fail to load with `idle_below_turn_timeout`.
+> 2100 (up from 1200 / 600) — see "Caps" above. An operator profile that still
+> declares `idle_timeout_s: 1200` must be edited to `2400` (or any value in
+> the 2101–2400 range), or it will fail to load with `idle_below_turn_timeout`.
 
 ### Why `osrs-reaper` ships as `fixable: false`
 

@@ -302,7 +302,6 @@ def _default_seed_workspace(project_id: str) -> bool:
     store = LedgerStore(project_id)
     proj = store.get_project()
     ws = CodingWorkspace(project_id, store)
-    ws.set_target(proj.target)
     if ws.exists():
         return False          # never re-stamp seed_head on a worked tree
     ws.setup(target=proj.target, repo_path=proj.repo_path)

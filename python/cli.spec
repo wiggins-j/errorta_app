@@ -237,6 +237,14 @@ a = Analysis(
         # pulled in transitively by errorta_hwdetect, but declare it explicitly so
         # the sole-owner guard can never silently degrade in the frozen binary.
         "psutil",
+        # live-run window_shot: errorta_tools.runner.preview (quartz_available,
+        # _macos_window_id_for_pids) imports Quartz inside function bodies, so
+        # PyInstaller's static scanner misses it. darwin-only dependency
+        # (pyobjc-framework-Quartz); PyInstaller just warns on other platforms
+        # where it can't be resolved. Declare it or the frozen `__serve__`
+        # sidecar can't resolve a window id and every live-run screenshot comes
+        # back empty.
+        "Quartz",
     ],
     hookspath=[],
     hooksconfig={},

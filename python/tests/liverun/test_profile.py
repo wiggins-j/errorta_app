@@ -528,7 +528,7 @@ def test_fix_loop_dev_route_is_declarable_and_validated(tmp_path: Path, valid_do
     d["fix_loop"]["dev_route"] = "claude_cli.sonnet"
     assert _load(tmp_path, d, project_exists_fn=lambda pid: True).fix_loop.dev_route == \
         "claude_cli.sonnet"
-    for bad in ("", "opus", "claude_cli.", "Claude_CLI.opus", "a.b;c", 7):
+    for bad in ("", "opus", "claude_cli.", "Claude_CLI.opus", "a.b;c", "claude_cli.opus\n", 7):
         d["fix_loop"]["dev_route"] = bad
         with pytest.raises(P.ProfileError) as ei:
             _load(tmp_path, d, project_exists_fn=lambda pid: True)
@@ -537,9 +537,9 @@ def test_fix_loop_dev_route_is_declarable_and_validated(tmp_path: Path, valid_do
 
 def test_fix_loop_idle_floor_follows_the_repo_read_turn(tmp_path: Path, valid_doc: dict) -> None:
     assert P.FIX_CAP_DEFAULTS["idle_timeout_s"] == 2400
-    assert P.MIN_IDLE_TIMEOUT_S == 1500
+    assert P.MIN_IDLE_TIMEOUT_S == 2100
     d = _fix_profile_dict(tmp_path, valid_doc)
-    d["fix_loop"]["idle_timeout_s"] = 1500
+    d["fix_loop"]["idle_timeout_s"] = 2100
     with pytest.raises(P.ProfileError) as ei:
         _load(tmp_path, d, project_exists_fn=lambda pid: True)
     assert ei.value.code == "idle_below_turn_timeout"
