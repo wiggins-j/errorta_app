@@ -133,7 +133,7 @@ class Fake:
         self.retired: list = []
         self.retire_raises: Exception | None = None
         self.baseline_result: SimpleNamespace | None = SimpleNamespace(
-            passed=True, sandbox="seatbelt")
+            passed=True, sandbox="seatbelt", results=[])
         self.baselined: list = []
         self.baseline_raises: Exception | None = None
 
@@ -1482,11 +1482,15 @@ def test_baseline_gate_runs_after_retire_and_before_the_task() -> None:
 
 
 def test_red_baseline_pauses_before_any_task() -> None:
-    """A gate that is already red on the clean tree cannot tell a good fix from
-    a bad one -- filing a task would only chase the red. This must pause before
-    ANY task, focus or run is created."""
+    """A gate that GENUINELY ran and failed (a real assertion, `status ==
+    "failed"` -- errorta_tools/runner/local.py:155 maps a non-zero exit to
+    exactly that, never `"completed"`) cannot tell a good fix from a bad one --
+    filing a task would only chase the red. This must pause before ANY task,
+    focus or run is created."""
     fake = Fake()
-    fake.baseline_result = SimpleNamespace(passed=False, sandbox="seatbelt")
+    fake.baseline_result = SimpleNamespace(
+        passed=False, sandbox="seatbelt",
+        results=[SimpleNamespace(status="failed", passed=False, reason="exit 1")])
     cyc = _cycle(fake)
     cyc.step()                                  # triage
     out = cyc.step()                            # task
@@ -1497,6 +1501,73 @@ def test_red_baseline_pauses_before_any_task() -> None:
     assert fake.store.tasks == []
     assert not getattr(fake.store, "focuses", [])
     assert not fake.started
+
+
+def test_blocked_baseline_is_unverifiable_not_red() -> None:
+    """A sandboxed tier that refuses to even LAUNCH a gradle/maven wrapper
+    (`testing.py`'s `_blocked_result`, `status == "blocked"`) never evaluated
+    the code at all -- that is environmental, not a defect any fix could turn
+    green. It must not pause the cycle before a task is even filed (mirrors
+    `gate_state.latest_acceptance_result`'s `ran` split -- see also
+    `_baseline_verdict`)."""
+    fake = Fake()
+    fake.baseline_result = SimpleNamespace(
+        passed=False, sandbox="seatbelt",
+        results=[SimpleNamespace(
+            status="blocked", passed=False,
+            reason="blocked: sandboxed tier cannot run gradle/maven; declare a trusted gate")])
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    kinds = [k for k, _ in out.events]
+    detail = dict(out.events)["fix_gate_baseline"]
+    assert detail == {
+        "head": fake.ws.head_value, "passed": False, "sandbox": "seatbelt",
+        "unverifiable": "blocked: sandboxed tier cannot run gradle/maven; declare a trusted gate"}
+    assert "fix_task" in kinds
+    assert fake.store.tasks
+
+
+def test_timed_out_only_baseline_is_unverifiable_not_red() -> None:
+    """A command that timed out (`status == "timed_out"`) never reached a
+    verdict either -- same `unverifiable`, not `red`, treatment as `blocked`."""
+    fake = Fake()
+    fake.baseline_result = SimpleNamespace(
+        passed=False, sandbox="seatbelt",
+        results=[SimpleNamespace(status="timed_out", passed=False,
+                                 reason="timed out after 120s")])
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    kinds = [k for k, _ in out.events]
+    detail = dict(out.events)["fix_gate_baseline"]
+    assert detail["unverifiable"] == "timed out after 120s"
+    assert detail["passed"] is False
+    assert "fix_task" in kinds
+    assert fake.store.tasks
+
+
+def test_baseline_verdict_mirrors_the_ran_passed_split() -> None:
+    """Direct pin of `_baseline_verdict` against every status the real runner
+    ever produces, independent of the FixCycle plumbing above."""
+    _bv = F._baseline_verdict
+
+    def _s(*results):
+        return SimpleNamespace(results=list(results))
+
+    def _r(status, passed, reason=""):
+        return SimpleNamespace(status=status, passed=passed, reason=reason)
+
+    # A genuine failure (ran, did not pass) is red, no matter what else is
+    # mixed in alongside it.
+    assert _bv(_s(_r("failed", False, "exit 1"))) == (True, "")
+    assert _bv(_s(_r("blocked", False, "blocked: x"), _r("failed", False, "exit 1"))) == (True, "")
+    # Launch failures alone are unverifiable, never red.
+    assert _bv(_s(_r("blocked", False, "blocked: x"))) == (False, "blocked: x")
+    assert _bv(_s(_r("timed_out", False, "timed out after 5s"))) == (
+        False, "timed out after 5s")
+    # No results at all (an empty session) has nothing to be red about.
+    assert _bv(_s()) == (False, "")
 
 
 def test_no_gate_session_is_not_a_verdict() -> None:

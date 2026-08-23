@@ -247,7 +247,9 @@ failed — never a ban signal, a cap, an operator stop, or the brain refusing)
 goes: evidence → teardown → **triage** → a dev task → a dev run → the **merge
 gate** → a staged acceptance → **deploy** → a **relaunch** as a new run id
 linked by `fix_of`. It runs on the supervisor's own thread; `stop_live_run`
-still interrupts it between steps.
+still interrupts it between steps, though a baseline or trusted gate command
+already in flight is bounded by its own timeout (up to 1800 s) before the
+interrupt lands.
 
 Before filing its Focus, a cycle archives any previous liverun Focus and
 drops/abandons the tasks and PRs created under it, so a cycle never inherits
@@ -257,7 +259,13 @@ Before filing its task, the cycle also runs the gate once on the clean tree,
 so the newest gate record is a truthful baseline on the current head — a stale
 red left over from an abandoned branch once misled the dev and tripped
 `gate_not_improving` with no gate ever run that cycle (live 2026-08-23, run
-5847ca); a red baseline pauses `fix_run_failed` (`baseline_gate_red`).
+5847ca); a GENUINELY red baseline (a real, evaluated `completed`/`failed`
+result — mirroring `gate_state.latest_acceptance_result`'s `ran` predicate)
+pauses `fix_run_failed` (`baseline_gate_red`). A baseline that only could not
+*launch* (`blocked`/`timed_out` — a sandboxed tier refusing a gradle/maven
+wrapper, a timeout) is unverifiable rather than red: it is reported on the
+`fix_gate_baseline` event and the cycle still files its task, since no fix
+would ever turn an environmental failure green.
 
 **Triage** is deterministic first. Each evidence class is a named signature
 over supervisor-owned state (the stop reason, a `/state` capture, a traceback
@@ -292,7 +300,7 @@ person clears — the loop never retries its way past one:
 | `fix_no_gate` | the project has no registrable acceptance gate |
 | `fix_project_not_existing` | the project's target is not `existing` — there is no repository to merge into |
 | `fix_project_busy` | something else owns that project's run |
-| `fix_run_failed` | the dev run could not start, or failed empty |
+| `fix_run_failed` | the dev run could not start, or failed empty — including a genuinely red gate baseline on the clean tree before any task was filed (`baseline_gate_red`) |
 | `fix_idle` | the dev run went quiet and was cancelled |
 | `fix_no_delivery` | a clean stop that delivered nothing is not a fix |
 | `fix_unsafe_paths` | a delivered path left the repository |

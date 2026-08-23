@@ -417,6 +417,39 @@ def _default_baseline_gate(store: Any, workspace: Any) -> Any:
                      task_id="liverun-baseline", should_cancel=None)
 
 
+# A result's `status` distinguishes a GENUINE verdict from an ENVIRONMENTAL one
+# that never actually evaluated the code: `completed` (exit 0) and `failed`
+# (non-zero exit -- errorta_tools/runner/local.py:155 maps a real assertion
+# failure to `status="failed"`, never `"completed"`) both mean the command
+# ran to a real verdict; `blocked` (sandbox/tooling could not launch it -- e.g.
+# a gradle/maven wrapper the sandboxed tier refuses, testing.py's
+# `_blocked_result`) and `timed_out` never evaluated the code at all. Mirrors
+# `gate_state.latest_acceptance_result`'s `ran` predicate (gate_state.py:147-186)
+# exactly: a launch failure is environmental and unfixable by any code merge,
+# so treating it as a fixable red would wedge the loop forever (the SPEC-34
+# cardinal sin) -- it must be `unverifiable`, not `baseline_gate_red`.
+_RAN_STATUSES = ("completed", "failed")
+
+
+def _baseline_verdict(session: Any) -> tuple[bool, str]:
+    """``(genuinely_red, unverifiable_reason)`` for a failed baseline session.
+
+    ``genuinely_red`` is True iff some result that actually RAN (status
+    ``completed`` or ``failed``) did not pass -- a real code defect a fix could
+    address. Otherwise, if the session still failed, every non-passing result
+    was ``blocked`` or ``timed_out``: environmental, not a defect, so
+    ``unverifiable_reason`` names the first one's ``.reason`` (falling back to
+    its ``.status``) for the event -- and the caller must NOT pause on it."""
+    results = list(getattr(session, "results", None) or [])
+    if any(getattr(r, "status", "") in _RAN_STATUSES and not getattr(r, "passed", False)
+           for r in results):
+        return True, ""
+    for r in results:
+        if not getattr(r, "passed", False):
+            return False, str(getattr(r, "reason", "") or getattr(r, "status", "") or "")
+    return False, ""
+
+
 @dataclass
 class FixDeps:
     """Every engine seam the cycle reaches through. ``None`` means "resolve the
@@ -786,10 +819,15 @@ class FixCycle:
         # the newest gate record is a truthful baseline on the current head --
         # not a stale FAILED session from an abandoned branch that misleads the
         # dev and trips the gate-stall detector (live 2026-08-23, run 5847ca). A
-        # gate that is already red on the clean tree cannot tell a good fix from
-        # a bad one, so a red baseline pauses before any task is filed. A seam
-        # failure is reported but never blocks the fix -- the dev run runs its
-        # own gate regardless.
+        # gate that is GENUINELY red on the clean tree cannot tell a good fix
+        # from a bad one, so that pauses before any task is filed -- but a
+        # session that merely could not LAUNCH (sandbox refused a gradle/maven
+        # wrapper, a command timed out) never evaluated the code at all, and no
+        # fix would ever turn it green: that is unverifiable, not red, and must
+        # not wedge the loop (mirrors gate_state.latest_acceptance_result's
+        # ran/passed split). A seam failure is reported but never blocks the
+        # fix -- the dev run runs its own gate regardless.
+        head = str(self._safe(self._ws.head, default="") or "")
         try:
             session = self.deps.baseline_gate(self._store, self._ws)
         except Exception as exc:  # noqa: BLE001 - the dev run runs its own gate anyway
@@ -798,9 +836,15 @@ class FixCycle:
         else:
             passed = bool(session.passed) if session is not None else None
             sandbox = str(getattr(session, "sandbox", "") or "") if session is not None else ""
-            self._event("fix_gate_baseline",
-                        {"head": self._head_before, "passed": passed, "sandbox": sandbox})
+            baseline_detail: dict[str, Any] = {"head": head, "passed": passed,
+                                               "sandbox": sandbox}
+            genuinely_red = False
             if session is not None and passed is False:
+                genuinely_red, unverifiable = _baseline_verdict(session)
+                if not genuinely_red:
+                    baseline_detail["unverifiable"] = unverifiable
+            self._event("fix_gate_baseline", baseline_detail)
+            if genuinely_red:
                 return self._pause("fix_run_failed", failed=False, detail="baseline_gate_red")
         # The fix is the team's OPERATIVE GOAL, not just one task in the backlog:
         # without an active Focus the PM plans against the North Star and, on an

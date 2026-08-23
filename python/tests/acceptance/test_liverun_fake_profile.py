@@ -759,6 +759,44 @@ def _wait_for_new_run(env: _Env, *, after: str, timeout: float = 30.0):
     raise AssertionError("no relaunched run appeared")
 
 
+def test_a_genuinely_red_baseline_pauses_before_any_task(slack_channel: _Env) -> None:
+    """`baseline_gate_fn` at its REAL production default (not the stub every
+    other test in this file uses -- see `_start_with`'s docstring): the fixture
+    repo's only commit is `BROKEN_APP`, which genuinely fails the registered
+    `gate` command (a real, non-environmental `status == "failed"` result).
+    With the real seam wired in, the cycle must pause
+    `fix_run_failed`/`baseline_gate_red` before it ever files a Focus, files a
+    task, or starts the dev run at all -- proving the real seam, wired
+    end-to-end, actually stops a genuinely broken clean tree rather than only
+    the fakes in `test_fixloop.py` believing it would."""
+    from errorta_liverun.fixloop import FixDeps
+
+    env = slack_channel
+    _fix_profile(env, Path(env.ledger_store.get_project().repo_path))
+
+    # Only `start_run_fn` is stubbed here -- there is no real dev/model in this
+    # suite -- `baseline_gate_fn` is left at `None` so it resolves to
+    # `_default_baseline_gate`, which runs the REAL `_run_gate` against the
+    # REAL workspace this fixture just seeded.
+    env.mgr._fix_deps = FixDeps(start_run_fn=_fake_dev(env))
+    started = env.mgr.start("fake", project_id=env.project_id)
+    assert started["status"] == "started", started
+    run_id = started["run_id"]
+
+    final = _wait_terminal(env)
+    assert final["phase"] == "paused_awaiting_human"
+    assert final["reason"] == "fix_run_failed"
+
+    baseline = _detail(env, run_id, "fix_gate_baseline")
+    assert baseline["passed"] is False
+    assert "unverifiable" not in baseline           # a genuine red, not a blocked launch
+
+    kinds = [e["kind"] for e in _events(env, run_id)]
+    assert "fix_task" not in kinds
+    assert env.ledger_store.list_tasks() == []
+    assert not env.dev_calls                        # the dev run never started
+
+
 def test_a_guarded_path_stops_the_cycle_at_the_button(slack_channel: _Env) -> None:
     """Same cycle, but the fix touches the supervisor's own package: the accept
     is staged human-only, autopilot does NOT fire it, nothing merges, and the
