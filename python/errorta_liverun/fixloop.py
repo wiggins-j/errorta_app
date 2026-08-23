@@ -396,6 +396,27 @@ def _default_retire_prior_cycle(store: Any) -> dict[str, int]:
     return counts
 
 
+def _default_baseline_gate(store: Any, workspace: Any) -> Any:
+    """Run the project's registered gate ONCE, against the clean merged tree,
+    before the cycle files its task -- so the newest gate record is a truthful
+    baseline on the current head (live 2026-08-23, run 5847ca).
+
+    Without this, the newest TEST-RUN record can be a stale FAILED session from
+    an abandoned revise branch: the dev's prompt led with that stale red gate
+    text and "fixed" the stale failure instead of the brief, and the engine's
+    gate-stall detector counted the stale failures and stopped the run
+    `gate_not_improving` after one turn -- no gate ran at all that cycle.
+
+    `_run_gate` runs every registered command against `workspace.root()` (the
+    merged tree, not any branch) AND records the session, which is the same
+    code path the in-loop gate and the delivery gate share. Returns the
+    `TestRunSession` (its `.passed` is the verdict), or `None` when there is
+    nothing to run."""
+    from errorta_council.coding.runner import _run_gate
+    return _run_gate(store, workspace, head=str(workspace.head() or ""),
+                     task_id="liverun-baseline", should_cancel=None)
+
+
 @dataclass
 class FixDeps:
     """Every engine seam the cycle reaches through. ``None`` means "resolve the
@@ -427,6 +448,7 @@ class FixDeps:
     assign_dev_route_fn: Callable[[str, str], list[str]] | None = None
     seed_workspace_fn: Callable[[str], bool] | None = None
     retire_prior_cycle_fn: Callable[[Any], dict[str, int]] | None = None
+    baseline_gate_fn: Callable[[Any, Any], Any] | None = None
 
     def ledger(self, project_id: str) -> Any:
         return (self.ledger_factory or _default_ledger_factory)(project_id)
@@ -480,6 +502,14 @@ class FixDeps:
         behind, before this cycle files its own Focus. See
         `_default_retire_prior_cycle` for the scope rationale."""
         return dict((self.retire_prior_cycle_fn or _default_retire_prior_cycle)(store) or {})
+
+    def baseline_gate(self, store: Any, workspace: Any) -> Any:
+        """Run the project's gate ONCE on the clean merged tree before this
+        cycle files its task, so the newest gate record is a truthful baseline
+        rather than a stale result left over from an abandoned branch. See
+        `_default_baseline_gate` for the live evidence. Returns the
+        `TestRunSession`, or `None` when there is nothing to run."""
+        return (self.baseline_gate_fn or _default_baseline_gate)(store, workspace)
 
 
 @dataclass
@@ -752,6 +782,26 @@ class FixCycle:
         else:
             if any(retired.values()):
                 self._event("fix_cycle_hygiene", dict(retired))
+        # Run the gate ONCE on the clean merged tree before filing anything, so
+        # the newest gate record is a truthful baseline on the current head --
+        # not a stale FAILED session from an abandoned branch that misleads the
+        # dev and trips the gate-stall detector (live 2026-08-23, run 5847ca). A
+        # gate that is already red on the clean tree cannot tell a good fix from
+        # a bad one, so a red baseline pauses before any task is filed. A seam
+        # failure is reported but never blocks the fix -- the dev run runs its
+        # own gate regardless.
+        try:
+            session = self.deps.baseline_gate(self._store, self._ws)
+        except Exception as exc:  # noqa: BLE001 - the dev run runs its own gate anyway
+            _LOG.exception("liverun %s could not run the baseline gate", self.run_id)
+            self._event("fix_gate_baseline", {"error": type(exc).__name__})
+        else:
+            passed = bool(session.passed) if session is not None else None
+            sandbox = str(getattr(session, "sandbox", "") or "") if session is not None else ""
+            self._event("fix_gate_baseline",
+                        {"head": self._head_before, "passed": passed, "sandbox": sandbox})
+            if session is not None and passed is False:
+                return self._pause("fix_run_failed", failed=False, detail="baseline_gate_red")
         # The fix is the team's OPERATIVE GOAL, not just one task in the backlog:
         # without an active Focus the PM plans against the North Star and, on an
         # existing repo, scaffolds it from scratch (live 2026-08-22, run b8370d).

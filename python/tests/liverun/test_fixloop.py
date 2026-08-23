@@ -132,6 +132,10 @@ class Fake:
             "focuses_archived": 0, "tasks_dropped": 0, "prs_abandoned": 0}
         self.retired: list = []
         self.retire_raises: Exception | None = None
+        self.baseline_result: SimpleNamespace | None = SimpleNamespace(
+            passed=True, sandbox="seatbelt")
+        self.baselined: list = []
+        self.baseline_raises: Exception | None = None
 
     # -- seams ---------------------------------------------------------- #
     def deps(self) -> FixDeps:
@@ -154,6 +158,7 @@ class Fake:
             assign_dev_route_fn=self._assign_dev_route,
             seed_workspace_fn=self._seed,
             retire_prior_cycle_fn=self._retire_prior_cycle,
+            baseline_gate_fn=self._baseline_gate,
         )
 
     def _assign_dev_route(self, project_id: str, route: str) -> list[str]:
@@ -175,6 +180,12 @@ class Fake:
             raise self.retire_raises
         self.retired.append(store)
         return dict(self.retire_result)
+
+    def _baseline_gate(self, store, workspace):
+        if self.baseline_raises is not None:
+            raise self.baseline_raises
+        self.baselined.append((store, workspace))
+        return self.baseline_result
 
     def _workspace(self, project_id: str):
         if self.ws_raises is not None:
@@ -304,8 +315,8 @@ def test_happy_path_files_a_task_starts_a_run_and_deploys() -> None:
     assert task["title"].startswith("Fix: ")
     assert fake.started == [("senditai-ng", {"resume": False, "continue_": False})]
     assert [k for k, _ in out.events] == [
-        "fix_triage", "fix_team_model", "fix_task", "fix_run", "fix_accept_staged",
-        "fix_accepted", "deploy_step"]
+        "fix_triage", "fix_team_model", "fix_gate_baseline", "fix_task", "fix_run",
+        "fix_accept_staged", "fix_accepted", "deploy_step"]
     assert cyc.repo_id == "brain" and cyc.task_id == "t1"
 
 
@@ -339,7 +350,7 @@ def test_the_fix_task_event_names_task_repo_and_project() -> None:
     fake = Fake()
     cyc = _cycle(fake)
     cyc.step()
-    detail = cyc.step().events[0][1]
+    detail = dict(cyc.step().events)["fix_task"]
     assert detail["task_id"] == "t1" and detail["repo_id"] == "brain"
     assert detail["project_id"] == "senditai-ng" and detail["gate"]
 
@@ -1449,6 +1460,90 @@ def test_retire_failure_is_reported_and_does_not_block_the_fix() -> None:
     assert dict(out.events)["fix_cycle_hygiene"] == {"error": "RuntimeError"}
     assert kinds.index("fix_cycle_hygiene") < kinds.index("fix_task")
     assert fake.started
+
+
+def test_baseline_gate_runs_after_retire_and_before_the_task() -> None:
+    """Live 2026-08-23 (run 5847ca): the newest gate record must be a truthful
+    baseline on the CURRENT head, run once on the clean tree, before the cycle
+    files its task -- not a stale FAILED session left over from an abandoned
+    branch. Use a nonzero retire count so `fix_cycle_hygiene` also fires, and
+    pin the full ordering the spec depends on."""
+    fake = Fake()
+    fake.retire_result = {"focuses_archived": 1, "tasks_dropped": 0, "prs_abandoned": 0}
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    kinds = [k for k, _ in out.events]
+    assert (kinds.index("fix_cycle_hygiene") < kinds.index("fix_gate_baseline")
+            < kinds.index("fix_task"))
+    assert dict(out.events)["fix_gate_baseline"] == {
+        "head": fake.ws.head_value, "passed": True, "sandbox": "seatbelt"}
+    assert fake.baselined == [(fake.store, fake.ws)]
+
+
+def test_red_baseline_pauses_before_any_task() -> None:
+    """A gate that is already red on the clean tree cannot tell a good fix from
+    a bad one -- filing a task would only chase the red. This must pause before
+    ANY task, focus or run is created."""
+    fake = Fake()
+    fake.baseline_result = SimpleNamespace(passed=False, sandbox="seatbelt")
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    assert out.kind == "paused" and out.code == "fix_run_failed"
+    assert out.detail == "baseline_gate_red"
+    assert dict(out.events)["fix_gate_baseline"] == {
+        "head": fake.ws.head_value, "passed": False, "sandbox": "seatbelt"}
+    assert fake.store.tasks == []
+    assert not getattr(fake.store, "focuses", [])
+    assert not fake.started
+
+
+def test_no_gate_session_is_not_a_verdict() -> None:
+    """`_run_gate` returns `None` when the project has nothing registered to
+    run. That is not a red gate -- it must not pause, and the cycle continues
+    to file its task."""
+    fake = Fake()
+    fake.baseline_result = None
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    kinds = [k for k, _ in out.events]
+    assert dict(out.events)["fix_gate_baseline"] == {
+        "head": fake.ws.head_value, "passed": None, "sandbox": ""}
+    assert "fix_task" in kinds
+    assert fake.store.tasks
+
+
+def test_baseline_failure_is_reported_and_does_not_block() -> None:
+    fake = Fake()
+    fake.baseline_raises = RuntimeError("x")
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "deployed" and out.failed is False
+    kinds = [k for k, _ in out.events]
+    assert dict(out.events)["fix_gate_baseline"] == {"error": "RuntimeError"}
+    assert kinds.index("fix_gate_baseline") < kinds.index("fix_task")
+    assert fake.started
+
+
+def test_default_baseline_gate_calls_run_gate_with_the_current_head(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    import errorta_council.coding.runner as runner
+
+    calls: list[dict] = []
+
+    def _fake_run_gate(store, workspace, *, head, task_id, should_cancel=None):
+        calls.append({"store": store, "workspace": workspace, "head": head,
+                      "task_id": task_id, "should_cancel": should_cancel})
+        return "session"
+
+    monkeypatch.setattr(runner, "_run_gate", _fake_run_gate)
+    store = object()
+    ws = SimpleNamespace(head=lambda: "abc123")
+    result = F._default_baseline_gate(store, ws)
+    assert result == "session"
+    assert calls == [{"store": store, "workspace": ws, "head": "abc123",
+                      "task_id": "liverun-baseline", "should_cancel": None}]
 
 
 def test_gate_label_names_a_trusted_tier() -> None:

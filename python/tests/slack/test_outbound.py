@@ -1413,6 +1413,22 @@ def test_fix_cycle_hygiene_error_line_names_the_exception() -> None:
     assert line == "🧹 Could not retire the previous fix cycle (RuntimeError) — continuing"
 
 
+def test_fix_gate_baseline_line_names_the_head_and_verdict() -> None:
+    line = outbound._liverun_detail(
+        "fix_gate_baseline",
+        {"head": "abcdef0123456789", "passed": True, "sandbox": "seatbelt"}, "fake")
+
+    assert line == "🧪 Gate baseline on the clean tree (abcdef012345): PASSED"
+
+
+def test_fix_gate_baseline_error_line_names_the_exception() -> None:
+    line = outbound._liverun_detail(
+        "fix_gate_baseline", {"error": "RuntimeError"}, "fake")
+
+    assert line == ("🧪 Could not run the gate baseline on the clean tree "
+                     "(RuntimeError) — continuing")
+
+
 def test_fix_workspace_seeded_line_names_the_source() -> None:
     line = outbound._liverun_detail(
         "fix_workspace_seeded",

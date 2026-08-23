@@ -33,6 +33,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -583,13 +584,22 @@ def fix_env(env: _Env, fake_repo: Path, monkeypatch: pytest.MonkeyPatch):
 def _start_with(env: _Env, fake_dev) -> dict:
     """Rebuild the manager with the fake dev wired into `FixDeps`, then start.
 
-    Only `start_run_fn` is injected: the ledger, the workspace, the gate reads,
-    the confirmation store and the bound channel all resolve to their real
-    production defaults.
+    Only `start_run_fn` and `baseline_gate_fn` are injected: the ledger, the
+    workspace, the gate reads, the confirmation store and the bound channel
+    all resolve to their real production defaults. `baseline_gate_fn` is
+    stubbed to a passing baseline because `BROKEN_APP` -- committed as the
+    fake repo's ONLY commit, precisely so the dev's own fix has something real
+    to turn green -- is exactly what a genuinely red clean-tree gate looks
+    like, and the real seam would now pause every one of these runs before
+    the dev ever got a task (`fix_run_failed`/`baseline_gate_red`). That
+    precondition has its own dedicated coverage in `test_fixloop.py`; this
+    suite is about the run/accept/deploy machinery downstream of it.
     """
     from errorta_liverun.fixloop import FixDeps
 
-    env.mgr._fix_deps = FixDeps(start_run_fn=fake_dev)
+    env.mgr._fix_deps = FixDeps(
+        start_run_fn=fake_dev,
+        baseline_gate_fn=lambda store, ws: SimpleNamespace(passed=True, sandbox="seatbelt"))
     started = env.mgr.start("fake", project_id=env.project_id)
     assert started["status"] == "started", started
     return started

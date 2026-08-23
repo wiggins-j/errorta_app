@@ -469,6 +469,14 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
                 f"{_esc(detail.get('focuses_archived'))} focus, "
                 f"{_esc(detail.get('tasks_dropped'))} task(s), "
                 f"{_esc(detail.get('prs_abandoned'))} PR(s)")
+    if kind == "fix_gate_baseline":
+        if "error" in detail:
+            return (f"🧪 Could not run the gate baseline on the clean tree "
+                     f"({_esc(detail.get('error'))}) — continuing")
+        head = _esc(str(detail.get("head") or "")[:12])
+        passed = detail.get("passed")
+        verdict = "no gate to run" if passed is None else ("PASSED" if passed else "FAILED")
+        return f"🧪 Gate baseline on the clean tree ({head}): {verdict}"
     if kind == "fix_run":
         return (f"Fix run {_esc(detail.get('status'))} "
                 f"({_esc(detail.get('mode'))}) on `{_esc(detail.get('project_id'))}`")

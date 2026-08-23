@@ -253,6 +253,12 @@ Before filing its Focus, a cycle archives any previous liverun Focus and
 drops/abandons the tasks and PRs created under it, so a cycle never inherits
 the last one's debris (live 2026-08-23).
 
+Before filing its task, the cycle also runs the gate once on the clean tree,
+so the newest gate record is a truthful baseline on the current head — a stale
+red left over from an abandoned branch once misled the dev and tripped
+`gate_not_improving` with no gate ever run that cycle (live 2026-08-23, run
+5847ca); a red baseline pauses `fix_run_failed` (`baseline_gate_red`).
+
 **Triage** is deterministic first. Each evidence class is a named signature
 over supervisor-owned state (the stop reason, a `/state` capture, a traceback
 banner), and the profile maps classes onto repos. Exactly one claimant is an
