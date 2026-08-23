@@ -345,7 +345,7 @@ def test_dev_repo_read_turn_budget_is_raised():
     """The budget must cover several tool-use turns PLUS the final envelope
     turn. 6 was too low in production (empty-result member failures)."""
     import errorta_model_gateway.providers.async_claude_cli as mod
-    assert mod._DEV_REPO_READ_MAX_TURNS == 48
+    assert mod._DEV_REPO_READ_MAX_TURNS == 80
 
 
 @pytest.mark.asyncio
@@ -354,7 +354,7 @@ async def test_retrieval_argv_carries_the_raised_budget(monkeypatch, tmp_path):
     calls = _patch_exec_sequence(monkeypatch, [_FakeProc(stdout=_ok_json())])
     await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
     argv = calls[0]["argv"]
-    assert argv[argv.index("--max-turns") + 1] == str(mod._DEV_REPO_READ_MAX_TURNS) == "48"
+    assert argv[argv.index("--max-turns") + 1] == str(mod._DEV_REPO_READ_MAX_TURNS) == "80"
 
 
 @pytest.mark.asyncio
@@ -374,7 +374,7 @@ async def test_empty_retrieval_result_falls_back_to_plain_invocation(monkeypatch
     # Attempt 1 = retrieval: read-only tools, raised budget, cwd = worktree.
     first = calls[0]["argv"]
     assert _tools_value(first) == "Read,Grep,Glob"
-    assert first[first.index("--max-turns") + 1] == "48"
+    assert first[first.index("--max-turns") + 1] == "80"
     assert calls[0]["kwargs"]["cwd"] == str(tmp_path)
 
     # Attempt 2 = the plain non-retrieval invocation, byte-for-byte the legacy
@@ -648,6 +648,39 @@ def test_repo_read_budget_is_operator_tunable(monkeypatch):
     monkeypatch.setenv("ERRORTA_REPO_READ_MAX_TURNS", "64")
     assert mod._repo_read_max_turns() == 64
     monkeypatch.setenv("ERRORTA_REPO_READ_MAX_TURNS", "garbage")
-    assert mod._repo_read_max_turns() == 48
+    assert mod._repo_read_max_turns() == 80
     monkeypatch.setenv("ERRORTA_REPO_READ_MAX_TURNS", "100000")
     assert mod._repo_read_max_turns() == 200
+
+
+def test_repo_read_timeout_is_operator_tunable(monkeypatch):
+    from errorta_model_gateway.providers import async_claude_cli as mod
+    monkeypatch.delenv("ERRORTA_REPO_READ_TIMEOUT_S", raising=False)
+    assert mod._repo_read_timeout_s() == 1500
+    monkeypatch.setenv("ERRORTA_REPO_READ_TIMEOUT_S", "2000")
+    assert mod._repo_read_timeout_s() == 2000
+    monkeypatch.setenv("ERRORTA_REPO_READ_TIMEOUT_S", "10")
+    assert mod._repo_read_timeout_s() == 600
+    monkeypatch.setenv("ERRORTA_REPO_READ_TIMEOUT_S", "garbage")
+    assert mod._repo_read_timeout_s() == 1500
+    monkeypatch.setenv("ERRORTA_REPO_READ_TIMEOUT_S", "99999")
+    assert mod._repo_read_timeout_s() == 3000
+
+
+@pytest.mark.asyncio
+async def test_only_the_retrieval_attempt_gets_the_raised_timeout(monkeypatch, tmp_path):
+    """The read-only worktree turn is where the budget is spent; the plain
+    fallback has no repository to read and keeps the request's own timeout."""
+    import errorta_model_gateway.providers.async_claude_cli as mod
+    seen: list[tuple[str | None, int]] = []
+
+    async def fake_run(*, argv, prompt, timeout_seconds, semaphore, error_prefix,
+                       cwd_prefix, cwd_override=None):
+        seen.append((cwd_override, timeout_seconds))
+        return (_empty_json() if cwd_override else _ok_json()), "", 0
+
+    monkeypatch.setattr(mod, "run_cli_subprocess", fake_run)
+    await ClaudeCliHandler().call(_req_with_worktree(tmp_path), api_key=None)
+    assert len(seen) == 2
+    assert seen[0][0] == str(tmp_path) and seen[0][1] == mod._REPO_READ_TIMEOUT_S == 1500
+    assert seen[1][0] is None and seen[1][1] == 30

@@ -101,17 +101,34 @@ _DEV_REPO_READ_TOOLS = _REPO_READ_TOOLS  # Spec 14: back-compat alias
 # exploring a real 657-file repo, and the lossy plain fallback then reported
 # "the source is not present" from its empty temp cwd. 48 by default;
 # ``ERRORTA_REPO_READ_MAX_TURNS`` overrides (operators tune, the model never).
+# Live 2026-08-23: 48 was still not enough for an opus dev on the same repo; 80.
 def _repo_read_max_turns() -> int:
     raw = os.environ.get("ERRORTA_REPO_READ_MAX_TURNS", "").strip()
     try:
-        v = int(raw) if raw else 48
+        v = int(raw) if raw else 80
     except ValueError:
-        v = 48
+        v = 80
     return max(2, min(v, 200))
 
 
 _REPO_READ_MAX_TURNS = _repo_read_max_turns()
 _DEV_REPO_READ_MAX_TURNS = _REPO_READ_MAX_TURNS  # Spec 14: back-compat alias
+
+# The read-only worktree turn is the one that spends the budget above, and the
+# default 600 s per-turn timeout (reasoning_budget.py) was sized for a turn with
+# no retrieval. ``ERRORTA_REPO_READ_TIMEOUT_S`` raises the RETRIEVAL attempt
+# only; the plain fallback has no repository to read. Snapshotted at import like
+# the turn budget: set it on the invocation that spawns the sidecar.
+def _repo_read_timeout_s() -> int:
+    raw = os.environ.get("ERRORTA_REPO_READ_TIMEOUT_S", "").strip()
+    try:
+        v = int(raw) if raw else 1500
+    except ValueError:
+        v = 1500
+    return max(600, min(v, 3000))
+
+
+_REPO_READ_TIMEOUT_S = _repo_read_timeout_s()
 
 # A GUI .app launched from Finder/Dock inherits a minimal PATH (/usr/bin:/bin:…)
 # that excludes the user-level dirs where `claude` is typically installed. So we
@@ -334,7 +351,11 @@ class ClaudeCliHandler:
             stdout, stderr, returncode = await run_cli_subprocess(
                 argv=argv,
                 prompt=prompt,
-                timeout_seconds=request.timeout_seconds,
+                timeout_seconds=(
+                    max(int(request.timeout_seconds), _REPO_READ_TIMEOUT_S)
+                    if cwd_override is not None
+                    else request.timeout_seconds
+                ),
                 semaphore=_CLAUDE_SEMAPHORE,
                 error_prefix="claude_cli",
                 cwd_prefix="errorta-claude-cli-",
