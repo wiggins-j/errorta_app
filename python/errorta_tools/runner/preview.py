@@ -126,6 +126,23 @@ def spawn_sandboxed_child(
     )
 
 
+_QUARTZ: bool | None = None
+
+
+def quartz_available() -> bool:
+    """Can this process resolve a window id at all? macOS needs pyobjc's
+    Quartz; its absence was misread as 'no window' for every live run until
+    2026-08-23. Cached: the answer does not change within a process."""
+    global _QUARTZ
+    if _QUARTZ is None:
+        try:
+            import Quartz  # type: ignore  # noqa: F401
+            _QUARTZ = True
+        except Exception:
+            _QUARTZ = False
+    return _QUARTZ
+
+
 def _macos_window_id_for_pids(pids: set[int]) -> int | None:
     """The on-screen window id owned by one of ``pids`` (frontmost/largest),
     via Quartz. Returns None if Quartz is unavailable or no window is owned —

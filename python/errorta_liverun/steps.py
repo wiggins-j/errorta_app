@@ -9,6 +9,7 @@ import secrets
 import shlex
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -20,7 +21,7 @@ from typing import Any, Callable
 from errorta_council.coding.runtime_process import redact_log_line
 from errorta_policy import PolicyAction, PolicyPhase
 from errorta_tools.runner.policy import evaluate_runner_launch
-from errorta_tools.runner.preview import capture_app_window
+from errorta_tools.runner.preview import capture_app_window, quartz_available
 from errorta_tools.runner.remote import RemoteToolRunner
 from errorta_tools.runner.types import ToolRunnerRequest, ToolRunnerResult, now_iso
 from errorta_tunnels.manager import TunnelManager, TunnelSpec
@@ -428,9 +429,13 @@ def _run_tunnel(params: dict[str, Any], ctx: Ctx, timeout_s: float, *, close: bo
 def _run_window_shot(params: dict[str, Any], ctx: Ctx, timeout_s: float) -> StepResult:
     started_at = now_iso()
     pids = _pgrep(params["pgrep"])
+    if not pids:
+        return StepResult(False, started_at, now_iso(), detail="no process matched")
+    if sys.platform == "darwin" and not quartz_available():
+        return StepResult(False, started_at, now_iso(), detail="quartz_unavailable")
     ctx.evidence_dir.mkdir(parents=True, exist_ok=True)
     out = ctx.evidence_dir / f"window-{time.time_ns()}.png"
-    ok = bool(pids) and capture_app_window(pids=set(pids), out_path=out)
+    ok = capture_app_window(pids=set(pids), out_path=out)
     return StepResult(ok, started_at, now_iso(), evidence_refs=[str(out)] if ok else [],
                       detail="" if ok else "no window captured")
 

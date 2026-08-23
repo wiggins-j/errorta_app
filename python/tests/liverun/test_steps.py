@@ -488,3 +488,28 @@ def test_an_undeclared_argv_is_still_refused_when_deploy_steps_exist(tmp_path: P
     with pytest.raises(S.ArgvIdentityError):
         S.run_action(P.Action("local", {"argv": ("/bin/echo", "pwned"), "cwd": None}),
                      ctx, timeout_s=5)
+
+
+def test_window_shot_names_the_missing_quartz(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(S, "_pgrep", lambda pattern: [4242])
+    monkeypatch.setattr(S, "quartz_available", lambda: False)
+    monkeypatch.setattr(S.sys, "platform", "darwin")
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    res = S._run_window_shot({"pgrep": "x"}, ctx, 5)
+    assert res.ok is False and res.detail == "quartz_unavailable"
+
+
+def test_window_shot_names_a_missing_process(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(S, "_pgrep", lambda pattern: [])
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    res = S._run_window_shot({"pgrep": "x"}, ctx, 5)
+    assert res.ok is False and res.detail == "no process matched"
+
+
+def test_window_shot_reports_an_uncapturable_window(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(S, "_pgrep", lambda pattern: [4242])
+    monkeypatch.setattr(S, "quartz_available", lambda: True)
+    monkeypatch.setattr(S, "capture_app_window", lambda *, pids, out_path: False)
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    res = S._run_window_shot({"pgrep": "x"}, ctx, 5)
+    assert res.ok is False and res.detail == "no window captured"

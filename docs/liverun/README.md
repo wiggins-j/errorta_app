@@ -435,6 +435,11 @@ them:
     followed by a run) still does too — but a fix cycle that arrives first no
     longer pauses `fix_run_failed` on a missing worktree it could have
     created.
+11. **`window_shot` needs Quartz.** The `pgrep` pattern
+    `RuneLite.app/Contents/MacOS/RuneLite` matches; what was missing was
+    `pyobjc-framework-Quartz` in the sidecar's environment. The step now
+    reports `quartz_unavailable`, `no process matched`, or `no window
+    captured` — three different failures.
 
 ## Status (2026-08-22)
 
@@ -456,8 +461,6 @@ model-limited until the items below land.
 - Fix-loop dev capacity: an opus dev for existing-repo projects, a larger
   `ERRORTA_REPO_READ_MAX_TURNS`, and a longer CLI turn timeout for repo-read
   turns; measure the fix rate on real stalls before widening anything.
-- `window_shot` never captured RuneLite: the `pgrep` pattern does not match the
-  launcher-spawned process name; fix the pattern.
 - osrs-reaper has no usable acceptance gate: Gradle cannot run inside the
   sandboxed gate executor (network off, synthetic HOME, no `JAVA_HOME`). A
   trusted, unsandboxed gate tier is its own slice; until then `fixable: false`.
