@@ -62,13 +62,20 @@ _SKIPPED_DIR_NAMES = frozenset({
     ".svelte-kit",
     ".turbo",
     "dist",
-    "build",
-    "target",
     "coverage",
     # Gradle/Maven build outputs -- a trusted gate rebuilds these in the
     # worktree from a warm ~/.gradle, so they must never be copied in.
     ".gradle",
 })
+
+# `build/` and `target/` are build OUTPUTS only where a build script sits
+# beside them (a Gradle/Maven module root). Anywhere else they are ordinary
+# source directories -- live 2026-08-23 osrs-reaper has a Java package named
+# `microfighter/target/`, and a blanket skip dropped its sources, so the first
+# trusted gate failed on `cannot find symbol` rather than on the build.
+_OUTPUT_DIRS_BESIDE_BUILD_SCRIPT = frozenset({"build", "target"})
+_BUILD_SCRIPT_NAMES = ("build.gradle", "build.gradle.kts", "settings.gradle",
+                       "settings.gradle.kts", "pom.xml")
 
 _SKIPPED_FILE_NAMES = frozenset({
     ".coverage",
@@ -225,6 +232,9 @@ def _copy_ignore(src: str, names: list[str]) -> set[str]:
         if path.is_symlink():
             ignored.add(name)
         elif path.is_dir() and name in _SKIPPED_DIR_NAMES:
+            ignored.add(name)
+        elif (path.is_dir() and name in _OUTPUT_DIRS_BESIDE_BUILD_SCRIPT
+              and any((root / b).is_file() for b in _BUILD_SCRIPT_NAMES)):
             ignored.add(name)
         elif name in _SKIPPED_FILE_NAMES:
             ignored.add(name)

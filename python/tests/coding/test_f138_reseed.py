@@ -158,6 +158,7 @@ def test_reseed_skips_build_outputs_but_keeps_libs_jar(
     # copied into the apply workspace. A jar under libs/ is a legitimate INPUT
     # (a vendored dependency) and must still be copied.
     ws, repo = _ws(tmp_path)
+    (repo / "build.gradle.kts").write_text("plugins { java }\n")   # marks build/ as OUTPUT
     (repo / "build").mkdir()
     (repo / "build" / "output.class").write_text("compiled\n")
     (repo / ".gradle").mkdir()
@@ -172,3 +173,36 @@ def test_reseed_skips_build_outputs_but_keeps_libs_jar(
     assert not (root / ".gradle").exists()
     assert not (root / "target").exists()
     assert (root / "libs" / "foo.jar").read_text() == "vendored\n"
+
+
+def test_build_and_target_are_skipped_only_beside_a_build_script(
+        tmp_errorta_home: Path, tmp_path: Path) -> None:
+    """Live 2026-08-23: osrs-reaper has a Java PACKAGE named `microfighter/target/`;
+    the blanket skip dropped its sources and the first trusted gate failed with
+    `cannot find symbol: TargetSelector`. A directory named build/target is an
+    OUTPUT only where a build script sits beside it (a Gradle/Maven module root);
+    anywhere else it is source and must be copied. `.gradle` is always a cache."""
+    ws, repo = _ws(tmp_path)
+    # module root: build.gradle.kts beside build/ -> output, skipped
+    (repo / "mod").mkdir()
+    (repo / "mod" / "build.gradle.kts").write_text("plugins { java }\n")
+    (repo / "mod" / "build").mkdir()
+    (repo / "mod" / "build" / "Out.class").write_text("x\n")
+    # maven module: pom.xml beside target/ -> output, skipped
+    (repo / "mvn").mkdir()
+    (repo / "mvn" / "pom.xml").write_text("<project/>\n")
+    (repo / "mvn" / "target").mkdir()
+    (repo / "mvn" / "target" / "out.jar").write_text("x\n")
+    # a source package that happens to be called target/ -> copied
+    pkg = repo / "src" / "main" / "java" / "app" / "target"
+    pkg.mkdir(parents=True)
+    (pkg / "TargetSelector.java").write_text("class TargetSelector {}\n")
+    # and one called build/ with no script beside it -> copied
+    (repo / "tools" / "build").mkdir(parents=True)
+    (repo / "tools" / "build" / "helper.py").write_text("print(1)\n")
+    ws.reseed(str(repo))
+    root = ws._ws._root
+    assert not (root / "mod" / "build").exists()
+    assert not (root / "mvn" / "target").exists()
+    assert (root / "src" / "main" / "java" / "app" / "target" / "TargetSelector.java").exists()
+    assert (root / "tools" / "build" / "helper.py").exists()
