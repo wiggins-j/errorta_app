@@ -1054,6 +1054,9 @@ def _gate_label(store: Any) -> str:
         commands = store.get_test_commands() or {}
         cmd_id = sorted(commands)[0]
         spec = commands[cmd_id]
+        invalid = spec.get("invalid")
+        if invalid:
+            return f"the project's trusted gate file is invalid ({invalid})"
         argv = spec.get("argv") or []
         label = f"{cmd_id} — {' '.join(str(a) for a in argv)}".strip(" —")[:200]
         if str(spec.get("tier") or "") == "trusted":

@@ -4644,21 +4644,6 @@ _BUILD_DEP_MARKERS: tuple[tuple[str, str], ...] = (
     ("go", "go.sum"),
 )
 
-# Spec 2026-08-23-trusted-gate: `_run_default_build` (this module's
-# auto-derived build path) always runs through the SANDBOXED, network-off
-# executor — it has no notion of a trusted-tier spec, because the auto-derived
-# build isn't a registry entry at all. A Gradle/Maven wrapper script resolves
-# its own JVM toolchain and dependencies over the network at build time; that
-# can never succeed here regardless of any on-disk marker, and only an
-# operator-declared trusted gate (an unsandboxed, network-capable executor)
-# can honestly verify it. So these argv0s degrade to `cannot_verify` on sight,
-# same tri-state contract as a missing npm/cargo/go marker, rather than being
-# probed for a marker file that would never explain the real reason.
-_TRUSTED_GATE_TOOLS: tuple[tuple[str, str], ...] = (
-    ("gradlew", "gradle"),
-    ("mvnw", "maven"),
-)
-
 
 def _missing_build_dep(
     argv: list[str], cwd: Any, root: Any,
@@ -4675,19 +4660,10 @@ def _missing_build_dep(
 
     Extracted from ``_run_default_build`` so the invariant is testable directly: the
     original probe was inline, and the test for it re-implemented the check instead
-    of calling it, which is how the hoisted-layout bug survived a green suite.
-
-    Spec 2026-08-23-trusted-gate: ``./gradlew``/``./mvnw`` return
-    ``(tool, "trusted gate required")`` unconditionally (no marker probe) —
-    this auto-derived build path never has access to a trusted-tier spec, so
-    the honest answer here is always "verify this through a trusted gate
-    instead", not a filesystem check that would never be true."""
+    of calling it, which is how the hoisted-layout bug survived a green suite."""
     from pathlib import Path as _P
 
     tool = str(argv[0]).lower() if argv else ""
-    for suffix, name in _TRUSTED_GATE_TOOLS:
-        if tool.endswith(suffix):
-            return name, "trusted gate required"
     try:
         root_stop = _P(str(root)).resolve()
     except Exception:  # noqa: BLE001 — an unresolvable root just stops the walk
@@ -4748,11 +4724,6 @@ def _run_default_build(
         missing = _missing_build_dep(argv, cwd, workspace.root())
         if missing is not None:
             prefix, marker = missing
-            if marker == "trusted gate required":
-                return False, True, (
-                    f"{prefix} build requires an operator-declared trusted gate; "
-                    "the delivery executor is sandboxed and network-off and "
-                    f"cannot verify a {prefix} build here")
             return False, True, (
                 f"{prefix} build needs dependencies and {marker!r} is absent; "
                 "the delivery executor is network-off and only provisions a "

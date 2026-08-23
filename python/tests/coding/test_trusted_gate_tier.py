@@ -109,12 +109,40 @@ def test_gate_text_names_the_tier(_home: Path, tmp_path: Path) -> None:
     reg = s.get_test_commands()
     session = run_test_commands(tmp_path, reg, list(reg))
     s.record_test_run(session, task_id="t1", head="abc")
-    assert "[trusted, unsandboxed]" in gate_state.latest_gate_text(s)
+    text = gate_state.latest_gate_text(s)
+    lines = text.splitlines()
+    assert lines[0].startswith("[trusted, unsandboxed] Latest acceptance gate run")
+    assert any(ln.startswith("[trusted, unsandboxed] [compile]") for ln in lines)
+    assert not any(ln == "[trusted, unsandboxed] " for ln in lines)
 
 
 def test_gradle_in_the_sandboxed_tier_degrades_to_cannot_verify(tmp_path: Path) -> None:
-    from errorta_council.coding.runner import _missing_build_dep
-    assert _missing_build_dep(["./gradlew", "build"], ".", tmp_path) == (
-        "gradle", "trusted gate required")
-    assert _missing_build_dep(["./mvnw", "test"], ".", tmp_path) == (
-        "maven", "trusted gate required")
+    for tool in ("./gradlew", "./mvnw"):
+        reg = {"g": {"argv": [tool, "build"], "cwd": ".", "timeout_seconds": 5}}
+        session = run_test_commands(tmp_path, reg, ["g"], sandbox="none")
+        assert not session.passed and session.sandbox == "none"
+        assert session.results[0].status == "blocked"
+        assert session.results[0].reason == (
+            "sandboxed tier cannot run gradle/maven; declare a trusted gate")
+
+
+def test_mixed_gate_tiers_fail_closed(tmp_path: Path) -> None:
+    reg = {
+        "a": {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5,
+              "tier": "trusted", "env_passthrough": []},
+        "b": {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5},
+    }
+    session = run_test_commands(tmp_path, reg, list(reg))
+    assert not session.passed and session.sandbox == "trusted"
+    assert all(r.status == "blocked" and r.reason == "mixed_gate_tiers"
+              for r in session.results)
+
+
+def test_set_test_commands_drops_an_injected_tier(_home: Path) -> None:
+    s = _store()
+    s.set_test_commands({"x": {"argv": ["/usr/bin/true"], "cwd": ".",
+                               "timeout_seconds": 5, "tier": "trusted",
+                               "env_passthrough": ["PATH"]}})
+    spec = s.get_test_commands()["x"]
+    assert "tier" not in spec and "env_passthrough" not in spec
+    assert s.gate_tier() == "sandboxed"

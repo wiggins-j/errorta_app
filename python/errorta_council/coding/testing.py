@@ -242,6 +242,20 @@ def run_test_commands(
                 stdout_sha256="", stdout_preview="", stderr_preview="",
                 reason="cancelled before launch"))
             break
+        # A gradle/maven wrapper resolves its own toolchain and dependencies
+        # over the network at build time; the sandboxed executor is
+        # network-off by contract (see `_run_one` above), so this can never
+        # succeed here — only an operator-declared trusted gate (unsandboxed,
+        # network-capable) can honestly verify it. `blocked` is evidence's
+        # existing "cannot verify" shape (gate_state.latest_acceptance_result
+        # never treats a blocked result as a fixable red), so this degrades
+        # the same way a missing npm/cargo/go marker already does, rather
+        # than filing a phantom code finding for an environmental failure.
+        argv0 = str((spec.get("argv") or [""])[0])
+        if Path(argv0).name in {"gradlew", "mvnw"}:
+            results.append(_blocked_result(
+                cmd_id, "sandboxed tier cannot run gradle/maven; declare a trusted gate"))
+            break
         results.append(asyncio.run(_run_one(
             cmd_id, spec, workspace_root=ws_root,
             runner_root=runner_root / f"c{idx}", sandbox=backend)))

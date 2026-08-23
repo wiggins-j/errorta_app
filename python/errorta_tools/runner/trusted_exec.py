@@ -268,13 +268,8 @@ def run_trusted_command(
     # near-instantly regardless of this deadline, so the common case pays
     # none of this latency.
     cutoff = time.monotonic() + _DRAIN_GRACE_S
-    # Both readers must end up bounded even if something unexpected raises
-    # between computing the cutoff and assigning it to the second one — an
-    # unbounded reader thread would otherwise be left running forever.
-    try:
-        out_state.deadline_at = cutoff
-    finally:
-        err_state.deadline_at = cutoff
+    out_state.deadline_at = cutoff
+    err_state.deadline_at = cutoff
     join_deadline = cutoff + _POLL_S * 2  # slack for the select() poll granularity
     out_thread.join(timeout=max(0.0, join_deadline - time.monotonic()))
     err_thread.join(timeout=max(0.0, join_deadline - time.monotonic()))

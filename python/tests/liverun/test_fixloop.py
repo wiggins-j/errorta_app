@@ -1457,3 +1457,12 @@ def test_gate_label_names_a_trusted_tier() -> None:
         def get_test_commands(self):
             return {"compile": {"argv": ["./gradlew", "build"], "tier": "trusted"}}
     assert _gate_label(_S()) == "compile — ./gradlew build [trusted, unsandboxed]"
+
+
+def test_gate_label_names_an_invalid_trusted_file() -> None:
+    from errorta_liverun.fixloop import _gate_label
+    class _S:
+        def get_test_commands(self):
+            return {"trusted-gate": {"tier": "trusted", "invalid": "gate_mode_insecure",
+                                     "argv": [], "cwd": ".", "timeout_seconds": 1}}
+    assert _gate_label(_S()) == "the project's trusted gate file is invalid (gate_mode_insecure)"
