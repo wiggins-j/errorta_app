@@ -148,9 +148,13 @@ def _connect_cli(client: SidecarClient, ctx: Context, provider: str,
     if args.get("login"):
         # GET /provider-keys/{provider}/login-command (gateway.py:296).
         out["login"] = client.get_json(f"/provider-keys/{provider}/login-command")
-    # POST /provider-keys/{provider}/test (gateway.py:477) — the ONLY way to
-    # populate the fail-closed `connected` cache. A billable probe, not a store
-    # mutation → no sole-owner guard.
+    # POST /provider-keys/{provider}/test (gateway.py:477) — this CLI command's
+    # way to populate the fail-closed `connected` cache. A billable probe, not
+    # a store mutation → no sole-owner guard. The only other caller is
+    # `errorta_liverun.fixloop._default_assign_dev_route`, which warms the
+    # same cache (via `probe_cli_provider` directly, not this route) before
+    # seating a dev on a `cli_not_verified` route -- so a live run never needs
+    # this command to have been run first on a freshly restarted sidecar.
     out["test"] = client.post_json(f"/provider-keys/{provider}/test", json={})
     return out
 

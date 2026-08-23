@@ -63,8 +63,14 @@ _CLI_LOGIN_META: dict[str, dict[str, Any]] = {
 }
 
 # F040-01 — process-level cache of the last *live* auth probe per CLI provider.
-# Advisory only (a hint for the room/role pickers): the live billable probe runs
-# ONLY on the explicit Test route, never on the hot discovery/detect paths.
+# Advisory only (a hint for the room/role pickers): the live billable probe
+# never runs on the hot discovery/detect paths. It has exactly two callers:
+# the explicit Test route (`test_provider_connection`, via `probe_cli_provider`
+# below) and the live-run seat path
+# (`errorta_liverun.fixloop._default_assign_dev_route`, which calls
+# `probe_cli_provider` directly through `loop_bridge` to warm this cache on a
+# freshly restarted sidecar that never had the desktop panel's Test button
+# pressed).
 _PROBE_CACHE: dict[str, dict[str, Any]] = {}
 
 

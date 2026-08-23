@@ -464,13 +464,22 @@ def test_default_assign_dev_route_over_a_real_ledger_store(
     `gateway_route_id` already equals the route is still reseated (to single);
     (d) a non-dev member is neither counted nor touched.
     """
-    from errorta_council.coding import control_actions, pm_reference
+    from errorta_council.coding import control_actions, model_availability, pm_reference
     from errorta_council.coding.ledger import LedgerStore
 
     monkeypatch.setattr(
         pm_reference, "list_available_routes",
         lambda: [{"route_id": "claude_cli.opus", "family": "opus",
                   "provider_class": "claude_cli"}])
+    # This route already reads available -- the seat-probe path (added for the
+    # cli_not_verified case, see test_default_assign_dev_route_probes_a_cold_
+    # cli_route_before_seating below) must stay OFF here, or this test would
+    # reach the real billable `probe_cli_provider` through `loop_bridge`.
+    monkeypatch.setattr(
+        model_availability, "resolve_route_availability",
+        lambda route_ids: {
+            route_ids[0]: model_availability.RouteAvailability(
+                route_ids[0], "claude_cli", True, "")})
     calls: list[tuple] = []
     real_assign = control_actions.assign_models_by_role
 

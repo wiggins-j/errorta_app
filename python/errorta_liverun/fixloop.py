@@ -293,13 +293,18 @@ def _default_assign_dev_route(project_id: str, route: str) -> list[str]:
     # simply leaves the route unavailable; the existing `ControlActionError`
     # path below still pauses the cycle -- this does not special-case that.
     provider_class = route.split(".", 1)[0]
-    if provider_class in {"claude_cli", "codex_cli", "cursor_cli"}:
+    from errorta_app.routes.gateway import _CLI_PROVIDERS, probe_cli_provider
+    if provider_class in _CLI_PROVIDERS:
         from errorta_council.coding import model_availability
         projection = model_availability.resolve_route_availability([route])
         item = projection.get(route)
         if item is not None and not item.available and item.reason == "cli_not_verified":
-            from errorta_app.routes.gateway import probe_cli_provider
             from errorta_model_gateway import loop_bridge
+            # `timeout=60` bounds how long THIS call waits, not the coroutine
+            # itself -- a timeout does not cancel it. On timeout the probe
+            # keeps running on the shared loop and still writes `_PROBE_CACHE`
+            # when it finishes; that's a correct (if late) observation, not a
+            # wrong one, so it is left to complete rather than cancelled.
             loop_bridge.run_coro(probe_cli_provider(provider_class), timeout=60)
     control_actions.assign_models_by_role(
         store, {"dev": route}, available=pm_reference.list_available_routes(),
