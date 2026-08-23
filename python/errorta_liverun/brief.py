@@ -142,9 +142,8 @@ def _excerpt(item: EvidenceItem) -> str:
 def _symptom(bundle: EvidenceBundle) -> str:
     if bundle.stalled_probe_id:
         name = _one_line(bundle.stalled_probe_id, limit=64)
-        if bundle.stalled_probe_kind == "remote_pid_alive":
-            return f"`{name}` process exited"
-        return f"`{name}` stopped advancing"
+        return f"`{name}` " + _KIND_TITLE.get(str(bundle.stalled_probe_kind or ""),
+                                             "stopped advancing")
     if bundle.launch_step_name:
         return f"step `{_one_line(bundle.launch_step_name, limit=64)}` did not complete"
     reason = _one_line(bundle.stop_reason, limit=64)
@@ -189,13 +188,23 @@ _KIND_MEANING = {
         "the process exited -- it had been gone for {s} when the run stopped. "
         "This is not a logging or heartbeat problem; find why it exited."),
     "remote_file_mtime_advancing": (
-        "the process was alive but its log file stopped writing for {s}."),
+        "its log file stopped writing for {s} (this alone does not say whether "
+        "the process was still running; check the other probes' evidence)."),
     "remote_stdout_advancing": (
-        "the command's output stopped advancing for {s} (the process it "
-        "observes was alive)."),
+        "the command's output stopped advancing for {s} (this alone does not "
+        "say whether the observed process was still running)."),
     "remote_stdout_matches": (
         "the command's output stopped matching the expected pattern for {s}."),
     "http": "the endpoint stopped answering for {s}.",
+}
+
+
+_KIND_TITLE = {
+    "remote_pid_alive": "process exited",
+    "remote_file_mtime_advancing": "log stopped writing",
+    "remote_stdout_advancing": "stopped advancing",
+    "remote_stdout_matches": "stopped matching",
+    "http": "stopped answering",
 }
 
 

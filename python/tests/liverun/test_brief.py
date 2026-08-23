@@ -172,3 +172,19 @@ def test_title_names_the_exit_for_a_pid_probe() -> None:
                 stalled_probe_kind="remote_pid_alive"), _repo(), gate_label="g")
     assert "`brain-alive` process exited" in title
     assert "stopped advancing" not in title
+
+
+def test_mtime_and_stdout_kinds_do_not_claim_the_process_was_alive() -> None:
+    for kind in ("remote_file_mtime_advancing", "remote_stdout_advancing"):
+        _, detail = build_fix_brief(
+            _bundle(stop_reason="stall:x", stalled_probe_id="x", stalled_probe_kind=kind),
+            _repo(), gate_label="g")
+        head = detail.split("LIVE-RUN EVIDENCE")[0]
+        assert "was alive" not in head and "does not say whether" in head
+
+
+def test_title_is_kind_aware_for_http() -> None:
+    title, _ = build_fix_brief(
+        _bundle(stop_reason="stall:client-state", stalled_probe_id="client-state",
+                stalled_probe_kind="http"), _repo(), gate_label="g")
+    assert "`client-state` stopped answering" in title
