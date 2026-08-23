@@ -1,8 +1,18 @@
 """Operator-declared, UNSANDBOXED acceptance gate (spec 2026-08-23-trusted-gate).
 
 A trusted gate exists only because a human put a file in ``$ERRORTA_HOME/gates``
-with the right owner and mode. The engine never writes there (a grep test keeps
-it so). Same provenance bar as a live-run profile; strictly less power than one.
+with the right owner and mode. The engine never writes there; Task 5 of this
+slice lands the grep test that keeps it so
+(``tests/test_gates_dir_is_operator_only.py``). Same provenance bar as a
+live-run profile; strictly less power than one.
+
+Hard links and the stat-then-read TOCTOU window are accepted at this trust
+level: a same-uid attacker who could already write a same-owner, same-mode
+file into ``gates/`` could just write a valid trusted gate directly, so
+defending against either buys nothing. Likewise an absolute ``argv[0]`` is
+deliberately unconstrained by design — the file is operator-authored, not
+attacker-supplied — and the shell-metacharacter filter on argv is hygiene
+against accidental shell interpretation downstream, not a sandbox boundary.
 """
 from __future__ import annotations
 
@@ -71,11 +81,17 @@ def gate_path(project_id: str) -> Path:
 def _file_guard(path: Path) -> None:
     if path.is_symlink():
         raise TrustedGateError("gate_is_symlink", str(path))
-    try:
-        path.resolve().relative_to(gates_dir().resolve())
-    except ValueError:
-        raise TrustedGateError("gate_outside_dir", str(path)) from None
+    # A symlinked gates/ directory defeats a resolve()-both-sides containment
+    # check: gate_path()'s parent and gates_dir() would resolve through the
+    # same symlink to the same place either way, so the comparison below is
+    # only meaningful once we know the directory itself isn't a symlink.
+    if gates_dir().is_symlink():
+        raise TrustedGateError("gates_dir_is_symlink", str(gates_dir()))
+    if path.parent.resolve() != gates_dir().resolve():
+        raise TrustedGateError("gate_outside_dir", str(path))
     st = path.stat()
+    if not stat.S_ISREG(st.st_mode):
+        raise TrustedGateError("gate_not_regular_file", str(path))
     if st.st_uid != os.getuid():
         raise TrustedGateError("gate_not_owned", str(path))
     if stat.S_IMODE(st.st_mode) not in ALLOWED_MODES:
@@ -95,9 +111,9 @@ def _command(raw: Any, *, where: str) -> TrustedCommand:
     if extra:
         raise TrustedGateError("unknown_key", f"{where}: {sorted(extra)}")
     cid = raw.get("id")
+    if not isinstance(cid, str) or not cid:
+        raise TrustedGateError("bad_command_id", where)
     try:
-        if not isinstance(cid, str) or not cid:
-            raise UnsafePathError(cid)
         safe_segment(cid)
     except UnsafePathError:
         raise TrustedGateError("bad_command_id", where) from None
@@ -105,17 +121,18 @@ def _command(raw: Any, *, where: str) -> TrustedCommand:
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
         raise TrustedGateError("bad_argv", where)
     for a in argv:
-        if _SHELL_CHARS.search(a):
+        if _SHELL_CHARS.search(a) or "\x00" in a:
             raise TrustedGateError("shell_chars", f"{where}: {a!r}")
         if a in BANNED_TOKENS:
             raise TrustedGateError("banned_token", f"{where}: {a}")
     if not (os.path.isabs(argv[0]) or argv[0] in RELATIVE_ARGV0):
         raise TrustedGateError("argv0_not_absolute", f"{where}: {argv[0]!r}")
     cwd = raw.get("cwd", ".")
-    if (not isinstance(cwd, str) or not cwd or cwd.startswith("/")
-            or ".." in Path(cwd).parts):
+    if (not isinstance(cwd, str) or not cwd.strip() or "\x00" in cwd
+            or cwd.startswith(("/", "~")) or ".." in Path(cwd).parts):
         raise TrustedGateError("bad_cwd", f"{where}: {cwd!r}")
-    timeout = _int(raw.get("timeout_seconds"), code="bad_timeout", lo=1, hi=MAX_TIMEOUT_S, where=where)
+    timeout = _int(raw.get("timeout_seconds"), code="bad_timeout", lo=1, hi=MAX_TIMEOUT_S,
+                   where=where)
     scope = raw.get("scope", "unit")
     if scope not in SCOPES:
         raise TrustedGateError("bad_scope", f"{where}: {scope!r}")
@@ -145,11 +162,7 @@ def _env(raw: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
-def load_trusted_gate(project_id: str) -> TrustedGate | None:
-    path = gate_path(project_id)
-    if not path.exists() and not path.is_symlink():
-        return None
-    _file_guard(path)
+def _parse_gate(project_id: str, path: Path) -> TrustedGate:
     try:
         doc = yaml.safe_load(path.read_text())
     except yaml.YAMLError as exc:
@@ -175,6 +188,21 @@ def load_trusted_gate(project_id: str) -> TrustedGate | None:
         raise TrustedGateError("bad_command_id", "duplicate id")
     return TrustedGate(project_id=project_id, path=str(path), commands=commands,
                        env_passthrough=_env(doc.get("env")))
+
+
+def load_trusted_gate(project_id: str) -> TrustedGate | None:
+    path = gate_path(project_id)
+    if not path.exists() and not path.is_symlink():
+        return None
+    _file_guard(path)
+    try:
+        return _parse_gate(project_id, path)
+    except TrustedGateError:
+        raise
+    except Exception as exc:  # last line of defence: any wrong-shaped YAML or
+        # unanticipated failure must still fail closed as a TrustedGateError,
+        # not crash the caller (mirrors errorta_liverun/profile.py::load_profile).
+        raise TrustedGateError("gate_malformed", f"{type(exc).__name__}: {exc}"[:120]) from None
 
 
 def registry_view(gate: TrustedGate) -> dict[str, dict[str, Any]]:
