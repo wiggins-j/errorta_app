@@ -1278,10 +1278,37 @@ class LedgerStore:
         return events[-int(limit):]
 
     # --- F087-10 test-command registry + grounded run records ----------------
-    def get_test_commands(self) -> dict[str, Any]:
+    def _read_file_registry(self) -> dict[str, Any]:
         if not self._test_commands_path.exists():
             return {}
         return json.loads(self._test_commands_path.read_text("utf-8"))
+
+    def get_test_commands(self) -> dict[str, Any]:
+        # Trusted tier (spec 2026-08-23-trusted-gate): an operator file under
+        # $ERRORTA_HOME/gates shadows the engine-written registry entirely. The
+        # file is read here, on every call, so a file the operator just fixed or
+        # removed takes effect without a restart, and every reader of the
+        # registry -- availability, the tester seat, labels, bootstrap -- sees one
+        # consistent gate without knowing which tier it is.
+        from errorta_council.coding import trusted_gate as _tg
+        try:
+            gate = _tg.load_trusted_gate(self.project_id)
+        except _tg.TrustedGateError as exc:
+            return _tg.invalid_registry_view(self.project_id, exc.code)
+        if gate is not None:
+            return _tg.registry_view(gate)
+        return self._read_file_registry()
+
+    def gate_tier(self) -> str:
+        """`trusted` | `trusted_invalid` | `sandboxed` | `none` — for labels and
+        the CLI; never a decision input on its own."""
+        from errorta_council.coding import trusted_gate as _tg
+        try:
+            if _tg.load_trusted_gate(self.project_id) is not None:
+                return "trusted"
+        except _tg.TrustedGateError:
+            return "trusted_invalid"
+        return "sandboxed" if self._read_file_registry() else "none"
 
     def set_test_commands(self, commands: Any) -> dict[str, Any]:
         """Validate + persist the per-project test-command registry. Argv-only
