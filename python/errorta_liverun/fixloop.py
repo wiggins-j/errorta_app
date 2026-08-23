@@ -293,6 +293,22 @@ def _default_assign_dev_route(project_id: str, route: str) -> list[str]:
     return prior
 
 
+def _default_seed_workspace(project_id: str) -> bool:
+    # `adopt_project` never seeds; the first `errorta run` does, via
+    # CodingRunner.__init__. A fix cycle that arrives first must not pause on
+    # a missing worktree it could have created (live 2026-08-22, README item 10).
+    from errorta_council.coding.ledger import LedgerStore
+    from errorta_council.coding.workspace import CodingWorkspace
+    store = LedgerStore(project_id)
+    proj = store.get_project()
+    ws = CodingWorkspace(project_id, store)
+    ws.set_target(proj.target)
+    if ws.exists():
+        return False          # never re-stamp seed_head on a worked tree
+    ws.setup(target=proj.target, repo_path=proj.repo_path)
+    return True
+
+
 @dataclass
 class FixDeps:
     """Every engine seam the cycle reaches through. ``None`` means "resolve the
@@ -322,6 +338,7 @@ class FixDeps:
     triage_fn: Callable[[str, str, str], str] | None = None
     bound_channel_fn: Callable[[str], str] | None = None
     assign_dev_route_fn: Callable[[str, str], list[str]] | None = None
+    seed_workspace_fn: Callable[[str], bool] | None = None
 
     def ledger(self, project_id: str) -> Any:
         return (self.ledger_factory or _default_ledger_factory)(project_id)
@@ -365,6 +382,10 @@ class FixDeps:
         """Seat every `dev` member on `route`. Returns the routes it replaced
         (empty when every dev seat already sat there)."""
         return list((self.assign_dev_route_fn or _default_assign_dev_route)(project_id, route) or [])
+
+    def seed_workspace(self, project_id: str) -> bool:
+        """Create the project's worktree if there is none. True when it did."""
+        return bool((self.seed_workspace_fn or _default_seed_workspace)(project_id))
 
 
 @dataclass
@@ -581,11 +602,22 @@ class FixCycle:
                 self._event("fix_team_model", {"project_id": project_id, "role": "dev",
                                                "from": prior, "to": route})
         try:
+            if self.deps.seed_workspace(project_id):
+                repo_path = self._safe(
+                    lambda: str(getattr(self._store.get_project(), "repo_path", "") or ""),
+                    default="")
+                self._event("fix_workspace_seeded", {"project_id": project_id,
+                                                     "repo_path": repo_path})
+        except Exception as exc:  # noqa: BLE001
+            _LOG.exception("liverun %s could not seed workspace for %s", self.run_id, project_id)
+            return self._pause("fix_run_failed", failed=False, detail=f"seed:{type(exc).__name__}")
+        try:
             self._ws = self.deps.workspace(project_id)
             self._head_before = str(self._ws.head() or "")
         except Exception as exc:  # noqa: BLE001
             _LOG.exception("liverun %s could not open workspace for %s", self.run_id, project_id)
-            return self._pause("fix_run_failed", failed=False, detail=type(exc).__name__)
+            return self._pause("fix_run_failed", failed=False,
+                               detail=f"{type(exc).__name__}:{str(exc)[:80]}")
         self._state = "task"
         return self._pending("fix_triage")
 

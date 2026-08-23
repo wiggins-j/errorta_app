@@ -459,6 +459,8 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
     if kind == "fix_team_model":
         frm = ", ".join(_esc(r) for r in (detail.get("from") or []))
         return f"dev seat → {_esc(detail.get('to'))} (was {frm})"
+    if kind == "fix_workspace_seeded":
+        return f"seeded the project worktree from {_esc(detail.get('repo_path'))}"
     if kind == "fix_run":
         return (f"Fix run {_esc(detail.get('status'))} "
                 f"({_esc(detail.get('mode'))}) on `{_esc(detail.get('project_id'))}`")

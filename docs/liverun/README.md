@@ -430,9 +430,11 @@ them:
    you like.
 9. **Caps are real.** 2 launches/hour and a 900 s gap means a shakedown with
    profile fixes takes hours; plan relaunch times instead of loosening caps.
-10. **Seed the project's worktree before the first fix cycle.** `adopt_project`
-    does not; the first `errorta run` (or `errorta setup --confirm` followed by
-    a run) does. Until then the cycle pauses `fix_run_failed`.
+10. **The fix cycle seeds a missing project worktree itself.** `adopt_project`
+    does not, and the first `errorta run` (or `errorta setup --confirm`
+    followed by a run) still does too — but a fix cycle that arrives first no
+    longer pauses `fix_run_failed` on a missing worktree it could have
+    created.
 
 ## Status (2026-08-22)
 
@@ -454,7 +456,6 @@ model-limited until the items below land.
 - Fix-loop dev capacity: an opus dev for existing-repo projects, a larger
   `ERRORTA_REPO_READ_MAX_TURNS`, and a longer CLI turn timeout for repo-read
   turns; measure the fix rate on real stalls before widening anything.
-- The fix cycle should seed a missing project worktree itself (item 10).
 - `window_shot` never captured RuneLite: the `pgrep` pattern does not match the
   launcher-spawned process name; fix the pattern.
 - osrs-reaper has no usable acceptance gate: Gradle cannot run inside the

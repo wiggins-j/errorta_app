@@ -1397,6 +1397,14 @@ def test_fix_team_model_line_names_the_swap() -> None:
     assert line == "dev seat → claude_cli.opus (was claude_cli.sonnet)"
 
 
+def test_fix_workspace_seeded_line_names_the_source() -> None:
+    line = outbound._liverun_detail(
+        "fix_workspace_seeded",
+        {"project_id": "senditai-ng", "repo_path": "/r/senditai-ng"}, "fake")
+
+    assert line == "seeded the project worktree from /r/senditai-ng"
+
+
 def test_every_fix_detail_is_escaped_and_capped() -> None:
     """Repo ids and pause codes come off disk and out of the engine, and
     `fyi_message` escapes nothing it is handed."""

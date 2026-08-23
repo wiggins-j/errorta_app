@@ -124,12 +124,16 @@ class Fake:
         self.dev_routes: list[str] = ["claude_cli.sonnet"]
         self.assigned: list[tuple[str, str]] = []
         self.assign_raises: Exception | None = None
+        self.seed_result = False
+        self.seeded: list[str] = []
+        self.seed_raises: Exception | None = None
+        self.ws_raises: Exception | None = None
 
     # -- seams ---------------------------------------------------------- #
     def deps(self) -> FixDeps:
         return FixDeps(
             ledger_factory=lambda pid: self.store,
-            workspace_factory=lambda pid: self.ws,
+            workspace_factory=self._workspace,
             gate_available_fn=lambda store: self.gate,
             merge_gate_ok_fn=lambda store, ws: self.merge_gate,
             start_run_fn=self._start_run,
@@ -144,6 +148,7 @@ class Fake:
             if self.triage_replies else None,
             bound_channel_fn=lambda pid: "C-live",
             assign_dev_route_fn=self._assign_dev_route,
+            seed_workspace_fn=self._seed,
         )
 
     def _assign_dev_route(self, project_id: str, route: str) -> list[str]:
@@ -153,6 +158,17 @@ class Fake:
         self.assigned.append((project_id, route))
         self.dev_routes = [route for _ in self.dev_routes]
         return prior
+
+    def _seed(self, project_id: str) -> bool:
+        if self.seed_raises is not None:
+            raise self.seed_raises
+        self.seeded.append(project_id)
+        return self.seed_result
+
+    def _workspace(self, project_id: str):
+        if self.ws_raises is not None:
+            raise self.ws_raises
+        return self.ws
 
     def finish_run(self, status: str | None = None) -> None:
         """The dev run ends. A run that delivered anything moved the branch —
@@ -345,6 +361,39 @@ def test_unavailable_dev_route_pauses_before_any_run() -> None:
     assert fake.started == [] and fake.store.tasks == []
 
 
+def test_missing_worktree_is_seeded_before_the_workspace_opens() -> None:
+    fake = Fake()
+    fake.seed_result = True
+    out = _drive(_cycle(fake), fake)
+    assert fake.seeded == ["senditai-ng"]
+    assert dict(out.events)["fix_workspace_seeded"] == {
+        "project_id": "senditai-ng", "repo_path": "/r/senditai-ng"}
+
+
+def test_existing_worktree_is_not_reseeded_and_not_announced() -> None:
+    fake = Fake()
+    out = _drive(_cycle(fake), fake)
+    assert fake.seeded == ["senditai-ng"]
+    assert "fix_workspace_seeded" not in [k for k, _ in out.events]
+
+
+def test_seed_failure_pauses_with_the_exception_named() -> None:
+    fake = Fake()
+    fake.seed_raises = ValueError("existing target needs a valid repo_path")
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "paused" and out.code == "fix_run_failed"
+    assert out.detail == "seed:ValueError"
+    assert fake.started == []
+
+
+def test_workspace_failure_keeps_its_message() -> None:
+    fake = Fake()
+    fake.ws_raises = RuntimeError("no worktree for this project yet")
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "paused" and out.code == "fix_run_failed"
+    assert out.detail == "RuntimeError:no worktree for this project yet"
+
+
 # -- the cancel path ------------------------------------------------------- #
 
 def test_idle_run_is_cancelled_through_cancel_requested() -> None:
@@ -470,6 +519,36 @@ def test_default_assign_dev_route_over_a_real_ledger_store(
     assert prior_d == [] and len(calls) == 2
     member_d = store_d.get_run_config()["members"][0]
     assert member_d["gateway_route_id"] == "claude_cli.sonnet"
+
+
+def test_default_seed_workspace_over_a_real_ledger_store(
+        tmp_path: pathlib.Path) -> None:
+    """`_default_seed_workspace` is the seam's only production implementation
+    and, before this test, had no coverage of its own -- everything else
+    drives it through the `Fake`. Exercise it directly against a real
+    `LedgerStore` + `CodingWorkspace` (the fixture-provided `ERRORTA_HOME`
+    already points at `tmp_path`)."""
+    import subprocess
+
+    from errorta_council.coding.ledger import LedgerStore
+    from errorta_council.coding.workspace import CodingWorkspace
+
+    repo_dir = tmp_path / "src-repo"
+    repo_dir.mkdir()
+    (repo_dir / "README.md").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-q", "-m", "seed"],
+        cwd=repo_dir, check=True)
+
+    store = LedgerStore("unit-seed")
+    store.create_project(north_star="n", definition_of_done="d",
+                         target="existing", repo_path=str(repo_dir))
+
+    assert F._default_seed_workspace("unit-seed") is True
+    assert CodingWorkspace("unit-seed", store).exists() is True
+    assert F._default_seed_workspace("unit-seed") is False
 
 
 def test_already_running_project_is_never_fought() -> None:
