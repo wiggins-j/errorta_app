@@ -1397,6 +1397,22 @@ def test_fix_team_model_line_names_the_swap() -> None:
     assert line == "dev seat → claude_cli.opus (was claude_cli.sonnet)"
 
 
+def test_fix_cycle_hygiene_line_names_the_counts() -> None:
+    line = outbound._liverun_detail(
+        "fix_cycle_hygiene",
+        {"focuses_archived": 1, "tasks_dropped": 2, "prs_abandoned": 3}, "fake")
+
+    assert line == ("🧹 Retired the previous fix cycle: 1 focus, 2 task(s), "
+                     "3 PR(s)")
+
+
+def test_fix_cycle_hygiene_error_line_names_the_exception() -> None:
+    line = outbound._liverun_detail(
+        "fix_cycle_hygiene", {"error": "RuntimeError"}, "fake")
+
+    assert line == "🧹 Could not retire the previous fix cycle (RuntimeError) — continuing"
+
+
 def test_fix_workspace_seeded_line_names_the_source() -> None:
     line = outbound._liverun_detail(
         "fix_workspace_seeded",

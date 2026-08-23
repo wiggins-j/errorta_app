@@ -249,6 +249,10 @@ gate** → a staged acceptance → **deploy** → a **relaunch** as a new run id
 linked by `fix_of`. It runs on the supervisor's own thread; `stop_live_run`
 still interrupts it between steps.
 
+Before filing its Focus, a cycle archives any previous liverun Focus and
+drops/abandons the tasks and PRs created under it, so a cycle never inherits
+the last one's debris (live 2026-08-23).
+
 **Triage** is deterministic first. Each evidence class is a named signature
 over supervisor-owned state (the stop reason, a `/state` capture, a traceback
 banner), and the profile maps classes onto repos. Exactly one claimant is an

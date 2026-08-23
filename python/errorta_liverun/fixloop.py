@@ -335,6 +335,44 @@ def _default_seed_workspace(project_id: str) -> bool:
     return True
 
 
+def _default_retire_prior_cycle(store: Any) -> dict[str, int]:
+    """Retire the DEBRIS of a previous liverun fix cycle before a new one
+    files its own Focus, task and run (live 2026-08-23, runs e3bb5f, b81258).
+
+    A cycle that ends without delivering (`fix_no_delivery`) leaves behind an
+    active Focus, an open PM-planned/dev task, and open PRs -- and the NEXT
+    cycle's project context still shows all of it, ahead of the new brief.
+    The dev chased that debris instead of reading the new brief; convergence
+    is impossible while each cycle inherits the last one's junk.
+
+    Every liverun Focus's own body says "the ONLY goal is this one fix" --
+    so everything created at or after the EARLIEST currently-active liverun
+    Focus is this loop's own work, and is safe to retire. Anything older
+    belongs to the operator (or predates this loop entirely) and is left
+    strictly alone: if there is no active liverun Focus, this touches
+    nothing at all.
+    """
+    prior = [f for f in store.active_focuses() if f.origin == "liverun"]
+    if not prior:
+        return {"focuses_archived": 0, "tasks_dropped": 0, "prs_abandoned": 0}
+    cutoff = min(f.created_at for f in prior)
+    for focus in prior:
+        store.update_focus(focus.id, status="archived")
+    dropped = 0
+    for task in store.list_tasks():
+        if task.state in ("todo", "doing", "blocked") and task.created_at >= cutoff:
+            store.update_task(task.task_id, state="dropped")
+            dropped += 1
+    abandoned = 0
+    live_pr_statuses = ("merged", "abandoned", "superseded", "blocked")
+    for pr in store.list_prs():
+        if pr.get("status") not in live_pr_statuses and pr.get("created_at", "") >= cutoff:
+            store.update_pr(pr["pr_id"], status="abandoned")
+            abandoned += 1
+    return {"focuses_archived": len(prior), "tasks_dropped": dropped,
+            "prs_abandoned": abandoned}
+
+
 @dataclass
 class FixDeps:
     """Every engine seam the cycle reaches through. ``None`` means "resolve the
@@ -365,6 +403,7 @@ class FixDeps:
     bound_channel_fn: Callable[[str], str] | None = None
     assign_dev_route_fn: Callable[[str, str], list[str]] | None = None
     seed_workspace_fn: Callable[[str], bool] | None = None
+    retire_prior_cycle_fn: Callable[[Any], dict[str, int]] | None = None
 
     def ledger(self, project_id: str) -> Any:
         return (self.ledger_factory or _default_ledger_factory)(project_id)
@@ -412,6 +451,12 @@ class FixDeps:
     def seed_workspace(self, project_id: str) -> bool:
         """Create the project's worktree if there is none. True when it did."""
         return bool((self.seed_workspace_fn or _default_seed_workspace)(project_id))
+
+    def retire_prior_cycle(self, store: Any) -> dict[str, int]:
+        """Archive/drop/abandon whatever the LAST liverun fix cycle left
+        behind, before this cycle files its own Focus. See
+        `_default_retire_prior_cycle` for the scope rationale."""
+        return dict((self.retire_prior_cycle_fn or _default_retire_prior_cycle)(store) or {})
 
 
 @dataclass
@@ -671,6 +716,19 @@ class FixCycle:
         gate = _gate_label(self._store)
         title, detail = _brief.build_fix_brief(self.bundle, self._repo, gate_label=gate)
         project_id = str(self._repo.errorta_project)
+        # A cycle that ended without delivering leaves its Focus, task and PRs
+        # behind; the NEXT cycle must not inherit that debris (live 2026-08-23,
+        # runs e3bb5f, b81258). Retire it before filing anything new. A failed
+        # cleanup is reported but never blocks the fix -- this cycle's own
+        # Focus/task still get filed.
+        try:
+            retired = self.deps.retire_prior_cycle(self._store)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.exception("liverun %s could not retire the prior fix cycle", self.run_id)
+            self._event("fix_cycle_hygiene", {"error": type(exc).__name__})
+        else:
+            if any(retired.values()):
+                self._event("fix_cycle_hygiene", dict(retired))
         # The fix is the team's OPERATIVE GOAL, not just one task in the backlog:
         # without an active Focus the PM plans against the North Star and, on an
         # existing repo, scaffolds it from scratch (live 2026-08-22, run b8370d).

@@ -461,6 +461,14 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
         return f"dev seat → {_esc(detail.get('to'))} (was {frm})"
     if kind == "fix_workspace_seeded":
         return f"seeded the project worktree from {_esc(detail.get('repo_path'))}"
+    if kind == "fix_cycle_hygiene":
+        if "error" in detail:
+            return (f"🧹 Could not retire the previous fix cycle "
+                     f"({_esc(detail.get('error'))}) — continuing")
+        return (f"🧹 Retired the previous fix cycle: "
+                f"{_esc(detail.get('focuses_archived'))} focus, "
+                f"{_esc(detail.get('tasks_dropped'))} task(s), "
+                f"{_esc(detail.get('prs_abandoned'))} PR(s)")
     if kind == "fix_run":
         return (f"Fix run {_esc(detail.get('status'))} "
                 f"({_esc(detail.get('mode'))}) on `{_esc(detail.get('project_id'))}`")

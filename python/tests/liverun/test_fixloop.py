@@ -128,6 +128,10 @@ class Fake:
         self.seeded: list[str] = []
         self.seed_raises: Exception | None = None
         self.ws_raises: Exception | None = None
+        self.retire_result: dict = {
+            "focuses_archived": 0, "tasks_dropped": 0, "prs_abandoned": 0}
+        self.retired: list = []
+        self.retire_raises: Exception | None = None
 
     # -- seams ---------------------------------------------------------- #
     def deps(self) -> FixDeps:
@@ -149,6 +153,7 @@ class Fake:
             bound_channel_fn=lambda pid: "C-live",
             assign_dev_route_fn=self._assign_dev_route,
             seed_workspace_fn=self._seed,
+            retire_prior_cycle_fn=self._retire_prior_cycle,
         )
 
     def _assign_dev_route(self, project_id: str, route: str) -> list[str]:
@@ -164,6 +169,12 @@ class Fake:
             raise self.seed_raises
         self.seeded.append(project_id)
         return self.seed_result
+
+    def _retire_prior_cycle(self, store) -> dict:
+        if self.retire_raises is not None:
+            raise self.retire_raises
+        self.retired.append(store)
+        return dict(self.retire_result)
 
     def _workspace(self, project_id: str):
         if self.ws_raises is not None:
@@ -645,6 +656,62 @@ def test_default_seed_workspace_over_a_real_ledger_store(
     assert F._default_seed_workspace("unit-seed") is True
     assert CodingWorkspace("unit-seed", store).exists() is True
     assert F._default_seed_workspace("unit-seed") is False
+
+
+def test_default_retire_prior_cycle_over_a_real_ledger_store(
+        tmp_path: pathlib.Path) -> None:
+    """`_default_retire_prior_cycle` is the seam's only production
+    implementation and, before this test, had no coverage against a real
+    `LedgerStore`. Seed an operator task BEFORE any liverun focus, a
+    liverun-origin focus, a task and an open PR created after it, and a
+    merged PR after it -- then verify only the liverun-scoped debris moves."""
+    import time
+
+    from errorta_council.coding.ledger import LedgerStore
+
+    store = LedgerStore("unit-retire")
+    store.create_project(north_star="n", definition_of_done="d",
+                         target="existing", repo_path="/r/unit-retire")
+
+    operator_task = store.add_task(title="operator's own task", role="dev",
+                                   detail="pre-existing work")
+    time.sleep(0.01)
+    focus = store.add_focus(title="Fix: something", origin="liverun",
+                            body="Live-run fix cycle: the ONLY goal is this one fix.")
+    time.sleep(0.01)
+    later_task = store.add_task(title="fix task", role="dev", detail="the fix")
+    open_pr = store.record_pr(task_id=later_task.task_id, branch="fix/branch",
+                              head="h1", dev_member="dev-1")
+    merged_task = store.add_task(title="merged work", role="dev", detail="landed")
+    merged_pr = store.record_pr(task_id=merged_task.task_id, branch="fix/merged",
+                                head="h2", dev_member="dev-1")
+    store.update_pr(merged_pr["pr_id"], status="merged")
+    # A merged PR's task is already `done` -- not the `todo`/`doing`/`blocked`
+    # state the drop step targets -- so it must survive untouched too.
+    store.update_task(merged_task.task_id, state="done")
+
+    counts = F._default_retire_prior_cycle(store)
+    assert counts == {"focuses_archived": 1, "tasks_dropped": 1, "prs_abandoned": 1}
+
+    active_ids = {f.id for f in store.active_focuses()}
+    assert focus.id not in active_ids
+    archived = next(f for f in store.list_focuses() if f.id == focus.id)
+    assert archived.status == "archived"
+
+    tasks_by_id = {t.task_id: t for t in store.list_tasks()}
+    assert tasks_by_id[operator_task.task_id].state == "todo"
+    assert tasks_by_id[later_task.task_id].state == "dropped"
+    assert tasks_by_id[merged_task.task_id].state == "done"
+
+    prs_by_id = {p["pr_id"]: p for p in store.list_prs()}
+    assert prs_by_id[open_pr["pr_id"]]["status"] == "abandoned"
+    assert prs_by_id[merged_pr["pr_id"]]["status"] == "merged"
+
+    counts2 = F._default_retire_prior_cycle(store)
+    assert counts2 == {"focuses_archived": 0, "tasks_dropped": 0, "prs_abandoned": 0}
+    assert {f.id for f in store.active_focuses()} == active_ids
+    tasks_by_id2 = {t.task_id: t for t in store.list_tasks()}
+    assert tasks_by_id2[later_task.task_id].state == "dropped"
 
 
 def test_already_running_project_is_never_fought() -> None:
@@ -1294,3 +1361,42 @@ def test_the_fix_is_filed_as_the_operative_focus_before_the_task() -> None:
     assert store.focuses[0]["title"] == store.tasks[0]["title"]
     assert "do not scaffold" in store.focuses[0]["body"]
     assert dict(out.events)["fix_task"]["focus_id"] == "f1"
+
+
+def test_prior_cycle_is_retired_before_the_focus_is_filed() -> None:
+    """Live 2026-08-23 (runs e3bb5f, b81258): a cycle that ends without
+    delivering leaves its Focus, task and PRs behind for the NEXT cycle to
+    inherit. Retiring them must happen before the new Focus is filed, and the
+    counts it reports must reach the channel."""
+    fake = Fake()
+    fake.retire_result = {"focuses_archived": 1, "tasks_dropped": 2, "prs_abandoned": 3}
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    kinds = [k for k, _ in out.events]
+    assert "fix_cycle_hygiene" in kinds
+    assert kinds.index("fix_cycle_hygiene") < kinds.index("fix_task")
+    assert dict(out.events)["fix_cycle_hygiene"] == {
+        "focuses_archived": 1, "tasks_dropped": 2, "prs_abandoned": 3}
+    assert fake.retired == [fake.store]
+    assert fake.store.focuses and fake.store.focuses[0]["origin"] == "liverun"
+
+
+def test_nothing_to_retire_is_silent() -> None:
+    fake = Fake()
+    cyc = _cycle(fake)
+    cyc.step()                                  # triage
+    out = cyc.step()                            # task
+    assert "fix_cycle_hygiene" not in [k for k, _ in out.events]
+    assert fake.store.focuses and fake.store.focuses[0]["origin"] == "liverun"
+
+
+def test_retire_failure_is_reported_and_does_not_block_the_fix() -> None:
+    fake = Fake()
+    fake.retire_raises = RuntimeError("x")
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "deployed" and out.failed is False
+    kinds = [k for k, _ in out.events]
+    assert dict(out.events)["fix_cycle_hygiene"] == {"error": "RuntimeError"}
+    assert kinds.index("fix_cycle_hygiene") < kinds.index("fix_task")
+    assert fake.started
