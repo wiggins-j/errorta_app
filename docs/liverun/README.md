@@ -468,9 +468,35 @@ The brain fix (senditai-ng `9373014`) is necessary but not sufficient: the
 preflight stalls because it reads a `StateManager` instance that nothing pumps
 between the feed gate and the loop. The journal is legitimately silent for up to
 120 + 180 seconds of preflight and up to 1800 seconds of a driven tutorial, so
-the operator profile's `journal-seq` threshold is now 2100 seconds. The fix loop
-is being pointed at this exact stall next. The run id, triage, and outcome will
-be recorded here.
+the operator profile's `journal-seq` threshold is now 2100 seconds.
+
+**Measured, 2026-08-23, against that stall.** Three fix cycles ran after the
+convergence slice merged; none converged, and nothing wrong was merged:
+
+- `20260823T060652-05f8b9`: triage by kind (`brain_pid_dead` → brain) worked
+  and `window_shot` captured its first PNG, but seating the opus dev failed —
+  `claude_cli.*` routes read `cli_not_verified` on a sidecar restarted from the
+  CLI, because only the desktop panel's Test button had ever warmed the probe
+  cache. Fixed: the cycle runs that probe itself before seating.
+- `20260823T064621-e3bb5f`: the full path fired (probe, seats sonnet→opus,
+  task, run). The opus dev's read turn ran 667 s — past the old 600 s cap — and
+  still misdiagnosed: the brief said the probe was "quiet for 46s" and the dev
+  (and the reviewer) shipped a heartbeat log line; the probe is a pid check and
+  the brain had exited. `fix_no_delivery`. Fixed: the brief now states what the
+  probe *kind* means.
+- `20260823T072440-b81258`: the dev never reached the brief — the ledger still
+  carried the previous cycle's Focus, six open PRs and a broken artifact, the
+  gate failed on those, and the dev reported `blocked`. `fix_no_delivery`.
+  Fixed: a cycle retires the previous cycle's Focus, tasks and PRs before it
+  files its own.
+- A fourth launch hit `fix_cycle_cap` (3/day), as designed.
+
+Fix rate on this stall: 0/3 (0/4 counting 2026-08-22's sonnet attempt). Each
+failure was a mechanical gap in the loop rather than the model, and each gap is
+now closed; the model's own diagnosis has not yet been measured on a clean
+cycle. The brain defect was fixed by hand (senditai-ng `cf9bd33`: the preflight
+pumps the notification queue instead of sleeping) so that live runs can reach
+the tutorial and the loop can be measured on the next genuinely new stall.
 
 ### Follow-ups, in priority order
 
