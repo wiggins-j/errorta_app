@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-import os as _os
 import re
+import select
 import signal
 import stat
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,8 @@ import yaml
 
 from errorta_app.paths import errorta_home
 from errorta_export.safe_path import UnsafePathError, safe_segment
-from errorta_tools.runner.env import is_secret_env_name
+from errorta_tools.runner.env import is_secret_env_name, sanitize_text
+from errorta_tools.runner.types import stable_json_sha256
 
 BANNED_TOKENS = ("--ignore-risk-budget", "--no-safety-plane")
 RELATIVE_ARGV0 = ("./gradlew", "./mvnw")
@@ -237,21 +239,113 @@ def passthrough_env(names: tuple[str, ...]) -> dict[str, str]:
     for n in names:
         if is_secret_env_name(n):
             continue
-        v = _os.environ.get(n)
+        v = os.environ.get(n)
         if v is not None:
             out[n] = v
     return out
 
 
-def _tail(data: bytes) -> str:
-    return data[-MAX_OUTPUT_BYTES:].decode("utf-8", "replace")[-PREVIEW_CHARS:]
+_READ_CHUNK = 65536
+_POLL_S = 0.5
+_KILL_WAIT_S = 5.0
+_DRAIN_GRACE_S = 5.0
+_ABANDONED_NOTE = " (output abandoned: detached child held the pipe)"
+
+
+class _ReaderState:
+    """Shared between the main thread and one drain thread. ``deadline_at``
+    is set by the main thread to tell the drain thread when to stop waiting
+    for more data; ``eof`` is set by the drain thread to tell the main thread
+    whether it actually reached the pipe's true end-of-file, as opposed to
+    giving up at the deadline with a writer that may still be attached — the
+    two must never be conflated, since a thread that stopped only because the
+    deadline passed has NOT drained real EOF and its buffer is unreliable."""
+
+    __slots__ = ("deadline_at", "eof")
+
+    def __init__(self) -> None:
+        self.deadline_at: float | None = None  # monotonic() cutoff; None = no cutoff yet
+        self.eof = False
+
+
+def _drain(stream, buf: bytearray, cap: int, state: _ReaderState) -> None:
+    """Read a pipe to EOF, keeping at most ``cap`` bytes and discarding the
+    rest, so the child can never block writing to a full pipe and captured
+    memory stays bounded regardless of how much output it produces.
+
+    Waits for readability with a short, bounded ``select()`` instead of a
+    blocking ``read()``. That means once the caller sets ``state.deadline_at``
+    this thread notices and returns within about ``_POLL_S`` of it passing —
+    even if the pipe's write end is still held open by a detached grandchild
+    (e.g. a backgrounded ``setsid`` daemon that inherited our stdout/stderr
+    fds and outlives the process group we killed) that will never send EOF.
+    The thread owns the stream's full lifecycle, including closing it,
+    entirely from within itself, so no other thread ever has to interrupt a
+    call already in progress on the same stream object."""
+    try:
+        os.set_blocking(stream.fileno(), False)
+        while True:
+            ready, _, _ = select.select([stream], [], [], _POLL_S)
+            if ready:
+                try:
+                    chunk = stream.read(_READ_CHUNK)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                if not chunk:
+                    state.eof = True
+                    return
+                if len(buf) < cap:
+                    buf.extend(chunk[: cap - len(buf)])
+                continue
+            if state.deadline_at is not None and time.monotonic() >= state.deadline_at:
+                return
+    except (OSError, ValueError):
+        return
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _terminate_group(proc: subprocess.Popen) -> None:
+    """Best-effort SIGTERM-then-SIGKILL of the whole process group, bounded so
+    a stubborn or already-dead group can never hang the caller. ``killpg`` can
+    raise more than ``ProcessLookupError`` here: macOS returns ``EPERM``
+    (``PermissionError``) when the group's only member is a just-exited
+    zombie, so any ``OSError`` from the signal itself is tolerated the same
+    way — the subsequent bounded ``wait`` is what actually decides whether
+    the process is gone."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=_KILL_WAIT_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=_KILL_WAIT_S)
+    except subprocess.TimeoutExpired:
+        proc.wait()  # SIGKILL cannot be caught or blocked; this returns promptly.
 
 
 def run_trusted_command(spec: dict[str, Any], *, command_id: str, workspace_root: Path,
                         env_passthrough: tuple[str, ...], should_cancel=None):
     """Run ONE trusted command with no sandbox wrapper and the declared
     passthrough environment. Records ``sandbox: trusted`` semantics through the
-    session (see testing.run_test_commands); the result shape is the registry's."""
+    session (see testing.run_test_commands); the result shape is the registry's.
+
+    Evidence fields mirror the sandboxed tier (``errorta_tools/runner/local.py``
+    and ``errorta_council/coding/testing.py::_run_one``) on purpose: the same
+    hash function, HEAD-not-tail previews run through the same sanitizer, and
+    hashes taken over the same output-capped bytes, so a reader can't tell
+    which tier produced a record just from its shape."""
     from errorta_council.coding.testing import TestRunResult
 
     def _blocked(reason: str) -> "TestRunResult":
@@ -271,7 +365,7 @@ def run_trusted_command(spec: dict[str, Any], *, command_id: str, workspace_root
     except ValueError:
         return _blocked("cwd_outside_workspace")
     timeout = float(spec.get("timeout_seconds", 1) or 1)
-    argv_sha = hashlib.sha256(repr(argv).encode()).hexdigest()
+    argv_sha = stable_json_sha256(argv)
     env = passthrough_env(env_passthrough)
     t0 = time.monotonic()
     try:
@@ -283,34 +377,63 @@ def run_trusted_command(spec: dict[str, Any], *, command_id: str, workspace_root
                              exit_code=None, passed=False, duration_ms=0, stdout_sha256="",
                              stdout_preview="", stderr_preview=str(exc)[:PREVIEW_CHARS],
                              reason=f"launch failed: {type(exc).__name__}")
+
+    out_buf, err_buf = bytearray(), bytearray()
+    out_state, err_state = _ReaderState(), _ReaderState()
+    out_thread = threading.Thread(
+        target=_drain, args=(proc.stdout, out_buf, MAX_OUTPUT_BYTES, out_state), daemon=True)
+    err_thread = threading.Thread(
+        target=_drain, args=(proc.stderr, err_buf, MAX_OUTPUT_BYTES, err_state), daemon=True)
+    out_thread.start()
+    err_thread.start()
+
     status = "completed"
     try:
-        out, err = proc.communicate(timeout=timeout)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         status = "timed_out"
-        try:
-            _os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                out, err = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                _os.killpg(proc.pid, signal.SIGKILL)
-                out, err = proc.communicate()
-        except ProcessLookupError:
-            out, err = b"", b""
-        finally:
-            proc.wait()
+        _terminate_group(proc)
+
+    # The process itself is done (or forcibly killed), but a detached
+    # grandchild (e.g. a backgrounded ``setsid`` daemon that inherited our
+    # stdout/stderr fds) can keep a pipe's write end open forever. Give the
+    # reader threads one bounded grace window — shared across both streams,
+    # not stacked — to drain what they can, then let them go either way. A
+    # thread that already reached true EOF returns near-instantly regardless
+    # of this deadline, so the common case pays none of this latency.
+    cutoff = time.monotonic() + _DRAIN_GRACE_S
+    out_state.deadline_at = cutoff
+    err_state.deadline_at = cutoff
+    join_deadline = cutoff + _POLL_S * 2  # slack for the select() poll granularity
+    out_thread.join(timeout=max(0.0, join_deadline - time.monotonic()))
+    err_thread.join(timeout=max(0.0, join_deadline - time.monotonic()))
+    # A thread that stopped without ever reaching real EOF — whether it's
+    # still running past our join budget, or it gave up at the deadline —
+    # never produced a trustworthy capture; its partial buffer is discarded.
+    output_abandoned = not (out_state.eof and err_state.eof)
+    if output_abandoned:
+        out, err = b"", b""
+    else:
+        out, err = bytes(out_buf), bytes(err_buf)
+
     duration_ms = int((time.monotonic() - t0) * 1000)
-    exit_code = proc.returncode if status == "completed" else None
+    exit_code = proc.returncode
     if status == "completed" and exit_code != 0:
         status = "failed"
     passed = status == "completed" and exit_code == 0
-    reason = "" if passed else (f"timed out after {int(timeout)}s" if status == "timed_out"
-                                else f"exit {exit_code}")
-    return TestRunResult(command_id=command_id, argv_sha256=argv_sha, status=status,
-                         exit_code=exit_code, passed=passed, duration_ms=duration_ms,
-                         stdout_sha256=hashlib.sha256(out or b"").hexdigest(),
-                         stdout_preview=_tail(out or b""), stderr_preview=_tail(err or b""),
-                         reason=reason)
+    note = _ABANDONED_NOTE if output_abandoned else ""
+    if passed:
+        reason = ""
+    elif status == "timed_out":
+        reason = f"timed out after {timeout}s{note}"
+    else:
+        reason = f"exit {exit_code}{note}"
+    return TestRunResult(
+        command_id=command_id, argv_sha256=argv_sha, status=status, exit_code=exit_code,
+        passed=passed, duration_ms=duration_ms, stdout_sha256=hashlib.sha256(out).hexdigest(),
+        stdout_preview=sanitize_text(out.decode("utf-8", "replace"))[:PREVIEW_CHARS],
+        stderr_preview=sanitize_text(err.decode("utf-8", "replace"))[:PREVIEW_CHARS],
+        reason=reason)
 
 
 __all__ = ["TrustedGate", "TrustedGateError", "TrustedCommand", "gate_path", "gates_dir",

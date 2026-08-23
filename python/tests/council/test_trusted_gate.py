@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -267,3 +268,71 @@ def test_load_trusted_gate_stat_race_is_gate_malformed(
     with pytest.raises(tg.TrustedGateError) as ei:
         tg.load_trusted_gate("reaper")
     assert ei.value.code == "gate_malformed"
+
+
+def test_run_trusted_command_killpg_eperm_is_tolerated(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # macOS raises PermissionError (EPERM), not ProcessLookupError, from
+    # os.killpg when the group's only member is a just-exited zombie. Both
+    # killpg calls (TERM and KILL) must tolerate this without an exception
+    # escaping, still landing a timed_out record.
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: (_ for _ in ()).throw(PermissionError))
+    res = tg.run_trusted_command(
+        {"argv": ["/bin/sleep", "2"], "cwd": ".", "timeout_seconds": 1},
+        command_id="eperm", workspace_root=tmp_path, env_passthrough=())
+    assert res.status == "timed_out" and not res.passed
+
+
+def test_run_trusted_command_abandons_output_from_a_detached_grandchild(
+        tmp_path: Path) -> None:
+    # A grandchild that calls os.setsid() moves to a new session/process
+    # group and so survives our killpg on the direct child's group, but it
+    # still holds the inherited stdout/stderr pipe fds open — the pipe never
+    # sees EOF. macOS ships no standalone `setsid` binary, so the detach is
+    # done with a python3 fork()+os.setsid(), per the review's own fallback.
+    script = ("python3 -c 'import os,time,sys; pid=os.fork(); "
+              "(os.setsid(), time.sleep(20)) if pid==0 else None' & sleep 30")
+    t0 = time.monotonic()
+    res = tg.run_trusted_command(
+        {"argv": ["/bin/sh", "-c", script], "cwd": ".", "timeout_seconds": 1},
+        command_id="grandchild", workspace_root=tmp_path, env_passthrough=("PATH",))
+    assert res.status == "timed_out" and not res.passed
+    assert "output abandoned" in res.reason
+    assert time.monotonic() - t0 < 12
+
+
+def test_run_trusted_command_caps_output_like_the_sandboxed_tier(tmp_path: Path) -> None:
+    script = "head -c 3000000 /dev/zero | tr '\\0' a"
+    res = tg.run_trusted_command(
+        {"argv": ["/bin/sh", "-c", script], "cwd": ".", "timeout_seconds": 10},
+        command_id="big", workspace_root=tmp_path, env_passthrough=())
+    assert res.passed and res.status == "completed"
+    expected = hashlib.sha256(b"a" * tg.MAX_OUTPUT_BYTES).hexdigest()
+    assert res.stdout_sha256 == expected
+
+
+def test_run_trusted_command_cwd_symlink_escaping_workspace_is_blocked(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-workspace"
+    outside.mkdir(exist_ok=True)
+    (tmp_path / "escape").symlink_to(outside)
+    res = tg.run_trusted_command(
+        {"argv": ["/bin/pwd"], "cwd": "escape", "timeout_seconds": 5},
+        command_id="escape", workspace_root=tmp_path, env_passthrough=())
+    assert res.status == "blocked" and res.reason == "cwd_outside_workspace"
+
+
+def test_run_trusted_command_missing_binary_is_a_labeled_failure(tmp_path: Path) -> None:
+    res = tg.run_trusted_command(
+        {"argv": ["/nonexistent/bin"], "cwd": ".", "timeout_seconds": 5},
+        command_id="nf", workspace_root=tmp_path, env_passthrough=())
+    assert res.status == "failed" and not res.passed and res.exit_code is None
+    assert res.reason == "launch failed: FileNotFoundError"
+
+
+def test_run_trusted_command_passthrough_value_reaches_the_child(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_VAR", "reaches-the-child")
+    res = tg.run_trusted_command(
+        {"argv": ["/usr/bin/env"], "cwd": ".", "timeout_seconds": 5},
+        command_id="envtest", workspace_root=tmp_path, env_passthrough=("MY_VAR",))
+    assert res.passed and "MY_VAR=reaches-the-child" in res.stdout_preview
