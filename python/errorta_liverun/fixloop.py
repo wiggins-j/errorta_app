@@ -824,8 +824,12 @@ class FixCycle:
         # session that merely could not LAUNCH (sandbox refused a gradle/maven
         # wrapper, a command timed out) never evaluated the code at all, and no
         # fix would ever turn it green: that is unverifiable, not red, and must
-        # not wedge the loop (mirrors gate_state.latest_acceptance_result's
-        # ran/passed split). A seam failure is reported but never blocks the
+        # not wedge the loop (same ran/unverifiable idea as gate_state.
+        # latest_acceptance_result -- but NOT the same predicate: gate_state
+        # counts only status "completed" as ran, while the runners record a
+        # genuine non-zero exit as "failed", so this check deliberately treats
+        # "failed" as ran too; the gate_state divergence is a tracked
+        # follow-up). A seam failure is reported but never blocks the
         # fix -- the dev run runs its own gate regardless.
         head = str(self._safe(self._ws.head, default="") or "")
         try:
