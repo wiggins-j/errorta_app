@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 from pathlib import Path
@@ -196,64 +195,6 @@ def test_registry_views() -> None:
     assert inv["trusted-gate"]["tier"] == "trusted"
     assert inv["trusted-gate"]["invalid"] == "gate_mode_insecure"
 
-
-def test_passthrough_env_copies_only_listed_non_secret_names(monkeypatch) -> None:
-    monkeypatch.setenv("JAVA_HOME", "/jdk")
-    monkeypatch.setenv("MY_API_KEY", "s3cret")
-    env = tg.passthrough_env(("JAVA_HOME", "MY_API_KEY", "NOT_SET_ANYWHERE_X"))
-    assert env == {"JAVA_HOME": "/jdk"}
-
-
-def test_run_trusted_command_passes_and_records_trusted(tmp_path: Path) -> None:
-    res = tg.run_trusted_command(
-        {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5},
-        command_id="ok", workspace_root=tmp_path, env_passthrough=("PATH",))
-    assert res.passed and res.status == "completed" and res.exit_code == 0
-    assert res.command_id == "ok" and len(res.argv_sha256) == 64
-
-
-def test_run_trusted_command_failure_is_a_real_red(tmp_path: Path) -> None:
-    res = tg.run_trusted_command(
-        {"argv": ["/usr/bin/false"], "cwd": ".", "timeout_seconds": 5},
-        command_id="no", workspace_root=tmp_path, env_passthrough=())
-    assert not res.passed and res.status == "failed"
-    assert res.exit_code == 1 and res.reason == "exit 1"
-
-
-def test_run_trusted_command_times_out_and_kills_the_group(tmp_path: Path) -> None:
-    import time
-    t0 = time.monotonic()
-    res = tg.run_trusted_command(
-        {"argv": ["/bin/sleep", "30"], "cwd": ".", "timeout_seconds": 1},
-        command_id="slow", workspace_root=tmp_path, env_passthrough=())
-    assert res.status == "timed_out" and not res.passed and "timed out" in res.reason
-    assert time.monotonic() - t0 < 10
-
-
-def test_run_trusted_command_cwd_is_inside_the_workspace(tmp_path: Path) -> None:
-    (tmp_path / "sub").mkdir()
-    res = tg.run_trusted_command(
-        {"argv": ["/bin/pwd"], "cwd": "sub", "timeout_seconds": 5},
-        command_id="pwd", workspace_root=tmp_path, env_passthrough=())
-    assert res.passed and str((tmp_path / "sub").resolve()) in res.stdout_preview
-
-
-def test_run_trusted_command_invalid_marker_is_blocked(tmp_path: Path) -> None:
-    spec = tg.invalid_registry_view("reaper", "gate_mode_insecure")["trusted-gate"]
-    res = tg.run_trusted_command(
-        spec, command_id="trusted-gate", workspace_root=tmp_path, env_passthrough=())
-    assert res.status == "blocked" and not res.passed
-    assert res.reason == "trusted_gate_invalid:gate_mode_insecure"
-
-
-def test_run_trusted_command_cancel_before_launch(tmp_path: Path) -> None:
-    res = tg.run_trusted_command(
-        {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5},
-        command_id="c", workspace_root=tmp_path, env_passthrough=(),
-        should_cancel=lambda: True)
-    assert res.status == "blocked" and res.reason == "cancelled before launch"
-
-
 def test_load_trusted_gate_stat_race_is_gate_malformed(
         _home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write(_home, _doc())
@@ -270,69 +211,29 @@ def test_load_trusted_gate_stat_race_is_gate_malformed(
     assert ei.value.code == "gate_malformed"
 
 
-def test_run_trusted_command_killpg_eperm_is_tolerated(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # macOS raises PermissionError (EPERM), not ProcessLookupError, from
-    # os.killpg when the group's only member is a just-exited zombie. Both
-    # killpg calls (TERM and KILL) must tolerate this without an exception
-    # escaping, still landing a timed_out record.
-    monkeypatch.setattr(os, "killpg", lambda pid, sig: (_ for _ in ()).throw(PermissionError))
+# The actual unsandboxed-execution mechanics (subprocess launch, kill-group,
+# bounded drain) live in errorta_tools.runner.trusted_exec and are exercised
+# in tests/council/test_trusted_exec.py — errorta_council may not import
+# subprocess itself (see test_tool_runner_local.py and
+# test_toolgateway_slice1.py). These two are a thin smoke test that the
+# council-facing wrapper actually delegates and converts the result into a
+# real TestRunResult, not a spot check of the execution behavior itself.
+
+
+def test_passthrough_env_delegates_to_trusted_exec(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JAVA_HOME", "/jdk")
+    monkeypatch.setenv("MY_API_KEY", "s3cret")
+    env = tg.passthrough_env(("JAVA_HOME", "MY_API_KEY", "NOT_SET_ANYWHERE_X"))
+    assert env == {"JAVA_HOME": "/jdk"}
+
+
+def test_run_trusted_command_delegates_and_returns_a_test_run_result(tmp_path: Path) -> None:
+    from errorta_council.coding.testing import TestRunResult
+
     res = tg.run_trusted_command(
-        {"argv": ["/bin/sleep", "2"], "cwd": ".", "timeout_seconds": 1},
-        command_id="eperm", workspace_root=tmp_path, env_passthrough=())
-    assert res.status == "timed_out" and not res.passed
+        {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5},
+        command_id="ok", workspace_root=tmp_path, env_passthrough=("PATH",))
+    assert isinstance(res, TestRunResult)
+    assert res.passed and res.status == "completed" and res.exit_code == 0
+    assert res.command_id == "ok" and len(res.argv_sha256) == 64
 
-
-def test_run_trusted_command_abandons_output_from_a_detached_grandchild(
-        tmp_path: Path) -> None:
-    # A grandchild that calls os.setsid() moves to a new session/process
-    # group and so survives our killpg on the direct child's group, but it
-    # still holds the inherited stdout/stderr pipe fds open — the pipe never
-    # sees EOF. macOS ships no standalone `setsid` binary, so the detach is
-    # done with a python3 fork()+os.setsid(), per the review's own fallback.
-    script = ("python3 -c 'import os,time,sys; pid=os.fork(); "
-              "(os.setsid(), time.sleep(20)) if pid==0 else None' & sleep 30")
-    t0 = time.monotonic()
-    res = tg.run_trusted_command(
-        {"argv": ["/bin/sh", "-c", script], "cwd": ".", "timeout_seconds": 1},
-        command_id="grandchild", workspace_root=tmp_path, env_passthrough=("PATH",))
-    assert res.status == "timed_out" and not res.passed
-    assert "output abandoned" in res.reason
-    assert time.monotonic() - t0 < 12
-
-
-def test_run_trusted_command_caps_output_like_the_sandboxed_tier(tmp_path: Path) -> None:
-    script = "head -c 3000000 /dev/zero | tr '\\0' a"
-    res = tg.run_trusted_command(
-        {"argv": ["/bin/sh", "-c", script], "cwd": ".", "timeout_seconds": 10},
-        command_id="big", workspace_root=tmp_path, env_passthrough=())
-    assert res.passed and res.status == "completed"
-    expected = hashlib.sha256(b"a" * tg.MAX_OUTPUT_BYTES).hexdigest()
-    assert res.stdout_sha256 == expected
-
-
-def test_run_trusted_command_cwd_symlink_escaping_workspace_is_blocked(tmp_path: Path) -> None:
-    outside = tmp_path.parent / "outside-workspace"
-    outside.mkdir(exist_ok=True)
-    (tmp_path / "escape").symlink_to(outside)
-    res = tg.run_trusted_command(
-        {"argv": ["/bin/pwd"], "cwd": "escape", "timeout_seconds": 5},
-        command_id="escape", workspace_root=tmp_path, env_passthrough=())
-    assert res.status == "blocked" and res.reason == "cwd_outside_workspace"
-
-
-def test_run_trusted_command_missing_binary_is_a_labeled_failure(tmp_path: Path) -> None:
-    res = tg.run_trusted_command(
-        {"argv": ["/nonexistent/bin"], "cwd": ".", "timeout_seconds": 5},
-        command_id="nf", workspace_root=tmp_path, env_passthrough=())
-    assert res.status == "failed" and not res.passed and res.exit_code is None
-    assert res.reason == "launch failed: FileNotFoundError"
-
-
-def test_run_trusted_command_passthrough_value_reaches_the_child(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MY_VAR", "reaches-the-child")
-    res = tg.run_trusted_command(
-        {"argv": ["/usr/bin/env"], "cwd": ".", "timeout_seconds": 5},
-        command_id="envtest", workspace_root=tmp_path, env_passthrough=("MY_VAR",))
-    assert res.passed and "MY_VAR=reaches-the-child" in res.stdout_preview
