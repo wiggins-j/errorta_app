@@ -743,3 +743,69 @@ def test_no_token_shaped_string_in_cli_responses(client, monkeypatch) -> None:
     providers = client.get("/gateway/providers")
     for resp in (probe, status, providers):
         assert leak not in resp.text
+
+
+# ----------------------------------------------------------------------
+# probe_cli_provider — the reusable coroutine behind the Test-button route
+# (the liverun fix cycle calls it directly, off-HTTP, to warm a fresh
+# sidecar's `_PROBE_CACHE` before seating a `claude_cli.*` dev route).
+# ----------------------------------------------------------------------
+
+
+def test_probe_cli_provider_caches_and_returns_classified_result(monkeypatch) -> None:
+    import asyncio
+
+    from errorta_app.routes import gateway as gw
+    from errorta_model_gateway.providers import async_claude_cli
+
+    async def _ok(self, *, api_key=None):
+        return _ConnResult(True, "subscription CLI ready", 7)
+
+    monkeypatch.setattr(async_claude_cli.ClaudeCliHandler, "test_connection", _ok)
+
+    before = gw._PROBE_CACHE.get("claude_cli")
+    assert before is None
+
+    result = asyncio.run(gw.probe_cli_provider("claude_cli"))
+
+    assert result["ok"] is True
+    assert result["latency_ms"] == 7
+    assert result["state"] == "connected"
+    assert "remediation" in result
+
+    cached = gw._PROBE_CACHE["claude_cli"]
+    assert cached["connected"] is True
+    assert cached["state"] == "connected"
+    assert cached["login"] == ""
+    assert cached["verified_at"] is not None
+
+
+def test_probe_cli_provider_unknown_provider_raises_value_error() -> None:
+    import asyncio
+
+    from errorta_app.routes import gateway as gw
+
+    with pytest.raises(ValueError):
+        asyncio.run(gw.probe_cli_provider("not-a-cli"))
+
+    with pytest.raises(ValueError):
+        asyncio.run(gw.probe_cli_provider("anthropic"))  # a real provider, but non-CLI
+
+
+def test_test_route_still_works_for_cli_provider_via_probe_cli_provider(
+        client, monkeypatch) -> None:
+    """The route itself must delegate to `probe_cli_provider` for CLI providers
+    -- behaviour byte-identical to before the extraction."""
+    from errorta_model_gateway.providers import async_claude_cli
+
+    async def _ok(self, *, api_key=None):
+        return _ConnResult(True, "subscription CLI ready", 7)
+
+    monkeypatch.setattr(async_claude_cli.ClaudeCliHandler, "test_connection", _ok)
+
+    r = client.post("/provider-keys/claude_cli/test", headers=_TAURI)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["state"] == "connected"
+    assert "remediation" in body

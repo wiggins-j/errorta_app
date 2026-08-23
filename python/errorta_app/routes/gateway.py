@@ -510,15 +510,71 @@ async def test_custom_alias(request: Request, alias: str = Query(...)) -> dict[s
     return {"ok": result.ok, "detail": result.detail, "latency_ms": result.latency_ms}
 
 
+async def probe_cli_provider(provider: str) -> dict[str, Any]:
+    """Run the billable CLI auth probe for ONE CLI provider and cache the
+    result in `_PROBE_CACHE`, exactly as the `/provider-keys/{provider}/test`
+    route does. This is the reusable body behind that route (see
+    `test_provider_connection` below) -- extracted so a non-HTTP caller can
+    run the SAME probe path without going through FastAPI.
+
+    Why a non-HTTP caller needs this: `_PROBE_CACHE` is an in-memory,
+    process-level cache and the desktop panel's Test button is the ONLY thing
+    that has ever warmed it. A sidecar started fresh from the CLI (no desktop
+    panel opened) never warms it, so `resolve_route_availability` reports a
+    live `claude_cli.*`/`codex_cli.*`/`cursor_cli.*` route unavailable with
+    reason `cli_not_verified` even when the CLI itself is logged in
+    (live 20260823T060652-05f8b9). The liverun fix cycle calls this directly
+    before seating a dev on such a route.
+
+    Raises ``ValueError`` for an unknown provider or a provider outside
+    `_CLI_PROVIDERS` (fixed/local/custom providers don't have this probe
+    shape -- see `test_provider_connection` for their path).
+    """
+    if provider not in _CLI_PROVIDERS:
+        raise ValueError(f"not a CLI provider: {provider!r}")
+    async_registry.ensure_bootstrapped()
+    handler = async_registry.get_handler(provider)
+    if handler is None:
+        raise ValueError(f"unknown provider: {provider!r}")
+    from errorta_model_gateway.providers._cli_common import classify_test_result
+
+    result = await handler.test_connection(api_key=None)
+    # F120: classify the result so every caller (panel or liverun) sees the
+    # same wording the run-loop uses -- a logged-out CLI reads `logged_out` +
+    # a one-step remediation, never a bare `claude_cli_failed: exit 1:`.
+    # classify_test_result already redacts the detail (no token ever reaches
+    # a caller -- defense-in-depth on the credential boundary).
+    classified = classify_test_result(result)
+    # F040-01 — this is the ONLY place the billable CLI probe runs. Cache the
+    # connected-state so the room/role pickers (and cli-status) can consult it
+    # without re-probing. `verified_at` lets the UI show "verified Nm ago".
+    _PROBE_CACHE[provider] = {
+        "connected": bool(result.ok),
+        "state": classified["state"],
+        "login": "",
+        "verified_at": time.time(),
+    }
+    return {
+        "ok": result.ok, "detail": classified["detail"], "latency_ms": result.latency_ms,
+        "state": classified["state"], "remediation": classified["remediation"],
+    }
+
+
 @router.post("/provider-keys/{provider}/test")
 async def test_provider_connection(provider: str, request: Request) -> dict[str, Any]:
     """Probe one provider. Returns {ok, detail, latency_ms}.
 
     For fixed providers (anthropic / openai / google) the key is
     resolved from the keys store. For local + custom the handler
-    decides whether/how to authenticate.
+    decides whether/how to authenticate. CLI providers delegate to
+    `probe_cli_provider` -- see that function for why it exists standalone.
     """
     _require_tauri_origin(request)
+    if provider in _CLI_PROVIDERS:
+        try:
+            return await probe_cli_provider(provider)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
     async_registry.ensure_bootstrapped()
     handler = async_registry.get_handler(provider)
     if handler is None:
@@ -527,32 +583,7 @@ async def test_provider_connection(provider: str, request: Request) -> dict[str,
     if provider in provider_keys.FIXED_PROVIDERS:
         api_key = provider_keys.get_fixed_key(provider)
     result = await handler.test_connection(api_key=api_key)
-    detail = result.detail
-    # F040-01 — this is the ONLY place the billable CLI probe runs. Cache the
-    # connected-state so the room/role pickers (and cli-status) can consult it
-    # without re-probing. `verified_at` lets the UI show "verified Nm ago". The
-    # detail may carry raw CLI stderr, so redact it (defense-in-depth — the
-    # credential boundary: no token ever reaches a response).
-    if provider in _CLI_PROVIDERS:
-        from errorta_model_gateway.providers._cli_common import classify_test_result
-
-        # F120: classify the result so the panel shows the same wording the
-        # run-loop uses — a logged-out CLI reads `logged_out` + a one-step
-        # remediation, never a bare `claude_cli_failed: exit 1:`. classify_test_result
-        # already redacts the detail.
-        classified = classify_test_result(result)
-        detail = classified["detail"]
-        _PROBE_CACHE[provider] = {
-            "connected": bool(result.ok),
-            "state": classified["state"],
-            "login": "",
-            "verified_at": time.time(),
-        }
-        return {
-            "ok": result.ok, "detail": detail, "latency_ms": result.latency_ms,
-            "state": classified["state"], "remediation": classified["remediation"],
-        }
-    return {"ok": result.ok, "detail": detail, "latency_ms": result.latency_ms}
+    return {"ok": result.ok, "detail": result.detail, "latency_ms": result.latency_ms}
 
 
 __all__ = ["router"]

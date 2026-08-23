@@ -521,6 +521,93 @@ def test_default_assign_dev_route_over_a_real_ledger_store(
     assert member_d["gateway_route_id"] == "claude_cli.sonnet"
 
 
+def test_default_assign_dev_route_probes_a_cold_cli_route_before_seating(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live 20260823T060652-05f8b9: a freshly restarted sidecar has never
+    warmed the gateway's in-memory `_PROBE_CACHE` -- only the desktop panel's
+    Test button does that -- so `resolve_route_availability` reports a live
+    `claude_cli.*` route unavailable/`cli_not_verified` even when the CLI
+    itself is logged in, and `assign_models_by_role` raised
+    `ControlActionError("model_not_found", "no available model matches ...")`,
+    pausing the fix cycle. `_default_assign_dev_route` must now run the SAME
+    probe the Test button runs, synchronously, before seating: warm the
+    cache, then let `assign_models_by_role` resolve normally.
+    """
+    from errorta_app.routes import gateway as gw
+    from errorta_council.coding import model_availability, pm_reference
+    from errorta_council.coding.ledger import LedgerStore
+
+    probe_calls: list[str] = []
+
+    async def _fake_probe(provider: str) -> dict:
+        probe_calls.append(provider)
+        return {"ok": True, "detail": "ok", "latency_ms": 1,
+                "state": "connected", "remediation": ""}
+
+    monkeypatch.setattr(gw, "probe_cli_provider", _fake_probe)
+
+    # (a) CLI route, currently unavailable/cli_not_verified -> the probe runs
+    # exactly once, warming the route into `list_available_routes`, and the
+    # dev is seated.
+    monkeypatch.setattr(
+        model_availability, "resolve_route_availability",
+        lambda route_ids: {
+            route_ids[0]: model_availability.RouteAvailability(
+                route_ids[0], "claude_cli", False, "cli_not_verified")})
+    monkeypatch.setattr(
+        pm_reference, "list_available_routes",
+        lambda: [{"route_id": "claude_cli.opus", "family": "opus",
+                  "provider_class": "claude_cli"}])
+    store_a = LedgerStore("probe-a")
+    store_a.set_run_config(members=[
+        {"id": "d1", "coding_role": "dev", "gateway_route_id": "claude_cli.sonnet",
+         "model_mode": "single"}])
+    prior_a = F._default_assign_dev_route("probe-a", "claude_cli.opus")
+    assert prior_a == ["claude_cli.sonnet"]
+    assert probe_calls == ["claude_cli"]
+    member_a = store_a.get_run_config()["members"][0]
+    assert member_a["gateway_route_id"] == "claude_cli.opus"
+
+    # (b) route already reports available -> no probe.
+    probe_calls.clear()
+    monkeypatch.setattr(
+        model_availability, "resolve_route_availability",
+        lambda route_ids: {
+            route_ids[0]: model_availability.RouteAvailability(
+                route_ids[0], "claude_cli", True, "")})
+    store_b = LedgerStore("probe-b")
+    store_b.set_run_config(members=[
+        {"id": "d1", "coding_role": "dev", "gateway_route_id": "claude_cli.sonnet",
+         "model_mode": "single"}])
+    prior_b = F._default_assign_dev_route("probe-b", "claude_cli.opus")
+    assert prior_b == ["claude_cli.sonnet"]
+    assert probe_calls == []
+    member_b = store_b.get_run_config()["members"][0]
+    assert member_b["gateway_route_id"] == "claude_cli.opus"
+
+    # (c) non-CLI provider class -> availability is never even consulted.
+    probe_calls.clear()
+
+    def _boom(route_ids):
+        raise AssertionError(
+            "resolve_route_availability must not be called for a non-CLI route")
+
+    monkeypatch.setattr(model_availability, "resolve_route_availability", _boom)
+    monkeypatch.setattr(
+        pm_reference, "list_available_routes",
+        lambda: [{"route_id": "anthropic.claude-sonnet-4-6", "family": "sonnet",
+                  "provider_class": "anthropic"}])
+    store_c = LedgerStore("probe-c")
+    store_c.set_run_config(members=[
+        {"id": "d1", "coding_role": "dev", "gateway_route_id": "claude_cli.sonnet",
+         "model_mode": "single"}])
+    prior_c = F._default_assign_dev_route("probe-c", "anthropic.claude-sonnet-4-6")
+    assert prior_c == ["claude_cli.sonnet"]
+    assert probe_calls == []
+    member_c = store_c.get_run_config()["members"][0]
+    assert member_c["gateway_route_id"] == "anthropic.claude-sonnet-4-6"
+
+
 def test_default_seed_workspace_over_a_real_ledger_store(
         tmp_path: pathlib.Path) -> None:
     """`_default_seed_workspace` is the seam's only production implementation

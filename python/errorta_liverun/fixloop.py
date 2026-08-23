@@ -279,6 +279,28 @@ def _default_assign_dev_route(project_id: str, route: str) -> list[str]:
     if not needs_change:
         return []
     prior = [str(m.get("gateway_route_id") or "") or "unset" for m in needs_change]
+    # F040-01's billable CLI probe only ever ran from the desktop panel's Test
+    # button (`POST /provider-keys/{provider}/test`), which is what warms the
+    # gateway's in-memory `_PROBE_CACHE`. A sidecar started fresh from the CLI
+    # -- no desktop panel ever opened -- has never warmed that cache, so a live
+    # `claude_cli.*`/`codex_cli.*`/`cursor_cli.*` route reads
+    # `available=False, reason="cli_not_verified"` even when the CLI itself is
+    # logged in, and `assign_models_by_role` below raises `ControlActionError`
+    # ("no available model matches ..."), pausing the fix cycle for no real
+    # reason (live 20260823T060652-05f8b9). Run that SAME probe here,
+    # synchronously, before seating -- once, and only for a CLI-backed route
+    # that currently reads unverified. A probe that reports not-connected
+    # simply leaves the route unavailable; the existing `ControlActionError`
+    # path below still pauses the cycle -- this does not special-case that.
+    provider_class = route.split(".", 1)[0]
+    if provider_class in {"claude_cli", "codex_cli", "cursor_cli"}:
+        from errorta_council.coding import model_availability
+        projection = model_availability.resolve_route_availability([route])
+        item = projection.get(route)
+        if item is not None and not item.available and item.reason == "cli_not_verified":
+            from errorta_app.routes.gateway import probe_cli_provider
+            from errorta_model_gateway import loop_bridge
+            loop_bridge.run_coro(probe_cli_provider(provider_class), timeout=60)
     control_actions.assign_models_by_role(
         store, {"dev": route}, available=pm_reference.list_available_routes(),
         # "liverun" is not a member of `pm_changes.SURFACES` (`("pop", "log")`)
