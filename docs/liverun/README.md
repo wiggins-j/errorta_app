@@ -293,7 +293,11 @@ person clears — the loop never retries its way past one:
 | `fix_cycle_cap` | the day's fix cycles are spent |
 
 Caps: `max_fix_cycles_per_day` (default 3) is arithmetic over the ledger, not
-a counter in memory, and a cycle is counted whether it merged or paused. The
+a counter in memory, and a cycle is counted whether it merged or paused.
+`idle_timeout_s` (default 2400, floor 1500) must outlast the repository-read
+dev turn: a single Claude CLI retrieval turn may run for up to
+`ERRORTA_REPO_READ_TIMEOUT_S` (1500 s by default), so an idle detector at or
+below that floor would cancel a run every time one turn thought hard. The
 relaunch is evaluated by the *untouched* Slice 1 launch caps — a fix that
 lands inside the minimum launch gap posts `relaunch_refused` and stops there.
 
@@ -342,7 +346,9 @@ workspace is actually about to deliver is the only answer worth acting on.
 
 2. **Confirm `dev_repo_read: true`** in `<project>/autonomy.json`, and that the
    dev role is seated on a `claude_cli.*` route — only those members honour it.
-   A dev that cannot read the repository cannot fix it.
+   A dev that cannot read the repository cannot fix it. `fix_loop.dev_route`
+   (default `claude_cli.opus`) is the route the cycle seats the dev role on
+   before it files the task; it must be an available gateway route.
 
 3. **Adopt a Slack channel** for the project with `adopt_project` — it opens
    and binds a NEW channel named from the `project_id` alone (and seats a team
@@ -355,6 +361,11 @@ workspace is actually about to deliver is the only answer worth acting on.
    contain `.git`), `repos[].errorta_project` must name a project that already
    exists — both are resolved at load, so a typo is reported by
    `list_live_profiles` rather than minutes after a stall.
+
+> **Existing profiles**: `idle_timeout_s` now defaults to 2400 with a floor of
+> 1500 (up from 1200 / 600) — see "Caps" above. An operator profile that still
+> declares `idle_timeout_s: 1200` must be edited to `2400` (or any value above
+> 1500), or it will fail to load with `idle_below_turn_timeout`.
 
 ### Why `osrs-reaper` ships as `fixable: false`
 

@@ -292,7 +292,7 @@ def test_repos_and_fix_loop_load(tmp_path: Path, valid_doc: dict) -> None:
     doc = dict(valid_doc)
     doc["repos"] = [_repos_doc(path=str(repo_dir))]
     doc["fix_loop"] = {"enabled": True, "max_fix_cycles_per_day": 3,
-                       "idle_timeout_s": 1200, "triage_route": "pm"}
+                       "idle_timeout_s": 2400, "triage_route": "pm"}
     prof = _load(tmp_path, doc, project_exists_fn=lambda pid: True)
     assert prof.fix_loop.enabled and prof.fix_loop.max_fix_cycles_per_day == 3
     assert prof.fix_loop.accept_timeout_s == 1800
@@ -506,3 +506,42 @@ def test_two_repos_may_not_claim_the_same_launch_step(tmp_path: Path, valid_doc:
     with pytest.raises(P.ProfileError) as exc:
         _load(tmp_path, doc, project_exists_fn=lambda pid: True)
     assert exc.value.code == "ambiguous_class_mapping"
+
+
+# --- fix_loop.dev_route / idle-timeout floor -------------------------------- #
+
+def _fix_profile_dict(tmp_path: Path, valid_doc: dict) -> dict:
+    doc = dict(valid_doc)
+    doc["repos"] = [_repos_doc(path=str(_repo_dir(tmp_path)))]
+    doc["fix_loop"] = {"enabled": True}
+    return doc
+
+
+def test_fix_loop_dev_route_defaults_to_opus(tmp_path: Path, valid_doc: dict) -> None:
+    prof = _load(tmp_path, _fix_profile_dict(tmp_path, valid_doc),
+                 project_exists_fn=lambda pid: True)
+    assert prof.fix_loop.dev_route == "claude_cli.opus"
+
+
+def test_fix_loop_dev_route_is_declarable_and_validated(tmp_path: Path, valid_doc: dict) -> None:
+    d = _fix_profile_dict(tmp_path, valid_doc)
+    d["fix_loop"]["dev_route"] = "claude_cli.sonnet"
+    assert _load(tmp_path, d, project_exists_fn=lambda pid: True).fix_loop.dev_route == \
+        "claude_cli.sonnet"
+    for bad in ("", "opus", "claude_cli.", "Claude_CLI.opus", "a.b;c", 7):
+        d["fix_loop"]["dev_route"] = bad
+        with pytest.raises(P.ProfileError) as ei:
+            _load(tmp_path, d, project_exists_fn=lambda pid: True)
+        assert ei.value.code == "bad_dev_route"
+
+
+def test_fix_loop_idle_floor_follows_the_repo_read_turn(tmp_path: Path, valid_doc: dict) -> None:
+    assert P.FIX_CAP_DEFAULTS["idle_timeout_s"] == 2400
+    assert P.MIN_IDLE_TIMEOUT_S == 1500
+    d = _fix_profile_dict(tmp_path, valid_doc)
+    d["fix_loop"]["idle_timeout_s"] = 1500
+    with pytest.raises(P.ProfileError) as ei:
+        _load(tmp_path, d, project_exists_fn=lambda pid: True)
+    assert ei.value.code == "idle_below_turn_timeout"
+    d["fix_loop"]["idle_timeout_s"] = 2400
+    assert _load(tmp_path, d, project_exists_fn=lambda pid: True).fix_loop.idle_timeout_s == 2400

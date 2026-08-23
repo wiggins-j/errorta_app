@@ -48,7 +48,9 @@ CANCEL_WAIT_S = 120.0
 # `continue_` start begins from "stopped"), not a run that finished.
 RUN_START_GRACE_S = 120.0
 TERMINAL_RUN_STATUSES = frozenset({"stopped", "failed"})
-DEFAULT_IDLE_TIMEOUT_S = 1200.0
+# Must outlast a single repository-read dev turn, which may run for
+# ERRORTA_REPO_READ_TIMEOUT_S (async_claude_cli.py, default 1500 s).
+DEFAULT_IDLE_TIMEOUT_S = 2400.0
 # STRICTLY below Slack's own confirmation sweep window
 # (`config.DEFAULT_CONFIG["timeout_minutes"] = 30` -> 1800 s, applied by
 # `outbound.sweep_timeouts`). The cycle must be the one that withdraws its own

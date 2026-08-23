@@ -67,12 +67,15 @@ LAUNCH_STEP_CLASS_PREFIX = "launch_step_failed:"
 # `tunnel_close` / `window_shot` / `http` are launch-time concerns and are
 # rejected in a deploy list.
 DEPLOY_ACTION_KINDS = {"local", "remote", "remote_signal"}
-FIX_CAP_DEFAULTS = {"max_fix_cycles_per_day": 3, "idle_timeout_s": 1200,
+FIX_CAP_DEFAULTS = {"max_fix_cycles_per_day": 3, "idle_timeout_s": 2400,
                     "accept_timeout_s": 1800}
-MIN_IDLE_TIMEOUT_S = 600      # the CLI per-turn timeout (reasoning_budget.py:78)
+# A single repository-read dev turn may run for ERRORTA_REPO_READ_TIMEOUT_S
+# (async_claude_cli.py, default 1500 s); the idle detector must outlast it.
+MIN_IDLE_TIMEOUT_S = 1500
 REPO_KEYS = {"id", "path", "errorta_project", "fixable", "classify", "deploy"}
-FIX_LOOP_KEYS = {"enabled", "triage_route"} | set(FIX_CAP_DEFAULTS)
+FIX_LOOP_KEYS = {"enabled", "triage_route", "dev_route"} | set(FIX_CAP_DEFAULTS)
 _REPO_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_DEV_ROUTE_RE = re.compile(r"^[a-z_]+\.[a-z0-9][a-z0-9_.-]*$")
 
 
 class ProfileError(ValueError):
@@ -157,8 +160,9 @@ class RepoDef:
 class FixLoop:
     enabled: bool = False
     max_fix_cycles_per_day: int = 3
-    idle_timeout_s: int = 1200
+    idle_timeout_s: int = 2400
     triage_route: str = "pm"
+    dev_route: str = "claude_cli.opus"
     accept_timeout_s: int = 1800
 
 
@@ -525,10 +529,14 @@ def _fix_loop(raw: Any, repos: tuple[RepoDef, ...]) -> FixLoop:
     if route not in TRIAGE_ROUTES:
         raise ProfileError("bad_triage_route", repr(route))
 
+    dev_route = raw.get("dev_route", "claude_cli.opus")
+    if not isinstance(dev_route, str) or not _DEV_ROUTE_RE.match(dev_route):
+        raise ProfileError("bad_dev_route", repr(dev_route)[:80])
+
     if enabled and not any(r.fixable for r in repos):
         raise ProfileError("fix_loop_without_repos",
                            "fix_loop.enabled needs at least one fixable repo")
-    return FixLoop(enabled=enabled, triage_route=str(route), **values)
+    return FixLoop(enabled=enabled, triage_route=str(route), dev_route=dev_route, **values)
 
 
 def _caps(raw: Any) -> Caps:

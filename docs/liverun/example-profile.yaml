@@ -191,6 +191,8 @@ repos:
 fix_loop:
   enabled: true
   max_fix_cycles_per_day: 3         # default 3; may only be LOWERED
-  idle_timeout_s: 1200              # default 1200; may only be LOWERED; must be > 600
+  idle_timeout_s: 2400              # default 2400; may only be LOWERED; must be > 1500
   accept_timeout_s: 1800            # default 1800; may only be LOWERED
   triage_route: pm                  # the project's own PM route; `pm` is the only value
+  dev_route: claude_cli.opus        # default claude_cli.opus; the route the dev role is
+                                     # seated on before the cycle files the fix task
