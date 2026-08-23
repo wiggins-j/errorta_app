@@ -544,6 +544,16 @@ cycle. The brain defect was fixed by hand (senditai-ng `cf9bd33`: the preflight
 pumps the notification queue instead of sleeping) so that live runs can reach
 the tutorial and the loop can be measured on the next genuinely new stall.
 
+**Trusted gate, live 2026-08-23.** The first operator-declared gate
+(`~/.errorta/gates/osrs-reaper.yaml`: `./gradlew :client:compileJava --offline
+--no-daemon`) ran unsandboxed on a freshly seeded worktree in 54 s and recorded
+`sandbox: trusted` at the worktree head; `errorta trusted-gate` shows it
+valid. The first attempt failed for a copy reason, not a build reason — the
+worktree seed skipped a Java package named `target/` — which is fixed
+(`build/`/`target/` are skipped only beside a build script). `osrs-reaper` is
+now `fixable: true` in the live-run profile; the next reaper-class stall is
+the first measurement of a trusted-gate fix cycle.
+
 ### Follow-ups, in priority order
 
 - The `errorta_tunnels` registry is in-memory, so boot recovery reports a prior
