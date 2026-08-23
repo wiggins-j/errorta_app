@@ -14,7 +14,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_PKGS = ("errorta_council", "errorta_app", "errorta_slack", "errorta_liverun", "errorta_cli")
+_PKGS = ("errorta_council", "errorta_app", "errorta_slack", "errorta_liverun", "errorta_cli",
+         "errorta_tools", "errorta_export")
 _ANCHOR = re.compile(r"gates_dir\(|gate_path\(|[\"']gates[\"']")
 _VERB = re.compile(
     r"write_text|write_bytes|open\(|mkdir|unlink|rename|replace|touch|rmdir|copy|move"

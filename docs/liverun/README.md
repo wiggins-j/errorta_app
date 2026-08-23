@@ -391,8 +391,8 @@ not be a symlink), and it must contain `version: 1`, `created_by: operator`,
 and a `project_id` matching the filename stem. The engine never writes this
 file; only a human puts it there. If the file is present but fails any of
 these checks, the gate registers as invalid and loudly refuses to run rather
-than silently falling back to the sandboxed registry — `errorta trusted-gate
-<project>` will show the reason code.
+than silently falling back to the sandboxed registry — `errorta trusted-gate`
+(with the project selected in your session) will show the reason code.
 
 Each command's `argv` must start with an absolute path or be exactly
 `./gradlew` or `./mvnw`; it may not contain shell metacharacters (`` $ ` | ; &
@@ -424,7 +424,7 @@ purpose: if the project's registry resolves to the trusted tier and
 anyway. Turn `require_sandbox` off for a project before giving it a trusted
 gate.
 
-Once `errorta trusted-gate <project>` shows the gate as valid with the
+Once `errorta trusted-gate` shows the gate as valid with the
 commands you expect, flip that project's `fixable: true` in the live-run
 profile — the fix loop will resolve its acceptance-gate registry entirely
 from the trusted file from that point on.
