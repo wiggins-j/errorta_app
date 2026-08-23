@@ -1449,3 +1449,11 @@ def test_retire_failure_is_reported_and_does_not_block_the_fix() -> None:
     assert dict(out.events)["fix_cycle_hygiene"] == {"error": "RuntimeError"}
     assert kinds.index("fix_cycle_hygiene") < kinds.index("fix_task")
     assert fake.started
+
+
+def test_gate_label_names_a_trusted_tier() -> None:
+    from errorta_liverun.fixloop import _gate_label
+    class _S:
+        def get_test_commands(self):
+            return {"compile": {"argv": ["./gradlew", "build"], "tier": "trusted"}}
+    assert _gate_label(_S()) == "compile — ./gradlew build [trusted, unsandboxed]"

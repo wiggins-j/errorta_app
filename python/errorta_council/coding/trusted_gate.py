@@ -208,9 +208,14 @@ def load_trusted_gate(project_id: str) -> TrustedGate | None:
 
 def registry_view(gate: TrustedGate) -> dict[str, dict[str, Any]]:
     """The gate as the registry shape every reader already understands, each
-    spec tagged ``tier: trusted`` so the executor knows which runner to use."""
+    spec tagged ``tier: trusted`` so the executor knows which runner to use.
+    ``env_passthrough`` is carried on every spec (not just at the gate level)
+    because the registry view is the only shape ``run_test_commands`` reads —
+    it has no access to the ``TrustedGate`` object itself when it dispatches
+    each command to the trusted executor."""
     return {c.id: {"argv": list(c.argv), "cwd": c.cwd, "timeout_seconds": c.timeout_seconds,
-                   "scope": c.scope, "tier": "trusted"} for c in gate.commands}
+                   "scope": c.scope, "tier": "trusted",
+                   "env_passthrough": list(gate.env_passthrough)} for c in gate.commands}
 
 
 def invalid_registry_view(project_id: str, code: str) -> dict[str, dict[str, Any]]:
@@ -218,7 +223,7 @@ def invalid_registry_view(project_id: str, code: str) -> dict[str, dict[str, Any
     into a blocked record, so the project neither loses its gate silently nor
     falls back to the sandboxed tier."""
     return {"trusted-gate": {"tier": "trusted", "invalid": code, "argv": [], "cwd": ".",
-                             "timeout_seconds": 1, "scope": "unit"}}
+                             "timeout_seconds": 1, "scope": "unit", "env_passthrough": []}}
 
 
 def passthrough_env(names: tuple[str, ...]) -> dict[str, str]:

@@ -1053,8 +1053,12 @@ def _gate_label(store: Any) -> str:
     try:
         commands = store.get_test_commands() or {}
         cmd_id = sorted(commands)[0]
-        argv = commands[cmd_id].get("argv") or []
-        return f"{cmd_id} — {' '.join(str(a) for a in argv)}".strip(" —")[:200]
+        spec = commands[cmd_id]
+        argv = spec.get("argv") or []
+        label = f"{cmd_id} — {' '.join(str(a) for a in argv)}".strip(" —")[:200]
+        if str(spec.get("tier") or "") == "trusted":
+            label += " [trusted, unsandboxed]"
+        return label
     except Exception:  # noqa: BLE001
         return "the project's registered acceptance gate"
 

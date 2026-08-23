@@ -155,6 +155,17 @@ async def _run_one(
         stderr_preview=result.stderr_preview[:_PREVIEW_CHARS], reason=reason)
 
 
+def _blocked_result(command_id: str, reason: str) -> TestRunResult:
+    """A never-launched command, recorded with the same shape a real one
+    would carry — factored out so every fail-closed-before-launch path
+    (sandbox unavailable, ``require_sandbox`` refusal, a mixed-tier registry
+    that can't happen by construction) produces an identical, honest record."""
+    return TestRunResult(
+        command_id=command_id, argv_sha256="", status="blocked", exit_code=None,
+        passed=False, duration_ms=0, stdout_sha256="", stdout_preview="",
+        stderr_preview="", reason=reason)
+
+
 def run_test_commands(
     workspace_root: Any, registry: dict[str, Any], command_ids: list[str], *,
     runner_root: Optional[Path] = None, sandbox: Optional[str] = None,
@@ -177,16 +188,46 @@ def run_test_commands(
     from errorta_tools.runner.sandbox import SANDBOX_NONE
     ws_root = Path(workspace_root)
     resolved, unknown = resolve_commands(registry, command_ids)
+
+    # Trusted-gate routing (spec 2026-08-23-trusted-gate): every spec in the
+    # trusted registry view carries ``tier: "trusted"`` (trusted_gate.py:
+    # registry_view / invalid_registry_view). A registry is served either
+    # entirely from the trusted file or entirely from the sandboxed one
+    # (ledger.py::get_test_commands), so a mixed set of tiers here can only
+    # mean a caller stitched ids from two different registries together —
+    # fail closed rather than silently running some commands unsandboxed.
+    tiers = {str(spec.get("tier") or "sandboxed") for _cid, spec in resolved}
+    if "trusted" in tiers:
+        from errorta_council.coding import trusted_gate as _tg
+
+        if tiers != {"trusted"}:
+            blocked = [_blocked_result(cid, "mixed_gate_tiers") for cid, _ in resolved]
+            return TestRunSession(command_ids=list(command_ids), results=blocked,
+                                  unknown_ids=unknown, passed=False, sandbox="trusted")
+        if require_sandbox:
+            blocked = [_blocked_result(cid, "sandbox_required_by_project")
+                      for cid, _ in resolved]
+            return TestRunSession(command_ids=list(command_ids), results=blocked,
+                                  unknown_ids=unknown, passed=False, sandbox="trusted")
+        results = []
+        for cid, spec in resolved:
+            results.append(_tg.run_trusted_command(
+                spec, command_id=cid, workspace_root=ws_root,
+                env_passthrough=tuple(spec.get("env_passthrough") or ()),
+                should_cancel=should_cancel))
+            if results[-1].status in ("blocked", "timed_out"):
+                break
+        passed = (bool(command_ids) and not unknown and bool(resolved)
+                 and all(r.passed for r in results))
+        return TestRunSession(command_ids=list(command_ids), results=results,
+                              unknown_ids=unknown, passed=passed, sandbox="trusted")
+
     if runner_root is None:
         runner_root = Path(tempfile.mkdtemp(prefix="f087-10-testrun-"))
     backend = sandbox if sandbox is not None else _default_sandbox()
 
     if require_sandbox and backend == SANDBOX_NONE:
-        blocked = [TestRunResult(
-            command_id=cid, argv_sha256="", status="blocked", exit_code=None,
-            passed=False, duration_ms=0, stdout_sha256="", stdout_preview="",
-            stderr_preview="", reason="sandbox_unavailable")
-            for cid, _ in resolved]
+        blocked = [_blocked_result(cid, "sandbox_unavailable") for cid, _ in resolved]
         return TestRunSession(command_ids=list(command_ids), results=blocked,
                               unknown_ids=unknown, passed=False, sandbox=backend)
 

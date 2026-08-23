@@ -77,14 +77,21 @@ class _ReaderState:
     end-of-file; ``error`` is set instead when OUR OWN read machinery
     (``select``/``read``/``set_blocking``) raised, so the caller can tell a
     real fd failure apart from a writer that simply never closes — the two
-    must never be conflated, and neither counts as ``eof``."""
+    must never be conflated, and neither counts as ``eof``.
 
-    __slots__ = ("deadline_at", "eof", "error")
+    ``lock`` protects ``buf`` (owned by the caller, not this object) against
+    the main thread taking a snapshot at abandonment while the drain thread
+    is still mid-``extend`` — without it a snapshot could observe a torn
+    write. Both sides hold it only for the duration of one bounded
+    read-and-append or one bounded copy, never across a blocking call."""
+
+    __slots__ = ("deadline_at", "eof", "error", "lock")
 
     def __init__(self) -> None:
         self.deadline_at: float | None = None  # monotonic() cutoff; None = no cutoff yet
         self.eof = False
         self.error: str | None = None
+        self.lock = threading.Lock()
 
 
 def _drain(stream, buf: bytearray, cap: int, state: _ReaderState) -> None:
@@ -127,12 +134,14 @@ def _drain(stream, buf: bytearray, cap: int, state: _ReaderState) -> None:
                 state.error = type(exc).__name__
                 return
             if chunk is None:  # non-blocking "no data yet" — NOT EOF
+                time.sleep(0.001)  # don't busy-spin the select/read loop
                 continue
             if not chunk:
                 state.eof = True
                 return
             if len(buf) < cap:
-                buf.extend(chunk[: cap - len(buf)])
+                with state.lock:
+                    buf.extend(chunk[: cap - len(buf)])
     finally:
         try:
             stream.close()
@@ -259,20 +268,30 @@ def run_trusted_command(
     # near-instantly regardless of this deadline, so the common case pays
     # none of this latency.
     cutoff = time.monotonic() + _DRAIN_GRACE_S
-    out_state.deadline_at = cutoff
-    err_state.deadline_at = cutoff
+    # Both readers must end up bounded even if something unexpected raises
+    # between computing the cutoff and assigning it to the second one — an
+    # unbounded reader thread would otherwise be left running forever.
+    try:
+        out_state.deadline_at = cutoff
+    finally:
+        err_state.deadline_at = cutoff
     join_deadline = cutoff + _POLL_S * 2  # slack for the select() poll granularity
     out_thread.join(timeout=max(0.0, join_deadline - time.monotonic()))
     err_thread.join(timeout=max(0.0, join_deadline - time.monotonic()))
     # A thread that stopped without ever reaching real EOF — whether it's
     # still running past our join budget, hit a genuine read error, or gave
-    # up at the deadline — never produced a trustworthy capture; its partial
-    # buffer is discarded either way.
+    # up at the deadline — never produced a TRUSTWORTHY (complete) capture,
+    # but it may still hold real, honest partial output (e.g. a detached
+    # grandchild held the pipe open after the command's own output was
+    # already written). Snapshot under the lock rather than discard it: the
+    # abandonment note in `reason` already tells the reader this capture may
+    # be incomplete, so keeping the partial bytes is strictly more honest
+    # than reporting nothing.
     output_abandoned = not (out_state.eof and err_state.eof)
-    if output_abandoned:
-        out, err = b"", b""
-    else:
-        out, err = bytes(out_buf), bytes(err_buf)
+    with out_state.lock:
+        out = bytes(out_buf)
+    with err_state.lock:
+        err = bytes(err_buf)
 
     duration_ms = int((time.monotonic() - t0) * 1000)
     exit_code = proc.returncode

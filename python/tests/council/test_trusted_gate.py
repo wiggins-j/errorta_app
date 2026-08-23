@@ -189,11 +189,13 @@ def test_registry_views() -> None:
     )
     assert tg.registry_view(g) == {
         "compile": {"argv": ["./gradlew", "build"], "cwd": ".",
-                    "timeout_seconds": 900, "scope": "unit", "tier": "trusted"},
+                    "timeout_seconds": 900, "scope": "unit", "tier": "trusted",
+                    "env_passthrough": ["PATH"]},
     }
     inv = tg.invalid_registry_view("reaper", "gate_mode_insecure")
     assert inv["trusted-gate"]["tier"] == "trusted"
     assert inv["trusted-gate"]["invalid"] == "gate_mode_insecure"
+    assert inv["trusted-gate"]["env_passthrough"] == []
 
 def test_load_trusted_gate_stat_race_is_gate_malformed(
         _home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

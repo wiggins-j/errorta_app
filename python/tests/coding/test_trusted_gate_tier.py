@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from errorta_council.coding.ledger import LedgerStore
+from errorta_council.coding.testing import run_test_commands
 
 
 @pytest.fixture(autouse=True)
@@ -62,3 +63,58 @@ def test_invalid_trusted_file_is_loud_not_silent(_home: Path) -> None:
 
 def test_no_file_no_registry_is_none(_home: Path) -> None:
     assert _store().gate_tier() == "none"
+
+
+def test_trusted_registry_runs_unsandboxed_and_records_trusted(_home: Path, tmp_path: Path) -> None:
+    s = _store()
+    _trusted(_home)
+    reg = s.get_test_commands()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    session = run_test_commands(ws, reg, list(reg), require_sandbox=False)
+    assert session.passed and session.sandbox == "trusted"
+    assert session.results[0].command_id == "compile"
+    assert session.results[0].status == "completed"
+
+
+def test_require_sandbox_refuses_a_trusted_gate(_home: Path, tmp_path: Path) -> None:
+    s = _store()
+    _trusted(_home)
+    reg = s.get_test_commands()
+    session = run_test_commands(tmp_path, reg, list(reg), require_sandbox=True)
+    assert not session.passed and session.sandbox == "trusted"
+    assert session.results[0].status == "blocked"
+    assert session.results[0].reason == "sandbox_required_by_project"
+
+
+def test_invalid_trusted_file_blocks_the_gate_loudly(_home: Path, tmp_path: Path) -> None:
+    s = _store()
+    _trusted(_home, mode=0o666)
+    reg = s.get_test_commands()
+    session = run_test_commands(tmp_path, reg, list(reg))
+    assert not session.passed
+    assert session.results[0].reason == "trusted_gate_invalid:gate_mode_insecure"
+
+
+def test_sandboxed_registry_path_is_untouched(tmp_path: Path) -> None:
+    reg = {"t": {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5}}
+    session = run_test_commands(tmp_path, reg, ["t"], sandbox="none")
+    assert session.passed and session.sandbox == "none"
+
+
+def test_gate_text_names_the_tier(_home: Path, tmp_path: Path) -> None:
+    from errorta_council.coding import gate_state
+    s = _store()
+    _trusted(_home)
+    reg = s.get_test_commands()
+    session = run_test_commands(tmp_path, reg, list(reg))
+    s.record_test_run(session, task_id="t1", head="abc")
+    assert "[trusted, unsandboxed]" in gate_state.latest_gate_text(s)
+
+
+def test_gradle_in_the_sandboxed_tier_degrades_to_cannot_verify(tmp_path: Path) -> None:
+    from errorta_council.coding.runner import _missing_build_dep
+    assert _missing_build_dep(["./gradlew", "build"], ".", tmp_path) == (
+        "gradle", "trusted gate required")
+    assert _missing_build_dep(["./mvnw", "test"], ".", tmp_path) == (
+        "maven", "trusted gate required")

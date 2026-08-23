@@ -211,6 +211,11 @@ def test_run_trusted_command_passing_with_abandoned_output_notes_it(tmp_path: Pa
         command_id="passabandon", workspace_root=tmp_path, env_passthrough=("PATH",))
     assert res.passed is True
     assert "abandoned" in res.reason
+    # The pre-abandonment output (written by `echo hi` before the grandchild
+    # ever backgrounds itself) must be KEPT, not discarded: the abandonment
+    # note in `reason` is honest evidence that the capture may be
+    # incomplete, but real captured bytes are strictly more useful than none.
+    assert "hi" in res.stdout_preview
 
 
 def test_drain_treats_a_none_read_as_no_data_not_eof() -> None:

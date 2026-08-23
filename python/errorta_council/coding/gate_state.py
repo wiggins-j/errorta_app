@@ -123,6 +123,15 @@ def latest_gate_text(store: Any, *, cap: int = _DEFAULT_CAP) -> str:
             if unknown:
                 lines.append(f"unknown command ids: {', '.join(map(str, unknown))}")
 
+        # Spec 2026-08-23-trusted-gate: a trusted-tier run executed with NO
+        # sandbox wrapper (an operator-declared gate, not the F039 runner). A
+        # reader trusting this block as "the sandboxed gate said X" would draw
+        # the wrong conclusion, so every line is loudly labeled when that is
+        # the case — the record's ``sandbox`` field (LedgerStore.record_test_run)
+        # is the one honest source for this, never inferred from the results.
+        if str(run.get("sandbox") or "") == "trusted":
+            lines = [f"[trusted, unsandboxed] {ln}" for ln in lines]
+
         return "\n".join(lines)[:cap]
     except Exception:  # noqa: BLE001 — prompt assembly must never raise
         return ""
