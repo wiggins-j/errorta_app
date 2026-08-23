@@ -409,7 +409,10 @@ def _project_out(store: LedgerStore) -> dict[str, Any]:
 
 
 def _project_store_or_404(project_id: str) -> LedgerStore:
-    store = LedgerStore(project_id)
+    try:
+        store = LedgerStore(project_id)
+    except LedgerError:
+        raise HTTPException(status_code=422, detail="invalid project id")
     try:
         store.get_project()
     except ProjectNotFound:

@@ -69,6 +69,21 @@ def test_none_gate_shows_none(make_ctx) -> None:
     assert "none" in text.lower()
 
 
+def test_sandboxed_tier_names_the_tier(make_ctx) -> None:
+    # No trusted gate file, but a legacy sandboxed test-commands registry
+    # exists (gate_tier() == "sandboxed", distinct from "none"); the view
+    # still has no gate file to show, but must not collapse the tier label.
+    payload = {
+        "tier": "sandboxed", "path": "/home/x/.errorta/gates/proj-1.yaml",
+        "present": False, "valid": False, "code": "",
+        "commands": [], "env_passthrough": [],
+    }
+    client = RouteClient(responses={ROUTE: payload})
+    out, text = registry.dispatch("trusted-gate", client, make_ctx(project_id=PID), [])
+    assert out == payload
+    assert "sandboxed" in text.lower()
+
+
 def test_json_flag_passes_through(make_ctx) -> None:
     payload = {
         "tier": "trusted", "path": "/home/x/.errorta/gates/proj-1.yaml",

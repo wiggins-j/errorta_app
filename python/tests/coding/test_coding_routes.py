@@ -440,6 +440,27 @@ def test_create_project_rejects_bad_id(tmp_errorta_home: Path) -> None:
     assert not os.path.exists(str(tmp_errorta_home.parent / "x" / "project.json"))
 
 
+def test_get_route_rejects_bad_project_id_with_422_not_500(tmp_errorta_home: Path) -> None:
+    # _project_store_or_404 constructs LedgerStore(project_id) before its
+    # get_project() try; a path-unsafe id must fail closed as a 4xx (via
+    # LedgerStore's safe_segment guard), never surface as an unhandled 500.
+    c = _client(tmp_errorta_home)
+    r = c.get("/coding/projects/%2e%2e/trusted-gate")
+    assert r.status_code == 422, r.text
+    # NUL bytes are typically rejected by the HTTP client/transport before
+    # ever reaching the route; assert only the ".." case above end-to-end and
+    # exercise the NUL case directly against the helper instead.
+    from fastapi import HTTPException
+
+    from errorta_app.routes.coding import _project_store_or_404
+    try:
+        _project_store_or_404("bad\x00id")
+    except HTTPException as exc:
+        assert exc.status_code == 422
+    else:
+        raise AssertionError("expected HTTPException for a NUL-containing project id")
+
+
 def test_mutating_routes_require_tauri_origin(tmp_errorta_home: Path) -> None:
     from fastapi.testclient import TestClient
 
