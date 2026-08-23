@@ -656,3 +656,71 @@ def test_prs_route(tmp_errorta_home: Path) -> None:
                                  dev_member="m-dev")
     prs = c.get("/coding/projects/prr/prs").json()["prs"]
     assert len(prs) == 1 and prs[0]["branch"] == "task-t1" and prs[0]["status"] == "open"
+
+
+# --- Task 5 (2026-08-23-trusted-gate): read-only trusted-gate route ---------
+
+def test_trusted_gate_route_none(tmp_errorta_home: Path) -> None:
+    c = _client(tmp_errorta_home)
+    c.post("/coding/projects", json={"project_id": "tgnone", "north_star": "n",
+           "definition_of_done": "d", "target": "new"})
+    r = c.get("/coding/projects/tgnone/trusted-gate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tier"] == "none"
+    assert body["present"] is False
+    assert body["valid"] is False
+    assert body["code"] == ""
+    assert body["commands"] == []
+    assert body["env_passthrough"] == []
+
+
+def test_trusted_gate_route_valid(tmp_errorta_home: Path) -> None:
+    import yaml
+    c = _client(tmp_errorta_home)
+    c.post("/coding/projects", json={"project_id": "tgvalid", "north_star": "n",
+           "definition_of_done": "d", "target": "new"})
+    gates_dir = tmp_errorta_home / ".errorta" / "gates"
+    gates_dir.mkdir(parents=True, exist_ok=True)
+    doc = {"version": 1, "created_by": "operator", "project_id": "tgvalid",
+           "commands": [{"id": "unit", "argv": ["/usr/bin/true"], "cwd": ".",
+                         "timeout_seconds": 5, "scope": "unit"}],
+           "env": {"passthrough": ["PATH"]}}
+    p = gates_dir / "tgvalid.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    p.chmod(0o600)
+    r = c.get("/coding/projects/tgvalid/trusted-gate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tier"] == "trusted"
+    assert body["present"] is True
+    assert body["valid"] is True
+    assert body["code"] == ""
+    assert body["commands"] == [{"id": "unit", "argv": ["/usr/bin/true"], "cwd": ".",
+                                 "timeout_seconds": 5, "scope": "unit"}]
+    assert body["env_passthrough"] == ["PATH"]
+    assert body["path"].endswith("gates/tgvalid.yaml")
+
+
+def test_trusted_gate_route_invalid(tmp_errorta_home: Path) -> None:
+    import yaml
+    c = _client(tmp_errorta_home)
+    c.post("/coding/projects", json={"project_id": "tginvalid", "north_star": "n",
+           "definition_of_done": "d", "target": "new"})
+    gates_dir = tmp_errorta_home / ".errorta" / "gates"
+    gates_dir.mkdir(parents=True, exist_ok=True)
+    doc = {"version": 1, "created_by": "operator", "project_id": "tginvalid",
+           "commands": [{"id": "unit", "argv": ["/usr/bin/true"], "cwd": ".",
+                         "timeout_seconds": 5, "scope": "unit"}]}
+    p = gates_dir / "tginvalid.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    p.chmod(0o666)
+    r = c.get("/coding/projects/tginvalid/trusted-gate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tier"] == "trusted_invalid"
+    assert body["present"] is True
+    assert body["valid"] is False
+    assert body["code"] == "gate_mode_insecure"
+    assert body["commands"] == []
+    assert body["env_passthrough"] == []

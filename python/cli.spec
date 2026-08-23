@@ -142,6 +142,7 @@ _CLI_COMMAND_MODULES = [
         "runctl", "connect", "wizard", "project", "focus",
         "interject", "task", "files", "publish", "grounding", "testcfg",
         "liverun",  # live-run supervisor control surface
+        "trusted_gate",  # 2026-08-23-trusted-gate Task 5 — read-only operator gate view
     )
 ]
 

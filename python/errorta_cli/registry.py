@@ -368,6 +368,7 @@ _COMMAND_MODULES = (
     "interject", "task", "files",  # S6 — mid-run steering + file/worktree edit/accept
     "publish", "grounding", "testcfg",  # S7 — publish + grounding + test-command config
     "liverun",  # live-run supervisor: profiles/start/stop/status/resume/fix pause|resume
+    "trusted_gate",  # 2026-08-23-trusted-gate Task 5 — read-only operator gate view
     # NB: `runtime` (S2 read) is listed once; S7 rewrote it in place with the
     # runtime-control sub-actions. It already appears in this tuple above.
 )

@@ -3386,6 +3386,45 @@ def get_test_commands(project_id: str) -> dict[str, Any]:
     return {"commands": store.get_test_commands()}
 
 
+@router.get("/projects/{project_id}/trusted-gate")
+def get_trusted_gate(project_id: str) -> dict[str, Any]:
+    """Read-only view of the operator-declared trusted gate (spec
+    2026-08-23-trusted-gate). No PUT: the engine never writes ``gates/`` —
+    see ``tests/test_gates_dir_is_operator_only.py``."""
+    from errorta_council.coding.trusted_gate import TrustedGateError, gate_path, load_trusted_gate
+
+    store = _project_store_or_404(project_id)
+    path = gate_path(project_id)
+    present = path.exists() or path.is_symlink()
+    valid = False
+    code = ""
+    commands: list[dict[str, Any]] = []
+    env_passthrough: list[str] = []
+    if present:
+        try:
+            gate = load_trusted_gate(project_id)
+        except TrustedGateError as exc:
+            code = exc.code
+        else:
+            if gate is not None:
+                valid = True
+                env_passthrough = list(gate.env_passthrough)
+                commands = [
+                    {"id": c.id, "argv": list(c.argv), "cwd": c.cwd,
+                     "timeout_seconds": c.timeout_seconds, "scope": c.scope}
+                    for c in gate.commands
+                ]
+    return {
+        "tier": store.gate_tier(),
+        "path": str(path),
+        "present": present,
+        "valid": valid,
+        "code": code,
+        "commands": commands,
+        "env_passthrough": env_passthrough,
+    }
+
+
 @router.put("/projects/{project_id}/test-commands")
 def put_test_commands(project_id: str, body: dict[str, Any], request: Request) -> dict[str, Any]:
     _require_tauri_origin(request)
