@@ -16,9 +16,14 @@ against accidental shell interpretation downstream, not a sandbox boundary.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import os as _os
 import re
+import signal
 import stat
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -194,12 +199,13 @@ def load_trusted_gate(project_id: str) -> TrustedGate | None:
     path = gate_path(project_id)
     if not path.exists() and not path.is_symlink():
         return None
-    _file_guard(path)
     try:
+        _file_guard(path)
         return _parse_gate(project_id, path)
     except TrustedGateError:
         raise
-    except Exception as exc:  # last line of defence: any wrong-shaped YAML or
+    except Exception as exc:  # last line of defence: any wrong-shaped YAML,
+        # a stat()-race/permission error from _file_guard, or any other
         # unanticipated failure must still fail closed as a TrustedGateError,
         # not crash the caller (mirrors errorta_liverun/profile.py::load_profile).
         raise TrustedGateError("gate_malformed", f"{type(exc).__name__}: {exc}"[:120]) from None
@@ -220,5 +226,93 @@ def invalid_registry_view(project_id: str, code: str) -> dict[str, dict[str, Any
                              "timeout_seconds": 1, "scope": "unit"}}
 
 
+MAX_OUTPUT_BYTES = 2_000_000
+PREVIEW_CHARS = 4000
+
+
+def passthrough_env(names: tuple[str, ...]) -> dict[str, str]:
+    """Only the listed, non-secret names, only when set — values read NOW from
+    the sidecar's environment, never from the file."""
+    out: dict[str, str] = {}
+    for n in names:
+        if is_secret_env_name(n):
+            continue
+        v = _os.environ.get(n)
+        if v is not None:
+            out[n] = v
+    return out
+
+
+def _tail(data: bytes) -> str:
+    return data[-MAX_OUTPUT_BYTES:].decode("utf-8", "replace")[-PREVIEW_CHARS:]
+
+
+def run_trusted_command(spec: dict[str, Any], *, command_id: str, workspace_root: Path,
+                        env_passthrough: tuple[str, ...], should_cancel=None):
+    """Run ONE trusted command with no sandbox wrapper and the declared
+    passthrough environment. Records ``sandbox: trusted`` semantics through the
+    session (see testing.run_test_commands); the result shape is the registry's."""
+    from errorta_council.coding.testing import TestRunResult
+
+    def _blocked(reason: str) -> "TestRunResult":
+        return TestRunResult(command_id=command_id, argv_sha256="", status="blocked",
+                             exit_code=None, passed=False, duration_ms=0, stdout_sha256="",
+                             stdout_preview="", stderr_preview="", reason=reason)
+
+    invalid = spec.get("invalid")
+    if invalid:
+        return _blocked(f"trusted_gate_invalid:{invalid}")
+    if should_cancel is not None and should_cancel():
+        return _blocked("cancelled before launch")
+    argv = [str(a) for a in spec.get("argv", [])]
+    cwd = (Path(workspace_root) / str(spec.get("cwd", "."))).resolve()
+    try:
+        cwd.relative_to(Path(workspace_root).resolve())
+    except ValueError:
+        return _blocked("cwd_outside_workspace")
+    timeout = float(spec.get("timeout_seconds", 1) or 1)
+    argv_sha = hashlib.sha256(repr(argv).encode()).hexdigest()
+    env = passthrough_env(env_passthrough)
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — operator-declared, validated argv; no shell
+            argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        return TestRunResult(command_id=command_id, argv_sha256=argv_sha, status="failed",
+                             exit_code=None, passed=False, duration_ms=0, stdout_sha256="",
+                             stdout_preview="", stderr_preview=str(exc)[:PREVIEW_CHARS],
+                             reason=f"launch failed: {type(exc).__name__}")
+    status = "completed"
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        status = "timed_out"
+        try:
+            _os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                _os.killpg(proc.pid, signal.SIGKILL)
+                out, err = proc.communicate()
+        except ProcessLookupError:
+            out, err = b"", b""
+        finally:
+            proc.wait()
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    exit_code = proc.returncode if status == "completed" else None
+    if status == "completed" and exit_code != 0:
+        status = "failed"
+    passed = status == "completed" and exit_code == 0
+    reason = "" if passed else (f"timed out after {int(timeout)}s" if status == "timed_out"
+                                else f"exit {exit_code}")
+    return TestRunResult(command_id=command_id, argv_sha256=argv_sha, status=status,
+                         exit_code=exit_code, passed=passed, duration_ms=duration_ms,
+                         stdout_sha256=hashlib.sha256(out or b"").hexdigest(),
+                         stdout_preview=_tail(out or b""), stderr_preview=_tail(err or b""),
+                         reason=reason)
+
+
 __all__ = ["TrustedGate", "TrustedGateError", "TrustedCommand", "gate_path", "gates_dir",
-           "invalid_registry_view", "load_trusted_gate", "registry_view"]
+           "invalid_registry_view", "load_trusted_gate", "passthrough_env", "registry_view",
+           "run_trusted_command"]

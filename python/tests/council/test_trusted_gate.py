@@ -194,3 +194,76 @@ def test_registry_views() -> None:
     inv = tg.invalid_registry_view("reaper", "gate_mode_insecure")
     assert inv["trusted-gate"]["tier"] == "trusted"
     assert inv["trusted-gate"]["invalid"] == "gate_mode_insecure"
+
+
+def test_passthrough_env_copies_only_listed_non_secret_names(monkeypatch) -> None:
+    monkeypatch.setenv("JAVA_HOME", "/jdk")
+    monkeypatch.setenv("MY_API_KEY", "s3cret")
+    env = tg.passthrough_env(("JAVA_HOME", "MY_API_KEY", "NOT_SET_ANYWHERE_X"))
+    assert env == {"JAVA_HOME": "/jdk"}
+
+
+def test_run_trusted_command_passes_and_records_trusted(tmp_path: Path) -> None:
+    res = tg.run_trusted_command(
+        {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5},
+        command_id="ok", workspace_root=tmp_path, env_passthrough=("PATH",))
+    assert res.passed and res.status == "completed" and res.exit_code == 0
+    assert res.command_id == "ok" and len(res.argv_sha256) == 64
+
+
+def test_run_trusted_command_failure_is_a_real_red(tmp_path: Path) -> None:
+    res = tg.run_trusted_command(
+        {"argv": ["/usr/bin/false"], "cwd": ".", "timeout_seconds": 5},
+        command_id="no", workspace_root=tmp_path, env_passthrough=())
+    assert not res.passed and res.status == "failed"
+    assert res.exit_code == 1 and res.reason == "exit 1"
+
+
+def test_run_trusted_command_times_out_and_kills_the_group(tmp_path: Path) -> None:
+    import time
+    t0 = time.monotonic()
+    res = tg.run_trusted_command(
+        {"argv": ["/bin/sleep", "30"], "cwd": ".", "timeout_seconds": 1},
+        command_id="slow", workspace_root=tmp_path, env_passthrough=())
+    assert res.status == "timed_out" and not res.passed and "timed out" in res.reason
+    assert time.monotonic() - t0 < 10
+
+
+def test_run_trusted_command_cwd_is_inside_the_workspace(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    res = tg.run_trusted_command(
+        {"argv": ["/bin/pwd"], "cwd": "sub", "timeout_seconds": 5},
+        command_id="pwd", workspace_root=tmp_path, env_passthrough=())
+    assert res.passed and str((tmp_path / "sub").resolve()) in res.stdout_preview
+
+
+def test_run_trusted_command_invalid_marker_is_blocked(tmp_path: Path) -> None:
+    spec = tg.invalid_registry_view("reaper", "gate_mode_insecure")["trusted-gate"]
+    res = tg.run_trusted_command(
+        spec, command_id="trusted-gate", workspace_root=tmp_path, env_passthrough=())
+    assert res.status == "blocked" and not res.passed
+    assert res.reason == "trusted_gate_invalid:gate_mode_insecure"
+
+
+def test_run_trusted_command_cancel_before_launch(tmp_path: Path) -> None:
+    res = tg.run_trusted_command(
+        {"argv": ["/usr/bin/true"], "cwd": ".", "timeout_seconds": 5},
+        command_id="c", workspace_root=tmp_path, env_passthrough=(),
+        should_cancel=lambda: True)
+    assert res.status == "blocked" and res.reason == "cancelled before launch"
+
+
+def test_load_trusted_gate_stat_race_is_gate_malformed(
+        _home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(_home, _doc())
+    real_stat = Path.stat
+
+    def _boom(self, *a, **kw):
+        if self.name == "reaper.yaml":
+            raise PermissionError("race")
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", _boom)
+    with pytest.raises(tg.TrustedGateError) as ei:
+        tg.load_trusted_gate("reaper")
+    assert ei.value.code == "gate_malformed"
