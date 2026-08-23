@@ -1,0 +1,24 @@
+# Trusted, UNSANDBOXED acceptance gate -- the operator's file, never the engine's.
+# Copy to $ERRORTA_HOME/gates/<project_id>.yaml, chmod 600, fill every FILL line.
+#
+# --no-daemon: a Gradle daemon detaches from this process and keeps holding the
+# stdout/stderr pipe after the gradlew invocation exits, so the runner sees the
+# pipe stay open ("output abandoned: detached child held the pipe" in the
+# result's reason) even on an otherwise clean pass. Run without a daemon so the
+# process tree actually exits when the build is done.
+version: 1
+created_by: operator
+project_id: FILL            # must equal the filename stem
+commands:
+  - id: compile
+    argv: ["./gradlew", ":client:compileJava", "--offline", "--console=plain", "-q", "--no-daemon"]
+    cwd: "."
+    timeout_seconds: 900
+    scope: unit
+  - id: unit-tests
+    argv: ["./gradlew", ":client:runUnitTests", "--offline", "--console=plain", "-q", "--no-daemon"]
+    cwd: "."
+    timeout_seconds: 1500
+    scope: unit
+env:
+  passthrough: [PATH, HOME, JAVA_HOME, GRADLE_USER_HOME, GRADLE_OPTS, LANG, TMPDIR]

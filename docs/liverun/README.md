@@ -374,14 +374,60 @@ workspace is actually about to deliver is the only answer worth acting on.
 > declares `idle_timeout_s: 1200` must be edited to `2400` (or any value in
 > the 2101–2400 range), or it will fail to load with `idle_below_turn_timeout`.
 
-### Why `osrs-reaper` ships as `fixable: false`
+### Giving a project a trusted gate
 
-Not a policy preference: Gradle cannot run inside the seatbelt the acceptance
-gate executes in, so that project has no registrable gate at all. With nothing
-able to produce a pass/fail signal, an autonomous merge there would be a merge
-on no evidence. Triage landing on the reaper pauses for a human, who has the
-whole brief and the evidence in the channel. Lifting this needs a separate
-"trusted unsandboxed gate" slice, not a profile edit.
+Gradle cannot run inside the seatbelt the sandboxed acceptance gate executes
+in (network off, synthetic `HOME`, no `JAVA_HOME`), so a Gradle/Maven project
+has no registrable *sandboxed* gate at all. With nothing able to produce a
+pass/fail signal, an autonomous merge there would be a merge on no evidence
+— which is why `osrs-reaper` shipped as `fixable: false`.
+
+A **trusted gate** is the operator-declared way out: a file at
+`$ERRORTA_HOME/gates/<project_id>.yaml` (default `~/.errorta/gates/`) that
+lists the exact commands the fix loop is allowed to run, unsandboxed. It uses
+the same provenance bar as a profile — owned by you, mode
+`0600`/`0640`/`0644`, a regular file (not a symlink, and `gates/` itself must
+not be a symlink), and it must contain `version: 1`, `created_by: operator`,
+and a `project_id` matching the filename stem. The engine never writes this
+file; only a human puts it there. If the file is present but fails any of
+these checks, the gate registers as invalid and loudly refuses to run rather
+than silently falling back to the sandboxed registry — `errorta trusted-gate
+<project>` will show the reason code.
+
+Each command's `argv` must start with an absolute path or be exactly
+`./gradlew` or `./mvnw`; it may not contain shell metacharacters (`` $ ` | ; &
+< > ``) or the banned safety-plane-bypass flags. `timeout_seconds` is bounded
+1–1800 (30 minutes, the same ceiling as everything else in the fix loop), and
+`scope` is `unit` or `acceptance`. `env.passthrough` is a list of environment
+variable *names* only — never values — and any name that looks like a secret
+(`*_KEY`, `*_TOKEN`, `*_SECRET`, …) is refused at load.
+
+Start from [`example-trusted-gate.yaml`](../gates/example-trusted-gate.yaml).
+Two details matter for Gradle specifically:
+
+- **`--offline`** makes the gate use the warm `~/.gradle` cache rather than
+  reaching out mid-run — the same determinism the sandboxed executor got for
+  free by having no network at all, just achieved differently since a trusted
+  gate is unsandboxed and could reach the network.
+- **`HOME` in `env.passthrough`** is what the sandboxed gate could never give
+  Gradle: your real home directory, so `~/.gradle` (build cache, wrapper
+  distributions) and `JAVA_HOME` resolve the way they do in your own shell.
+- **`--no-daemon`** avoids a false-looking failure: a Gradle daemon detaches
+  and keeps holding the output pipe open after the command "finishes," which
+  the runner reports as `output abandoned: detached child held the pipe` in
+  the result's `reason` — even on an otherwise clean pass.
+
+A trusted gate and `require_sandbox` (`errorta test-settings`) refuse each other on
+purpose: if the project's registry resolves to the trusted tier and
+`require_sandbox` is on, every command in that run comes back `blocked` with
+`sandbox_required_by_project` rather than silently running unsandboxed
+anyway. Turn `require_sandbox` off for a project before giving it a trusted
+gate.
+
+Once `errorta trusted-gate <project>` shows the gate as valid with the
+commands you expect, flip that project's `fixable: true` in the live-run
+profile — the fix loop will resolve its acceptance-gate registry entirely
+from the trusted file from that point on.
 
 ### What you will see, and what `live_status` adds
 
@@ -500,9 +546,6 @@ the tutorial and the loop can be measured on the next genuinely new stall.
 
 ### Follow-ups, in priority order
 
-- osrs-reaper has no usable acceptance gate: Gradle cannot run inside the
-  sandboxed gate executor (network off, synthetic HOME, no `JAVA_HOME`). A
-  trusted, unsandboxed gate tier is its own slice; until then `fixable: false`.
 - The `errorta_tunnels` registry is in-memory, so boot recovery reports a prior
   sidecar's tunnel `ABSENT` rather than closing it.
 - `_PATH_RE`/`_TOKEN_RE` use `.match()` + `$`; switch to `fullmatch`.

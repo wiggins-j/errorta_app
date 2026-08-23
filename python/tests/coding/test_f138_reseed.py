@@ -149,3 +149,26 @@ def test_unaccepted_signal_ignores_external_repo_edits(
     (repo / "a.txt").write_text("edited outside\n")
     (repo / "c.txt").write_text("added outside\n")
     assert ws.has_unaccepted_changes() is False
+
+
+def test_reseed_skips_build_outputs_but_keeps_libs_jar(
+        tmp_errorta_home: Path, tmp_path: Path) -> None:
+    # Task 6: build/.gradle/target are Gradle/Maven OUTPUT dirs -- a trusted gate
+    # rebuilds them in the worktree from a warm ~/.gradle, so they must never be
+    # copied into the apply workspace. A jar under libs/ is a legitimate INPUT
+    # (a vendored dependency) and must still be copied.
+    ws, repo = _ws(tmp_path)
+    (repo / "build").mkdir()
+    (repo / "build" / "output.class").write_text("compiled\n")
+    (repo / ".gradle").mkdir()
+    (repo / ".gradle" / "cache.bin").write_text("cache\n")
+    (repo / "target").mkdir()
+    (repo / "target" / "output.jar").write_text("built\n")
+    (repo / "libs").mkdir()
+    (repo / "libs" / "foo.jar").write_text("vendored\n")
+    ws.reseed(str(repo))
+    root = ws._ws._root
+    assert not (root / "build").exists()
+    assert not (root / ".gradle").exists()
+    assert not (root / "target").exists()
+    assert (root / "libs" / "foo.jar").read_text() == "vendored\n"

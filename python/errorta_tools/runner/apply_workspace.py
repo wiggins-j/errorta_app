@@ -65,6 +65,9 @@ _SKIPPED_DIR_NAMES = frozenset({
     "build",
     "target",
     "coverage",
+    # Gradle/Maven build outputs -- a trusted gate rebuilds these in the
+    # worktree from a warm ~/.gradle, so they must never be copied in.
+    ".gradle",
 })
 
 _SKIPPED_FILE_NAMES = frozenset({
