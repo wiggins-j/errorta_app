@@ -141,7 +141,10 @@ def _excerpt(item: EvidenceItem) -> str:
 
 def _symptom(bundle: EvidenceBundle) -> str:
     if bundle.stalled_probe_id:
-        return f"`{_one_line(bundle.stalled_probe_id, limit=64)}` stopped advancing"
+        name = _one_line(bundle.stalled_probe_id, limit=64)
+        if bundle.stalled_probe_kind == "remote_pid_alive":
+            return f"`{name}` process exited"
+        return f"`{name}` stopped advancing"
     if bundle.launch_step_name:
         return f"step `{_one_line(bundle.launch_step_name, limit=64)}` did not complete"
     reason = _one_line(bundle.stop_reason, limit=64)
@@ -176,16 +179,46 @@ def _lint_title(title: str) -> str:
     return title
 
 
+# What each probe KIND means when it stalls, in words a dev cannot misread.
+# Live 2026-08-23 (run e3bb5f): the brief said `brain-alive` was "quiet for
+# 46s" and the opus dev -- and the reviewer -- diagnosed a missing heartbeat
+# log; the probe is a pid check and the brain had EXITED. The kind is
+# supervisor-owned (resolved from the profile), so the sentence is fact.
+_KIND_MEANING = {
+    "remote_pid_alive": (
+        "the process exited -- it had been gone for {s} when the run stopped. "
+        "This is not a logging or heartbeat problem; find why it exited."),
+    "remote_file_mtime_advancing": (
+        "the process was alive but its log file stopped writing for {s}."),
+    "remote_stdout_advancing": (
+        "the command's output stopped advancing for {s} (the process it "
+        "observes was alive)."),
+    "remote_stdout_matches": (
+        "the command's output stopped matching the expected pattern for {s}."),
+    "http": "the endpoint stopped answering for {s}.",
+}
+
+
+def _stall_sentence(bundle: EvidenceBundle) -> str:
+    name = _one_line(bundle.stalled_probe_id)
+    secs = None
+    if isinstance(bundle.stalled_s, (int, float)) and not isinstance(bundle.stalled_s, bool):
+        secs = f"{int(bundle.stalled_s)}s"
+    meaning = _KIND_MEANING.get(str(bundle.stalled_probe_kind or ""))
+    if meaning is None:
+        quiet = f" (quiet for {secs})" if secs else ""
+        return f"Stalled probe: `{name}`{quiet}."
+    kind = _one_line(bundle.stalled_probe_kind)
+    return f"Stalled probe: `{name}` ({kind}): {meaning.format(s=secs or 'an unknown time')}"
+
+
 def _header(bundle: EvidenceBundle, repo, gate_label: str) -> list[str]:
     lines = [
         f"Live-run profile `{_one_line(bundle.profile_name)}` stopped with reason "
         f"`{_one_line(bundle.stop_reason)}`.",
     ]
     if bundle.stalled_probe_id:
-        quiet = ""
-        if isinstance(bundle.stalled_s, (int, float)) and not isinstance(bundle.stalled_s, bool):
-            quiet = f" (quiet for {int(bundle.stalled_s)}s)"
-        lines.append(f"Stalled probe: `{_one_line(bundle.stalled_probe_id)}`{quiet}.")
+        lines.append(_stall_sentence(bundle))
     if bundle.launch_step_name:
         lines.append(f"Failing launch step: `{_one_line(bundle.launch_step_name)}`.")
     lines.append(f"Repository: {_one_line(repo.path)} "

@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from errorta_liverun.brief import EvidenceBundle, EvidenceItem, build_fix_brief
 from errorta_liverun.profile import RepoDef
 
@@ -127,3 +129,46 @@ def test_the_cap_holds_even_when_every_excerpt_is_dropped() -> None:
     assert len(detail) <= 24_000
     assert detail.count("BEGIN UNTRUSTED LIVE-RUN EVIDENCE") == 1
     assert detail.count("END UNTRUSTED LIVE-RUN EVIDENCE") == 1
+
+
+@pytest.mark.parametrize("kind,phrase", [
+    ("remote_pid_alive", "the process exited"),
+    ("remote_file_mtime_advancing", "stopped writing"),
+    ("remote_stdout_advancing", "stopped advancing"),
+    ("remote_stdout_matches", "stopped matching"),
+    ("http", "stopped answering"),
+])
+def test_brief_says_what_the_probe_kind_means(kind: str, phrase: str) -> None:
+    """Live 2026-08-23 (run e3bb5f): the brief said `brain-alive` was "quiet for
+    46s" and the opus dev diagnosed a logging gap -- the probe is a pid check
+    and the brain had EXITED. The kind is supervisor-owned; spell it out."""
+    _, detail = build_fix_brief(
+        _bundle(stop_reason="stall:x", stalled_probe_id="x", stalled_probe_kind=kind),
+        _repo(), gate_label="g")
+    head = detail.split("LIVE-RUN EVIDENCE")[0]
+    assert phrase in head
+    assert "quiet for" not in head
+
+
+def test_brief_without_a_kind_keeps_the_neutral_wording() -> None:
+    _, detail = build_fix_brief(_bundle(stalled_probe_kind=None), _repo(), gate_label="g")
+    assert "Stalled probe: `brain-log` (quiet for 187s)." in detail.split("LIVE-RUN EVIDENCE")[0]
+
+
+def test_pid_kind_brief_names_the_exit_not_silence() -> None:
+    _, detail = build_fix_brief(
+        _bundle(stop_reason="stall:brain-alive", stalled_probe_id="brain-alive",
+                stalled_probe_kind="remote_pid_alive", stalled_s=46.0),
+        _repo(), gate_label="g")
+    head = detail.split("LIVE-RUN EVIDENCE")[0]
+    assert ("Stalled probe: `brain-alive` (remote_pid_alive): the process exited -- "
+            "it had been gone for 46s when the run stopped. This is not a logging "
+            "or heartbeat problem; find why it exited.") in head
+
+
+def test_title_names_the_exit_for_a_pid_probe() -> None:
+    title, _ = build_fix_brief(
+        _bundle(stop_reason="stall:brain-alive", stalled_probe_id="brain-alive",
+                stalled_probe_kind="remote_pid_alive"), _repo(), gate_label="g")
+    assert "`brain-alive` process exited" in title
+    assert "stopped advancing" not in title
