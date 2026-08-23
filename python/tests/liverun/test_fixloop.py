@@ -675,6 +675,11 @@ def test_default_retire_prior_cycle_over_a_real_ledger_store(
 
     operator_task = store.add_task(title="operator's own task", role="dev",
                                    detail="pre-existing work")
+    # An open PR the operator already had BEFORE any liverun focus existed --
+    # the cutoff guard (`created_at >= cutoff`) is what has to keep this one
+    # out of the sweep; nothing else would.
+    operator_pr = store.record_pr(task_id=operator_task.task_id, branch="operator/branch",
+                                  head="h0", dev_member="dev-0")
     time.sleep(0.01)
     focus = store.add_focus(title="Fix: something", origin="liverun",
                             body="Live-run fix cycle: the ONLY goal is this one fix.")
@@ -704,6 +709,7 @@ def test_default_retire_prior_cycle_over_a_real_ledger_store(
     assert tasks_by_id[merged_task.task_id].state == "done"
 
     prs_by_id = {p["pr_id"]: p for p in store.list_prs()}
+    assert prs_by_id[operator_pr["pr_id"]]["status"] == "open"
     assert prs_by_id[open_pr["pr_id"]]["status"] == "abandoned"
     assert prs_by_id[merged_pr["pr_id"]]["status"] == "merged"
 
@@ -712,6 +718,49 @@ def test_default_retire_prior_cycle_over_a_real_ledger_store(
     assert {f.id for f in store.active_focuses()} == active_ids
     tasks_by_id2 = {t.task_id: t for t in store.list_tasks()}
     assert tasks_by_id2[later_task.task_id].state == "dropped"
+
+
+def test_unstamped_focus_is_archived_but_sweeps_nothing(
+        tmp_path: pathlib.Path) -> None:
+    """A liverun focus with no `created_at` (hand-corrupted here the way a
+    reviewer might find one) must not be read as "the cutoff is the empty
+    string" -- `"" >= cutoff` is true for every row, which would drop every
+    task and abandon every PR the project has ever had. The focus itself is
+    still archived; the sweep below it is skipped entirely."""
+    import dataclasses
+    import time
+
+    from errorta_council.coding.ledger import LedgerStore
+
+    store = LedgerStore("unit-retire-unstamped")
+    store.create_project(north_star="n", definition_of_done="d",
+                         target="existing", repo_path="/r/unit-retire-unstamped")
+
+    operator_task = store.add_task(title="operator's own task", role="dev",
+                                   detail="pre-existing work")
+    operator_pr = store.record_pr(task_id=operator_task.task_id, branch="operator/branch",
+                                  head="h0", dev_member="dev-0")
+    time.sleep(0.01)
+    focus = store.add_focus(title="Fix: something", origin="liverun",
+                            body="Live-run fix cycle: the ONLY goal is this one fix.")
+
+    # Hand-corrupt the stamp: read the focus row back out and rewrite it with
+    # `created_at` cleared, exactly the row shape a real ledger read returns.
+    focuses = store._read_focuses()
+    stripped = [dataclasses.replace(f, created_at="") if f.id == focus.id else f
+                for f in focuses]
+    store._write_focuses(stripped)
+
+    counts = F._default_retire_prior_cycle(store)
+    assert counts == {"focuses_archived": 1, "tasks_dropped": 0, "prs_abandoned": 0}
+
+    archived = next(f for f in store.list_focuses() if f.id == focus.id)
+    assert archived.status == "archived"
+
+    assert store.list_tasks()[0].state == "todo"
+    assert store.list_tasks()[0].task_id == operator_task.task_id
+    prs_by_id = {p["pr_id"]: p for p in store.list_prs()}
+    assert prs_by_id[operator_pr["pr_id"]]["status"] == "open"
 
 
 def test_already_running_project_is_never_fought() -> None:

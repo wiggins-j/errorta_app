@@ -350,27 +350,50 @@ def _default_retire_prior_cycle(store: Any) -> dict[str, int]:
     Focus is this loop's own work, and is safe to retire. Anything older
     belongs to the operator (or predates this loop entirely) and is left
     strictly alone: if there is no active liverun Focus, this touches
-    nothing at all.
+    nothing at all. A liverun Focus with no `created_at` stamp is archived
+    (it is still retired) but scopes no sweep at all -- an unknown cutoff is
+    never treated as "everything", which is what an unguarded string
+    comparison against `""` would otherwise do.
     """
     prior = [f for f in store.active_focuses() if f.origin == "liverun"]
     if not prior:
         return {"focuses_archived": 0, "tasks_dropped": 0, "prs_abandoned": 0}
-    cutoff = min(f.created_at for f in prior)
     for focus in prior:
         store.update_focus(focus.id, status="archived")
+    # An unstamped `created_at` (empty string) is not "everything is after
+    # it" -- `"" >= cutoff` is vacuously true for every row, which would wipe
+    # every operator task and PR the project has ever had. A focus with no
+    # timestamp scopes NOTHING: the archive above still happened, but the
+    # sweep below is skipped entirely.
+    cutoff = min((f.created_at for f in prior), default="")
+    if not cutoff:
+        return {"focuses_archived": len(prior), "tasks_dropped": 0, "prs_abandoned": 0}
     dropped = 0
     for task in store.list_tasks():
         if task.state in ("todo", "doing", "blocked") and task.created_at >= cutoff:
             store.update_task(task.task_id, state="dropped")
             dropped += 1
     abandoned = 0
-    live_pr_statuses = ("merged", "abandoned", "superseded", "blocked")
+    terminal_pr_statuses = ("merged", "abandoned", "superseded", "blocked")
     for pr in store.list_prs():
-        if pr.get("status") not in live_pr_statuses and pr.get("created_at", "") >= cutoff:
+        if pr.get("status") not in terminal_pr_statuses and pr.get("created_at", "") >= cutoff:
             store.update_pr(pr["pr_id"], status="abandoned")
             abandoned += 1
-    return {"focuses_archived": len(prior), "tasks_dropped": dropped,
-            "prs_abandoned": abandoned}
+    counts = {"focuses_archived": len(prior), "tasks_dropped": dropped,
+              "prs_abandoned": abandoned}
+    if dropped or abandoned:
+        try:
+            store.record_decision(
+                title="fix-cycle hygiene: retired the previous liverun cycle",
+                context=f"cutoff {cutoff}",
+                choice="fix_cycle_hygiene",
+                rationale=(f"archived {len(prior)} focus(es), dropped {dropped} task(s), "
+                           f"abandoned {abandoned} PR(s) created under the prior liverun "
+                           "cycle before filing this cycle's own"),
+                related_task_ids=[])
+        except Exception:
+            pass  # best-effort audit trail; never blocks the sweep it describes
+    return counts
 
 
 @dataclass
