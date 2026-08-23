@@ -449,7 +449,21 @@ sidecar: the full launch chain, wall-clock stall detection, teardown with
 triage, operative Focus + fix task, a coding run that opened a PR, and the
 Slack narration of all of it.
 
-On 2026-08-23, run `916bbd` demonstrated the launch chain and teardown again. The brain fix (senditai-ng `9373014`) is necessary but not sufficient: the preflight stalls because it reads a `StateManager` instance that nothing pumps between the feed gate and the loop. The journal is legitimately silent for up to 120 + 180 seconds of preflight and up to 1800 seconds of a driven tutorial, so the operator profile's `journal-seq` threshold is now 2100 seconds. The fix loop is being pointed at this exact stall next. The run id, triage, and outcome will be recorded here.
+Not yet demonstrated: a fix cycle that **converges** on its own. On the real
+defect of the day (the brain's `tutorialProgress` never reaching its preflight)
+the sonnet dev exhausted its repository-read budget on a 657-file repo twice
+and misread the symptom; the defect was found and fixed by hand
+(senditai-ng `9373014`). Treat the loop as mechanically complete and
+model-limited until the convergence slice is measured.
+
+On 2026-08-23, run `916bbd` demonstrated the launch chain and teardown again.
+The brain fix (senditai-ng `9373014`) is necessary but not sufficient: the
+preflight stalls because it reads a `StateManager` instance that nothing pumps
+between the feed gate and the loop. The journal is legitimately silent for up to
+120 + 180 seconds of preflight and up to 1800 seconds of a driven tutorial, so
+the operator profile's `journal-seq` threshold is now 2100 seconds. The fix loop
+is being pointed at this exact stall next. The run id, triage, and outcome will
+be recorded here.
 
 ### Follow-ups, in priority order
 
