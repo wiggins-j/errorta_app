@@ -254,6 +254,29 @@ def _default_bound_channel(project_id: str) -> str:
     return slack_store.channel_for_project(project_id) or ""
 
 
+def _default_assign_dev_route(project_id: str, route: str) -> list[str]:
+    """Seat every `dev` member of `project_id`'s team on `route`.
+
+    Compares routes BEFORE calling `assign_models_by_role`: that action raises
+    `ControlActionError("no_matching_members")` when nothing would change, and
+    "nothing to seat" (no team yet, or every dev already on `route`) is a
+    silent no-op here, not a pause.
+    """
+    from errorta_council.coding import control_actions, pm_reference
+    from errorta_council.coding.ledger import LedgerStore
+    store = LedgerStore(project_id)
+    members = [m for m in (store.get_run_config().get("members") or []) if isinstance(m, dict)]
+    prior = [str(m.get("gateway_route_id") or "") for m in members
+             if control_actions.coding_role_of(m) == "dev"
+             and str(m.get("gateway_route_id") or "") != route]
+    if not prior:
+        return []
+    control_actions.assign_models_by_role(
+        store, {"dev": route}, available=pm_reference.list_available_routes(),
+        surface="liverun")
+    return prior
+
+
 @dataclass
 class FixDeps:
     """Every engine seam the cycle reaches through. ``None`` means "resolve the
@@ -282,6 +305,7 @@ class FixDeps:
     accept_outcome_fn: Callable[[str], Any] | None = None
     triage_fn: Callable[[str, str, str], str] | None = None
     bound_channel_fn: Callable[[str], str] | None = None
+    assign_dev_route_fn: Callable[[str, str], list[str]] | None = None
 
     def ledger(self, project_id: str) -> Any:
         return (self.ledger_factory or _default_ledger_factory)(project_id)
@@ -320,6 +344,11 @@ class FixDeps:
 
     def bound_channel(self, project_id: str) -> str:
         return str((self.bound_channel_fn or _default_bound_channel)(project_id) or "")
+
+    def assign_dev_route(self, project_id: str, route: str) -> list[str]:
+        """Seat every `dev` member on `route`. Returns the routes it replaced
+        (empty when every dev seat already sat there)."""
+        return list((self.assign_dev_route_fn or _default_assign_dev_route)(project_id, route) or [])
 
 
 @dataclass
@@ -516,6 +545,17 @@ class FixCycle:
             # cannot be merged, and filing it would spend a dev run to prove it.
             return self._pause("fix_no_gate", failed=False,
                                detail=f"project `{project_id}` has no registrable gate")
+        route = str(getattr(getattr(self.profile, "fix_loop", None), "dev_route", "") or "")
+        if route:
+            try:
+                prior = self.deps.assign_dev_route(project_id, route)
+            except Exception as exc:  # noqa: BLE001 - a seat that cannot be filled is a pause
+                _LOG.exception("liverun %s could not seat the dev on %s", self.run_id, route)
+                return self._pause("fix_run_failed", failed=False,
+                                   detail=f"dev_route_unavailable:{route}:{type(exc).__name__}")
+            if prior:
+                self._event("fix_team_model", {"project_id": project_id, "role": "dev",
+                                               "from": prior, "to": route})
         status = self._status()
         if status == "running":
             return self._pause("fix_project_busy", failed=False, detail=status)

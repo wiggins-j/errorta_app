@@ -121,6 +121,9 @@ class Fake:
         self.run_end_status = "stopped"
         self.start_result: dict = {"status": "started"}
         self.start_sets_running = True
+        self.dev_routes: list[str] = ["claude_cli.sonnet"]
+        self.assigned: list[tuple[str, str]] = []
+        self.assign_raises: Exception | None = None
 
     # -- seams ---------------------------------------------------------- #
     def deps(self) -> FixDeps:
@@ -140,7 +143,16 @@ class Fake:
             triage_fn=(lambda prompt, project_id, route: self.triage_replies.pop(0))
             if self.triage_replies else None,
             bound_channel_fn=lambda pid: "C-live",
+            assign_dev_route_fn=self._assign_dev_route,
         )
+
+    def _assign_dev_route(self, project_id: str, route: str) -> list[str]:
+        if self.assign_raises is not None:
+            raise self.assign_raises
+        prior = [r for r in self.dev_routes if r != route]
+        self.assigned.append((project_id, route))
+        self.dev_routes = [route for _ in self.dev_routes]
+        return prior
 
     def finish_run(self, status: str | None = None) -> None:
         """The dev run ends. A run that delivered anything moved the branch —
@@ -265,8 +277,8 @@ def test_happy_path_files_a_task_starts_a_run_and_deploys() -> None:
     assert task["title"].startswith("Fix: ")
     assert fake.started == [("senditai-ng", {"resume": False, "continue_": False})]
     assert [k for k, _ in out.events] == [
-        "fix_triage", "fix_task", "fix_run", "fix_accept_staged", "fix_accepted",
-        "deploy_step"]
+        "fix_triage", "fix_team_model", "fix_task", "fix_run", "fix_accept_staged",
+        "fix_accepted", "deploy_step"]
     assert cyc.repo_id == "brain" and cyc.task_id == "t1"
 
 
@@ -303,6 +315,34 @@ def test_the_fix_task_event_names_task_repo_and_project() -> None:
     detail = cyc.step().events[0][1]
     assert detail["task_id"] == "t1" and detail["repo_id"] == "brain"
     assert detail["project_id"] == "senditai-ng" and detail["gate"]
+
+
+def test_dev_seat_is_moved_to_the_profile_route_before_the_task_is_filed() -> None:
+    fake = Fake()
+    out = _drive(_cycle(fake), fake)
+    assert fake.assigned == [("senditai-ng", "claude_cli.opus")]
+    kinds = [k for k, _ in out.events]
+    assert kinds.index("fix_team_model") < kinds.index("fix_task")
+    ev = dict(out.events)["fix_team_model"]
+    assert ev == {"project_id": "senditai-ng", "role": "dev",
+                  "from": ["claude_cli.sonnet"], "to": "claude_cli.opus"}
+
+
+def test_dev_seat_already_on_the_route_is_left_alone() -> None:
+    fake = Fake()
+    fake.dev_routes = ["claude_cli.opus", "claude_cli.opus"]
+    out = _drive(_cycle(fake), fake)
+    assert fake.assigned == [("senditai-ng", "claude_cli.opus")]  # asked once
+    assert "fix_team_model" not in [k for k, _ in out.events]
+
+
+def test_unavailable_dev_route_pauses_before_any_run() -> None:
+    fake = Fake()
+    fake.assign_raises = RuntimeError("model_not_found")
+    out = _drive(_cycle(fake), fake)
+    assert out.kind == "paused" and out.code == "fix_run_failed"
+    assert out.detail.startswith("dev_route_unavailable:claude_cli.opus")
+    assert fake.started == [] and fake.store.tasks == []
 
 
 # -- the cancel path ------------------------------------------------------- #

@@ -1388,6 +1388,15 @@ def test_every_fix_kind_the_driver_emits_has_a_written_line(
         assert token in line
 
 
+def test_fix_team_model_line_names_the_swap() -> None:
+    line = outbound._liverun_detail(
+        "fix_team_model",
+        {"project_id": "senditai-ng", "role": "dev",
+         "from": ["claude_cli.sonnet"], "to": "claude_cli.opus"}, "fake")
+
+    assert line == "dev seat → claude_cli.opus (was claude_cli.sonnet)"
+
+
 def test_every_fix_detail_is_escaped_and_capped() -> None:
     """Repo ids and pause codes come off disk and out of the engine, and
     `fyi_message` escapes nothing it is handed."""

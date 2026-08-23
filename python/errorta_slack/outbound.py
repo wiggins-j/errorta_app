@@ -456,6 +456,9 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
         return (f"📋 Filed a dev task for *{_esc(detail.get('repo_id'))}* "
                 f"in project `{_esc(detail.get('project_id'))}` "
                 f"(gate: {_esc(detail.get('gate'))})")
+    if kind == "fix_team_model":
+        frm = ", ".join(_esc(r) for r in (detail.get("from") or []))
+        return f"dev seat → {_esc(detail.get('to'))} (was {frm})"
     if kind == "fix_run":
         return (f"Fix run {_esc(detail.get('status'))} "
                 f"({_esc(detail.get('mode'))}) on `{_esc(detail.get('project_id'))}`")
