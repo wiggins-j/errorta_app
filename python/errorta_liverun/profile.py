@@ -45,7 +45,7 @@ PROBE_KINDS = {"http", "remote_pid_alive", "remote_file_mtime_advancing",
 ACTION_KINDS = {"local", "remote", "remote_signal", "tunnel", "tunnel_close", "window_shot", "http"}
 TOP_KEYS = {"version", "created_by", "hosts", "tunnels", "launch", "watch", "evidence",
             "teardown", "caps", "ban_signals", "repos", "fix_loop"}
-STEP_KEYS = {"name", "check", "timeout_s", "evidence_literal"} | ACTION_KINDS
+STEP_KEYS = {"name", "check", "timeout_s", "evidence_literal", "retries"} | ACTION_KINDS
 
 # --- Slice 2: the fix loop ------------------------------------------------- #
 # The closed evidence vocabulary a profile may map onto a repo. Closed by
@@ -128,6 +128,7 @@ class Step:
     check: Check | None
     timeout_s: float
     evidence_literal: str | None = None
+    retries: int = 0
 
 
 @dataclass(frozen=True)
@@ -442,7 +443,14 @@ def _step(raw: Any, hosts, tunnels, *, where: str) -> Step:
         # check-less `logoff_verified` would be a forged receipt for a logoff
         # that never happened. Fail closed at authoring time.
         raise ProfileError("literal_without_check", where)
-    return Step(raw["name"], action, check, timeout, lit)
+    retries_raw = raw.get("retries", 0)
+    if not isinstance(retries_raw, int) or isinstance(retries_raw, bool) \
+            or not 0 <= retries_raw <= 5:
+        raise ProfileError("bad_retries", where)
+    if retries_raw and action is None:
+        # Only a command can be retried; a check already polls on its own.
+        raise ProfileError("retries_without_action", where)
+    return Step(raw["name"], action, check, timeout, lit, retries_raw)
 
 
 def _repo(raw: dict[str, Any], hosts, tunnels, *, where: str,

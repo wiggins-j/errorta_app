@@ -266,14 +266,24 @@ class Supervisor:
             self._step_started = self._clock()
             self._step_started_wall = self._wall()
             if step.action is not None:
-                res = self._run_action(step.action, self.ctx, timeout_s=step.timeout_s)
-                self._event("launch_step", {"name": step.name, "ok": res.ok, "exit_code": res.exit_code,
-                                            "stdout": res.stdout_tail[-400:],
-                                            "stderr": res.stderr_tail[-400:]})
-                if self._scan_ban(f"{res.stdout_tail}\n{res.stderr_tail}", where=f"launch:{step.name}"):
-                    self._stop_reason = self._stop_reason or "ban_signal"
-                    self._do_stopping()
-                    return
+                attempt = 0
+                while True:
+                    res = self._run_action(step.action, self.ctx, timeout_s=step.timeout_s)
+                    self._event("launch_step", {"name": step.name, "ok": res.ok, "exit_code": res.exit_code,
+                                                "attempt": attempt,
+                                                "stdout": res.stdout_tail[-400:],
+                                                "stderr": res.stderr_tail[-400:]})
+                    if self._scan_ban(f"{res.stdout_tail}\n{res.stderr_tail}", where=f"launch:{step.name}"):
+                        self._stop_reason = self._stop_reason or "ban_signal"
+                        self._do_stopping()
+                        return
+                    if res.ok or attempt >= step.retries:
+                        break
+                    tails = f"{res.stdout_tail}\n{res.stderr_tail}"
+                    if res.exit_code == 3 or _REFUSAL_TAIL_RE.search(tails):
+                        break   # a refusal is a decision, never retried
+                    attempt += 1
+                    self._sleep(2.0)
                 if not res.ok:
                     reason = f"launch_step_failed:{step.name}"
                     tails = f"{res.stdout_tail}\n{res.stderr_tail}"

@@ -1569,3 +1569,67 @@ def test_fix_bundle_carries_the_stalled_probe_kind() -> None:
     assert sup._fix_bundle("stall:clock").stalled_probe_kind == "elapsed_lt_s"
     assert sup._fix_bundle("stall:no-such-probe").stalled_probe_kind is None
     assert sup._fix_bundle("launch_step_failed:one").stalled_probe_kind is None
+
+
+def test_launch_step_retries_then_succeeds() -> None:
+    clock = FakeClock()
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    launch = (P.Step("flaky", act, None, 5, None, 3),)
+    prof = P.Profile("p", {}, {}, launch,
+                     (P.WatchProbe("clock", 10, 0, "stop", P.Probe("elapsed_lt_s", 10_000)),),
+                     (), (P.Step("logoff", None, P.Check("file_exists", "/"), 5, "logoff_verified"),),
+                     P.DEFAULT_CAPS, ())
+    calls = {"n": 0}
+    def action(a, ctx, timeout_s):
+        calls["n"] += 1
+        return StepResult(calls["n"] >= 3, "t", "t")
+    sup = _sup(prof, clock, probe=lambda p, ctx: True, action=action)
+    sup.start(blocking=False)
+    sup._tick(); sup._tick()
+    assert calls["n"] == 3
+    assert sup.state.phase == "watching"
+    attempts = [e["detail"].get("attempt") for e in sup.store.events(sup.state.run_id)
+                if e["kind"] == "launch_step" and "attempt" in e["detail"]]
+    assert attempts == [0, 1, 2]
+
+
+def test_launch_step_retries_exhausted_fails() -> None:
+    clock = FakeClock()
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    launch = (P.Step("flaky", act, None, 5, None, 2),)
+    prof = P.Profile("p", {}, {}, launch,
+                     (P.WatchProbe("clock", 10, 0, "stop", P.Probe("elapsed_lt_s", 10_000)),),
+                     (), (P.Step("logoff", None, P.Check("file_exists", "/"), 5, "logoff_verified"),),
+                     P.DEFAULT_CAPS, ())
+    calls = {"n": 0}
+    def action(a, ctx, timeout_s):
+        calls["n"] += 1
+        return StepResult(False, "t", "t")
+    sup = _sup(prof, clock, probe=lambda p, ctx: True, action=action)
+    sup.start(blocking=False)
+    for _ in range(5):
+        sup._tick()
+    assert calls["n"] == 3   # 1 + 2 retries
+    assert sup.state.phase == "failed"
+    assert sup.state.reason == "launch_step_failed:flaky"
+
+
+def test_launch_step_refusal_is_never_retried() -> None:
+    clock = FakeClock()
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    launch = (P.Step("brain", act, None, 5, None, 5),)
+    prof = P.Profile("p", {}, {}, launch,
+                     (P.WatchProbe("clock", 10, 0, "stop", P.Probe("elapsed_lt_s", 10_000)),),
+                     (), (P.Step("logoff", None, P.Check("file_exists", "/"), 5, "logoff_verified"),),
+                     P.DEFAULT_CAPS, ())
+    calls = {"n": 0}
+    def action(a, ctx, timeout_s):
+        calls["n"] += 1
+        return StepResult(False, "t", "t", exit_code=3)
+    sup = _sup(prof, clock, probe=lambda p, ctx: True, action=action)
+    sup.start(blocking=False)
+    for _ in range(5):
+        sup._tick()
+    assert calls["n"] == 1
+    assert sup.state.phase == "failed"
+    assert sup.state.reason == "launch_step_failed:brain:refused"
