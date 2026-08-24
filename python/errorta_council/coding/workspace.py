@@ -328,6 +328,54 @@ class CodingWorkspace:
             )
         return head
 
+    def edit_file(self, rel_path: str, old_string: str, new_string: str, *,
+                  replace_all: bool = False, task_id: str,
+                  summary: str = "") -> str:
+        """Apply an anchored find/replace (``code_edit``) to an existing text
+        file in the worktree and commit via :meth:`write_file`. Returns the new
+        HEAD sha.
+
+        Delegating the spliced FULL content to ``write_file`` is the point: the
+        F140 destructive-write guard, the F139 no-op-commit suppression, and
+        provenance recording all apply to an edit exactly as to a whole-file
+        write — an edit that guts a large file is still blocked. Raises
+        :class:`CodingWorkspaceError` whose message starts with a stable code
+        (``edit_target_missing`` / ``edit_target_binary`` / the
+        ``edit_apply`` codes) so the failed tool event carries the taxonomy."""
+        from errorta_tools.runner.apply_workspace import resolve_workspace_path
+
+        from .edit_apply import EditApplyError, apply_code_edit
+        root = (
+            self.task_root(task_id)
+            if self._ws.has_worktree(task_id)
+            else self._ws.root
+        )
+        target = resolve_workspace_path(root, rel_path, must_exist=False)
+        if not target.exists() or not target.is_file():
+            raise CodingWorkspaceError(
+                f"edit_target_missing: {rel_path} does not exist in the "
+                "worktree — code_edit cannot create a file; use code_write")
+        try:
+            raw = target.read_bytes()
+        except OSError as exc:
+            raise CodingWorkspaceError(
+                f"edit_target_missing: {rel_path} is unreadable: {exc}") from exc
+        # Same NUL heuristic as write_file's guard path: a genuine binary asset
+        # is not editable text; a non-UTF-8 TEXT file has no NUL and is decoded
+        # leniently below, so it stays editable.
+        if b"\x00" in raw:
+            raise CodingWorkspaceError(
+                f"edit_target_binary: {rel_path} is a binary asset — code_edit "
+                "is text-only; re-emit it with code_write content_base64")
+        old_content = raw.decode("utf-8", errors="replace")
+        try:
+            new_content = apply_code_edit(
+                old_content, old_string, new_string, replace_all=replace_all)
+        except EditApplyError as exc:
+            raise CodingWorkspaceError(str(exc)) from exc
+        return self.write_file(rel_path, new_content, task_id=task_id,
+                               summary=summary)
+
     def changed_paths(self, branch: str, *, base: str = "master") -> list[str]:
         """F139 WS-C: file paths ``branch`` changes vs ``base`` (adds + modifies +
         deletes) — its net contribution. Empty means no net change. Callers pass
