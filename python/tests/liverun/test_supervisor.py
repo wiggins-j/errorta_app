@@ -1633,3 +1633,40 @@ def test_launch_step_refusal_is_never_retried() -> None:
     assert calls["n"] == 1
     assert sup.state.phase == "failed"
     assert sup.state.reason == "launch_step_failed:brain:refused"
+
+
+def test_brain_refusal_in_declared_evidence_skips_the_fix_loop() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    prof = _fix_profile(fix_loop=P.FixLoop(enabled=True, refusal_evidence=("brain-out",)))
+    prof = P.Profile(prof.name, prof.hosts, prof.tunnels, prof.launch, prof.watch,
+                     (P.Step("brain-out", act, None, 5), P.Step("stale-log", act, None, 5)),
+                     prof.teardown, prof.caps, prof.ban_signals, prof.repos, prof.fix_loop)
+    def action(a, ctx, timeout_s):
+        return StepResult(True, "t", "t", stdout_tail=(
+            "07:29 ERROR senditai_ng.run_live REFUSED: the tutorial is unfinished"))
+    sup = _fix_sup(clock, fake, prof=prof, action=action)
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "stopped"
+    assert _skip_codes(sup) == ["brain_refused"]
+    assert fake.store.tasks == []
+
+
+def test_refusal_in_undeclared_evidence_does_not_skip() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    act = P.Action("local", {"argv": ("/bin/true",), "cwd": None})
+    prof = _fix_profile(fix_loop=P.FixLoop(enabled=True, refusal_evidence=()))
+    prof = P.Profile(prof.name, prof.hosts, prof.tunnels, prof.launch, prof.watch,
+                     (P.Step("stale-log", act, None, 5),),
+                     prof.teardown, prof.caps, prof.ban_signals, prof.repos, prof.fix_loop)
+    def action(a, ctx, timeout_s):
+        return StepResult(True, "t", "t", stdout_tail=(
+            "yesterday ERROR senditai_ng.run_live REFUSED: stale line from a prior run"))
+    sup = _fix_sup(clock, fake, prof=prof, action=action)
+    for _ in range(60):
+        clock.sleep(10); sup._tick()
+        if sup.state.phase in ("fixing",) or sup.state.phase in ("stopped", "failed", "paused_awaiting_human"):
+            break
+    assert "brain_refused" not in _skip_codes(sup)

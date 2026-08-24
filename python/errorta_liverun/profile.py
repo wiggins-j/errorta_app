@@ -77,7 +77,7 @@ FIX_CAP_DEFAULTS = {"max_fix_cycles_per_day": 3, "idle_timeout_s": 2400,
 # turn that falls through to the fallback gets killed as "idle" mid-turn.
 MIN_IDLE_TIMEOUT_S = 2100
 REPO_KEYS = {"id", "path", "errorta_project", "fixable", "classify", "deploy"}
-FIX_LOOP_KEYS = {"enabled", "triage_route", "dev_route"} | set(FIX_CAP_DEFAULTS)
+FIX_LOOP_KEYS = {"enabled", "triage_route", "dev_route", "refusal_evidence"} | set(FIX_CAP_DEFAULTS)
 _REPO_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _DEV_ROUTE_RE = re.compile(r"^[a-z_]+\.[a-z0-9][a-z0-9_.-]*")
 
@@ -169,6 +169,11 @@ class FixLoop:
     triage_route: str = "pm"
     dev_route: str = "claude_cli.opus"
     accept_timeout_s: int = 1800
+    # Evidence steps whose capture is RUN-SCOPED (their source is truncated at
+    # every launch) and may carry the brain's own refusal verdict. Only these
+    # are trusted for "the brain declined, don't file a fix cycle" — an
+    # appended log would resurface a previous run's refusal under a real crash.
+    refusal_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -548,7 +553,12 @@ def _fix_loop(raw: Any, repos: tuple[RepoDef, ...]) -> FixLoop:
     if enabled and not any(r.fixable for r in repos):
         raise ProfileError("fix_loop_without_repos",
                            "fix_loop.enabled needs at least one fixable repo")
-    return FixLoop(enabled=enabled, triage_route=str(route), dev_route=dev_route, **values)
+    refusal_raw = raw.get("refusal_evidence", ())
+    if not isinstance(refusal_raw, (list, tuple)) \
+            or not all(isinstance(x, str) and x for x in refusal_raw):
+        raise ProfileError("bad_refusal_evidence", repr(refusal_raw)[:80])
+    return FixLoop(enabled=enabled, triage_route=str(route), dev_route=dev_route,
+                   refusal_evidence=tuple(refusal_raw), **values)
 
 
 def _caps(raw: Any) -> Caps:
@@ -670,6 +680,9 @@ def _build_profile(path: Path, doc: dict[str, Any], known_hosts_fn: Callable[[st
     fix_loop = None
     if "fix_loop" in doc:
         fix_loop = _fix_loop(doc.get("fix_loop"), repos)
+        unknown_refusal = set(fix_loop.refusal_evidence) - {e.name for e in evidence}
+        if unknown_refusal:
+            raise ProfileError("refusal_evidence_unknown_step", str(sorted(unknown_refusal)))
         if fix_loop.enabled and not repos:
             raise ProfileError("fix_loop_without_repos", "fix_loop.enabled needs repos")
 

@@ -52,6 +52,9 @@ _FIX_PHASES = ("fixing", "accepting", "deploying")
 # a cap and an operator stop are all decisions to respect (spec §3.8 rule 7).
 _FIXABLE_REASON_RE = re.compile(r"^(stall|launch_step_failed):")
 _REFUSAL_TAIL_RE = re.compile(r"^REFUSED:", re.MULTILINE)
+# The brain's refusal line inside a captured log tail: prefixed by its logger,
+# so not anchored at line start like the launch-step form above.
+_BRAIN_REFUSAL_RE = re.compile(r"\bREFUSED: ")
 # Skip codes that are NOT worth an event: nothing was expected to happen, or the
 # more specific event (`fix_cycle_cap`) has already said it.
 _SILENT_SKIPS = frozenset({
@@ -516,6 +519,16 @@ class Supervisor:
         if self._fix is not None:
             return "fix_in_flight"             # this run already had its cycle
         if self._refused:
+            return "brain_refused"
+        fl_refusal = self.profile.fix_loop.refusal_evidence if self.profile.fix_loop else ()
+        if fl_refusal and any(
+                e.id in fl_refusal
+                and _BRAIN_REFUSAL_RE.search(f"{e.stdout_tail}\n{e.stderr_tail}")
+                for e in self._evidence_items):
+            # The brain EXITED on its own verdict. The profile names which
+            # evidence captures are run-scoped (their files are truncated at
+            # launch), so this cannot be a previous run's refusal resurfacing.
+            self._refused = True
             return "brain_refused"
         if (reason or "").endswith(":unverifiable"):
             # The supervisor could not actually SEE the box when this stall
