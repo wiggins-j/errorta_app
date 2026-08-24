@@ -212,6 +212,26 @@ halfway through cannot skip the kills, the verdict, or the phase.
 `logoff_verified: ABSENT` is reported, never assumed. Absence of evidence is
 posted as absence, not read as health.
 
+**Remote probes are tri-state.** `remote_pid_alive`, `remote_file_mtime_advancing`,
+`remote_stdout_advancing` and `remote_stdout_matches` each return `True`
+(healthy), `False` (a command that ran and reported a real failure — `kill -0`
+on a gone pid, `stat` on a missing file), or `None` when the *transport*
+itself failed: ssh exiting 255, a runner timeout, or the request never going
+out at all. A `None` tick never refreshes `last_ok` and never posts a
+`probe_warn` — there is nothing actionable to warn about, only an inability to
+look. If a stall window expires having seen only `None`s since the probe last
+succeeded (never a definite `False`), the stop reason carries an
+`:unverifiable` suffix (`stall:<id>:unverifiable`) instead of the plain
+`stall:<id>`, and the `stall` event carries `"unverifiable": true`. Triage
+maps an unverifiable reason to no evidence class, and the fix loop refuses to
+start on one at all (`fix_skipped` `stall_unverifiable`) — the supervisor
+never actually saw a failure, so no repository gets blamed for one. (`http`
+probes are deliberately NOT tri-stated: their target is always loopback, so a
+connection error there means the tunnel they exist to check is down, which
+*is* the failure.) This exists because a ~64 s tailscale flake on 2026-08-23
+(run `aaadac`) made `remote_pid_alive` read a transport failure as a dead
+brain process, and the supervisor tore down a run that was actually healthy.
+
 ## Restart behaviour
 
 A live run is **never resumed** across an Errorta restart. On boot, every

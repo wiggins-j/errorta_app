@@ -64,8 +64,14 @@ def _text(bundle: EvidenceBundle) -> str:
 def _stall_kind(bundle: EvidenceBundle) -> str | None:
     """The kind of the probe that stalled: the bundle's own, else the kind the
     legacy id implies, else None. `elapsed_lt_s` is a kind too -- and maps to
-    no class below, because a session clock running out is not a defect."""
-    if not str(bundle.stop_reason or "").startswith("stall:"):
+    no class below, because a session clock running out is not a defect.
+    Likewise a `stall:<id>:unverifiable` reason maps to no class: the
+    supervisor never actually observed a failure, only an inability to look
+    (spec: tri-state remote probes) -- in the live pipeline this reason is
+    already excluded from the fix loop before a bundle is ever built, but
+    `classify` stays honest about it standalone too."""
+    reason = str(bundle.stop_reason or "")
+    if not reason.startswith("stall:") or reason.endswith(":unverifiable"):
         return None
     if bundle.stalled_probe_kind:
         return str(bundle.stalled_probe_kind)

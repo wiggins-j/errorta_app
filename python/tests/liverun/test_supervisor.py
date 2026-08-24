@@ -247,6 +247,82 @@ def test_stall_window_is_wall_clock_since_last_ok_and_resets_on_recovery() -> No
     assert sup.state.phase == "stopped" and sup.state.reason == "stall:alive"
 
 
+def test_unknown_probe_result_does_not_refresh_last_ok_or_warn() -> None:
+    """A transport-unknown (`None`) probe result is neither evidence of life
+    nor of death: `last_ok` must not move, and a warn-type probe must not post
+    a warning over something it could not actually observe -- see live
+    2026-08-23 run aaadac."""
+    clock = FakeClock()
+    def probe(p, ctx):
+        return None if p.kind == "http" else True
+    sup = _sup(_profile(warn=True), clock, probe=probe)
+    sup.start(blocking=False)
+    sup._tick()
+    sup._tick()
+    assert sup.state.phase == "watching"
+    last_ok_before = sup._probe_last_ok["alive"]
+    for _ in range(6):                       # 60s: twice past the 30s stall window
+        clock.sleep(10)
+        sup._tick()
+    assert sup.state.phase == "watching"       # warn-type probes never stop the run
+    assert sup._probe_last_ok["alive"] == last_ok_before
+    assert [e for e in sup.store.events(sup.state.run_id) if e["kind"] == "probe_warn"] == []
+
+
+def test_stall_of_only_unknowns_is_reported_unverifiable() -> None:
+    clock = FakeClock()
+    def probe(p, ctx):
+        return None if p.kind == "http" else True
+    sup = _sup(_profile(), clock, probe=probe)
+    sup.start(blocking=False)
+    sup._tick()
+    sup._tick()
+    assert sup.state.phase == "watching"
+    for _ in range(4):                        # 40s of nothing but unknowns
+        clock.sleep(10)
+        sup._tick()
+    assert sup.state.phase == "stopped"
+    assert sup.state.reason == "stall:alive:unverifiable"
+    stalls = [e["detail"] for e in sup.store.events(sup.state.run_id) if e["kind"] == "stall"]
+    assert stalls and stalls[-1].get("unverifiable") is True
+
+
+def test_stall_stays_plain_when_a_definite_false_was_seen_in_the_window() -> None:
+    """A real failure anywhere in the stall episode makes the reason plain,
+    even if the LAST tick before the window expired happened to be a
+    transport-unknown one."""
+    clock = FakeClock()
+    seq = iter([False, None, None, None])
+    def probe(p, ctx):
+        if p.kind != "http":
+            return True
+        try:
+            return next(seq)
+        except StopIteration:
+            return None
+    sup = _sup(_profile(), clock, probe=probe)
+    sup.start(blocking=False)
+    sup._tick()
+    sup._tick()
+    assert sup.state.phase == "watching"
+    for _ in range(4):
+        clock.sleep(10)
+        sup._tick()
+    assert sup.state.phase == "stopped"
+    assert sup.state.reason == "stall:alive"       # no ":unverifiable" suffix
+
+
+def test_unverifiable_stall_skips_the_fix_loop_entirely() -> None:
+    clock = FakeClock()
+    fake = FixFake()
+    sup = _fix_sup(clock, fake, probe=lambda p, ctx: None)
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "stopped"
+    assert sup.state.reason == "stall:brain-log:unverifiable"
+    assert _skip_codes(sup) == ["stall_unverifiable"]
+    assert fake.store.tasks == []                   # no dev task was ever filed
+
+
 def test_check_step_start_is_wall_clock_not_monotonic() -> None:
     """`file_mtime_newer` compares `step_start` against an epoch mtime, so the
     supervisor must hand checks wall time even though it times steps out on

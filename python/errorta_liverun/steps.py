@@ -519,11 +519,30 @@ def _pgrep(pattern: str) -> list[int]:
     return [int(x) for x in out.split() if x.isdigit() and int(x) != os.getpid()]
 
 
-def _remote_pid_alive(ctx: Ctx, host: str, pidfile: str) -> bool:
+def _transport_unknown(res: Any) -> bool:
+    """True when a remote command tells us nothing about the box: ssh itself
+    failed to connect (conventionally exit 255 -- see ssh(1)), the runner gave
+    up waiting, or the request never went out at all (policy/argv/host
+    problems short of running anything). None of that is evidence the thing
+    being checked is dead; it is evidence we could not look.
+
+    Live 2026-08-23 (run aaadac): a ~64s tailscale flake made ssh fail this
+    way, `_remote_pid_alive` read it as a dead pid, and the supervisor tore
+    down a healthy run. A command that DID run and reported failure (a
+    `kill -0` on a gone pid, `stat` on a missing file) is status "failed"
+    with an exit code that is not 255 -- that is a real, definite no."""
+    if res.status in ("timed_out", "blocked"):
+        return True
+    return res.status == "failed" and res.exit_code == 255
+
+
+def _remote_pid_alive(ctx: Ctx, host: str, pidfile: str) -> bool | None:
     pidfile_expr = _remote_path_expr(pidfile)
     guard = _pid_guard().format(fail_exit=1)  # no valid pid on file: definitely not "alive"
     script = f'p=$(cat {pidfile_expr} 2>/dev/null); {guard}; kill -0 "$p"'
     res = _remote(ctx, host, ("sh", "-c", script), 15)
+    if _transport_unknown(res):
+        return None
     return res.status == "completed"
 
 
@@ -563,13 +582,24 @@ def run_check(check: Check, ctx: Ctx, *, step_start: float) -> bool:
         st = ctx.tunnels.status_for(tunnel_spec_for(ctx.profile.tunnels[p], ctx))
         return bool(st) and st["state"] == "up"
     if k == "remote_pid_alive":
-        return _remote_pid_alive(ctx, p["host"], p["pidfile"])
+        # A launch-step check waits for a positive "yes", retrying until its
+        # own timeout -- a transport hiccup here is indistinguishable from
+        # "not yet" and correctly just retries; there is no stall window to
+        # protect the way there is for a watch probe (below), so collapsing
+        # `None` to False costs nothing here.
+        return bool(_remote_pid_alive(ctx, p["host"], p["pidfile"]))
     raise ValueError(k)
 
 
 # --- probes -------------------------------------------------------------- #
+#
+# Every remote probe below is tri-state (True / False / None): see
+# `_transport_unknown`. `http` is deliberately NOT tri-stated -- its target is
+# always loopback (validated at profile-load time), so a connection error
+# there means the tunnel it is checking is down, which IS the failure the
+# probe exists to catch, not a transport problem external to it.
 
-def run_probe(probe: Probe, ctx: Ctx) -> bool:
+def run_probe(probe: Probe, ctx: Ctx) -> bool | None:
     k, p = probe.kind, probe.params
     if k == "http":
         return _http_status(p["url"]) == 200
@@ -583,14 +613,20 @@ def run_probe(probe: Probe, ctx: Ctx) -> bool:
         res = _remote(ctx, p["host"],
                       ("sh", "-c", f"stat -c %Y {shlex.quote(p['path'])} 2>/dev/null || stat -f %m {shlex.quote(p['path'])}"),
                       15)
+        if _transport_unknown(res):
+            return None
         return _advancing(ctx, f"mtime:{p['path']}", res.stdout_preview.strip() if res.status == "completed" else None)
     if k == "remote_stdout_advancing":
         argv = _guard(tuple(p["argv"]), ctx)
         res = _remote(ctx, p["host"], argv, 15)
+        if _transport_unknown(res):
+            return None
         return _advancing(ctx, f"stdout:{argv}", res.stdout_preview.strip() if res.status == "completed" else None)
     if k == "remote_stdout_matches":
         argv = _guard(tuple(p["argv"]), ctx)
         res = _remote(ctx, p["host"], argv, 15)
+        if _transport_unknown(res):
+            return None
         return res.status == "completed" and re.search(p["regex"], res.stdout_preview, re.M) is not None
     raise ValueError(k)
 

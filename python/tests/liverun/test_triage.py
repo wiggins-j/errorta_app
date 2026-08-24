@@ -121,6 +121,16 @@ def test_session_clock_kind_is_not_a_defect() -> None:
     assert res.classes == () and res.repo_id is None
 
 
+def test_unverifiable_stall_maps_to_no_class() -> None:
+    """A `kind` that would normally claim `brain_pid_dead` must not, when the
+    reason says the supervisor never actually saw a failure -- only a
+    transport failure it could not see past (live 2026-08-23 run aaadac)."""
+    res = classify(_bundle(stop_reason="stall:brain-alive:unverifiable",
+                           stalled_probe_id="brain-alive",
+                           stalled_probe_kind="remote_pid_alive"), _profile())
+    assert res.classes == () and res.repo_id is None
+
+
 def test_kind_wins_over_a_misleading_legacy_id() -> None:
     # The id says brain-log; the probe is an http probe on the client port.
     res = classify(_bundle(stop_reason="stall:brain-log", stalled_probe_id="brain-log",

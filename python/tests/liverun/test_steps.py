@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -456,6 +457,95 @@ def test_remote_pid_alive_and_signal_reject_non_numeric_pidfile(
     # this user can reach (or the whole process group). Confirm this very
     # test process is still here.
     os.kill(os.getpid(), 0)
+
+
+# --- tri-state remote probes: transport failure is unknown, not dead ------ #
+#
+# Live 2026-08-23 (run aaadac): a ~64s tailscale flake made ssh itself fail.
+# `_remote_pid_alive` returned False on that, indistinguishable from a real
+# `kill -0` failure -- the supervisor stopped a HEALTHY run, and triage
+# classified it as a dead brain. These probe-level tests fix that at the
+# source: a transport failure (ssh exit 255, a runner timeout) must not look
+# like a definite "no".
+
+def _fake_remote(status: str, exit_code: int | None, stdout: str = ""):
+    def _fn(ctx, host, argv, timeout_s=20, **kw):
+        return SimpleNamespace(status=status, exit_code=exit_code, stdout_preview=stdout)
+    return _fn
+
+
+def _watch_ctx(tmp_path: Path, probe: P.Probe) -> S.Ctx:
+    """A profile whose sole watch entry IS this probe -- so an argv-based
+    probe's argv is declared and `_guard` does not reject it."""
+    prof = P.Profile("p", {"box": P.Host("localhost")}, {},
+                     (), (P.WatchProbe("w", 10, 30, "stop", probe),), (), (),
+                     P.DEFAULT_CAPS, ())
+    return _ctx(tmp_path, prof)
+
+
+def test_remote_pid_alive_is_none_on_ssh_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ssh exiting 255 means the box could not be reached at all -- not that
+    the pid is dead."""
+    monkeypatch.setattr(S, "_remote", _fake_remote("failed", 255))
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    assert S._remote_pid_alive(ctx, "box", "/p.pid") is None
+
+
+def test_remote_pid_alive_is_none_on_a_runner_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(S, "_remote", _fake_remote("timed_out", None))
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    assert S._remote_pid_alive(ctx, "box", "/p.pid") is None
+
+
+def test_remote_pid_alive_is_none_when_the_runner_blocks_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(S, "_remote", _fake_remote("blocked", None))
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    assert S._remote_pid_alive(ctx, "box", "/p.pid") is None
+
+
+def test_remote_pid_alive_is_false_on_a_clean_kill_dash_zero_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command that actually RAN and reported the pid gone (exit 1, not
+    255) is a real, definite failure -- ssh worked fine."""
+    monkeypatch.setattr(S, "_remote", _fake_remote("failed", 1))
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    assert S._remote_pid_alive(ctx, "box", "/p.pid") is False
+
+
+def test_remote_pid_alive_is_true_on_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(S, "_remote", _fake_remote("completed", 0))
+    ctx = _ctx(tmp_path, _profile(tmp_path))
+    assert S._remote_pid_alive(ctx, "box", "/p.pid") is True
+
+
+@pytest.mark.parametrize("probe_kind,params", [
+    ("remote_file_mtime_advancing", {"host": "box", "path": "/l.log"}),
+    ("remote_stdout_advancing", {"host": "box", "argv": ("cat", "/j")}),
+    ("remote_stdout_matches", {"host": "box", "argv": ("cat", "/j"), "regex": "x"}),
+])
+def test_run_probe_is_none_on_ssh_transport_failure_for_every_remote_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_kind: str, params: dict
+) -> None:
+    monkeypatch.setattr(S, "_remote", _fake_remote("failed", 255))
+    probe = P.Probe(probe_kind, params)
+    assert S.run_probe(probe, _watch_ctx(tmp_path, probe)) is None
+
+
+def test_run_probe_remote_stdout_matches_is_false_on_a_clean_non_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(S, "_remote", _fake_remote("completed", 0, stdout="no match here"))
+    probe = P.Probe("remote_stdout_matches", {"host": "box", "argv": ("cat", "/j"), "regex": "x"})
+    assert S.run_probe(probe, _watch_ctx(tmp_path, probe)) is False
 
 
 def _profile_with_deploy(action: P.Action, check: P.Check | None = None) -> P.Profile:

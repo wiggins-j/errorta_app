@@ -132,6 +132,12 @@ class Supervisor:
         self._evidence_items: list[EvidenceItem] = []
         self._stalled_s: float | None = None
         self._warned: set[str] = set()
+        # Which watch ids have seen a DEFINITE False (not just a transport
+        # `None`) since their `_probe_last_ok` was last refreshed -- this is
+        # what tells a stall apart from a stall that never actually saw
+        # evidence of failure, only an inability to look (spec: tri-state
+        # remote probes, live 2026-08-23 run aaadac).
+        self._probe_saw_false: set[str] = set()
         self._probe_next: dict[str, float] = {}
         self._probe_last_ok: dict[str, float] = {}
         self._last_watch_save: float | None = None
@@ -252,6 +258,7 @@ class Supervisor:
             for w in self.profile.watch:
                 self._probe_last_ok[w.id] = now   # the stall window opens now
                 self._probe_next[w.id] = now
+                self._probe_saw_false.discard(w.id)
             self._set_phase("watching")
             return
         step = steps[i]
@@ -305,29 +312,43 @@ class Supervisor:
                 continue
             self._probe_next[w.id] = now + w.every_s
             try:
-                ok = bool(self._run_probe(w.probe, self.ctx))
+                result = self._run_probe(w.probe, self.ctx)
             except Exception as exc:  # noqa: BLE001 — a probe that throws is a probe that isn't ok
-                ok = False
+                result = False
                 self._event("probe_error", {"id": w.id, "error": type(exc).__name__,
                                             "detail": str(exc)[:200]})
-            if ok:
+            if result is True:
                 self._probe_last_ok[w.id] = now
+                self._probe_saw_false.discard(w.id)   # a fresh window starts here
                 stamp = now_iso()
                 dirty = dirty or self.state.probe_last_ok.get(w.id) != stamp
                 self.state.probe_last_ok[w.id] = stamp
                 self._warned.discard(w.id)
                 continue
+            # `result` is False (a definite failure) or None (a transport
+            # failure: we could not observe the box at all this tick). Either
+            # way `last_ok` does NOT move -- but only a definite False is
+            # remembered as evidence toward the eventual stall reason.
+            if result is False:
+                self._probe_saw_false.add(w.id)
             stalled_for = now - self._probe_last_ok.get(w.id, now)
             if stalled_for < w.stall_after_s:
                 continue
             if w.on_stall == "warn":
-                if w.id not in self._warned:      # one warning per stall episode
-                    self._warned.add(w.id)
+                # An unknown result is not something to warn about -- there is
+                # nothing to tell the operator except "we could not check",
+                # which is not actionable and not what `probe_warn` means.
+                if result is False and w.id not in self._warned:
+                    self._warned.add(w.id)      # one warning per stall episode
                     self._event("probe_warn", {"id": w.id, "stalled_s": stalled_for})
                 continue
-            self._event("stall", {"id": w.id, "stalled_s": stalled_for})
+            unverifiable = w.id not in self._probe_saw_false
+            detail = {"id": w.id, "stalled_s": stalled_for}
+            if unverifiable:
+                detail["unverifiable"] = True
+            self._event("stall", detail)
             self._stalled_s = stalled_for
-            self._stop_reason = f"stall:{w.id}"
+            self._stop_reason = f"stall:{w.id}:unverifiable" if unverifiable else f"stall:{w.id}"
             self._do_stopping()
             return
         # A watching tick is the hot path — a run can sit here for hours. Only
@@ -479,6 +500,13 @@ class Supervisor:
             return "fix_in_flight"             # this run already had its cycle
         if self._refused:
             return "brain_refused"
+        if (reason or "").endswith(":unverifiable"):
+            # The supervisor could not actually SEE the box when this stall
+            # window expired (a transport failure the whole way through, spec:
+            # tri-state remote probes). No repo owns "we could not look" --
+            # filing a task here would send a dev chasing a bug that was never
+            # observed to exist.
+            return "stall_unverifiable"
         if not _FIXABLE_REASON_RE.match(reason or "") or (reason or "").endswith(":refused"):
             return "reason_not_fixable"
         if self._stop.is_set():
