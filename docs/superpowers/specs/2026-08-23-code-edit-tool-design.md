@@ -64,6 +64,7 @@ and the carry-forward prompt hint can match on prefix:
 
 | code | condition | detail includes |
 |---|---|---|
+| `edit_invalid_args` | `old_string`/`new_string` absent or not strings (JSON-type check at the executor, before the workspace is touched) | — |
 | `edit_target_missing` | file does not exist in the worktree | "code_edit cannot create a file; use code_write" |
 | `edit_target_binary` | existing file is binary (NUL-byte heuristic, same as `write_file`) | — |
 | `edit_empty_old_string` | `old_string` empty/blank | — |
