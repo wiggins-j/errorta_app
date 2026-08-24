@@ -18,15 +18,15 @@ from .topology import DESIGNER, DEV, PM, REVIEWER, TESTER
 from .workspace import CodingWorkspace
 
 # F087-14 WS-3: advertise ONLY tools that are actually executed. The dev's
-# code_write is the single member-driven executed tool. The reviewer and tester
-# are verdict roles that receive context directly (the reviewer is shown the real
-# cumulative diff in its prompt; the tester verdict is derived from a real,
-# grounded test run) rather than dispatching member-named tools — so they expose
-# no executable tool surface here (previously they advertised git_diff/code_read/
-# code_exec with no executor, which over-promised).
+# code_write/code_edit are the member-driven executed tools. The reviewer and
+# tester are verdict roles that receive context directly (the reviewer is shown
+# the real cumulative diff in its prompt; the tester verdict is derived from a
+# real, grounded test run) rather than dispatching member-named tools — so they
+# expose no executable tool surface here (previously they advertised git_diff/
+# code_read/code_exec with no executor, which over-promised).
 _ROLE_TOOLS: dict[str, tuple[str, ...]] = {
     PM: (),
-    DEV: ("code_write",),
+    DEV: ("code_write", "code_edit"),
     REVIEWER: (),
     TESTER: (),
     # Designer (Slice 1 §1): read tools + artifact authoring ONLY. It NEVER gets
@@ -210,6 +210,57 @@ class CodingTurnController:
                 )
                 continue
             path = str(args.get("path", ""))
+            if tool == "code_edit":
+                old_string = args.get("old_string")
+                new_string = args.get("new_string")
+                replace_all = bool(args.get("replace_all", False))
+                if not isinstance(old_string, str) or not isinstance(new_string, str):
+                    reason = ("edit_invalid_args: old_string and new_string "
+                              "must both be strings")
+                    failures.append((path, reason))
+                    self.store.record_tool_event(
+                        turn_id=turn_id,
+                        task_id=task.task_id,
+                        member_id=str(member.get("id", "m-dev")),
+                        role=DEV,
+                        tool="code_edit",
+                        status="failed",
+                        intent=intent,
+                        error=reason,
+                    )
+                    continue
+                try:
+                    if self.workspace is None:
+                        raise RuntimeError("coding_workspace_unavailable")
+                    head = self.workspace.edit_file(
+                        path, old_string, new_string,
+                        replace_all=replace_all, task_id=task.task_id)
+                except Exception as exc:
+                    reason = str(exc)
+                    failures.append((path, reason))
+                    self.store.record_tool_event(
+                        turn_id=turn_id,
+                        task_id=task.task_id,
+                        member_id=str(member.get("id", "m-dev")),
+                        role=DEV,
+                        tool="code_edit",
+                        status="failed",
+                        intent=intent,
+                        error=reason,
+                    )
+                    continue
+                successes += 1
+                self.store.record_tool_event(
+                    turn_id=turn_id,
+                    task_id=task.task_id,
+                    member_id=str(member.get("id", "m-dev")),
+                    role=DEV,
+                    tool="code_edit",
+                    status="succeeded",
+                    intent=intent,
+                    result={"head": head, "path": path},
+                )
+                continue
             try:
                 content = _resolve_write_content(args)
             except _BinaryDecodeError as exc:
@@ -316,6 +367,14 @@ class CodingTurnController:
                     intent["content_bytes"] = len(resolved)
                 else:
                     intent["content_bytes"] = len(resolved.encode("utf-8"))
+        elif tool == "code_edit":
+            old = args.get("old_string")
+            new = args.get("new_string")
+            intent["old_bytes"] = (
+                len(old.encode("utf-8")) if isinstance(old, str) else 0)
+            intent["new_bytes"] = (
+                len(new.encode("utf-8")) if isinstance(new, str) else 0)
+            intent["replace_all"] = bool(args.get("replace_all", False))
         elif args:
             intent["args_keys"] = sorted(str(k) for k in args.keys())
         return intent

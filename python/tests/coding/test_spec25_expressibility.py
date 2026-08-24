@@ -775,7 +775,7 @@ def test_capability_ask_is_optional_and_never_grants_anything() -> None:
     from errorta_council.coding.turn_controller import allowed_tools_for_role
     ask = CapabilityAsk(capability="execution", what="a way to run pytest")
     assert ask.capability == "execution"
-    assert allowed_tools_for_role(DEV) == ("code_write",)
+    assert allowed_tools_for_role(DEV) == ("code_write", "code_edit")
     for role in (PM, REVIEWER, TESTER):
         assert allowed_tools_for_role(role) == ()
 
@@ -928,6 +928,6 @@ def test_surfacing_an_ask_to_the_pm_grants_nothing(tmp_errorta_home) -> None:
         s, _blocked_with_needs("execution", "run the tests"),
         role=DEV, task=task, context=f"task {task.task_id}")
     assert runner._capability_ask_note(s) != ""
-    assert allowed_tools_for_role(DEV) == ("code_write",)
+    assert allowed_tools_for_role(DEV) == ("code_write", "code_edit")
     for role in (PM, REVIEWER, TESTER):
         assert allowed_tools_for_role(role) == ()
