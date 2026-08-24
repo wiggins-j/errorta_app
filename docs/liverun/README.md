@@ -322,6 +322,20 @@ valid operator range is 2101–2400 (above 2400 fails `cap_raised`). The
 relaunch is evaluated by the *untouched* Slice 1 launch caps — a fix that
 lands inside the minimum launch gap posts `relaunch_refused` and stops there.
 
+**Operator debug switch.** Setting `ERRORTA_LIVERUN_CAPS_OFF=1` (also `true`
+or `yes`) in the **sidecar's own environment** disables both the launch caps
+(`LaunchLedger.check`) and the fix-cycle-per-day cap, read fresh from
+`os.environ` on every check — a profile cannot set it, and there is no way to
+flip it from Slack or a run's own config. It exists for an operator actively
+debugging a live loop, not for routine use. Every check it skips posts a
+`caps` event with `{"code": "caps_disabled_by_operator"}` to the channel, so
+skipped enforcement is never silent. The caps come back the moment the
+variable is unset **and the sidecar is restarted** — `caps_disabled()` is not
+cached, but the sidecar process that read it into its environment is. Leaving
+it on unattended spends real risk budget: the launch caps exist because the
+previous account was banned, and this switch is the one knob that turns that
+protection off.
+
 ### Guarded paths — the human-only accept
 
 `accept_live_fix` is staged as a button either way. Whether **autopilot** may

@@ -1388,6 +1388,17 @@ def test_every_fix_kind_the_driver_emits_has_a_written_line(
         assert token in line
 
 
+def test_caps_disabled_by_operator_says_it_proceeded_not_paused() -> None:
+    """The generic `caps` line says "paused awaiting human" — true for every
+    real cap hit, but false for the operator debug switch: that run PROCEEDED.
+    A misleading line here is exactly the kind of thing an operator debugging
+    a live loop would trust and act on wrong."""
+    line = outbound._liverun_detail("caps", {"code": "caps_disabled_by_operator"}, "fake")
+
+    assert "paused" not in line.lower()
+    assert "ERRORTA_LIVERUN_CAPS_OFF" in line
+
+
 def test_fix_team_model_line_names_the_swap() -> None:
     line = outbound._liverun_detail(
         "fix_team_model",

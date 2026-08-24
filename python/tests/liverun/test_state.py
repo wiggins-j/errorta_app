@@ -8,7 +8,7 @@ import pytest
 
 from errorta_liverun.profile import Caps
 from errorta_liverun.state import (LaunchLedger, PHASES, TERMINAL_PHASES,
-                                    RunState, RunStore)
+                                    RunState, RunStore, caps_disabled)
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +73,47 @@ def test_launch_ledger_caps(tmp_path: Path) -> None:
     assert led2.check("p", caps, t0 + 90_000) == "cap_consecutive_failures"
     led2.record("p", "c", t0 + 90_000); led2.record_outcome("c", failed=False)
     assert led2.check("p", caps, t0 + 200_000) is None
+
+
+def test_caps_disabled_reads_the_env_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ERRORTA_LIVERUN_CAPS_OFF", raising=False)
+    assert caps_disabled() is False
+    for on in ("1", "true", "yes"):
+        monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", on)
+        assert caps_disabled() is True
+    for off in ("0", "false", "no", ""):
+        monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", off)
+        assert caps_disabled() is False
+
+
+def test_launch_ledger_check_ignores_caps_off_switch_by_default(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing behaviour is intact with the switch unset: a saturated ledger
+    still refuses."""
+    monkeypatch.delenv("ERRORTA_LIVERUN_CAPS_OFF", raising=False)
+    led = LaunchLedger()
+    caps = Caps(max_launches_per_hour=1, min_launch_gap_s=900, max_launches_per_day=3,
+                max_consecutive_failed_cycles=2)
+    t0 = 1_000_000.0
+    led.record("p", "r1", t0)
+    assert led.check("p", caps, t0 + 10) == "cap_gap"
+
+
+def test_launch_ledger_check_returns_none_when_caps_off(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator debug switch: a saturated ledger that would normally
+    refuse every code path instead verdicts None while the env var is set."""
+    led = LaunchLedger()
+    caps = Caps(max_launches_per_hour=1, min_launch_gap_s=900, max_launches_per_day=1,
+                max_consecutive_failed_cycles=1)
+    t0 = 1_000_000.0
+    led.record("p", "r1", t0)
+    led.record_outcome("r1", failed=True)
+    assert led.check("p", caps, t0 + 10) == "cap_gap"        # saturated, switch off
+    monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", "1")
+    assert led.check("p", caps, t0 + 10) is None              # switch on: no verdict at all
+    monkeypatch.delenv("ERRORTA_LIVERUN_CAPS_OFF", raising=False)
+    assert led.check("p", caps, t0 + 10) == "cap_gap"          # switch off again: caps return
 
 
 def test_launch_ledger_is_per_profile(tmp_path: Path) -> None:

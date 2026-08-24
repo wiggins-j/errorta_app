@@ -39,7 +39,7 @@ from . import profile as _profile
 from . import steps as _steps
 from .brief import EvidenceBundle, EvidenceItem
 from .fixloop import FixCycle, FixDeps, FixOutcome
-from .state import TERMINAL_PHASES, LaunchLedger, RunState, RunStore, now_iso
+from .state import TERMINAL_PHASES, LaunchLedger, RunState, RunStore, caps_disabled, now_iso
 
 _LOG = logging.getLogger("errorta.liverun")
 _CHECK_POLL_S = 2.0
@@ -165,7 +165,12 @@ class Supervisor:
             self._event("refused", {"code": "paused_awaiting_human"})
             raise LiveRunRefused("paused_awaiting_human", "resume_live_run required")
         code = self.ledger.check(self.profile.name, self.profile.caps, self._wall())
-        if code:
+        if caps_disabled():
+            # Operator debug switch: the ledger already verdicted None above
+            # (`LaunchLedger.check` itself short-circuits) -- this is only the
+            # loud announcement that a check was skipped, once per start.
+            self._event("caps", {"code": "caps_disabled_by_operator"})
+        elif code:
             self._event("refused", {"code": code})
             raise LiveRunRefused(code)
         self.ledger.record(self.profile.name, self.state.run_id, self._wall())
@@ -490,15 +495,20 @@ class Supervisor:
             return "profile_paused"
         if fix_paused_marker(self.profile.name).exists():
             return "fix_loop_paused"
-        cap = int(fix_loop.max_fix_cycles_per_day)
-        try:
-            today = int(self.ledger.fix_cycles_today(self.profile.name, self._wall()))
-        except Exception:  # noqa: BLE001 — an unreadable ledger is a full ledger
-            _LOG.exception("liverun %s could not read the fix-cycle ledger", self.state.run_id)
-            today = cap
-        if today >= cap:
-            self._event("fix_cycle_cap", {"cycles_today": today, "cap": cap})
-            return "fix_cycle_cap"
+        if caps_disabled():
+            # Operator debug switch: the fix-cycle-per-day arithmetic is
+            # skipped entirely, loudly, once per entry into the fix loop.
+            self._event("caps", {"code": "caps_disabled_by_operator"})
+        else:
+            cap = int(fix_loop.max_fix_cycles_per_day)
+            try:
+                today = int(self.ledger.fix_cycles_today(self.profile.name, self._wall()))
+            except Exception:  # noqa: BLE001 — an unreadable ledger is a full ledger
+                _LOG.exception("liverun %s could not read the fix-cycle ledger", self.state.run_id)
+                today = cap
+            if today >= cap:
+                self._event("fix_cycle_cap", {"cycles_today": today, "cap": cap})
+                return "fix_cycle_cap"
         self._closed = False                   # this run is not over after all
         self.state.fix_repo_id = None
         self._set_phase("fixing", reason)

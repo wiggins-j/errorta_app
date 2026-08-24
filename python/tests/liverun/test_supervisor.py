@@ -511,6 +511,21 @@ def test_refusals_are_recorded_as_events() -> None:
             if e["kind"] == "refused"] == ["paused_awaiting_human"]
 
 
+def test_start_proceeds_and_is_loud_when_caps_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ERRORTA_LIVERUN_CAPS_OFF bypasses the launch-cap refusal entirely --
+    the ledger would refuse (the gap cap is saturated), but the switch makes
+    `check()` verdict None, and the skip is announced exactly once."""
+    clock = FakeClock()
+    ledger = LaunchLedger()
+    ledger.record("p", "prev-run", clock())            # saturates the min gap cap
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True, ledger=ledger)
+    monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", "1")
+    sup.start(blocking=False)                            # would raise LiveRunRefused if on
+    assert sup.state.phase == "launching"
+    caps = [e["detail"] for e in sup.store.events(sup.state.run_id) if e["kind"] == "caps"]
+    assert caps == [{"code": "caps_disabled_by_operator"}]
+
+
 def test_unreleased_tunnels_stay_owned_and_are_reported_absent() -> None:
     """`TunnelManager.close` returns False when its in-memory registry has no
     such tunnel — the normal case after a restart. Nothing was closed, so the id
@@ -770,6 +785,26 @@ def test_day_cap_pauses_on_the_fourth_cycle() -> None:
     assert sup.state.phase == "paused_awaiting_human"
     assert paused_marker("p").exists() and fake.store.tasks == []
     assert _skip_codes(sup) == []                     # the cap event says it, once
+
+
+def test_fix_cycle_cap_is_skipped_when_caps_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same saturated fix-cycle ledger as `test_day_cap_pauses_on_the_fourth_cycle`,
+    but with the operator switch on: the cycle runs instead of pausing, and the
+    skip is announced instead of the (now bypassed) `fix_cycle_cap` event."""
+    clock = FakeClock()
+    fake = FixFake()
+    ledger = LaunchLedger()
+    for i in range(3):
+        ledger.record_fix_cycle("p", f"r{i}", "brain", failed=False, at=clock())
+    sup = _fix_sup(clock, fake, ledger=ledger)
+    monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", "1")
+    _to_terminal(sup, clock)
+    assert sup.state.phase == "fixing"
+    # Two skips this run: the launch-cap check in `start()`, and the
+    # fix-cycle-cap check in `_enter_fix_loop` -- each announces itself once.
+    caps = [e["detail"] for e in _events(sup) if e["kind"] == "caps"]
+    assert caps == [{"code": "caps_disabled_by_operator"}] * 2
+    assert [e for e in _events(sup) if e["kind"] == "fix_cycle_cap"] == []
 
 
 def test_the_day_cap_counter_survives_a_ledger_reload() -> None:

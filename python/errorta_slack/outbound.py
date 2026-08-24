@@ -443,7 +443,12 @@ def _liverun_detail(kind: str, detail: dict[str, Any], profile: str) -> str:
         return (f"🚫 Ban-class signal matched (`{_esc(detail.get('pattern'))}`) — "
                 "paused awaiting human. Look at the evidence before you resume.")
     if kind == "caps":
-        return f"⛔ Launch cap hit: {_esc(detail.get('code'))} — paused awaiting human"
+        code = detail.get("code")
+        if code == "caps_disabled_by_operator":
+            return ("⚠️ Caps check skipped: ERRORTA_LIVERUN_CAPS_OFF is set on the "
+                     "sidecar — this run proceeded without it. Unset it and restart "
+                     "the sidecar to bring the caps back.")
+        return f"⛔ Launch cap hit: {_esc(code)} — paused awaiting human"
     if kind == "refused":
         return f"Live run refused: {_esc(detail.get('code'))}"
     # -- the fix loop (spec 2026-08-22 §3.5) ------------------------------- #

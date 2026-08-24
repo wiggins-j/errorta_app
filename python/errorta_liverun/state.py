@@ -29,6 +29,14 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def caps_disabled() -> bool:
+    """Operator debug switch: read fresh from the environment on every call
+    (never cached at import time) so a sidecar restart is the only thing that
+    can pick up a change -- see docs/liverun/README.md, "Caps" section. Set
+    only in the SIDECAR's own environment; a profile cannot set it."""
+    return os.environ.get("ERRORTA_LIVERUN_CAPS_OFF", "").strip() in ("1", "true", "yes")
+
+
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -257,6 +265,8 @@ class LaunchLedger:
         self._append({"kind": "outcome", "run_id": run_id, "failed": bool(failed)})
 
     def check(self, profile_name: str, caps: Caps, now: float) -> str | None:
+        if caps_disabled():
+            return None
         rows = self._rows()
         launches: list[tuple[float, str]] = []
         for r in rows:
@@ -307,4 +317,5 @@ class LaunchLedger:
         return None
 
 
-__all__ = ["PHASES", "TERMINAL_PHASES", "RunState", "RunStore", "LaunchLedger", "now_iso"]
+__all__ = ["PHASES", "TERMINAL_PHASES", "RunState", "RunStore", "LaunchLedger", "now_iso",
+           "caps_disabled"]
