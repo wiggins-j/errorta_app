@@ -461,10 +461,17 @@ class Supervisor:
         try:
             if self._banned:
                 self._pause("ban_signal")
-            elif self._consecutive_failures_hit():
+            elif (not caps_disabled()) and self._consecutive_failures_hit():
                 self._event("caps", {"code": "cap_consecutive_failures"})
                 self._pause("cap_consecutive_failures")
             else:
+                # Deliberate, not a side effect of `LaunchLedger.check` going
+                # quiet: the operator switch covers this pause too. It is the
+                # ONE pause an operator debugging a live loop re-resumes over
+                # and over, so leaving it live under CAPS_OFF would defeat the
+                # switch's own purpose. Ban-signal pauses are untouched --
+                # `self._banned` is checked first and does not consult caps at
+                # all.
                 # Slice 2: the ONE behavioural change to the closing sequence.
                 # Teardown has already completed here — the fix cycle never runs
                 # against a live game session.
@@ -832,8 +839,12 @@ class Supervisor:
                 "elapsed_s": (now - launched) if launched is not None else None,
                 "probes": probes,
                 # Headroom, stated as the refusal a relaunch would get right now.
+                # `caps_disabled` names the switch explicitly -- `would_refuse:
+                # None` alone is ambiguous between "the switch is on" and "no
+                # cap would be hit anyway".
                 "caps": {"would_refuse": self.ledger.check(self.profile.name, self.profile.caps,
-                                                           self._wall())},
+                                                           self._wall()),
+                        "caps_disabled": caps_disabled()},
                 "literals": dict(st.literals),
                 # The fix loop, stated the same way: where this run sits in a fix
                 # chain, and how much autonomy is left before a human is needed.

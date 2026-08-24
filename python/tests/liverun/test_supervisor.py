@@ -362,6 +362,31 @@ def test_consecutive_failed_cycles_pause_the_profile() -> None:
     assert ei.value.code == "paused_awaiting_human"
 
 
+def test_consecutive_failed_cycles_do_not_pause_when_caps_off(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mirrors `test_consecutive_failed_cycles_pause_the_profile` with the
+    operator switch on. This is DELIBERATE: `cap_consecutive_failures` is the
+    one pause an operator debugging a live loop re-resumes constantly, so
+    CAPS_OFF covers it too -- the run lands in its normal terminal phase
+    instead of `paused_awaiting_human`."""
+    monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", "1")
+    clock = FakeClock()
+    store, ledger = RunStore(), LaunchLedger()
+    def action(a, ctx, timeout_s):
+        return StepResult(False, "t", "t", exit_code=1)
+    prof = _profile()
+    for _ in range(2):
+        sup = _sup(prof, clock, probe=lambda p, ctx: True, action=action,
+                   store=store, ledger=ledger)
+        sup.start(blocking=False)
+        sup._tick()
+        clock.sleep(4000)  # past min_launch_gap_s and outside the hourly window
+    assert sup.state.phase != "paused_awaiting_human"
+    assert sup.state.phase in TERMINAL_PHASES
+    assert sup.state.reason != "cap_consecutive_failures"
+    assert not paused_marker("p").exists()
+
+
 def test_supervisor_crash_still_tears_down() -> None:
     clock = FakeClock()
     def action(a, ctx, timeout_s):
@@ -977,6 +1002,16 @@ def test_snapshot_reports_the_fix_loop_state() -> None:
     fix_paused_marker("p").touch()
     assert sup.snapshot()["fix_paused"] is True
     sup.stop("operator_stop"); sup._tick()
+
+
+def test_snapshot_names_the_caps_off_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock()
+    sup = _sup(_profile(), clock, probe=lambda p, ctx: True)
+    sup.start(blocking=False)
+    assert sup.snapshot()["caps"]["caps_disabled"] is False
+    monkeypatch.setenv("ERRORTA_LIVERUN_CAPS_OFF", "1")
+    snap = sup.snapshot()
+    assert snap["caps"]["caps_disabled"] is True and snap["caps"]["would_refuse"] is None
 
 
 def test_a_relaunched_run_records_its_lineage() -> None:

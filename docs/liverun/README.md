@@ -354,7 +354,12 @@ variable is unset **and the sidecar is restarted** — `caps_disabled()` is not
 cached, but the sidecar process that read it into its environment is. Leaving
 it on unattended spends real risk budget: the launch caps exist because the
 previous account was banned, and this switch is the one knob that turns that
-protection off.
+protection off.  The switch also, deliberately, disables the
+`cap_consecutive_failures` **close-out pause** — all three failure-streak
+backstops (launch refusal, fix-cycle refusal, and the close-out pause an
+operator would otherwise have to keep re-resuming) are off together, while a
+ban-signal pause is untouched: that one is not a cap at all, and CAPS_OFF
+never covers it.
 
 ### Guarded paths — the human-only accept
 
