@@ -220,7 +220,8 @@ def test_pm_prompt_segments_byte_identical_with_work_request(
 def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
     existing = (f"Current files in the worktree (EXTEND these — do not drop "
                 f"existing code; code_write replaces the whole file so include "
-                f"all of it):\n{readback}\n" if readback
+                f"all of it, or use code_edit for a targeted "
+                f"change):\n{readback}\n" if readback
                 else "The worktree is empty; create the files from scratch.\n")
     return (
         f"{_skill_line(DEV)} You are a developer for task id {task.task_id!r}: "
@@ -256,6 +257,15 @@ def _old_dev_prompt(task, store: LedgerStore, readback: str = "") -> str:
         '{"path": "...", "content_base64": "<base64 of the actual file bytes>"} '
         "(never a text description or placeholder in a binary file body — an "
         "undecodable .png is not a valid image). "
+        "To CHANGE an existing file, prefer code_edit: "
+        '{"tool": "code_edit", "args": {"path": "rel/path", "old_string": '
+        '"<exact existing text>", "new_string": "<replacement>"}} — '
+        "old_string must be copied EXACTLY from the current file (whitespace "
+        "included) and must match exactly once; add surrounding lines to make "
+        'it unique, or set "replace_all": true to change every occurrence. '
+        "For a large file ALWAYS use code_edit (a whole-file re-emit gets "
+        "truncated and blocked); use code_write only for a new file, a full "
+        "rewrite of a small file, or a binary asset. "
         "Reply with ONLY a coding_turn.v1 envelope: "
         '{"schema_version": "coding_turn.v1", "role": "dev", "task_id": '
         f'"{task.task_id}", "intent": {{"kind": "tool_plan", "task_type": '

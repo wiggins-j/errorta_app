@@ -66,7 +66,7 @@ class _Policy:
 def test_manifest_reflects_role_tools(monkeypatch) -> None:
     monkeypatch.setattr(capabilities.gate_state, "gate_available", lambda _s: False)
     man = capabilities.capability_manifest(_FakeStore(), _Policy())
-    assert man[DEV].tools == ("code_write",)
+    assert man[DEV].tools == ("code_write", "code_edit")
     assert man[REVIEWER].tools == ()
     assert man[TESTER].tools == ()
     assert man[PM].tools == ()

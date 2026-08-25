@@ -1,11 +1,12 @@
 """Spec 15 — a role-capability manifest, derived not authored.
 
 The gravity-golf run's PM planned a task titled *"Run acceptance gate and fix
-failures"* and assigned it to a DEV. A DEV has exactly one tool — ``code_write``
-(``turn_controller._ROLE_TOOLS``). The task was unsatisfiable as written, and the
-loop had no way to notice: it dispatched, the dev wrote code (all it can do), the
-reviewer rejected for missing execution evidence, a ``revise:`` task was spawned,
-and the cycle repeated for the last ~20 minutes of the run.
+failures"* and assigned it to a DEV. A DEV's executed tools are ``code_write``
+and ``code_edit`` (``turn_controller._ROLE_TOOLS``). The task was
+unsatisfiable as written, and the loop had no way to notice: it dispatched,
+the dev wrote code (all it can do), the reviewer rejected for missing
+execution evidence, a ``revise:`` task was spawned, and the cycle repeated
+for the last ~20 minutes of the run.
 
 Nothing in the pipeline modelled *what each role can do*. This module is that
 model. It is **pure and read-only**: it *describes* capabilities from the code
@@ -427,8 +428,8 @@ CLOSURE_TABLE: dict[str, tuple[str, str]] = {
     # Category (a) coordination: PM plans via its intent and holds no tool, so
     # ``audit_grant_or_delete`` can never flag it. Always capable.
     PM: ("coordination", CAPABLE),
-    # ``_ROLE_TOOLS[DEV] == ("code_write",)`` is a module constant — if it is ever
-    # empty, no amount of running restores it.
+    # ``_ROLE_TOOLS[DEV] == ("code_write", "code_edit")`` is a module constant —
+    # if it is ever empty, no amount of running restores it.
     DEV: ("authoring", UNCLOSABLE),
     # ``policy.reviewer_repo_read`` is a persisted policy field read once per
     # manifest; no run event changes it.
