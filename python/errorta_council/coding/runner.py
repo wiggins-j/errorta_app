@@ -4042,7 +4042,8 @@ def _dev_prompt(task: Task, store: LedgerStore, readback: str = "", *,
     # of the worktree (everything merged so far) are inlined so the dev EXTENDS
     # the project instead of regenerating a file from scratch and clobbering
     # prior work. code_write replaces the WHOLE file, so it must include
-    # everything that should remain.
+    # everything that should remain; code_edit (anchored find/replace) is the
+    # targeted alternative for existing files.
     return _register_pending_composition(
         _dev_prompt_segments(task, store, readback, repo_read=repo_read))
 
@@ -4054,7 +4055,8 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
     this equals the pre-refactor ``_dev_prompt`` string byte-for-byte (golden-locked)."""
     existing = (f"Current files in the worktree (EXTEND these — do not drop "
                 f"existing code; code_write replaces the whole file so include "
-                f"all of it):\n{readback}\n" if readback
+                f"all of it, or use code_edit for a targeted "
+                f"change):\n{readback}\n" if readback
                 else "The worktree is empty; create the files from scratch.\n")
     _gate_available = _gate_state.gate_available(store)
     envelope = (
@@ -4073,6 +4075,19 @@ def _dev_prompt_segments(task: Task, store: LedgerStore,
         '{"path": "...", "content_base64": "<base64 of the actual file bytes>"} '
         "(never a text description or placeholder in a binary file body — an "
         "undecodable .png is not a valid image). "
+        # code_edit: an anchored find/replace so a fix to a LARGE file costs
+        # output proportional to the change — a whole-file re-emit of a large
+        # module gets truncated by the output budget and then (rightly) blocked
+        # by the destructive-write guard, making the fix impossible to land.
+        "To CHANGE an existing file, prefer code_edit: "
+        '{"tool": "code_edit", "args": {"path": "rel/path", "old_string": '
+        '"<exact existing text>", "new_string": "<replacement>"}} — '
+        "old_string must be copied EXACTLY from the current file (whitespace "
+        "included) and must match exactly once; add surrounding lines to make "
+        'it unique, or set "replace_all": true to change every occurrence. '
+        "For a large file ALWAYS use code_edit (a whole-file re-emit gets "
+        "truncated and blocked); use code_write only for a new file, a full "
+        "rewrite of a small file, or a binary asset. "
         "Reply with ONLY a coding_turn.v1 envelope: "
         '{"schema_version": "coding_turn.v1", "role": "dev", "task_id": '
         f'"{task.task_id}", "intent": {{"kind": "tool_plan", "task_type": '
@@ -7452,7 +7467,7 @@ def build_run_turn(
                     store.record_decision(
                         title=f"write missing: {task.title}",
                         context=f"task {task.task_id}", choice="write_missing",
-                        rationale="implementation task completed no code_write tool event",
+                        rationale="implementation task completed no successful write tool event (code_write/code_edit)",
                         related_task_ids=[task.task_id])
                     store.update_task(task.task_id, state="todo")
                     # F136: an implementation turn that wrote nothing usable is

@@ -2,8 +2,8 @@
 
 Models propose intents; this controller executes the allowed workspace tools and
 records the resulting facts in the Coding ledger. This slice executes dev
-``code_write`` calls plus the legacy ``files`` shape while keeping task
-completion dependent on tool outcomes.
+``code_write`` and ``code_edit`` calls plus the legacy ``files`` shape while
+keeping task completion dependent on tool outcomes.
 """
 from __future__ import annotations
 

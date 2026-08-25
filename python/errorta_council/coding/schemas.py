@@ -583,6 +583,13 @@ _MINIMAL_INTENT_EXAMPLES: dict[tuple[str, str], dict[str, Any]] = {
         "tool_calls": [{"tool": "code_write",
                         "args": {"path": "src/hud.py", "content": "..."}}],
     },
+    ("dev", "tool_plan_edit"): {
+        "kind": "tool_plan", "task_type": "implementation",
+        "tool_calls": [{"tool": "code_edit",
+                        "args": {"path": "src/hud.py",
+                                 "old_string": "def render_hud():",
+                                 "new_string": "def render_hud(score):"}}],
+    },
     ("dev", "context_request"): {
         "kind": "context_request", "reason": "missing_api_contract",
         "question": "What is the signature of render_hud() in src/hud.py?",
