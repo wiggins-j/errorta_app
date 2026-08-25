@@ -28,6 +28,11 @@ a blocked write is re-queued and escalated (a human sees an attention Problem),
 while an allowed destructive write silently deletes the file — so where it does
 fire, it errs toward blocking.
 
+This guard also runs for ``code_edit`` splices: an edit's old/new file content
+reaches it as a full old-content-to-new-content pair via
+``CodingWorkspace.write_file`` (the same choke point ``code_write`` uses), so a
+collapse or placeholder produced by a bad anchored edit is caught identically.
+
 Pure/dependency-free so it is unit-testable without git or a workspace.
 """
 from __future__ import annotations
