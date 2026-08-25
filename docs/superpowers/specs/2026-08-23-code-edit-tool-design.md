@@ -67,7 +67,7 @@ and the carry-forward prompt hint can match on prefix:
 | `edit_invalid_args` | `old_string`/`new_string` absent or not strings (JSON-type check at the executor, before the workspace is touched) | — |
 | `edit_target_missing` | file does not exist in the worktree | "code_edit cannot create a file; use code_write" |
 | `edit_target_binary` | existing file is binary (NUL-byte heuristic, same as `write_file`) | — |
-| `edit_empty_old_string` | `old_string` empty/blank | — |
+| `edit_empty_old_string` | `old_string` is the empty string (a whitespace-only anchor is legal and gated by uniqueness) | — |
 | `edit_no_change` | `old_string == new_string` | — |
 | `edit_no_match` | 0 occurrences | reminder that matching is exact (whitespace included) |
 | `edit_not_unique` | N > 1 occurrences without `replace_all` | the count N; advice to enlarge the anchor with surrounding lines or set `replace_all` |

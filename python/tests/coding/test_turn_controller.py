@@ -22,8 +22,9 @@ def _workspace(project_id: str, store: LedgerStore) -> CodingWorkspace:
 
 
 def test_role_tool_catalog_is_scoped() -> None:
-    # F087-14 WS-3: only the dev's code_write is an executed tool; reviewer/tester
-    # are verdict roles with no executable tool surface (no over-promised tools).
+    # F087-14 WS-3: only the dev holds executed tools (code_write + code_edit);
+    # reviewer/tester are verdict roles with no executable tool surface (no
+    # over-promised tools).
     assert allowed_tools_for_role("dev") == ("code_write", "code_edit")
     assert allowed_tools_for_role("reviewer") == ()
     assert allowed_tools_for_role("tester") == ()
