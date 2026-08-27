@@ -6,7 +6,7 @@
 
 **Architecture:** New pure module `edit_apply.py` (mirrors `write_guard.py`: dependency-free splice + typed errors) → `CodingWorkspace.edit_file` (path safety, missing/binary checks, delegates final content to the existing `write_file` so the F140 destructive-write guard, F139 no-op suppression, and provenance are shared) → `turn_controller` dispatch (`_ROLE_TOOLS[DEV]` gains `code_edit`) → dev prompt teaches the vocabulary.
 
-**Tech Stack:** Python 3.11+, pydantic v2, pytest. All paths below are relative to `python/` in the repo (`/Users/wiggins/GitHub/errorta_app/.claude/worktrees/vibrant-wright-d210ef/python`). Run tests from that directory.
+**Tech Stack:** Python 3.11+, pydantic v2, pytest. All paths below are relative to `python/` in the repo (`python/`). Run tests from that directory.
 
 **Spec:** `docs/superpowers/specs/2026-08-23-code-edit-tool-design.md`
 
@@ -127,7 +127,7 @@ def test_whitespace_only_old_string_is_allowed_but_must_be_unique() -> None:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/wiggins/GitHub/errorta_app/.claude/worktrees/vibrant-wright-d210ef/python && python -m pytest tests/coding/test_edit_apply.py -q`
+Run: `cd python/ && python -m pytest tests/coding/test_edit_apply.py -q`
 Expected: collection error — `ModuleNotFoundError: No module named 'errorta_council.coding.edit_apply'`
 
 - [ ] **Step 3: Write the implementation**
